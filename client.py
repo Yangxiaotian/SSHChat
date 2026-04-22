@@ -7,8 +7,8 @@ import pwd
 from prompt_toolkit import prompt
 from prompt_toolkit.patch_stdout import patch_stdout
 
-SERVER_IP = "127.0.0.1"
-PORT = 12345
+SERVER_IP = os.environ.get("SSHCHAT_SERVER", "127.0.0.1")
+PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
 name = pwd.getpwuid(os.getuid()).pw_name
 
@@ -44,6 +44,7 @@ def main():
     s.send((name + "\n").encode("utf-8"))
 
     print("[OK] connected as " + name)
+    print("Commands: /users  /join <room>  /help")
 
     threading.Thread(target=recv_msg, args=(s,), daemon=True).start()
 
