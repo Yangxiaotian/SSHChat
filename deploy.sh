@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # One-shot install: copy app under PREFIX, venv + prompt_toolkit, sshchat.env, systemd unit.
-# Target: Linux with systemd, python3, useradd.
+# Linux: systemd + service user. macOS: auto local-dev (no useradd/groupadd/systemd).
 #
 #   sudo ./deploy.sh
 #   sudo ./deploy.sh --prefix /Shared --server-ip 10.0.0.5 --port 12345
 #   sudo ./deploy.sh --no-systemd
+#   sudo ./deploy.sh --prefix /opt/sshchat --keep-env   # upgrade: keep sshchat.env
+# Rewrites user authorized_keys command= to PREFIX/chat.sh each run unless --no-migrate-keys (needs perl).
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Numeric uid:gid — macOS has no group named "root" (gid 0 is "wheel").
+ROOT_OWN=0:0
 
 PREFIX=/opt/sshchat
 SERVER_IP=""
@@ -16,6 +20,14 @@ PORT=12345
 INSTALL_SYSTEMD=1
 RUN_USER=sshchat
 CREATE_RUN_USER=1
+KEEP_ENV=0
+MIGRATE_KEYS=1
+: "${SSHCHAT_CLIENT_GROUP:=sshchat-clients}"
+CLIENT_GROUP=$SSHCHAT_CLIENT_GROUP
+
+is_darwin() {
+  [[ "$(uname -s)" == "Darwin" ]]
+}
 
 usage() {
   cat >&2 <<EOF
@@ -25,23 +37,209 @@ Options:
   --prefix DIR       Install directory (default: $PREFIX)
   --server-ip ADDR   Address clients use to reach this host (default: auto-detect)
   --port N           Listen port (default: $PORT)
+  --keep-env         If $PREFIX/sshchat.env already exists, do not overwrite it (upgrade-friendly)
+  --no-migrate-keys  Do not rewrite authorized_keys command= paths to this install's chat.sh
   --no-systemd       Do not install or start systemd service
   --run-user NAME    User to run the server as (default: $RUN_USER)
   --no-run-user      Do not create user; install as root (manual server only)
   -h, --help         This help
+
+Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
+scanned authorized_keys so command="…/<basename>" points at PREFIX/chat.sh.
+Override matched basename with env SSHCHAT_COMMAND_BASENAME if needed. Needs perl.
 EOF
 }
 
 detect_ip() {
   local ip=""
-  if command -v ip &>/dev/null; then
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
-  fi
-  if [[ -z "$ip" ]] && command -v hostname &>/dev/null; then
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if command -v ipconfig &>/dev/null; then
+      local iface
+      for iface in en0 en1 en2 en3; do
+        ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+        [[ -n "$ip" && "$ip" != "127.0.0.1" ]] && break
+      done
+    fi
+  else
+    if command -v ip &>/dev/null; then
+      ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
+    fi
+    if [[ -z "$ip" ]] && command -v hostname &>/dev/null; then
+      ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    fi
   fi
   [[ -n "$ip" ]] || ip="127.0.0.1"
   printf '%s' "$ip"
+}
+
+ensure_client_group() {
+  if is_darwin; then
+    if dscl . -read "/Groups/$CLIENT_GROUP" &>/dev/null; then
+      return 0
+    fi
+    if ! command -v dseditgroup &>/dev/null; then
+      echo "error: dseditgroup not found (cannot create $CLIENT_GROUP)" >&2
+      exit 1
+    fi
+    dseditgroup -o create "$CLIENT_GROUP"
+    echo "info: created macOS group $CLIENT_GROUP (chat SSH users join via admin-add-user.sh)"
+    return 0
+  fi
+
+  if getent group "$CLIENT_GROUP" &>/dev/null; then
+    return 0
+  fi
+  if ! command -v groupadd &>/dev/null; then
+    echo "error: groupadd not found (cannot create $CLIENT_GROUP)" >&2
+    exit 1
+  fi
+  groupadd -r "$CLIENT_GROUP"
+  echo "info: created system group $CLIENT_GROUP (chat SSH users join via admin-add-user.sh)"
+}
+
+apply_data_plane_permissions() {
+  # Chat login users only need chat.sh, client.py, sshchat.env, venv/. Admins keep
+  # server.* and admin-add-user.sh private to root / service user.
+  local u="$RUN_USER"
+  chown "$u:$CLIENT_GROUP" "$PREFIX"
+  chmod 750 "$PREFIX"
+
+  chown "$u:$CLIENT_GROUP" "$PREFIX/chat.sh" "$PREFIX/client.py"
+  chmod 750 "$PREFIX/chat.sh"
+  chmod 640 "$PREFIX/client.py"
+  if [[ -f "$PREFIX/sshchat.env" ]]; then
+    chown "$u:$CLIENT_GROUP" "$PREFIX/sshchat.env"
+    chmod 640 "$PREFIX/sshchat.env"
+  fi
+
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py"
+  chmod 700 "$PREFIX/server.sh"
+
+  chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh"
+  chmod 700 "$PREFIX/admin-add-user.sh"
+
+  chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
+  chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+}
+
+apply_root_group_permissions() {
+  chown "root:$CLIENT_GROUP" "$PREFIX"
+  chmod 750 "$PREFIX"
+
+  chown "root:$CLIENT_GROUP" "$PREFIX/chat.sh" "$PREFIX/client.py"
+  chmod 750 "$PREFIX/chat.sh"
+  chmod 640 "$PREFIX/client.py"
+  if [[ -f "$PREFIX/sshchat.env" ]]; then
+    chown "root:$CLIENT_GROUP" "$PREFIX/sshchat.env"
+    chmod 640 "$PREFIX/sshchat.env"
+  fi
+
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  chmod 600 "$PREFIX/server.py"
+  chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+
+  chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
+  chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+}
+
+user_in_group() {
+  local user_name=$1
+  if is_darwin; then
+    id -Gn "$user_name" 2>/dev/null | tr ' ' '\n' | grep -qx "$CLIENT_GROUP"
+  else
+    id -nG "$user_name" 2>/dev/null | tr ' ' '\n' | grep -qx "$CLIENT_GROUP"
+  fi
+}
+
+add_user_to_client_group() {
+  local user_name=$1
+  [[ -n "$user_name" ]] || return 0
+  id "$user_name" &>/dev/null || return 0
+  if user_in_group "$user_name"; then
+    return 0
+  fi
+  if is_darwin; then
+    dseditgroup -o edit -a "$user_name" -t user "$CLIENT_GROUP"
+  else
+    usermod -aG "$CLIENT_GROUP" "$user_name"
+  fi
+  echo "info: added existing user $user_name to group $CLIENT_GROUP"
+}
+
+sync_existing_chat_users_to_group() {
+  local chat_abs=$1
+  local bn=${SSHCHAT_COMMAND_BASENAME:-$(basename "$chat_abs")}
+  local f user_name
+  shopt -s nullglob
+  if is_darwin; then
+    for f in /Users/*/.ssh/authorized_keys; do
+      grep -qF "$chat_abs" "$f" 2>/dev/null || grep -qE "command=[\"'](/[^\"']*/)?$bn[\"']" "$f" 2>/dev/null || continue
+      user_name=${f#/Users/}
+      user_name=${user_name%%/*}
+      add_user_to_client_group "$user_name"
+    done
+  else
+    for f in /home/*/.ssh/authorized_keys; do
+      grep -qF "$chat_abs" "$f" 2>/dev/null || grep -qE "command=[\"'](/[^\"']*/)?$bn[\"']" "$f" 2>/dev/null || continue
+      user_name=${f#/home/}
+      user_name=${user_name%%/*}
+      add_user_to_client_group "$user_name"
+    done
+  fi
+  shopt -u nullglob
+}
+
+migrate_authorized_keys_chat_command() {
+  local chat_abs=$1
+  local bn=${SSHCHAT_COMMAND_BASENAME:-$(basename "$chat_abs")}
+
+  if ! command -v perl &>/dev/null; then
+    echo "warning: perl not found; skipping authorized_keys migration (install perl or use --no-migrate-keys)" >&2
+    return 0
+  fi
+
+  do_one_authkeys() {
+    local path=$1
+    local own
+    [[ -f "$path" ]] || return 0
+    grep -q 'command=' "$path" || return 0
+    grep -qF "$bn" "$path" || return 0
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      own=$(stat -f '%u:%g' "$path")
+    else
+      own=$(stat -c '%u:%g' "$path")
+    fi
+    SSHCHAT_MIGRATE_NEW="$chat_abs" SSHCHAT_CMD_BN="$bn" perl -i.bak -pe "$(cat <<'ENDPERL'
+BEGIN {
+  $new = $ENV{SSHCHAT_MIGRATE_NEW};
+  die "internal" unless defined $new && length $new;
+  $b = $ENV{SSHCHAT_CMD_BN} || "chat.sh";
+  $b =~ s/\./\\./g;
+}
+s/(command=")(\/[^"]*$b)(")/$1$new$3/g;
+s/(command=\x27)(\/[^\x27]*$b)(\x27)/$1$new$3/g;
+ENDPERL
+)" "$path"
+    chown "$own" "$path"
+    [[ -e "${path}.bak" ]] && chown "$own" "${path}.bak"
+    echo "info: migrated command= paths in $path -> $chat_abs"
+  }
+
+  local f
+  shopt -s nullglob
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    for f in /Users/*/.ssh/authorized_keys; do
+      do_one_authkeys "$f"
+    done
+    do_one_authkeys /var/root/.ssh/authorized_keys
+  else
+    for f in /home/*/.ssh/authorized_keys; do
+      do_one_authkeys "$f"
+    done
+    do_one_authkeys /root/.ssh/authorized_keys
+  fi
+  shopt -u nullglob
 }
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +255,14 @@ while [[ $# -gt 0 ]]; do
     --port)
       PORT=${2:?}
       shift 2
+      ;;
+    --keep-env)
+      KEEP_ENV=1
+      shift
+      ;;
+    --no-migrate-keys)
+      MIGRATE_KEYS=0
+      shift
       ;;
     --no-systemd)
       INSTALL_SYSTEMD=0
@@ -82,11 +288,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if is_darwin && [[ "${SSHCHAT_NO_MAC_ADAPT:-}" != "1" ]]; then
+  if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
+    echo "info: macOS: local-dev install (no Linux service user/systemd; uses group $CLIENT_GROUP for chat access)" >&2
+    echo "info: macOS: use $PREFIX/server.sh to run the server; set SSHCHAT_SERVER in $PREFIX/sshchat.env for LAN clients" >&2
+    CREATE_RUN_USER=0
+    INSTALL_SYSTEMD=0
+  fi
+fi
+
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
 for f in server.py client.py chat.sh server.sh admin-add-user.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
+
+chmod +x \
+  "$SCRIPT_DIR/chat.sh" \
+  "$SCRIPT_DIR/server.sh" \
+  "$SCRIPT_DIR/admin-add-user.sh"
 
 if ! command -v python3 &>/dev/null; then
   echo "error: python3 not found" >&2
@@ -97,12 +317,17 @@ if ! python3 -c "import venv" 2>/dev/null; then
   exit 1
 fi
 
-[[ -z "$SERVER_IP" ]] && SERVER_IP=$(detect_ip)
-if [[ "$SERVER_IP" == "127.0.0.1" ]]; then
-  echo "warning: SSHCHAT_SERVER is 127.0.0.1 — remote SSH users must set a reachable IP in $PREFIX/sshchat.env" >&2
+if [[ -z "$SERVER_IP" ]]; then
+  # In forced-command SSH mode, client.py runs on this host after login, so loopback
+  # is the safest default regardless of where users SSH from.
+  SERVER_IP="127.0.0.1"
+  echo "info: defaulting SSHCHAT_SERVER to 127.0.0.1 (forced-command local client mode)" >&2
 fi
 
 mkdir -p "$PREFIX"
+if [[ "$CREATE_RUN_USER" -eq 1 ]] || is_darwin; then
+  ensure_client_group
+fi
 
 if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
   if ! id "$RUN_USER" &>/dev/null; then
@@ -132,20 +357,50 @@ cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
 
 rm -rf "$PREFIX/venv"
+# Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
+DEPLOY_TMP="$PREFIX/.deploy-tmp"
+rm -rf "$DEPLOY_TMP"
+mkdir -p "$DEPLOY_TMP"
+export TMPDIR="$DEPLOY_TMP"
+export PIP_NO_CACHE_DIR=1
+
 python3 -m venv "$PREFIX/venv"
-"$PREFIX/venv/bin/pip" install -q --upgrade pip
+# Upgrading pip downloads a large wheel; skip by default on low-disk / constrained /tmp setups.
+if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
+  "$PREFIX/venv/bin/pip" install -q --upgrade pip
+fi
 "$PREFIX/venv/bin/pip" install -q prompt_toolkit
+rm -rf "$DEPLOY_TMP"
 
 umask 022
-cat >"$PREFIX/sshchat.env" <<EOF
+if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
+  echo "info: keeping existing $PREFIX/sshchat.env (--keep-env)"
+else
+  cat >"$PREFIX/sshchat.env" <<EOF
 SSHCHAT_SERVER=$SERVER_IP
 SSHCHAT_PORT=$PORT
 EOF
-chmod 0644 "$PREFIX/sshchat.env"
+fi
 
 if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
-  chown -R "$RUN_USER:$RUN_USER" "$PREFIX"
+  apply_data_plane_permissions
+elif is_darwin; then
+  apply_root_group_permissions
+else
+  chown -R "$ROOT_OWN" "$PREFIX"
+  chmod 755 "$PREFIX"
+  chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  chmod 644 "$PREFIX/server.py" "$PREFIX/client.py"
+  [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
 fi
+
+CHAT_ABS=$(cd "$(dirname "$PREFIX/chat.sh")" && pwd)/$(basename "$PREFIX/chat.sh")
+if [[ "$MIGRATE_KEYS" -eq 1 ]]; then
+  echo "info: rewriting authorized_keys command= (basename: ${SSHCHAT_COMMAND_BASENAME:-$(basename "$CHAT_ABS")}) -> $CHAT_ABS"
+  migrate_authorized_keys_chat_command "$CHAT_ABS"
+fi
+echo "info: ensuring existing chat users have group $CLIENT_GROUP"
+sync_existing_chat_users_to_group "$CHAT_ABS"
 
 UNIT=/etc/systemd/system/sshchat.service
 if [[ "$INSTALL_SYSTEMD" -eq 1 ]] && command -v systemctl &>/dev/null && [[ -d /run/systemd/system || -d /lib/systemd/system ]]; then
@@ -175,11 +430,27 @@ EOF
   systemctl restart sshchat.service
   echo "info: systemd service sshchat.service enabled and restarted"
 else
-  echo "info: systemd skipped; start server with: $PREFIX/server.sh"
+  # Non-systemd platforms (e.g. macOS): restart a detached server process.
+  if pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+    pkill -f "$PREFIX/server.py" || true
+    sleep 1
+  fi
+  nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
+  SERVER_PID=$!
+  echo "info: systemd skipped; started $PREFIX/server.sh in background (pid $SERVER_PID)"
+  echo "info: server log: $PREFIX/server.log"
 fi
 
 echo
 echo "Install path:     $PREFIX"
 echo "Client connects:  $SERVER_IP port $PORT (see $PREFIX/sshchat.env)"
-echo "Add SSH users:    sudo $PREFIX/admin-add-user.sh <user> <key.pub>"
+if [[ "$CREATE_RUN_USER" -eq 1 ]] || is_darwin; then
+  echo "Chat login group: $CLIENT_GROUP (admin-add-user adds each user to this group)"
+fi
+echo "Add SSH users:    sudo $PREFIX/admin-add-user.sh <user> <pasted-pubkey-line|key.pub|->"
+if [[ "$MIGRATE_KEYS" -eq 1 ]]; then
+  echo "authorized_keys:  command= paths normalized to $CHAT_ABS"
+else
+  echo "authorized_keys:  not modified (--no-migrate-keys)"
+fi
 echo "Optional: open firewall for TCP $PORT"

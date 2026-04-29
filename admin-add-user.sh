@@ -1,27 +1,65 @@
 #!/usr/bin/env bash
 # Add a local user and an SSH public key that forces chat.sh on login.
-# Intended to run as root on Linux (useradd/getent).
+# Intended for Linux (useradd/getent) or macOS (existing users only; see below).
 #
 # Usage:
-#   sudo ./admin-add-user.sh <username> <path-to-pubkey>
+#   sudo ./admin-add-user.sh <username> <pasted-openssh-pubkey-line>
+#   sudo ./admin-add-user.sh alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… alice@laptop
+#   sudo ./admin-add-user.sh <username> <path-to-pubkey-file>   # if path exists, first line is used
 #   cat id_ed25519.pub | sudo ./admin-add-user.sh <username> -
 #
 # Env (optional):
 #   SSHCHAT_CHAT_SCRIPT  Absolute or relative path to chat.sh (default: next to this script)
 #   SSHCHAT_SHELL        Login shell for new users (default: /usr/sbin/nologin)
+#   SSHCHAT_CLIENT_GROUP  Group with read/execute on chat.sh and venv (default: sshchat-clients)
 
 set -euo pipefail
 
-usage() {
-  echo "Usage: $0 <username> <public_key_file|->" >&2
-  echo "  Reads one line from the file or stdin (-). Run as root." >&2
+: "${SSHCHAT_CLIENT_GROUP:=sshchat-clients}"
+
+is_darwin() {
+  [[ "$(uname -s)" == "Darwin" ]]
 }
 
-[[ $# -eq 2 ]] || { usage; exit 1; }
+ensure_client_group() {
+  if is_darwin; then
+    if dscl . -read "/Groups/$SSHCHAT_CLIENT_GROUP" &>/dev/null; then
+      return 0
+    fi
+    if ! command -v dseditgroup &>/dev/null; then
+      echo "error: dseditgroup not found (cannot create $SSHCHAT_CLIENT_GROUP)" >&2
+      exit 1
+    fi
+    dseditgroup -o create "$SSHCHAT_CLIENT_GROUP"
+    echo "info: created macOS group $SSHCHAT_CLIENT_GROUP"
+    return 0
+  fi
+
+  if getent group "$SSHCHAT_CLIENT_GROUP" &>/dev/null; then
+    return 0
+  fi
+  if command -v groupadd &>/dev/null; then
+    groupadd -r "$SSHCHAT_CLIENT_GROUP"
+    echo "info: created system group $SSHCHAT_CLIENT_GROUP"
+  else
+    echo "error: group $SSHCHAT_CLIENT_GROUP missing and groupadd not found (run deploy.sh first?)" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  echo "Usage: $0 <username> <public_key_or_file|->" >&2
+  echo "  public key: paste the full ssh-ed25519 / ssh-rsa line (multiple argv words are joined with spaces)" >&2
+  echo "  file:       if <public_key_or_file> is an existing file, its first line is used" >&2
+  echo "  -:          read one line from stdin" >&2
+  echo "Run as root." >&2
+}
+
+[[ $# -ge 2 ]] || { usage; exit 1; }
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: must run as root" >&2; exit 1; }
 
 USER_NAME=$1
-KEY_SRC=$2
+shift
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 : "${SSHCHAT_CHAT_SCRIPT:=$SCRIPT_DIR/chat.sh}"
@@ -44,11 +82,12 @@ if [[ ! -x "$CHAT_SCRIPT" ]]; then
   echo "warning: chat script is not executable: $CHAT_SCRIPT" >&2
 fi
 
-if [[ "$KEY_SRC" == "-" ]]; then
+if [[ $# -eq 1 && "$1" == "-" ]]; then
   IFS= read -r KEY_LINE || true
+elif [[ $# -eq 1 && -f "$1" ]]; then
+  IFS= read -r KEY_LINE <"$1" || true
 else
-  [[ -f "$KEY_SRC" ]] || { echo "error: key file not found: $KEY_SRC" >&2; exit 1; }
-  IFS= read -r KEY_LINE <"$KEY_SRC" || true
+  KEY_LINE="$*"
 fi
 
 KEY_LINE=${KEY_LINE//$'\r'/}
@@ -80,12 +119,40 @@ fi
 if id "$USER_NAME" &>/dev/null; then
   echo "info: user exists: $USER_NAME"
 else
+  if is_darwin; then
+    echo "error: macOS: create \"$USER_NAME\" first (System Settings → Users & Groups), then re-run" >&2
+    exit 1
+  fi
   if ! command -v useradd &>/dev/null; then
     echo "error: useradd not found (this script targets Linux with shadow-utils)" >&2
     exit 1
   fi
   useradd -m -s "$SSHCHAT_SHELL" "$USER_NAME"
   echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
+fi
+
+if ! is_darwin; then
+  ensure_client_group
+  if ! command -v usermod &>/dev/null; then
+    echo "error: usermod not found" >&2
+    exit 1
+  fi
+  if ! id -nG "$USER_NAME" | grep -qw "$SSHCHAT_CLIENT_GROUP"; then
+    usermod -aG "$SSHCHAT_CLIENT_GROUP" "$USER_NAME"
+    echo "info: added $USER_NAME to group $SSHCHAT_CLIENT_GROUP"
+  fi
+else
+  ensure_client_group
+  if ! command -v dseditgroup &>/dev/null; then
+    echo "error: dseditgroup not found" >&2
+    exit 1
+  fi
+  if id -Gn "$USER_NAME" | tr ' ' '\n' | grep -qx "$SSHCHAT_CLIENT_GROUP"; then
+    echo "info: user already in group $SSHCHAT_CLIENT_GROUP"
+  else
+    dseditgroup -o edit -a "$USER_NAME" -t user "$SSHCHAT_CLIENT_GROUP"
+    echo "info: added $USER_NAME to group $SSHCHAT_CLIENT_GROUP (re-login required)"
+  fi
 fi
 
 if command -v getent &>/dev/null; then

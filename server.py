@@ -2,6 +2,7 @@ import os
 import re
 import socket
 import threading
+import traceback
 from collections import defaultdict
 from typing import Optional
 
@@ -15,6 +16,7 @@ rooms = defaultdict(set)
 lock = threading.Lock()
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+_DISCONNECT_ERRNOS = {32, 54, 57, 104}
 
 
 def normalize_room(name: str) -> Optional[str]:
@@ -27,7 +29,8 @@ def normalize_room(name: str) -> Optional[str]:
 def send_line(conn, text: str) -> None:
     try:
         conn.send(text.encode("utf-8"))
-    except Exception:
+    except Exception as e:
+        print(f"send_line error: {e!r}")
         remove_client(conn)
 
 
@@ -42,7 +45,8 @@ def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
     for c in targets:
         try:
             c.send(msg)
-        except Exception:
+        except Exception as e:
+            print(f"broadcast send error: {e!r}")
             dead.append(c)
     for c in dead:
         remove_client(c)
@@ -164,7 +168,12 @@ def handle_client(conn, addr) -> None:
     buffer = b""
     try:
         while b"\n" not in buffer:
-            chunk = conn.recv(1024)
+            try:
+                chunk = conn.recv(1024)
+            except OSError as e:
+                if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
+                    return
+                raise
             if not chunk:
                 return
             buffer += chunk
@@ -186,7 +195,12 @@ def handle_client(conn, addr) -> None:
 
         while True:
             if not buffer:
-                chunk = conn.recv(4096)
+                try:
+                    chunk = conn.recv(4096)
+                except OSError as e:
+                    if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
+                        break
+                    raise
                 if not chunk:
                     break
                 buffer += chunk
@@ -197,6 +211,7 @@ def handle_client(conn, addr) -> None:
 
     except Exception as e:
         print("connection error:", e)
+        traceback.print_exc()
     finally:
         remove_client(conn)
 

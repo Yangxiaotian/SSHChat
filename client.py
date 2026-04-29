@@ -1,8 +1,11 @@
-import socket
-import threading
-import sys
 import os
 import pwd
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
 
 from prompt_toolkit import prompt
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -12,8 +15,70 @@ PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
 name = pwd.getpwuid(os.getuid()).pw_name
 
+# beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
+_ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
+_CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
+_SYSTEM_SENDERS = frozenset(("+", "!", "*"))
+_STOP = threading.Event()
 
-def recv_msg(sock):
+
+def _alert_beep() -> None:
+    print("\a", end="", flush=True)
+
+
+def _alert_notify(sender: str, preview: str) -> None:
+    title = "SSHChat"
+    subtitle = sender
+    body = preview if preview else "(message)"
+    if shutil.which("osascript"):
+        # argv avoids brittle AppleScript string escaping
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                "on run argv\n"
+                '\tdisplay notification (item 1 of argv) with title '
+                "(item 2 of argv) subtitle (item 3 of argv)\n"
+                "end run",
+                body[:400],
+                title,
+                subtitle[:200],
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    elif shutil.which("notify-send"):
+        subprocess.run(
+            ["notify-send", "-a", title, f"{title} — {subtitle}", body[:400]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def maybe_alert_incoming(sender: str, preview: str) -> None:
+    if _ALERT in ("", "none", "0", "off"):
+        return
+    if _ALERT in ("beep", "all", "both"):
+        _alert_beep()
+    if _ALERT in ("notify", "all", "both"):
+        _alert_notify(sender, preview)
+
+
+def _line_is_peer_chat(line: str, my_name: str) -> tuple[bool, str, str]:
+    """Return (is_peer_chat, sender, preview) for a single line without trailing \\n."""
+    m = _CHAT_PREFIX.match(line.rstrip("\r"))
+    if not m:
+        return False, "", ""
+    sender, rest = m.group(1), m.group(2)
+    if sender in _SYSTEM_SENDERS or sender == my_name:
+        return False, sender, rest
+    return True, sender, rest
+
+
+def recv_msg(sock, my_name: str):
+    notif_buf = ""
     while True:
         try:
             data = sock.recv(1024)
@@ -21,14 +86,22 @@ def recv_msg(sock):
                 print("\n[ERROR] server disconnected")
                 break
 
-            print(data.decode("utf-8"), end="")
+            text = data.decode("utf-8", errors="replace")
+            print(text, end="", flush=True)
+
+            notif_buf += text
+            while "\n" in notif_buf:
+                line, notif_buf = notif_buf.split("\n", 1)
+                ok, sender, preview = _line_is_peer_chat(line, my_name)
+                if ok:
+                    maybe_alert_incoming(sender, preview)
 
         except Exception:
             print("\n[ERROR] receive failed")
             break
 
     sock.close()
-    os._exit(0)
+    _STOP.set()
 
 
 def main():
@@ -45,19 +118,54 @@ def main():
 
     print("[OK] connected as " + name)
     print("Commands: /users  /join <room>  /help")
+    print(
+        f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
+        "peer chat lines only"
+    )
 
-    threading.Thread(target=recv_msg, args=(s,), daemon=True).start()
+    threading.Thread(target=recv_msg, args=(s, name), daemon=True).start()
 
-    with patch_stdout():
+    # Some forced-command SSH sessions may not provide a TTY for prompt_toolkit.
+    use_prompt_toolkit = sys.stdin.isatty() and sys.stdout.isatty()
+    if not use_prompt_toolkit:
+        print("[*] non-interactive terminal detected; fallback input mode")
+
+    if use_prompt_toolkit:
+        with patch_stdout():
+            while True:
+                if _STOP.is_set():
+                    print("[INFO] disconnected")
+                    break
+                try:
+                    msg = prompt("> ")
+
+                    if msg.strip() == "":
+                        continue
+
+                    s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))
+
+                except (KeyboardInterrupt, EOFError):
+                    print("\n[INFO] exit")
+                    break
+                except Exception:
+                    print("[ERROR] send failed")
+                    break
+    else:
         while True:
+            if _STOP.is_set():
+                print("[INFO] disconnected")
+                break
             try:
-                msg = prompt("> ")
-
+                sys.stdout.write("> ")
+                sys.stdout.flush()
+                msg = sys.stdin.readline()
+                if msg == "":
+                    print("\n[INFO] stdin closed")
+                    break
+                msg = msg.rstrip("\r\n")
                 if msg.strip() == "":
                     continue
-
                 s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))
-
             except (KeyboardInterrupt, EOFError):
                 print("\n[INFO] exit")
                 break
