@@ -10,7 +10,7 @@
 #
 # Env (optional):
 #   SSHCHAT_CHAT_SCRIPT  Absolute or relative path to chat.sh (default: next to this script)
-#   SSHCHAT_SHELL        Login shell for new users (default: /usr/sbin/nologin)
+#   SSHCHAT_SHELL        Login shell for new users (default: /bin/sh)
 #   SSHCHAT_CLIENT_GROUP  Group with read/execute on chat.sh and venv (default: sshchat-clients)
 
 set -euo pipefail
@@ -63,7 +63,7 @@ shift
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 : "${SSHCHAT_CHAT_SCRIPT:=$SCRIPT_DIR/chat.sh}"
-: "${SSHCHAT_SHELL:=/usr/sbin/nologin}"
+: "${SSHCHAT_SHELL:=/bin/sh}"
 
 if ! [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
   echo "error: invalid username (lowercase POSIX-ish, max 32 chars)" >&2

@@ -15,6 +15,7 @@
 
 - **Python 3**（含 `venv` 模块），部署目标建议为带 **systemd** 的 Linux。
 - 客户端额外依赖：**prompt_toolkit**（由 `deploy.sh` 装入安装目录下的 venv）。
+- Linux 新消息提示音：若终端 BEL 被静音，可额外安装 `libcanberra-gtk3-module`（`canberra-gtk-play`）或使用 `pulseaudio-utils`（`paplay`）/`alsa-utils`（`aplay`）作为回退。
 
 ## 一键部署
 
@@ -39,7 +40,7 @@ sudo ./deploy.sh --keep-env --no-migrate-keys   # 升级时保留 env 且不改 
 
 - 将程序文件复制到 `--prefix`（默认 `/opt/sshchat`）
 - 创建 venv 并安装 `prompt_toolkit`
-- 写入 **`sshchat.env`**（`SSHCHAT_SERVER`、`SSHCHAT_PORT`）
+- 写入 **`sshchat.env`**（`SSHCHAT_SERVER`、`SSHCHAT_PORT`、`SSHCHAT_ALERT_SOUND=auto`）
 - 创建系统用户 **sshchat**（可用 `--run-user` 修改），并以该用户运行聊天服务（**Linux**；macOS 见上文）
 - 创建系统组 **sshchat-clients**（可用环境变量 **`SSHCHAT_CLIENT_GROUP`** 改名，须与 `admin-add-user.sh` 一致；**Linux**）：聊天 SSH 用户经 `admin-add-user.sh` 加入该组后，可进入安装目录并运行 **`chat.sh`** 与 **`venv`**；**`server.py` / `server.sh`、以及 `admin-add-user.sh`** 仅 **sshchat** 或 **root** 可访问
 - 安装并启用 **`sshchat.service`**（**Linux** + systemd；除非 `--no-systemd`）
@@ -94,9 +95,10 @@ cat bob.pub | sudo /opt/sshchat/admin-add-user.sh carol -
 | 变量 | 含义 |
 |------|------|
 | `SSHCHAT_CHAT_SCRIPT` | `chat.sh` 的绝对路径（默认：脚本同目录的 `chat.sh`） |
-| `SSHCHAT_SHELL` | 新建系统用户的登录 shell（默认 `/usr/sbin/nologin`） |
+| `SSHCHAT_SHELL` | 新建系统用户的登录 shell（默认 `/bin/sh`；需可执行 forced command） |
 | `SSHCHAT_CLIENT_GROUP` | 赋予「可进安装目录、跑客户端」的补充组（默认 `sshchat-clients`，须与部署时一致） |
 | `SSHCHAT_COMMAND_BASENAME` | `deploy.sh` 重写 **`command=`** 时匹配的文件名（默认与 **`chat.sh`**  basename 相同） |
+| `SSHCHAT_ALERT_SOUND` | 新消息提示音后端（`auto`/`canberra`/`paplay`/`aplay`/`none`，默认 `auto`） |
 
 写入 `authorized_keys` 时会加上 `command="…/chat.sh"` 以及 `no-port-forwarding` 等限制；**未使用 `no-pty`**，以便交互式客户端正常工作。
 
@@ -119,6 +121,7 @@ cat bob.pub | sudo /opt/sshchat/admin-add-user.sh carol -
 ```bash
 SSHCHAT_SERVER=10.0.0.5
 SSHCHAT_PORT=12345
+SSHCHAT_ALERT_SOUND=auto
 ```
 
 - **`server.py`** 读取 **`SSHCHAT_PORT`**（默认 `12345`）。

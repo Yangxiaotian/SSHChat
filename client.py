@@ -17,10 +17,23 @@ name = pwd.getpwuid(os.getuid()).pw_name
 
 # beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
 _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
+_ALERT_SOUND = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
 _CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
+
+
+def _spawn_quiet(cmd: list[str]) -> bool:
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _alert_beep() -> None:
@@ -38,12 +51,31 @@ def _alert_beep() -> None:
     if shutil.which("afplay"):
         sound = "/System/Library/Sounds/Glass.aiff"
         if os.path.exists(sound):
-            subprocess.run(
-                ["afplay", sound],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            _spawn_quiet(["afplay", sound])
+    if _ALERT_SOUND in ("none", "off", "0"):
+        return
+    # Linux fallback for terminals that mute BEL:
+    # try configured backend or auto-detect order.
+    backends = ["canberra", "paplay", "aplay"] if _ALERT_SOUND == "auto" else [_ALERT_SOUND]
+    for backend in backends:
+        if backend == "canberra" and shutil.which("canberra-gtk-play"):
+            if _spawn_quiet(["canberra-gtk-play", "-i", "message-new-instant", "-d", "SSHChat"]):
+                return
+        if backend == "paplay" and shutil.which("paplay"):
+            for sound in (
+                "/usr/share/sounds/freedesktop/stereo/message.oga",
+                "/usr/share/sounds/freedesktop/stereo/complete.oga",
+            ):
+                if os.path.exists(sound) and _spawn_quiet(["paplay", sound]):
+                    return
+        if backend == "aplay" and shutil.which("aplay"):
+            for sound in (
+                "/usr/share/sounds/alsa/Front_Center.wav",
+                "/usr/share/sounds/alsa/Noise.wav",
+            ):
+                if os.path.exists(sound):
+                    _spawn_quiet(["aplay", "-q", sound])
+                    return
 
 
 def _alert_notify(sender: str, preview: str) -> None:
@@ -145,6 +177,10 @@ def main():
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
         "peer chat lines only"
+    )
+    print(
+        "Alert sound backend "
+        f"(SSHCHAT_ALERT_SOUND={_ALERT_SOUND}): auto | canberra | paplay | aplay | none"
     )
 
     threading.Thread(target=recv_msg, args=(s, name), daemon=True).start()
