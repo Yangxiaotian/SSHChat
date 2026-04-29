@@ -20,10 +20,30 @@ _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
 _CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
+_DISCONNECTED = threading.Event()
 
 
 def _alert_beep() -> None:
+    # Terminal bell first; some terminals mute this by default.
     print("\a", end="", flush=True)
+    # macOS audible fallback when terminal bell is disabled.
+    if shutil.which("osascript"):
+        subprocess.run(
+            ["osascript", "-e", "beep 1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    # Stronger macOS fallback for SSH sessions: play a system sound file.
+    if shutil.which("afplay"):
+        sound = "/System/Library/Sounds/Glass.aiff"
+        if os.path.exists(sound):
+            subprocess.run(
+                ["afplay", sound],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
 
 
 def _alert_notify(sender: str, preview: str) -> None:
@@ -84,6 +104,7 @@ def recv_msg(sock, my_name: str):
             data = sock.recv(1024)
             if not data:
                 print("\n[ERROR] server disconnected")
+                _DISCONNECTED.set()
                 break
 
             text = data.decode("utf-8", errors="replace")
@@ -98,6 +119,7 @@ def recv_msg(sock, my_name: str):
 
         except Exception:
             print("\n[ERROR] receive failed")
+            _DISCONNECTED.set()
             break
 
     sock.close()
@@ -105,6 +127,8 @@ def recv_msg(sock, my_name: str):
 
 
 def main():
+    _STOP.clear()
+    _DISCONNECTED.clear()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
@@ -174,7 +198,11 @@ def main():
                 break
 
     s.close()
+    if _DISCONNECTED.is_set():
+        # Let chat.sh decide whether to auto-restart client.
+        return 75
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

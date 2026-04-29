@@ -8,4 +8,13 @@ if [[ -f "$DIR/sshchat.env" ]]; then
 fi
 PY="$DIR/venv/bin/python"
 [[ -x "$PY" ]] || PY=python3
-exec "$PY" "$DIR/client.py"
+while true; do
+  "$PY" "$DIR/client.py"
+  rc=$?
+  if [[ "$rc" -eq 75 ]]; then
+    echo "[INFO] reconnecting in 1s ..."
+    sleep 1
+    continue
+  fi
+  exit "$rc"
+done
