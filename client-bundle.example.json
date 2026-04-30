@@ -1,0 +1,5 @@
+{
+  "host": "chat.example.com",
+  "ssh_port": 22,
+  "bundle_mode": true
+}

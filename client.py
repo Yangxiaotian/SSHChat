@@ -7,7 +7,9 @@ import subprocess
 import sys
 import threading
 
-from prompt_toolkit import prompt
+from prompt_toolkit import PromptSession
+from prompt_toolkit.data_structures import Size
+from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.patch_stdout import patch_stdout
 
 SERVER_IP = os.environ.get("SSHCHAT_SERVER", "127.0.0.1")
@@ -22,6 +24,14 @@ _CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
+
+
+def _terminal_size() -> Size:
+    try:
+        wh = shutil.get_terminal_size()
+        return Size(rows=wh.lines, columns=wh.columns)
+    except OSError:
+        return Size(rows=24, columns=80)
 
 
 def _spawn_quiet(cmd: list[str]) -> bool:
@@ -191,13 +201,18 @@ def main():
         print("[*] non-interactive terminal detected; fallback input mode")
 
     if use_prompt_toolkit:
+        # GUI / Paramiko / some PTYs do not answer CPR (cursor position requests);
+        # prompt_toolkit then prints a noisy WARNING on each prompt without this.
+        ptk_session = PromptSession(
+            output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
+        )
         with patch_stdout():
             while True:
                 if _STOP.is_set():
                     print("[INFO] disconnected")
                     break
                 try:
-                    msg = prompt("> ")
+                    msg = ptk_session.prompt("> ")
 
                     if msg.strip() == "":
                         continue

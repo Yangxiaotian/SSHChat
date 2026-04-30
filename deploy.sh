@@ -17,6 +17,9 @@ ROOT_OWN=0:0
 PREFIX=/opt/sshchat
 SERVER_IP=""
 PORT=12345
+CLIENT_SSH_HOST="${SSHCHAT_CLIENT_SSH_HOST:-}"
+CLIENT_SSH_PORT="${SSHCHAT_CLIENT_SSH_PORT:-22}"
+BUILD_GUI_PACKAGES=0
 INSTALL_SYSTEMD=1
 RUN_USER=sshchat
 CREATE_RUN_USER=1
@@ -35,13 +38,16 @@ Usage: sudo $0 [options]
 
 Options:
   --prefix DIR       Install directory (default: $PREFIX)
-  --server-ip ADDR   Address clients use to reach this host (default: auto-detect)
-  --port N           Listen port (default: $PORT)
+  --server-ip ADDR   SSHCHAT_SERVER in sshchat.env: where server-side client.py connects for chat TCP (often 127.0.0.1; NOT the user's ssh hostname)
+  --port N           Chat TCP port for server.py / SSHCHAT_PORT (default: $PORT; NOT sshd)
   --keep-env         If $PREFIX/sshchat.env already exists, do not overwrite it (upgrade-friendly)
   --no-migrate-keys  Do not rewrite authorized_keys command= paths to this install's chat.sh
   --no-systemd       Do not install or start systemd service
   --run-user NAME    User to run the server as (default: $RUN_USER)
   --no-run-user      Do not create user; install as root (manual server only)
+  --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
+  --client-ssh-port PORT  sshd port embedded in client-bundle.json (default: $CLIENT_SSH_PORT)
+  --build-gui-packages    After install, run scripts/build-gui-packages.sh if present (needs tkinter + PyInstaller)
   -h, --help         This help
 
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
@@ -276,6 +282,18 @@ while [[ $# -gt 0 ]]; do
       CREATE_RUN_USER=0
       shift
       ;;
+    --client-ssh-host)
+      CLIENT_SSH_HOST=${2:?}
+      shift 2
+      ;;
+    --client-ssh-port)
+      CLIENT_SSH_PORT=${2:?}
+      shift 2
+      ;;
+    --build-gui-packages)
+      BUILD_GUI_PACKAGES=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -322,6 +340,22 @@ if [[ -z "$SERVER_IP" ]]; then
   # is the safest default regardless of where users SSH from.
   SERVER_IP="127.0.0.1"
   echo "info: defaulting SSHCHAT_SERVER to 127.0.0.1 (forced-command local client mode)" >&2
+fi
+
+if ! [[ "$CLIENT_SSH_PORT" =~ ^[0-9]+$ ]]; then
+  echo "error: client SSH port must be numeric (got: $CLIENT_SSH_PORT)" >&2
+  exit 1
+fi
+
+if [[ -z "$CLIENT_SSH_HOST" ]]; then
+  if [[ -n "$SERVER_IP" && "$SERVER_IP" != "127.0.0.1" ]]; then
+    CLIENT_SSH_HOST="$SERVER_IP"
+  else
+    CLIENT_SSH_HOST=$(detect_ip)
+  fi
+fi
+if [[ "$CLIENT_SSH_HOST" == "127.0.0.1" ]]; then
+  echo "warning: client-bundle.json SSH host is 127.0.0.1; remote users cannot reach it — set --client-ssh-host to your public DNS/IP" >&2
 fi
 
 mkdir -p "$PREFIX"
@@ -381,6 +415,29 @@ SSHCHAT_SERVER=$SERVER_IP
 SSHCHAT_PORT=$PORT
 SSHCHAT_ALERT_SOUND=auto
 EOF
+fi
+
+CLIENT_BUNDLE_JSON="$PREFIX/client-bundle.json"
+SSHCHAT__H="$CLIENT_SSH_HOST" SSHCHAT__P="$CLIENT_SSH_PORT" SSHCHAT__OUT="$CLIENT_BUNDLE_JSON" python3 - <<'PY'
+import json, os, pathlib
+out = os.environ["SSHCHAT__OUT"]
+obj = {
+    "host": os.environ["SSHCHAT__H"],
+    "ssh_port": int(os.environ["SSHCHAT__P"]),
+    "bundle_mode": True,
+}
+pathlib.Path(out).write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+chmod 644 "$CLIENT_BUNDLE_JSON"
+chown "$ROOT_OWN" "$CLIENT_BUNDLE_JSON" 2>/dev/null || true
+
+if [[ -d "$SCRIPT_DIR" ]]; then
+  if mkdir -p "$SCRIPT_DIR/dist" 2>/dev/null && cp -f "$CLIENT_BUNDLE_JSON" "$SCRIPT_DIR/dist/client-bundle.json" 2>/dev/null; then
+    chmod 644 "$SCRIPT_DIR/dist/client-bundle.json" 2>/dev/null || true
+    echo "info: copied client-bundle.json -> $SCRIPT_DIR/dist/ (for maintainer GUI builds)"
+  else
+    echo "info: could not write $SCRIPT_DIR/dist/client-bundle.json (copy from $CLIENT_BUNDLE_JSON manually)" >&2
+  fi
 fi
 
 if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
@@ -455,3 +512,14 @@ else
   echo "authorized_keys:  not modified (--no-migrate-keys)"
 fi
 echo "Optional: open firewall for TCP $PORT"
+echo "GUI bundle:     $CLIENT_BUNDLE_JSON  (host=$CLIENT_SSH_HOST ssh_port=$CLIENT_SSH_PORT)"
+if [[ "$BUILD_GUI_PACKAGES" -eq 1 ]]; then
+  if [[ -x "$SCRIPT_DIR/scripts/build-gui-packages.sh" ]]; then
+    echo "info: running scripts/build-gui-packages.sh ..."
+    if ! SSHCHAT_BUNDLE_FILE="$CLIENT_BUNDLE_JSON" "$SCRIPT_DIR/scripts/build-gui-packages.sh"; then
+      echo "warning: GUI package build failed; install PyInstaller + tkinter or build on a workstation" >&2
+    fi
+  else
+    echo "warning: $SCRIPT_DIR/scripts/build-gui-packages.sh not found or not executable" >&2
+  fi
+fi
