@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -38,15 +41,20 @@ _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _OTHER_ESC_RE = re.compile(r"\x1b[\][()#%][\d\"A-Za-z]*")
 _PROMPT_PREFIX_RE = re.compile(r"(?:^|\s)>+\s*")
-_RESIDUAL_ONLY_RE = re.compile(r"[\s,，。！？!?、;；:：\-]*")
-_CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
+_RESIDUAL_ONLY_RE = re.compile(r"[\s,，。！？!?、;；:：\->]*")
+_CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
 _TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
+_TIME_ANY_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]\s*")
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_LEADING_GARBAGE_RE = re.compile(r"^[\s\uFFFD\u25A1\uFEFF\u00A0]+")
+_SPACE_RE = re.compile(r"\s+")
 
 
 def _clean_chunk(s: str) -> str:
     s = _OSC_RE.sub("", s)
     s = _CSI_RE.sub("", s)
     s = _OTHER_ESC_RE.sub("", s)
+    s = _CTRL_CHARS_RE.sub("", s)
     # Keep line semantics for CRLF-based streams from PTY/SSH.
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     return s
@@ -75,6 +83,24 @@ def _strip_time_prefixes(line: str) -> str:
         out = nxt.lstrip()
 
 
+def _parse_chat_line(line: str) -> tuple[str, str] | None:
+    t = _LEADING_GARBAGE_RE.sub("", line.rstrip("\n"))
+    t = _TIME_ANY_RE.sub("", t)
+    t = _PROMPT_PREFIX_RE.sub("", t).strip()
+    m = _CHAT_LINE_RE.match(t)
+    if not m:
+        all_matches = re.findall(r"\[([^\]]+)\]\s*([^\[]*)", t)
+        if all_matches:
+            sender, body = all_matches[-1]
+            return sender.strip(), body.strip()
+        return None
+    return m.group(1), m.group(2)
+
+
+def _normalize_payload_text(s: str) -> str:
+    return _SPACE_RE.sub(" ", s.strip())
+
+
 class SSHChatGUI:
     def __init__(self, config_path: Path, *, force_full_ui: bool = False) -> None:
         self.config_path = config_path.expanduser().resolve()
@@ -91,13 +117,15 @@ class SSHChatGUI:
         self._chan: paramiko.Channel | None = None
         self._reader_thread: threading.Thread | None = None
         self._connect_thread: threading.Thread | None = None
-        self._out_q: queue.Queue[str | None] = queue.Queue()
+        self._out_q: queue.Queue[tuple[int, str | None]] = queue.Queue()
         self._drain_after_id: str | int | None = None
         self._connecting = threading.Event()
         self._line_buf = ""
+        self._session_id = 0
         self._pending_lock = threading.Lock()
         self._pending_sent: deque[str] = deque(maxlen=64)
         self._display_times: deque[datetime] = deque(maxlen=2048)
+        self._alert_sound = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -112,10 +140,18 @@ class SSHChatGUI:
             self._pending_sent.append(text)
 
     def _consume_sent_exact(self, payload: str) -> bool:
+        normalized_payload = _normalize_payload_text(payload)
         with self._pending_lock:
-            if payload in self._pending_sent:
-                self._pending_sent.remove(payload)
-                return True
+            for sent in list(self._pending_sent):
+                normalized_sent = _normalize_payload_text(sent)
+                if (
+                    sent == payload
+                    or normalized_sent == normalized_payload
+                    or normalized_sent in normalized_payload
+                    or normalized_payload in normalized_sent
+                ):
+                    self._pending_sent.remove(sent)
+                    return True
         return False
 
     def _consume_if_prompt_echo(self, line: str) -> bool:
@@ -146,10 +182,14 @@ class SSHChatGUI:
         normalized = _strip_time_prefixes(line)
         if _skip_line(normalized):
             return True
-        m = _CHAT_LINE_RE.match(normalized.rstrip("\r"))
-        if m:
+        parsed = _parse_chat_line(normalized.rstrip("\r"))
+        if parsed:
             me = self.var_user.get().strip()
-            if me and m.group(1) == me and self._consume_sent_exact(m.group(2)):
+            sender, body = parsed
+            sender = sender.strip()
+            if me and sender == me:
+                # Server echo of our own message; we already displayed it locally.
+                self._consume_sent_exact(body)
                 return True
         if self._consume_if_prompt_echo(normalized):
             return True
@@ -164,13 +204,8 @@ class SSHChatGUI:
             top.pack(fill=tk.X, **pad)
             ttk.Label(
                 top,
-                text=f"SSH 服务器（已内置）: {bh}    端口 {bp}",
+                text=f"SSH 服务器: {bh}    端口 {bp}",
             ).pack(anchor="w")
-            ttk.Label(
-                top,
-                text="请输入服务器上的 Linux 用户名。认证与命令行 ssh 相同：使用本机 ~/.ssh 下标准私钥与 ssh-agent（不在此选择密钥文件）。",
-                wraplength=640,
-            ).pack(anchor="w", pady=(6, 0))
             row_u = ttk.Frame(self.root)
             row_u.pack(fill=tk.X, **pad)
             ttk.Label(row_u, text="用户名").pack(side=tk.LEFT)
@@ -203,19 +238,6 @@ class SSHChatGUI:
             )
 
             top.columnconfigure(1, weight=1)
-            ttk.Label(
-                self.root,
-                text="认证：默认 ~/.ssh 与 ssh-agent，与系统 ssh 客户端一致。",
-            ).pack(anchor="w", padx=10, pady=(0, 2))
-
-        opts = ttk.Frame(self.root)
-        opts.pack(fill=tk.X, padx=6, pady=(0, 4))
-        self.var_strict_host = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            opts,
-            text="严格校验主机密钥（使用本机 ~/.ssh/known_hosts，未知主机将拒绝）",
-            variable=self.var_strict_host,
-        ).pack(side=tk.LEFT)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill=tk.X, padx=6, pady=(0, 4))
@@ -225,10 +247,6 @@ class SSHChatGUI:
             bar, text="断开", command=self._disconnect, state=tk.DISABLED
         )
         self.btn_disconnect.pack(side=tk.LEFT, padx=(8, 0))
-        save_lbl = "保存（用户名）" if self._bundle else "保存配置"
-        ttk.Button(bar, text=save_lbl, command=self._save_profile_clicked).pack(
-            side=tk.RIGHT
-        )
 
         self.var_status = tk.StringVar(value="就绪")
         ttk.Label(self.root, textvariable=self.var_status).pack(
@@ -269,7 +287,9 @@ class SSHChatGUI:
         self.log.configure(state=tk.DISABLED)
 
     def _append_chat_line(self, line: str, *, local_sent: bool = False) -> None:
-        t = _strip_time_prefixes(line.rstrip("\n"))
+        cleaned = _LEADING_GARBAGE_RE.sub("", line.rstrip("\n"))
+        cleaned = _TIME_ANY_RE.sub("", cleaned).strip()
+        t = cleaned
         if not t:
             return
         ts = datetime.now()
@@ -277,16 +297,27 @@ class SSHChatGUI:
         time_label = self._format_time(ts)
         self.log.configure(state=tk.NORMAL)
         self.log.insert(tk.END, f"[{time_label}] ", ("meta",))
-        m = _CHAT_LINE_RE.match(t)
-        if m:
-            sender, body = m.group(1), m.group(2)
+        parsed = _parse_chat_line(t)
+        if parsed:
+            sender, body = parsed
             me = self.var_user.get().strip()
-            role_tag = "me" if sender == me else "peer"
+            is_system_sender = sender in {"+", "-", "*", "!"}
+            role_tag = "system" if is_system_sender else ("me" if sender == me else "peer")
+            if not local_sent:
+                if role_tag == "peer":
+                    self._alert_beep()
+                elif sender in {"+", "-"} or (
+                    sender == "!" and (" left " in body or " joined " in body)
+                ):
+                    self._alert_beep()
             self.log.insert(tk.END, f"[{sender}] ", (role_tag,))
             self.log.insert(tk.END, body + "\n", (role_tag,))
-        elif t.startswith("[*]") or t.startswith("[+]") or t.startswith("[!]") or local_sent:
+        elif local_sent:
             self.log.insert(tk.END, t + "\n", ("system",))
         else:
+            lowered = t.lower()
+            if " joined " in lowered or " left " in lowered:
+                self._alert_beep()
             self.log.insert(tk.END, t + "\n")
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
@@ -336,18 +367,50 @@ class SSHChatGUI:
             data["extra_ssh_options"] = existing["extra_ssh_options"]
         return data
 
-    def _save_profile_clicked(self) -> None:
+    def _save_profile(self, *, warn_on_error: bool = True) -> bool:
         try:
             data = self._collect_profile_dict()
         except ValueError as e:
-            messagebox.showwarning("SSHChat", str(e))
-            return
+            if warn_on_error:
+                messagebox.showwarning("SSHChat", str(e))
+            return False
         try:
             save_client_config(self.config_path, data)
         except OSError as e:
-            messagebox.showerror("SSHChat", f"无法写入配置: {e}")
+            if warn_on_error:
+                messagebox.showerror("SSHChat", f"无法写入配置: {e}")
+            return False
+        return True
+
+    def _alert_beep(self) -> None:
+        self.root.bell()
+        if self._alert_sound in ("none", "off", "0"):
             return
-        self._set_status(f"已保存: {self.config_path}")
+        backends = ["canberra", "paplay", "aplay"] if self._alert_sound == "auto" else [self._alert_sound]
+        for backend in backends:
+            if backend == "canberra" and shutil.which("canberra-gtk-play"):
+                subprocess.Popen(
+                    ["canberra-gtk-play", "-i", "message-new-instant", "-d", "SSHChat"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            if backend == "paplay" and shutil.which("paplay"):
+                for sound in (
+                    "/usr/share/sounds/freedesktop/stereo/message.oga",
+                    "/usr/share/sounds/freedesktop/stereo/complete.oga",
+                ):
+                    if os.path.exists(sound):
+                        subprocess.Popen(["paplay", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
+            if backend == "aplay" and shutil.which("aplay"):
+                for sound in (
+                    "/usr/share/sounds/alsa/Front_Center.wav",
+                    "/usr/share/sounds/alsa/Noise.wav",
+                ):
+                    if os.path.exists(sound):
+                        subprocess.Popen(["aplay", "-q", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
 
     def _connect_clicked(self) -> None:
         if self._connecting.is_set():
@@ -395,10 +458,7 @@ class SSHChatGUI:
         ssh = paramiko.SSHClient()
         try:
             ssh.load_system_host_keys()
-            if self.var_strict_host.get():
-                ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
-            else:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
             connect_kw: dict[str, Any] = {
                 "hostname": host,
@@ -424,9 +484,12 @@ class SSHChatGUI:
         self.root.after(0, self._connect_succeeded)
 
     def _connect_succeeded(self) -> None:
+        self._save_profile(warn_on_error=False)
         self.btn_disconnect.configure(state=tk.NORMAL)
         self._set_status("已连接（SSH 会话）")
-        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._session_id += 1
+        sid = self._session_id
+        self._reader_thread = threading.Thread(target=self._reader_loop, args=(sid,), daemon=True)
         self._reader_thread.start()
         self._schedule_drain()
 
@@ -437,7 +500,7 @@ class SSHChatGUI:
         self._set_status("连接失败")
         messagebox.showerror("SSHChat", msg)
 
-    def _reader_loop(self) -> None:
+    def _reader_loop(self, sid: int) -> None:
         assert self._chan is not None
         dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
         chan = self._chan
@@ -465,13 +528,13 @@ class SSHChatGUI:
                     else:
                         self._line_buf += ch
                 if out:
-                    self._out_q.put("".join(out))
+                    self._out_q.put((sid, "".join(out)))
         finally:
             try:
                 dec.decode(b"", final=True)
             except Exception:
                 pass
-            self._out_q.put(None)
+            self._out_q.put((sid, None))
 
     def _schedule_drain(self) -> None:
         self._drain_after_id = self.root.after(40, self._drain_queue)
@@ -481,7 +544,9 @@ class SSHChatGUI:
         buf: list[str] = []
         try:
             while True:
-                item = self._out_q.get_nowait()
+                sid, item = self._out_q.get_nowait()
+                if sid != self._session_id:
+                    continue
                 if item is None:
                     self._on_remote_eof()
                     return
