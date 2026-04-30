@@ -106,7 +106,7 @@ def handle_command(conn, payload: str) -> None:
             rooms[new_room].add(conn)
         broadcast_room(
             old_room,
-            f"[!] {name} went to #{new_room}\n".encode("utf-8"),
+            f"[!] {name} left the room\n".encode("utf-8"),
         )
         broadcast_room(
             new_room,

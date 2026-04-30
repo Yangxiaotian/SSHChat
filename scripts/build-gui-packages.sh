@@ -12,6 +12,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+export PYINSTALLER_CONFIG_DIR="$ROOT/build/pyinstaller-cache"
+mkdir -p "$PYINSTALLER_CONFIG_DIR"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "error: do not run this script with sudo/root." >&2
+  echo "       it creates root-owned files and breaks later non-root builds." >&2
+  echo "       if you already did, run:" >&2
+  echo "       sudo chown -R \"$(logname 2>/dev/null || echo '<user>')\":\"$(id -gn)\" \"$ROOT/build\" \"$ROOT/dist\" \"$ROOT/dist-packages\"" >&2
+  exit 1
+fi
 
 BUNDLE="${SSHCHAT_BUNDLE_FILE:-$ROOT/dist/client-bundle.json}"
 if [[ ! -f "$BUNDLE" ]]; then
@@ -32,7 +42,18 @@ case "$(uname -s)" in
 esac
 
 PACKVENV="$ROOT/build/pack-venv"
-rm -rf "$PACKVENV"
+PYI_WORKPATH="$ROOT/build/pyinstaller"
+ARTIFACT_DIR="$ROOT/dist-packages"
+
+# Keep clean fixed directories; fail with clear ownership hint if cleanup is blocked.
+for p in "$PACKVENV" "$PYI_WORKPATH" "$ARTIFACT_DIR"; do
+  if [[ -e "$p" ]] && ! rm -rf "$p" 2>/dev/null; then
+    echo "error: cannot remove $p (likely root-owned from previous sudo build)." >&2
+    echo "fix:   sudo chown -R \"$(id -un)\":\"$(id -gn)\" \"$ROOT/build\" \"$ROOT/dist-packages\"" >&2
+    exit 1
+  fi
+done
+
 python3 -m venv "$PACKVENV"
 if [[ -f "$PACKVENV/bin/activate" ]]; then
   # shellcheck disable=SC1090
@@ -45,8 +66,6 @@ else
   exit 1
 fi
 pip install -q -r "$ROOT/requirements-gui.txt" -r "$ROOT/requirements-packaging.txt"
-
-ARTIFACT_DIR="$ROOT/dist-packages"
 mkdir -p "$ARTIFACT_DIR"
 PYINST=(
   python -m PyInstaller
@@ -59,7 +78,7 @@ PYINST=(
   --collect-all paramiko
   --collect-all cryptography
   --distpath "$ARTIFACT_DIR"
-  --workpath "$ROOT/build/pyinstaller"
+  --workpath "$PYI_WORKPATH"
   --add-data "$BUNDLE${SEP}."
 )
 

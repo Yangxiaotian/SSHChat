@@ -6,6 +6,8 @@ import socket
 import subprocess
 import sys
 import threading
+from collections import deque
+from datetime import datetime
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.data_structures import Size
@@ -24,6 +26,9 @@ _CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
+_DISPLAY_TIMES: deque[datetime] = deque(maxlen=2048)
+_SEND_LOCK = threading.Lock()
+_PENDING_INPUT_ECHOES: deque[str] = deque(maxlen=32)
 
 
 def _terminal_size() -> Size:
@@ -139,8 +144,53 @@ def _line_is_peer_chat(line: str, my_name: str) -> tuple[bool, str, str]:
     return True, sender, rest
 
 
+def _format_time(ts: datetime) -> str:
+    return ts.strftime("%H:%M:%S")
+
+
+def _format_display_line(line: str, my_name: str) -> str:
+    # If line was already decorated by a local renderer, avoid double-prefixing.
+    if re.match(r"^\[\d{2}:\d{2}:\d{2}\] ", line):
+        return line + ("\n" if not line.endswith("\n") else "")
+    ts = datetime.now()
+    _DISPLAY_TIMES.append(ts)
+    time_label = _format_time(ts)
+    m = _CHAT_PREFIX.match(line.rstrip("\r"))
+    if not m:
+        return f"[{time_label}] {line}\n"
+    sender, payload = m.group(1), m.group(2)
+    return f"[{time_label}] [{sender}] {payload}\n"
+
+
+def _should_skip_display_line(line: str) -> bool:
+    t = line.strip()
+    if not t:
+        return True
+    # prompt redraw or local input echo fragments from PTY.
+    if t == ">" or t.startswith("> "):
+        return True
+    return False
+
+
+def _remember_sent_input(payload: str) -> None:
+    with _SEND_LOCK:
+        _PENDING_INPUT_ECHOES.append(payload)
+
+
+def _consume_sent_input_echo(line: str) -> bool:
+    t = line.strip()
+    if not t:
+        return False
+    with _SEND_LOCK:
+        if t in _PENDING_INPUT_ECHOES:
+            _PENDING_INPUT_ECHOES.remove(t)
+            return True
+    return False
+
+
 def recv_msg(sock, my_name: str):
     notif_buf = ""
+    print_buf = ""
     while True:
         try:
             data = sock.recv(1024)
@@ -149,15 +199,26 @@ def recv_msg(sock, my_name: str):
                 _DISCONNECTED.set()
                 break
 
-            text = data.decode("utf-8", errors="replace")
-            print(text, end="", flush=True)
+            text = data.decode("utf-8", errors="replace").replace("\a", "")
 
             notif_buf += text
+            print_buf += text
             while "\n" in notif_buf:
                 line, notif_buf = notif_buf.split("\n", 1)
                 ok, sender, preview = _line_is_peer_chat(line, my_name)
                 if ok:
                     maybe_alert_incoming(sender, preview)
+
+            out_lines: list[str] = []
+            while "\n" in print_buf:
+                line, print_buf = print_buf.split("\n", 1)
+                if _should_skip_display_line(line):
+                    continue
+                if _consume_sent_input_echo(line):
+                    continue
+                out_lines.append(_format_display_line(line, my_name))
+            if out_lines:
+                print("".join(out_lines), end="", flush=True)
 
         except Exception:
             print("\n[ERROR] receive failed")
@@ -217,6 +278,7 @@ def main():
                     if msg.strip() == "":
                         continue
 
+                    _remember_sent_input(msg)
                     s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))
 
                 except (KeyboardInterrupt, EOFError):
@@ -240,6 +302,7 @@ def main():
                 msg = msg.rstrip("\r\n")
                 if msg.strip() == "":
                     continue
+                _remember_sent_input(msg)
                 s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))
             except (KeyboardInterrupt, EOFError):
                 print("\n[INFO] exit")

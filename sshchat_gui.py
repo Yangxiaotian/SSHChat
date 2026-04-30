@@ -14,6 +14,8 @@ import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Any
@@ -35,14 +37,42 @@ from sshchat_client_util import (
 _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _OTHER_ESC_RE = re.compile(r"\x1b[\][()#%][\d\"A-Za-z]*")
+_PROMPT_PREFIX_RE = re.compile(r"(?:^|\s)>+\s*")
+_RESIDUAL_ONLY_RE = re.compile(r"[\s,，。！？!?、;；:：\-]*")
+_CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
+_TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
 
 
-def _strip_ansi(s: str) -> str:
+def _clean_chunk(s: str) -> str:
     s = _OSC_RE.sub("", s)
     s = _CSI_RE.sub("", s)
     s = _OTHER_ESC_RE.sub("", s)
+    # Keep line semantics for CRLF-based streams from PTY/SSH.
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     return s
+
+
+def _skip_line(line: str) -> bool:
+    t = line.strip()
+    if not t:
+        return False
+    if t.startswith("?[") and (t.endswith("A") or t.endswith("K")):
+        return True
+    if t.startswith("WARNING: your terminal doesn't support cursor position requests"):
+        return True
+    # prompt_toolkit redraw / local tty echo, not chat content.
+    if t == ">" or t.startswith("> "):
+        return True
+    return False
+
+
+def _strip_time_prefixes(line: str) -> str:
+    out = line
+    while True:
+        nxt = _TIME_PREFIX_RE.sub("", out, count=1)
+        if nxt == out:
+            return out
+        out = nxt.lstrip()
 
 
 class SSHChatGUI:
@@ -64,11 +94,66 @@ class SSHChatGUI:
         self._out_q: queue.Queue[str | None] = queue.Queue()
         self._drain_after_id: str | int | None = None
         self._connecting = threading.Event()
+        self._line_buf = ""
+        self._pending_lock = threading.Lock()
+        self._pending_sent: deque[str] = deque(maxlen=64)
+        self._display_times: deque[datetime] = deque(maxlen=2048)
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _remember_sent(self, payload: str) -> None:
+        text = payload
+        if not text:
+            return
+        with self._pending_lock:
+            self._pending_sent.append(text)
+
+    def _consume_sent_exact(self, payload: str) -> bool:
+        with self._pending_lock:
+            if payload in self._pending_sent:
+                self._pending_sent.remove(payload)
+                return True
+        return False
+
+    def _consume_if_prompt_echo(self, line: str) -> bool:
+        t = line.strip()
+        if not t or "[" in t:
+            return False
+        if ">" not in t:
+            return False
+        normalized = _PROMPT_PREFIX_RE.sub(" ", t).strip()
+        if not normalized:
+            return True
+        with self._pending_lock:
+            pending = list(self._pending_sent)
+        for sent in reversed(pending):
+            if not sent:
+                continue
+            if sent not in normalized:
+                continue
+            rest = normalized.replace(sent, " ")
+            if _RESIDUAL_ONLY_RE.fullmatch(rest):
+                with self._pending_lock:
+                    if sent in self._pending_sent:
+                        self._pending_sent.remove(sent)
+                return True
+        return False
+
+    def _should_drop_line(self, line: str) -> bool:
+        normalized = _strip_time_prefixes(line)
+        if _skip_line(normalized):
+            return True
+        m = _CHAT_LINE_RE.match(normalized.rstrip("\r"))
+        if m:
+            me = self.var_user.get().strip()
+            if me and m.group(1) == me and self._consume_sent_exact(m.group(2)):
+                return True
+        if self._consume_if_prompt_echo(normalized):
+            return True
+        return False
 
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 4}
@@ -159,6 +244,10 @@ class SSHChatGUI:
             state=tk.DISABLED,
         )
         self.log.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self.log.tag_configure("meta", foreground="#7f8c8d")
+        self.log.tag_configure("me", foreground="#2e7d32")
+        self.log.tag_configure("peer", foreground="#1565c0")
+        self.log.tag_configure("system", foreground="#8e24aa")
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -170,11 +259,42 @@ class SSHChatGUI:
             side=tk.LEFT, padx=(8, 0)
         )
 
+    def _format_time(self, ts: datetime) -> str:
+        return ts.strftime("%H:%M:%S")
+
     def _append_log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)
         self.log.insert(tk.END, text)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
+
+    def _append_chat_line(self, line: str, *, local_sent: bool = False) -> None:
+        t = _strip_time_prefixes(line.rstrip("\n"))
+        if not t:
+            return
+        ts = datetime.now()
+        self._display_times.append(ts)
+        time_label = self._format_time(ts)
+        self.log.configure(state=tk.NORMAL)
+        self.log.insert(tk.END, f"[{time_label}] ", ("meta",))
+        m = _CHAT_LINE_RE.match(t)
+        if m:
+            sender, body = m.group(1), m.group(2)
+            me = self.var_user.get().strip()
+            role_tag = "me" if sender == me else "peer"
+            self.log.insert(tk.END, f"[{sender}] ", (role_tag,))
+            self.log.insert(tk.END, body + "\n", (role_tag,))
+        elif t.startswith("[*]") or t.startswith("[+]") or t.startswith("[!]") or local_sent:
+            self.log.insert(tk.END, t + "\n", ("system",))
+        else:
+            self.log.insert(tk.END, t + "\n")
+        self.log.see(tk.END)
+        self.log.configure(state=tk.DISABLED)
+
+    def _append_rendered_block(self, text: str) -> None:
+        for line in text.splitlines():
+            if line:
+                self._append_chat_line(line)
 
     def _set_status(self, s: str) -> None:
         self.var_status.set(s)
@@ -329,9 +449,23 @@ class SSHChatGUI:
                     break
                 if not data:
                     break
-                text = _strip_ansi(dec.decode(data, final=False))
-                if text:
-                    self._out_q.put(text)
+                text = _clean_chunk(dec.decode(data, final=False))
+                if not text:
+                    continue
+                out: list[str] = []
+                for ch in text:
+                    if ch == "\r":
+                        self._line_buf = ""
+                    elif ch == "\b":
+                        self._line_buf = self._line_buf[:-1]
+                    elif ch == "\n":
+                        if not self._should_drop_line(self._line_buf):
+                            out.append(self._line_buf + "\n")
+                        self._line_buf = ""
+                    else:
+                        self._line_buf += ch
+                if out:
+                    self._out_q.put("".join(out))
         finally:
             try:
                 dec.decode(b"", final=True)
@@ -355,7 +489,7 @@ class SSHChatGUI:
         except queue.Empty:
             pass
         if buf:
-            self._append_log("".join(buf))
+            self._append_rendered_block("".join(buf))
         ch = self._chan
         if ch is not None and not ch.closed:
             self._schedule_drain()
@@ -363,7 +497,7 @@ class SSHChatGUI:
     def _on_remote_eof(self) -> None:
         if self._ssh is None and self._chan is None:
             return
-        self._append_log("\n[本地] 与服务器的连接已结束。\n")
+        self._append_chat_line("[*] 与服务器的连接已结束。")
         self._disconnect(clear_log=False)
         self._set_status("已断开")
 
@@ -372,7 +506,12 @@ class SSHChatGUI:
             return
         line = self.var_input.get()
         self.var_input.set("")
+        if not line.strip():
+            return
         try:
+            self._remember_sent(line)
+            me = self.var_user.get().strip() or "me"
+            self._append_chat_line(f"[{me}] {line}", local_sent=True)
             self._chan.send((line + "\n").encode("utf-8"))
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
@@ -396,6 +535,7 @@ class SSHChatGUI:
         sh = self._ssh
         self._chan = None
         self._ssh = None
+        self._line_buf = ""
 
         if ch:
             try:

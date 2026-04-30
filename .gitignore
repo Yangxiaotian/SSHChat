@@ -3,4 +3,6 @@ __pycache__/
 dist/
 build/
 dist-packages/
+dist-packages-*/
+*.spec
 *.spec.bak

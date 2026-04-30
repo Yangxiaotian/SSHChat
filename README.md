@@ -143,7 +143,7 @@ cat bob.pub | sudo /opt/sshchat/admin-add-user.sh carol -
 
 1. **部署时**由 `deploy.sh` 生成 **`$PREFIX/client-bundle.json`**，内含 **`host`**（用户 SSH 的域名或公网 IP）与 **`ssh_port`**（**sshd** 端口，默认 **22**）。**不会**写入 **`SSHCHAT_PORT`**（聊天服务端口）；聊天仍在服务器本机由 **`client.py` → `SSHCHAT_SERVER:SSHCHAT_PORT`** 完成。
 2. 若部署时 **`SCRIPT_DIR`**（本仓库路径）可写，脚本会同步 **`dist/client-bundle.json`**，供维护者在各操作系统上打包。
-3. 维护者在 **Windows / macOS / Linux 各自环境**执行 **`scripts/build-gui-packages.sh`**（依赖 **tkinter** 与 **PyInstaller**，见 `requirements-packaging.txt`），得到 **`dist-packages/SSHChat.exe`**、**`SSHChat.app`** 或 **`SSHChat`** 单文件可执行程序；**`client-bundle.json` 会打进包内**，最终用户**只需输入自己的 Linux 用户名**；认证与 **`ssh`** 相同，使用本机 **`~/.ssh`** 与 **agent**。
+3. 维护者在 **Windows / macOS / Linux 各自环境**执行打包脚本（依赖 **tkinter** 与 **PyInstaller**，见 `requirements-packaging.txt`），得到 **`dist-packages/SSHChat.exe`**、**`SSHChat.app`** 或 **`SSHChat`**；**`client-bundle.json` 会打进包内**，最终用户**只需输入自己的 Linux 用户名**；认证与 **`ssh`** 相同，使用本机 **`~/.ssh`** 与 **agent**。
 
 **部署示例（指定外网域名与 sshd 端口）：**
 
@@ -166,7 +166,15 @@ export SSHCHAT_BUNDLE_FILE=/path/to/client-bundle.json
 ./scripts/build-gui-packages.sh
 ```
 
-Windows 请在 **Git Bash** 或 **WSL** 下运行该脚本（需 **bash** 与 **Python venv**）。未单独提供 **JAR**；若需 Java 客户端可自行用 **JSch** 等实现同等 SSH 会话。
+Windows（PowerShell）可直接执行：
+
+```powershell
+cd C:\path\to\SSHChat
+$env:SSHCHAT_BUNDLE_FILE = "C:\path\to\client-bundle.json"
+.\scripts\build-gui-packages.ps1
+```
+
+打包目录固定为 **`dist-packages`**。若遇到“权限不足无法删除旧构建目录”，通常是曾经用 `sudo`/管理员权限跑过脚本；先修复目录属主再重试。未单独提供 **JAR**；若需 Java 客户端可自行用 **JSch** 等实现同等 SSH 会话。
 
 ### 源码直接运行（不打包）
 
@@ -242,6 +250,6 @@ SSHCHAT_ALERT_SOUND=auto
 | `admin-add-user.sh` | 创建系统用户并写入受限公钥 |
 | `easy_connect.py` | 可选：按 JSON 调用 `ssh -tt`（仅 host/user/ssh_port，认证用默认 `~/.ssh`） |
 | `sshchat_gui.py` / `requirements-gui.txt` | 图形界面客户端（tkinter + paramiko） |
-| `requirements-packaging.txt` / `scripts/build-gui-packages.sh` | PyInstaller 打包（各 OS 分别构建） |
+| `requirements-packaging.txt` / `scripts/build-gui-packages.sh` / `scripts/build-gui-packages.ps1` | PyInstaller 打包（各 OS 分别构建） |
 | `client-bundle.example.json` | 内置站点配置样例（`host` + `ssh_port`） |
 | `sshchat_client_util.py` | 客户端配置路径、读写、bundle 查找（CLI / GUI 共用） |
