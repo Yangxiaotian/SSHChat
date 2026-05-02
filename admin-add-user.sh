@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Add a local user and an SSH public key that forces chat.sh on login.
-# Intended for Linux (useradd/getent) or macOS (existing users only; see below).
+# Linux: useradd/getent. macOS: dscl + createhomedir (same CLI as Linux).
 #
 # Usage:
 #   sudo ./admin-add-user.sh <username> <pasted-openssh-pubkey-line>
@@ -10,7 +10,7 @@
 #
 # Env (optional):
 #   SSHCHAT_CHAT_SCRIPT  Absolute or relative path to chat.sh (default: next to this script)
-#   SSHCHAT_SHELL        Login shell for new users (default: /bin/sh)
+#   SSHCHAT_SHELL        Login shell for new users (default: /bin/sh; macOS new users too)
 #   SSHCHAT_CLIENT_GROUP  Group with read/execute on chat.sh and venv (default: sshchat-clients)
 
 set -euo pipefail
@@ -19,6 +19,64 @@ set -euo pipefail
 
 is_darwin() {
   [[ "$(uname -s)" == "Darwin" ]]
+}
+
+darwin_staff_gid() {
+  local g
+  g=$(dscl . -read /Groups/staff PrimaryGroupID 2>/dev/null | awk '{print $2}' || true)
+  if [[ -n "$g" && "$g" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$g"
+    return
+  fi
+  printf '%s' "20"
+}
+
+darwin_next_uid() {
+  local max=500 uid _name
+  while read -r _name uid; do
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    ((uid > max)) && max=$uid
+  done < <(dscl . -list /Users UniqueID 2>/dev/null || true)
+  echo $((max + 1))
+}
+
+create_user_darwin() {
+  local name=$1 home="/Users/$1" uid staff_gid pw
+  if [[ -e "$home" && ! -d "$home" ]]; then
+    echo "error: macOS: $home exists and is not a directory" >&2
+    exit 1
+  fi
+  if ! command -v dscl &>/dev/null; then
+    echo "error: macOS: dscl not found (cannot create user)" >&2
+    exit 1
+  fi
+  uid=$(darwin_next_uid)
+  staff_gid=$(darwin_staff_gid)
+  pw=$(openssl rand -base64 32 | tr -d '\n')
+
+  dscl . -create "$home"
+  dscl . -create "$home" UserShell "$SSHCHAT_SHELL"
+  dscl . -create "$home" RealName "$name"
+  dscl . -create "$home" UniqueID "$uid"
+  dscl . -create "$home" PrimaryGroupID "$staff_gid"
+  dscl . -create "$home" NFSHomeDirectory "$home"
+  dscl . -passwd "$home" "$pw"
+
+  if command -v createhomedir &>/dev/null; then
+    createhomedir -c -u "$name" 2>/dev/null || true
+  fi
+  if [[ ! -d "$home" ]]; then
+    mkdir -p "$home"
+    # Primary group is often "staff", not a same-named group (matches .ssh install below).
+    chown "${name}:$(id -gn "$name")" "$home"
+    chmod 751 "$home"
+  fi
+
+  if ! id "$name" &>/dev/null; then
+    echo "error: macOS: user record created but id(1) does not see $name" >&2
+    exit 1
+  fi
+  echo "info: created macOS user $name (uid $uid, home $home, shell $SSHCHAT_SHELL)"
 }
 
 ensure_client_group() {
@@ -120,15 +178,15 @@ if id "$USER_NAME" &>/dev/null; then
   echo "info: user exists: $USER_NAME"
 else
   if is_darwin; then
-    echo "error: macOS: create \"$USER_NAME\" first (System Settings → Users & Groups), then re-run" >&2
-    exit 1
+    create_user_darwin "$USER_NAME"
+  else
+    if ! command -v useradd &>/dev/null; then
+      echo "error: useradd not found (this script targets Linux with shadow-utils)" >&2
+      exit 1
+    fi
+    useradd -m -s "$SSHCHAT_SHELL" "$USER_NAME"
+    echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
   fi
-  if ! command -v useradd &>/dev/null; then
-    echo "error: useradd not found (this script targets Linux with shadow-utils)" >&2
-    exit 1
-  fi
-  useradd -m -s "$SSHCHAT_SHELL" "$USER_NAME"
-  echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
 fi
 
 if ! is_darwin; then
@@ -165,13 +223,16 @@ fi
   exit 1
 }
 
-install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "$HOME_DIR/.ssh"
+# macOS default primary group is usually "staff", not a private group named like the user.
+USER_GROUP=$(id -gn "$USER_NAME")
+
+install -d -m 700 -o "$USER_NAME" -g "$USER_GROUP" "$HOME_DIR/.ssh"
 AUTH_KEYS="$HOME_DIR/.ssh/authorized_keys"
 if [[ ! -f "$AUTH_KEYS" ]]; then
   umask 077
   touch "$AUTH_KEYS"
 fi
-chown "$USER_NAME:$USER_NAME" "$AUTH_KEYS"
+chown "$USER_NAME:$USER_GROUP" "$AUTH_KEYS"
 chmod 600 "$AUTH_KEYS"
 
 if grep -Fxq "$FINAL_LINE" "$AUTH_KEYS"; then
