@@ -9,7 +9,7 @@ from typing import Optional
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
-# conn -> {"name": str, "room": str}
+# conn -> {"name": str, "rooms": set[str], "current_room": str}
 clients = {}
 # room -> set of conn
 rooms = defaultdict(set)
@@ -61,11 +61,13 @@ def remove_client(conn) -> None:
             except Exception:
                 pass
             return
-        room = info["room"]
         name = info["name"]
-        rooms[room].discard(conn)
-    leave_msg = f"[!] {name} left the chat\n".encode("utf-8")
-    broadcast_room(room, leave_msg)
+        joined_rooms = list(info["rooms"])
+        for room in joined_rooms:
+            rooms[room].discard(conn)
+    for room in joined_rooms:
+        leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
+        broadcast_room(room, leave_msg)
     try:
         conn.close()
     except Exception:
@@ -78,7 +80,7 @@ def handle_command(conn, payload: str) -> None:
         if not info:
             return
         name = info["name"]
-        room = info["room"]
+        current_room = info["current_room"]
 
     parts = payload.split(None, 1)
     cmd = parts[0].lower() if parts else ""
@@ -94,31 +96,136 @@ def handle_command(conn, payload: str) -> None:
                 "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
             )
             return
-        old_room = room
-        if new_room == old_room:
-            send_line(conn, f"[*] Already in #{new_room}\n")
+
+        newly_joined = False
+        with lock:
+            if conn not in clients:
+                return
+            joined = clients[conn]["rooms"]
+            prev_room = clients[conn]["current_room"]
+            if new_room not in joined:
+                joined.add(new_room)
+                rooms[new_room].add(conn)
+                newly_joined = True
+            clients[conn]["current_room"] = new_room
+
+        if newly_joined:
+            broadcast_room(
+                new_room,
+                f"[+] {name} joined #{new_room}\n".encode("utf-8"),
+                exclude_conn=conn,
+            )
+            send_line(
+                conn,
+                f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
+            )
+        elif new_room == current_room:
+            send_line(conn, f"[*] Already active in #{new_room}\n")
+        else:
+            send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
+        return
+
+    if cmd == "/switch":
+        if len(parts) < 2 or not parts[1].strip():
+            send_line(conn, "[*] Usage: /switch <room>\n")
+            return
+        target_room = normalize_room(parts[1])
+        if not target_room:
+            send_line(
+                conn,
+                "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
+            )
             return
         with lock:
             if conn not in clients:
                 return
-            rooms[old_room].discard(conn)
-            clients[conn]["room"] = new_room
-            rooms[new_room].add(conn)
+            joined = clients[conn]["rooms"]
+            active = clients[conn]["current_room"]
+            if target_room not in joined:
+                send_line(conn, f"[*] You are not in #{target_room}. Use /join first.\n")
+                return
+            if target_room == active:
+                send_line(conn, f"[*] Already active in #{target_room}\n")
+                return
+            clients[conn]["current_room"] = target_room
+        send_line(conn, f"[*] Switched from #{active} to #{target_room}\n")
+        return
+
+    if cmd == "/msg":
+        parts3 = payload.split(None, 2)
+        if len(parts3) < 3 or not parts3[1].strip() or not parts3[2].strip():
+            send_line(conn, "[*] Usage: /msg <room> <text>\n")
+            return
+        target_room = normalize_room(parts3[1])
+        if not target_room:
+            send_line(
+                conn,
+                "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
+            )
+            return
+        text = parts3[2].strip()
+        with lock:
+            if conn not in clients:
+                return
+            joined = clients[conn]["rooms"]
+            if target_room not in joined:
+                send_line(conn, f"[*] You are not in #{target_room}. Use /join first.\n")
+                return
+        line_out = f"[#{target_room}] [{name}] {text}\n".encode("utf-8")
+        broadcast_room(target_room, line_out)
+        return
+
+    if cmd == "/part":
+        if len(parts) < 2 or not parts[1].strip():
+            send_line(conn, "[*] Usage: /part <room>\n")
+            return
+        target_room = normalize_room(parts[1])
+        if not target_room:
+            send_line(
+                conn,
+                "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
+            )
+            return
+        with lock:
+            if conn not in clients:
+                return
+            joined = clients[conn]["rooms"]
+            active = clients[conn]["current_room"]
+            if target_room not in joined:
+                send_line(conn, f"[*] You are not in #{target_room}\n")
+                return
+            if len(joined) == 1:
+                send_line(conn, "[*] Cannot leave your last room\n")
+                return
+            joined.remove(target_room)
+            rooms[target_room].discard(conn)
+            switched_to = None
+            if active == target_room:
+                switched_to = sorted(joined)[0]
+                clients[conn]["current_room"] = switched_to
         broadcast_room(
-            old_room,
-            f"[!] {name} left the room\n".encode("utf-8"),
+            target_room,
+            f"[!] {name} left #{target_room}\n".encode("utf-8"),
         )
-        broadcast_room(
-            new_room,
-            f"[+] {name} joined #{new_room}\n".encode("utf-8"),
-            exclude_conn=conn,
-        )
-        send_line(conn, f"[*] You joined #{new_room}\n")
+        if switched_to:
+            send_line(conn, f"[*] Left #{target_room}, switched to #{switched_to}\n")
+        else:
+            send_line(conn, f"[*] Left #{target_room}\n")
+        return
+
+    if cmd == "/rooms":
+        with lock:
+            if conn not in clients:
+                return
+            active = clients[conn]["current_room"]
+            joined = sorted(clients[conn]["rooms"])
+        labels = [f"*#{r}" if r == active else f"#{r}" for r in joined]
+        send_line(conn, f"[*] Rooms: {', '.join(labels)}\n")
         return
 
     if cmd in ("/users", "/who"):
         with lock:
-            r = clients[conn]["room"]
+            r = clients[conn]["current_room"]
             members = sorted(
                 clients[c]["name"] for c in rooms.get(r, ()) if c in clients
             )
@@ -131,7 +238,7 @@ def handle_command(conn, payload: str) -> None:
     if cmd == "/help":
         send_line(
             conn,
-            "[*] /users — users in this room | /join <room> — switch room | /help\n",
+            "[*] /users | /rooms | /join <room> | /switch <room> | /msg <room> <text> | /part <room> | /help\n",
         )
         return
 
@@ -153,14 +260,14 @@ def process_client_line(conn, raw_line: bytes) -> None:
         info = clients.get(conn)
         if not info:
             return
-        room = info["room"]
+        room = info["current_room"]
         name = info["name"]
 
     if payload.startswith("/"):
         handle_command(conn, payload)
         return
 
-    line_out = f"[{name}] {payload}\n".encode("utf-8")
+    line_out = f"[#{room}] [{name}] {payload}\n".encode("utf-8")
     broadcast_room(room, line_out)
 
 
@@ -181,7 +288,11 @@ def handle_client(conn, addr) -> None:
         name = first.decode("utf-8").strip() or "Unknown"
 
         with lock:
-            clients[conn] = {"name": name, "room": DEFAULT_ROOM}
+            clients[conn] = {
+                "name": name,
+                "rooms": {DEFAULT_ROOM},
+                "current_room": DEFAULT_ROOM,
+            }
             rooms[DEFAULT_ROOM].add(conn)
 
         print(f"{name} joined #{DEFAULT_ROOM} ({addr})")
@@ -190,7 +301,7 @@ def handle_client(conn, addr) -> None:
         broadcast_room(DEFAULT_ROOM, join_msg, exclude_conn=conn)
         send_line(
             conn,
-            f"[*] You are in #{DEFAULT_ROOM}. Commands: /users, /join <room>, /help\n",
+            f"[*] Active room #{DEFAULT_ROOM}. Commands: /users, /rooms, /join <room>, /switch <room>, /msg <room> <text>, /part <room>, /help\n",
         )
 
         while True:

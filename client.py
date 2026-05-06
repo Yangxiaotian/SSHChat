@@ -22,6 +22,7 @@ name = pwd.getpwuid(os.getuid()).pw_name
 # beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
 _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
 _ALERT_SOUND = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
+_ROOM_CHAT_PREFIX = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\]\s+(.*)$")
 _CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
@@ -133,15 +134,26 @@ def maybe_alert_incoming(sender: str, preview: str) -> None:
         _alert_notify(sender, preview)
 
 
+def _parse_chat_line(line: str) -> tuple[str, str, str]:
+    """Return (room, sender, payload); room is empty for legacy format."""
+    t = line.rstrip("\r")
+    m = _ROOM_CHAT_PREFIX.match(t)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    m = _CHAT_PREFIX.match(t)
+    if m:
+        return "", m.group(1), m.group(2)
+    return "", "", ""
+
+
 def _line_is_peer_chat(line: str, my_name: str) -> tuple[bool, str, str]:
     """Return (is_peer_chat, sender, preview) for a single line without trailing \\n."""
-    m = _CHAT_PREFIX.match(line.rstrip("\r"))
-    if not m:
+    _room, sender, payload = _parse_chat_line(line)
+    if not sender:
         return False, "", ""
-    sender, rest = m.group(1), m.group(2)
     if sender in _SYSTEM_SENDERS or sender == my_name:
-        return False, sender, rest
-    return True, sender, rest
+        return False, sender, payload
+    return True, sender, payload
 
 
 def _format_time(ts: datetime) -> str:
@@ -155,10 +167,11 @@ def _format_display_line(line: str, my_name: str) -> str:
     ts = datetime.now()
     _DISPLAY_TIMES.append(ts)
     time_label = _format_time(ts)
-    m = _CHAT_PREFIX.match(line.rstrip("\r"))
-    if not m:
+    room, sender, payload = _parse_chat_line(line)
+    if not sender:
         return f"[{time_label}] {line}\n"
-    sender, payload = m.group(1), m.group(2)
+    if room:
+        return f"[{time_label}] [#{room}] [{sender}] {payload}\n"
     return f"[{time_label}] [{sender}] {payload}\n"
 
 
@@ -244,7 +257,7 @@ def main():
     s.send((name + "\n").encode("utf-8"))
 
     print("[OK] connected as " + name)
-    print("Commands: /users  /join <room>  /help")
+    print("Commands: /users  /rooms  /join <room>  /switch <room>  /msg <room> <text>  /part <room>  /help")
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
         "peer chat lines only"

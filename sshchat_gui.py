@@ -43,11 +43,14 @@ _OTHER_ESC_RE = re.compile(r"\x1b[\][()#%][\d\"A-Za-z]*")
 _PROMPT_PREFIX_RE = re.compile(r"(?:^|\s)>+\s*")
 _RESIDUAL_ONLY_RE = re.compile(r"[\s,，。！？!?、;；:：\->]*")
 _CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
+_ROOM_CHAT_LINE_RE = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\]\s*(.*)$")
 _TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
 _TIME_ANY_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]\s*")
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _LEADING_GARBAGE_RE = re.compile(r"^[\s\uFFFD\u25A1\uFEFF\u00A0]+")
 _SPACE_RE = re.compile(r"\s+")
+_MAX_ROOM_HISTORY = 4000
+_DRAIN_BATCH_ITEMS = 200
 
 
 def _clean_chunk(s: str) -> str:
@@ -83,18 +86,21 @@ def _strip_time_prefixes(line: str) -> str:
         out = nxt.lstrip()
 
 
-def _parse_chat_line(line: str) -> tuple[str, str] | None:
+def _parse_chat_line(line: str) -> tuple[str, str, str] | None:
     t = _LEADING_GARBAGE_RE.sub("", line.rstrip("\n"))
     t = _TIME_ANY_RE.sub("", t)
     t = _PROMPT_PREFIX_RE.sub("", t).strip()
+    m_room = _ROOM_CHAT_LINE_RE.match(t)
+    if m_room:
+        return m_room.group(1), m_room.group(2), m_room.group(3)
     m = _CHAT_LINE_RE.match(t)
     if not m:
         all_matches = re.findall(r"\[([^\]]+)\]\s*([^\[]*)", t)
         if all_matches:
             sender, body = all_matches[-1]
-            return sender.strip(), body.strip()
+            return "", sender.strip(), body.strip()
         return None
-    return m.group(1), m.group(2)
+    return "", m.group(1), m.group(2)
 
 
 def _normalize_payload_text(s: str) -> str:
@@ -126,9 +132,16 @@ class SSHChatGUI:
         self._pending_sent: deque[str] = deque(maxlen=64)
         self._display_times: deque[datetime] = deque(maxlen=2048)
         self._alert_sound = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
+        self._rooms_order: list[str] = ["default"]
+        self._active_room = "default"
+        self._room_unread: dict[str, int] = {"default": 0}
+        self._room_history: dict[str, list[tuple[str, str]]] = {"default": []}
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
+        self.root.bind("<Map>", self._on_window_mapped, add="+")
+        self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
+        self._is_minimized = False
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -185,7 +198,7 @@ class SSHChatGUI:
         parsed = _parse_chat_line(normalized.rstrip("\r"))
         if parsed:
             me = self.var_user.get().strip()
-            sender, body = parsed
+            _room, sender, body = parsed
             sender = sender.strip()
             if me and sender == me:
                 # Server echo of our own message; we already displayed it locally.
@@ -254,14 +267,24 @@ class SSHChatGUI:
         )
 
         mono = tkfont.nametofont("TkFixedFont")
+        body = ttk.Frame(self.root)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        left = ttk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        ttk.Label(left, text="频道").pack(anchor="w")
+        self.room_list = tk.Listbox(left, width=20, height=18, exportselection=False)
+        self.room_list.pack(fill=tk.Y, expand=True)
+        self.room_list.bind("<<ListboxSelect>>", self._on_room_selected)
+
         self.log = scrolledtext.ScrolledText(
-            self.root,
+            body,
             height=20,
             wrap=tk.WORD,
             font=mono,
             state=tk.DISABLED,
         )
-        self.log.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.log.tag_configure("meta", foreground="#7f8c8d")
         self.log.tag_configure("me", foreground="#2e7d32")
         self.log.tag_configure("peer", foreground="#1565c0")
@@ -276,9 +299,144 @@ class SSHChatGUI:
         ttk.Button(bot, text="发送", command=self._send_clicked).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        self._refresh_room_list()
+
+    def _on_window_mapped(self, _event=None) -> None:
+        # On some macOS/Tk builds, first paint can leave controls seemingly
+        # unresponsive until a manual move/resize. Force a post-map refresh.
+        self._is_minimized = False
+        self.root.after_idle(self._stabilize_initial_interaction)
+        self.root.after(120, self._stabilize_initial_interaction)
+        self.root.after(320, self._stabilize_initial_interaction)
+        self.root.after(60, self._render_active_room)
+
+    def _on_window_unmapped(self, _event=None) -> None:
+        try:
+            self._is_minimized = self.root.state() == "iconic"
+        except tk.TclError:
+            self._is_minimized = False
+
+    def _stabilize_initial_interaction(self) -> None:
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        if self.btn_connect.instate(("disabled",)):
+            self.btn_connect.state(("!disabled",))
+        if not self._chan or self._chan.closed:
+            self.entry.focus_set()
 
     def _format_time(self, ts: datetime) -> str:
         return ts.strftime("%H:%M:%S")
+
+    def _room_label(self, room: str) -> str:
+        unread = self._room_unread.get(room, 0)
+        active = room == self._active_room
+        base = f"#{room}"
+        if active:
+            base = f"* {base}"
+        return f"{base} ({unread})" if unread > 0 else base
+
+    def _ensure_room(self, room: str) -> None:
+        if not room:
+            return
+        if room not in self._rooms_order:
+            self._rooms_order.append(room)
+        self._room_unread.setdefault(room, 0)
+        self._room_history.setdefault(room, [])
+
+    def _refresh_room_list(self) -> None:
+        if not hasattr(self, "room_list"):
+            return
+        self.room_list.delete(0, tk.END)
+        for room in self._rooms_order:
+            self.room_list.insert(tk.END, self._room_label(room))
+        if self._active_room in self._rooms_order:
+            idx = self._rooms_order.index(self._active_room)
+            self.room_list.selection_clear(0, tk.END)
+            self.room_list.selection_set(idx)
+            self.room_list.activate(idx)
+
+    def _render_active_room(self) -> None:
+        entries = self._room_history.get(self._active_room, [])
+        self.log.configure(state=tk.NORMAL)
+        self.log.delete("1.0", tk.END)
+        for text, tag in entries:
+            if tag:
+                self.log.insert(tk.END, text, (tag,))
+            else:
+                self.log.insert(tk.END, text)
+        self.log.see(tk.END)
+        self.log.configure(state=tk.DISABLED)
+
+    def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
+        self._ensure_room(room)
+        self._active_room = room
+        self._room_unread[room] = 0
+        self._refresh_room_list()
+        self._render_active_room()
+        if send_switch and self._chan and not self._chan.closed:
+            try:
+                self._chan.send((f"/switch {room}\n").encode("utf-8"))
+            except Exception:
+                pass
+
+    def _on_room_selected(self, _event=None) -> None:
+        if not self.room_list.curselection():
+            return
+        idx = int(self.room_list.curselection()[0])
+        if idx < 0 or idx >= len(self._rooms_order):
+            return
+        room = self._rooms_order[idx]
+        if room == self._active_room:
+            return
+        self._switch_room_local(room, send_switch=True)
+
+    def _append_room_entry(self, room: str, text: str, tag: str = "") -> None:
+        self._ensure_room(room)
+        history = self._room_history[room]
+        history.append((text, tag))
+        if len(history) > _MAX_ROOM_HISTORY:
+            del history[: len(history) - _MAX_ROOM_HISTORY]
+        if room == self._active_room and not self._is_minimized:
+            self.log.configure(state=tk.NORMAL)
+            if tag:
+                self.log.insert(tk.END, text, (tag,))
+            else:
+                self.log.insert(tk.END, text)
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        else:
+            self._room_unread[room] = self._room_unread.get(room, 0) + 1
+            self._refresh_room_list()
+
+    def _update_rooms_from_system(self, body: str) -> None:
+        # Examples:
+        # "Rooms: #default, *#ops"
+        # "Joined #ops and switched from #default to #ops"
+        # "Switched from #ops to #dev"
+        # "Left #dev, switched to #default"
+        m = re.search(r"Rooms:\s*(.*)$", body)
+        if m:
+            rooms_text = m.group(1)
+            found = re.findall(r"\*?#([a-zA-Z0-9_-]{1,32})", rooms_text)
+            if found:
+                for r in found:
+                    self._ensure_room(r)
+                active = re.search(r"\*#([a-zA-Z0-9_-]{1,32})", rooms_text)
+                if active:
+                    self._switch_room_local(active.group(1), send_switch=False)
+                else:
+                    self._refresh_room_list()
+            return
+        m2 = re.search(r"to\s+#([a-zA-Z0-9_-]{1,32})", body)
+        if m2:
+            self._switch_room_local(m2.group(1), send_switch=False)
 
     def _append_log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)
@@ -295,11 +453,14 @@ class SSHChatGUI:
         ts = datetime.now()
         self._display_times.append(ts)
         time_label = self._format_time(ts)
-        self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, f"[{time_label}] ", ("meta",))
         parsed = _parse_chat_line(t)
+        room_for_line = self._active_room
+        prefix = f"[{time_label}] "
         if parsed:
-            sender, body = parsed
+            room, sender, body = parsed
+            room_for_line = room or self._active_room
+            if room:
+                prefix += f"[#{room}] "
             me = self.var_user.get().strip()
             is_system_sender = sender in {"+", "-", "*", "!"}
             role_tag = "system" if is_system_sender else ("me" if sender == me else "peer")
@@ -310,17 +471,19 @@ class SSHChatGUI:
                     sender == "!" and (" left " in body or " joined " in body)
                 ):
                     self._alert_beep()
-            self.log.insert(tk.END, f"[{sender}] ", (role_tag,))
-            self.log.insert(tk.END, body + "\n", (role_tag,))
+            self._append_room_entry(room_for_line, prefix, "meta")
+            self._append_room_entry(room_for_line, f"[{sender}] {body}\n", role_tag)
+            if sender == "*":
+                self._update_rooms_from_system(body)
         elif local_sent:
-            self.log.insert(tk.END, t + "\n", ("system",))
+            self._append_room_entry(room_for_line, prefix, "meta")
+            self._append_room_entry(room_for_line, t + "\n", "me")
         else:
             lowered = t.lower()
             if " joined " in lowered or " left " in lowered:
                 self._alert_beep()
-            self.log.insert(tk.END, t + "\n")
-        self.log.see(tk.END)
-        self.log.configure(state=tk.DISABLED)
+            self._append_room_entry(room_for_line, prefix, "meta")
+            self._append_room_entry(room_for_line, t + "\n")
 
     def _append_rendered_block(self, text: str) -> None:
         for line in text.splitlines():
@@ -487,6 +650,12 @@ class SSHChatGUI:
         self._save_profile(warn_on_error=False)
         self.btn_disconnect.configure(state=tk.NORMAL)
         self._set_status("已连接（SSH 会话）")
+        self._rooms_order = ["default"]
+        self._active_room = "default"
+        self._room_unread = {"default": 0}
+        self._room_history = {"default": []}
+        self._refresh_room_list()
+        self._render_active_room()
         self._session_id += 1
         sid = self._session_id
         self._reader_thread = threading.Thread(target=self._reader_loop, args=(sid,), daemon=True)
@@ -528,7 +697,8 @@ class SSHChatGUI:
                     else:
                         self._line_buf += ch
                 if out:
-                    self._out_q.put((sid, "".join(out)))
+                    for line in out:
+                        self._out_q.put((sid, line))
         finally:
             try:
                 dec.decode(b"", final=True)
@@ -542,19 +712,32 @@ class SSHChatGUI:
     def _drain_queue(self) -> None:
         self._drain_after_id = None
         buf: list[str] = []
+        processed = 0
+        remote_eof = False
         try:
             while True:
                 sid, item = self._out_q.get_nowait()
                 if sid != self._session_id:
                     continue
                 if item is None:
-                    self._on_remote_eof()
-                    return
+                    remote_eof = True
+                    break
                 buf.append(item)
+                processed += 1
+                if processed >= _DRAIN_BATCH_ITEMS:
+                    break
         except queue.Empty:
             pass
         if buf:
             self._append_rendered_block("".join(buf))
+        if remote_eof:
+            self._on_remote_eof()
+            return
+        if processed >= _DRAIN_BATCH_ITEMS:
+            # Yield to Tk so minimized/restore won't lock the UI
+            # when there is a large backlog of buffered messages.
+            self._schedule_drain()
+            return
         ch = self._chan
         if ch is not None and not ch.closed:
             self._schedule_drain()
@@ -575,8 +758,26 @@ class SSHChatGUI:
             return
         try:
             self._remember_sent(line)
+            low = line.strip()
+            m_join = re.match(r"^/(?:join|switch)\s+([a-zA-Z0-9_-]{1,32})\s*$", low)
+            if m_join:
+                self._switch_room_local(m_join.group(1), send_switch=False)
+            m_part = re.match(r"^/part\s+([a-zA-Z0-9_-]{1,32})\s*$", low)
+            if m_part:
+                room = m_part.group(1)
+                if room in self._rooms_order and len(self._rooms_order) > 1:
+                    self._rooms_order = [r for r in self._rooms_order if r != room]
+                    self._room_unread.pop(room, None)
+                    self._room_history.pop(room, None)
+                    if self._active_room == room:
+                        self._active_room = self._rooms_order[0]
+                    self._refresh_room_list()
+                    self._render_active_room()
             me = self.var_user.get().strip() or "me"
-            self._append_chat_line(f"[{me}] {line}", local_sent=True)
+            if not line.startswith("/"):
+                self._append_chat_line(f"[#{self._active_room}] [{me}] {line}", local_sent=True)
+            else:
+                self._append_chat_line(f"[*] {line}", local_sent=True)
             self._chan.send((line + "\n").encode("utf-8"))
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
@@ -616,9 +817,12 @@ class SSHChatGUI:
         self.btn_connect.configure(state=tk.NORMAL)
         self.btn_disconnect.configure(state=tk.DISABLED)
         if clear_log:
-            self.log.configure(state=tk.NORMAL)
-            self.log.delete("1.0", tk.END)
-            self.log.configure(state=tk.DISABLED)
+            self._rooms_order = ["default"]
+            self._active_room = "default"
+            self._room_unread = {"default": 0}
+            self._room_history = {"default": []}
+            self._refresh_room_list()
+            self._render_active_room()
 
     def _on_close(self) -> None:
         self._disconnect(clear_log=False)
