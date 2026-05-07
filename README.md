@@ -19,9 +19,7 @@
 
    连上后会进入聊天界面，不是平时那种可随便执行命令的 shell（由服务器配置决定）。
 
-4. 发普通文字就是聊天。常用命令：`/help`、`/users`、`/rooms`、`/join 房间名`、`/switch 房间名`、`/msg 房间名 内容`。
-
-若管理员发了 **Windows / Mac 图形小工具**：打开程序，一般只需填**用户名**，地址和端口已内置。
+4. 发普通文字就是聊天。常用命令：`/help`、`/users`、`/rooms`、`/join`、`/switch`、`/msg`。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
 
 ---
 
@@ -109,7 +107,7 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 }
 ```
 
-然后执行：`python3 easy_connect.py`
+然后执行：`python3 easy_connect.py`（在本机根据 JSON 调用 `ssh`，省去重复敲主机与用户名）。
 
 **从源码跑图形界面：** 安装 Python 3、tkinter，再 `pip install -r requirements-gui.txt`，运行 `python3 sshchat_gui.py`。开发调试可用 `python3 sshchat_gui.py --full-ui` 手动填主机信息。
 
@@ -123,7 +121,7 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 ## 安全与预期（请读这几句）
 
 - **不是「完全隐身」。** 服务器管理员、机房或云厂商仍能看到 SSH 连接；请用**你信任的人**和**你控制或信任的机器**。
-- **好处在形态：** 流量形态是常见 SSH，不依赖额外聊天协议；在典型单机部署下，聊天内容在服务器本机转发，不单独再拉一条「聊天专用」明文长连接（细节见仓库内技术说明）。
+- **好处在形态：** 流量形态是常见 SSH，不依赖额外聊天协议；在典型单机部署下，聊天内容在服务器本机转发。
 - 只把公钥给**信任的人**，定期检查服务器上的授权密钥。
 
 ---

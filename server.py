@@ -186,6 +186,7 @@ def handle_command(conn, payload: str) -> None:
                 "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
             )
             return
+        switched_to = None
         with lock:
             if conn not in clients:
                 return
@@ -199,7 +200,6 @@ def handle_command(conn, payload: str) -> None:
                 return
             joined.remove(target_room)
             rooms[target_room].discard(conn)
-            switched_to = None
             if active == target_room:
                 switched_to = sorted(joined)[0]
                 clients[conn]["current_room"] = switched_to
@@ -238,7 +238,7 @@ def handle_command(conn, payload: str) -> None:
     if cmd == "/help":
         send_line(
             conn,
-            "[*] /users | /rooms | /join <room> | /switch <room> | /msg <room> <text> | /part <room> | /help\n",
+            "[*] /users | /rooms | /join | /switch | /msg | /part | /help\n",
         )
         return
 
@@ -262,6 +262,10 @@ def process_client_line(conn, raw_line: bytes) -> None:
             return
         room = info["current_room"]
         name = info["name"]
+
+    if payload.startswith("/file "):
+        send_line(conn, "[*] File transfer is not supported.\n")
+        return
 
     if payload.startswith("/"):
         handle_command(conn, payload)
@@ -301,7 +305,8 @@ def handle_client(conn, addr) -> None:
         broadcast_room(DEFAULT_ROOM, join_msg, exclude_conn=conn)
         send_line(
             conn,
-            f"[*] Active room #{DEFAULT_ROOM}. Commands: /users, /rooms, /join <room>, /switch <room>, /msg <room> <text>, /part <room>, /help\n",
+            f"[*] Active room #{DEFAULT_ROOM}. "
+            f"/users /rooms /join /switch /msg /part /help\n",
         )
 
         while True:

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-SSHChat 简易启动器：根据 JSON 中的 host / user / ssh_port 调用系统 ssh（-tt），
+SSHChat 简易启动器：根据 JSON 中的 host / user / ssh_port 调用系统 ssh，
 进入服务器上的强制命令客户端。
 
-本机需已安装 OpenSSH；认证与「ssh 用户名@主机」相同：默认使用 ~/.ssh 下标准私钥
-与 ssh-agent，不传 -i。配置文件仅保存连接目标，不包含私钥路径。
+用户名前缀取自配置文件里的 ``user``（须与远端 SSH 登录名一致）。
+本机需已安装 OpenSSH；认证与「ssh 用户名@主机」相同。
 """
 
 from __future__ import annotations
@@ -42,11 +42,14 @@ def _load_config(path: Path) -> dict[str, Any]:
     return cfg
 
 
-def _build_ssh_argv(cfg: dict[str, Any], overrides: dict[str, str | None]) -> list[str]:
+def _build_ssh_argv(
+    cfg: dict[str, Any],
+    overrides: dict[str, str | None],
+) -> list[str]:
     ssh_bin = shutil.which("ssh")
     if not ssh_bin:
         print(
-            "[SSHChat] 未找到 ssh 命令。请安装 OpenSSH 客户端（Windows 10+ 可选功能，macOS/Linux 一般自带）。",
+            "[SSHChat] 未找到 ssh 命令。请安装 OpenSSH 客户端。",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -82,9 +85,7 @@ def _build_ssh_argv(cfg: dict[str, Any], overrides: dict[str, str | None]) -> li
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="SSHChat 简易连接：根据 JSON 调用 ssh（使用本机 ~/.ssh 默认认证，无 -i）。"
-    )
+    parser = argparse.ArgumentParser(description="SSHChat 简易连接：根据 JSON 调用 ssh。")
     parser.add_argument(
         "--config",
         "-c",

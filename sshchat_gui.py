@@ -7,7 +7,6 @@ SSHChat 图形客户端：通过 SSH（与命令行相同）进入服务端强�
 from __future__ import annotations
 
 import argparse
-import codecs
 import os
 import queue
 import re
@@ -15,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from collections import deque
@@ -58,8 +58,8 @@ def _clean_chunk(s: str) -> str:
     s = _CSI_RE.sub("", s)
     s = _OTHER_ESC_RE.sub("", s)
     s = _CTRL_CHARS_RE.sub("", s)
-    # Keep line semantics for CRLF-based streams from PTY/SSH.
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    # Normalize lone CR from PTY without merging unrelated lines.
+    s = s.replace("\r\n", "\n").replace("\r", "")
     return s
 
 
@@ -121,12 +121,12 @@ class SSHChatGUI:
 
         self._ssh: paramiko.SSHClient | None = None
         self._chan: paramiko.Channel | None = None
+        self._chan_send_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
         self._connect_thread: threading.Thread | None = None
         self._out_q: queue.Queue[tuple[int, str | None]] = queue.Queue()
         self._drain_after_id: str | int | None = None
         self._connecting = threading.Event()
-        self._line_buf = ""
         self._session_id = 0
         self._pending_lock = threading.Lock()
         self._pending_sent: deque[str] = deque(maxlen=64)
@@ -382,7 +382,7 @@ class SSHChatGUI:
         self._render_active_room()
         if send_switch and self._chan and not self._chan.closed:
             try:
-                self._chan.send((f"/switch {room}\n").encode("utf-8"))
+                self._chan_send_bytes((f"/switch {room}\n").encode("utf-8"))
             except Exception:
                 pass
 
@@ -669,10 +669,23 @@ class SSHChatGUI:
         self._set_status("连接失败")
         messagebox.showerror("SSHChat", msg)
 
+    def _chan_send_bytes(self, data: bytes) -> None:
+        ch = self._chan
+        if ch is None or ch.closed:
+            raise RuntimeError("连接已断开")
+        with self._chan_send_lock:
+            off = 0
+            while off < len(data):
+                n = ch.send(data[off:])
+                if n == 0:
+                    time.sleep(0.02)
+                    continue
+                off += n
+
     def _reader_loop(self, sid: int) -> None:
         assert self._chan is not None
-        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
         chan = self._chan
+        buf = bytearray()
         try:
             while True:
                 try:
@@ -681,29 +694,26 @@ class SSHChatGUI:
                     break
                 if not data:
                     break
-                text = _clean_chunk(dec.decode(data, final=False))
-                if not text:
-                    continue
-                out: list[str] = []
-                for ch in text:
-                    if ch == "\r":
-                        self._line_buf = ""
-                    elif ch == "\b":
-                        self._line_buf = self._line_buf[:-1]
-                    elif ch == "\n":
-                        if not self._should_drop_line(self._line_buf):
-                            out.append(self._line_buf + "\n")
-                        self._line_buf = ""
-                    else:
-                        self._line_buf += ch
-                if out:
-                    for line in out:
-                        self._out_q.put((sid, line))
+                buf.extend(data)
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    line_bytes = bytes(buf[:nl])
+                    del buf[: nl + 1]
+                    line_bytes = line_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"")
+                    text = line_bytes.decode("utf-8", errors="replace")
+                    text = _clean_chunk(text)
+                    if self._should_drop_line(text):
+                        continue
+                    self._out_q.put((sid, text + "\n"))
         finally:
-            try:
-                dec.decode(b"", final=True)
-            except Exception:
-                pass
+            if buf:
+                tail = bytes(buf).replace(b"\r\n", b"\n").replace(b"\r", b"")
+                if tail.strip():
+                    text = _clean_chunk(tail.decode("utf-8", errors="replace"))
+                    if text.strip() and not self._should_drop_line(text):
+                        self._out_q.put((sid, text + "\n"))
             self._out_q.put((sid, None))
 
     def _schedule_drain(self) -> None:
@@ -778,7 +788,7 @@ class SSHChatGUI:
                 self._append_chat_line(f"[#{self._active_room}] [{me}] {line}", local_sent=True)
             else:
                 self._append_chat_line(f"[*] {line}", local_sent=True)
-            self._chan.send((line + "\n").encode("utf-8"))
+            self._chan_send_bytes((line + "\n").encode("utf-8"))
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
             self._disconnect()
@@ -801,7 +811,6 @@ class SSHChatGUI:
         sh = self._ssh
         self._chan = None
         self._ssh = None
-        self._line_buf = ""
 
         if ch:
             try:

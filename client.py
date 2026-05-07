@@ -8,7 +8,6 @@ import sys
 import threading
 from collections import deque
 from datetime import datetime
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output.vt100 import Vt100_Output
@@ -213,6 +212,7 @@ def recv_msg(sock, my_name: str):
                 break
 
             text = data.decode("utf-8", errors="replace").replace("\a", "")
+            text = text.replace("\r\n", "\n").replace("\r", "")
 
             notif_buf += text
             print_buf += text
@@ -257,7 +257,10 @@ def main():
     s.send((name + "\n").encode("utf-8"))
 
     print("[OK] connected as " + name)
-    print("Commands: /users  /rooms  /join <room>  /switch <room>  /msg <room> <text>  /part <room>  /help")
+    print(
+        "Commands: /users  /rooms  /join <room>  /switch <room>  /msg <room> <text>  "
+        "/part <room>  /help"
+    )
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
         "peer chat lines only"
