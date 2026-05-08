@@ -41,7 +41,6 @@ _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _OTHER_ESC_RE = re.compile(r"\x1b[\][()#%][\d\"A-Za-z]*")
 _PROMPT_PREFIX_RE = re.compile(r"(?:^|\s)>+\s*")
-_RESIDUAL_ONLY_RE = re.compile(r"[\s,，。！？!?、;；:：\->]*")
 _CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
 _ROOM_CHAT_LINE_RE = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\]\s*(.*)$")
 _TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
@@ -103,10 +102,6 @@ def _parse_chat_line(line: str) -> tuple[str, str, str] | None:
     return "", m.group(1), m.group(2)
 
 
-def _normalize_payload_text(s: str) -> str:
-    return _SPACE_RE.sub(" ", s.strip())
-
-
 class SSHChatGUI:
     def __init__(self, config_path: Path, *, force_full_ui: bool = False) -> None:
         self.config_path = config_path.expanduser().resolve()
@@ -128,8 +123,8 @@ class SSHChatGUI:
         self._drain_after_id: str | int | None = None
         self._connecting = threading.Event()
         self._session_id = 0
-        self._pending_lock = threading.Lock()
-        self._pending_sent: deque[str] = deque(maxlen=64)
+        # SSH login name; used in reader thread — do not read StringVar there (Tk is not thread-safe).
+        self._session_user = ""
         self._display_times: deque[datetime] = deque(maxlen=2048)
         self._alert_sound = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
         self._rooms_order: list[str] = ["default"]
@@ -145,67 +140,19 @@ class SSHChatGUI:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _remember_sent(self, payload: str) -> None:
-        text = payload
-        if not text:
-            return
-        with self._pending_lock:
-            self._pending_sent.append(text)
-
-    def _consume_sent_exact(self, payload: str) -> bool:
-        normalized_payload = _normalize_payload_text(payload)
-        with self._pending_lock:
-            for sent in list(self._pending_sent):
-                normalized_sent = _normalize_payload_text(sent)
-                if (
-                    sent == payload
-                    or normalized_sent == normalized_payload
-                    or normalized_sent in normalized_payload
-                    or normalized_payload in normalized_sent
-                ):
-                    self._pending_sent.remove(sent)
-                    return True
-        return False
-
-    def _consume_if_prompt_echo(self, line: str) -> bool:
-        t = line.strip()
-        if not t or "[" in t:
-            return False
-        if ">" not in t:
-            return False
-        normalized = _PROMPT_PREFIX_RE.sub(" ", t).strip()
-        if not normalized:
-            return True
-        with self._pending_lock:
-            pending = list(self._pending_sent)
-        for sent in reversed(pending):
-            if not sent:
-                continue
-            if sent not in normalized:
-                continue
-            rest = normalized.replace(sent, " ")
-            if _RESIDUAL_ONLY_RE.fullmatch(rest):
-                with self._pending_lock:
-                    if sent in self._pending_sent:
-                        self._pending_sent.remove(sent)
-                return True
-        return False
-
     def _should_drop_line(self, line: str) -> bool:
+        # Plain messages are no longer optimistically echoed locally; the server
+        # broadcast (also delivered to ourselves) is the single source of truth,
+        # so we only filter obvious PTY noise here.
         normalized = _strip_time_prefixes(line)
         if _skip_line(normalized):
             return True
-        parsed = _parse_chat_line(normalized.rstrip("\r"))
-        if parsed:
-            me = self.var_user.get().strip()
-            _room, sender, body = parsed
-            sender = sender.strip()
-            if me and sender == me:
-                # Server echo of our own message; we already displayed it locally.
-                self._consume_sent_exact(body)
+        # prompt_toolkit's "> something" commit echo when the GUI sends a line.
+        stripped = normalized.strip()
+        if stripped.startswith(">"):
+            tail = _PROMPT_PREFIX_RE.sub("", stripped, count=1).strip()
+            if not tail or "[" not in tail:
                 return True
-        if self._consume_if_prompt_echo(normalized):
-            return True
         return False
 
     def _build_ui(self) -> None:
@@ -642,6 +589,7 @@ class SSHChatGUI:
                 pass
             raise
 
+        self._session_user = user.strip()
         self._ssh = ssh
         self._chan = chan
         self.root.after(0, self._connect_succeeded)
@@ -666,6 +614,7 @@ class SSHChatGUI:
         self.btn_connect.configure(state=tk.NORMAL)
         self._ssh = None
         self._chan = None
+        self._session_user = ""
         self._set_status("连接失败")
         messagebox.showerror("SSHChat", msg)
 
@@ -767,7 +716,6 @@ class SSHChatGUI:
         if not line.strip():
             return
         try:
-            self._remember_sent(line)
             low = line.strip()
             m_join = re.match(r"^/(?:join|switch)\s+([a-zA-Z0-9_-]{1,32})\s*$", low)
             if m_join:
@@ -783,10 +731,10 @@ class SSHChatGUI:
                         self._active_room = self._rooms_order[0]
                     self._refresh_room_list()
                     self._render_active_room()
-            me = self.var_user.get().strip() or "me"
-            if not line.startswith("/"):
-                self._append_chat_line(f"[#{self._active_room}] [{me}] {line}", local_sent=True)
-            else:
+            # Slash commands have no [user]-prefixed broadcast; show a local hint.
+            # Plain messages rely on the server broadcast (which the server also
+            # delivers back to us) to render exactly once.
+            if line.startswith("/"):
                 self._append_chat_line(f"[*] {line}", local_sent=True)
             self._chan_send_bytes((line + "\n").encode("utf-8"))
         except Exception as e:
@@ -811,6 +759,7 @@ class SSHChatGUI:
         sh = self._ssh
         self._chan = None
         self._ssh = None
+        self._session_user = ""
 
         if ch:
             try:
