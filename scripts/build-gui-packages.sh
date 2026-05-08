@@ -41,15 +41,18 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) SEP=";" ;;
 esac
 
+# Default artifact output ./dist-packages; override if it is root-owned:
+#   SSHCHAT_ARTIFACT_DIR=\"$HOME/sshchat-gui-dist\" ./scripts/build-gui-packages.sh
 PACKVENV="$ROOT/build/pack-venv"
 PYI_WORKPATH="$ROOT/build/pyinstaller"
-ARTIFACT_DIR="$ROOT/dist-packages"
+ARTIFACT_DIR="${SSHCHAT_ARTIFACT_DIR:-$ROOT/dist-packages}"
 
 # Keep clean fixed directories; fail with clear ownership hint if cleanup is blocked.
 for p in "$PACKVENV" "$PYI_WORKPATH" "$ARTIFACT_DIR"; do
   if [[ -e "$p" ]] && ! rm -rf "$p" 2>/dev/null; then
     echo "error: cannot remove $p (likely root-owned from previous sudo build)." >&2
     echo "fix:   sudo chown -R \"$(id -un)\":\"$(id -gn)\" \"$ROOT/build\" \"$ROOT/dist-packages\"" >&2
+    echo "  or:  SSHCHAT_ARTIFACT_DIR=\"\${TMPDIR:-/tmp}/sshchat-gui-dist\" $0" >&2
     exit 1
   fi
 done
