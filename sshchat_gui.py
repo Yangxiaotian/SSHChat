@@ -143,7 +143,7 @@ class SSHChatGUI:
     def _should_drop_line(self, line: str) -> bool:
         # Plain messages are no longer optimistically echoed locally; the server
         # broadcast (also delivered to ourselves) is the single source of truth,
-        # so we only filter obvious PTY noise here.
+        # so we only render server-formatted lines and filter PTY redraw noise.
         normalized = _strip_time_prefixes(line)
         if _skip_line(normalized):
             return True
@@ -153,7 +153,10 @@ class SSHChatGUI:
             tail = _PROMPT_PREFIX_RE.sub("", stripped, count=1).strip()
             if not tail or "[" not in tail:
                 return True
-        return False
+        # Long input submitted through the remote PTY can be echoed back as
+        # terminal-wrapped fragments. Real chat/server lines are bracketed
+        # ([#room] [user] ..., [*] ..., [OK] ...); fragments are not.
+        return _parse_chat_line(normalized.rstrip("\r")) is None
 
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 4}
