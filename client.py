@@ -29,6 +29,10 @@ _DISCONNECTED = threading.Event()
 _DISPLAY_TIMES: deque[datetime] = deque(maxlen=2048)
 _SEND_LOCK = threading.Lock()
 _PENDING_INPUT_ECHOES: deque[str] = deque(maxlen=32)
+# Server sends CSI alone on one line; SSH/PTY often strips or replaces ESC (shows as "?[2J?[H").
+_CLEAR_CSI_STRICT = re.compile(r"^\s*\x1b\[2J\x1b\[H\s*$")
+_CLEAR_CSI_MANGLED = re.compile(r"^\s*\?\[2J\?\[H\s*$")
+_SCREEN_CLEARED_ACK_RE = re.compile(r"^\[\*\]\s*Screen cleared\.\s*$")
 
 
 def _terminal_size() -> Size:
@@ -200,6 +204,27 @@ def _consume_sent_input_echo(line: str) -> bool:
     return False
 
 
+def _terminal_hard_clear() -> None:
+    """Clear the real terminal; needed when CSI bytes are mangled in SSH/PTY."""
+    if not sys.stdout.isatty():
+        return
+    try:
+        if sys.platform == "win32":
+            os.system("cls")
+        elif shutil.which("clear"):
+            subprocess.run(["clear"], check=False)
+        else:
+            sys.stdout.buffer.write(b"\x1b[2J\x1b[H")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _is_clear_csi_line(line: str) -> bool:
+    t = line.strip()
+    return bool(_CLEAR_CSI_STRICT.match(t) or _CLEAR_CSI_MANGLED.match(t))
+
+
 def recv_msg(sock, my_name: str):
     notif_buf = ""
     print_buf = ""
@@ -229,6 +254,11 @@ def recv_msg(sock, my_name: str):
                     continue
                 if _consume_sent_input_echo(line):
                     continue
+                if _is_clear_csi_line(line):
+                    # Do not print CSI (often echoed as "?[2J?[H"); ack line triggers clear.
+                    continue
+                if _SCREEN_CLEARED_ACK_RE.match(line.strip()):
+                    _terminal_hard_clear()
                 out_lines.append(_format_display_line(line, my_name))
             if out_lines:
                 print("".join(out_lines), end="", flush=True)
@@ -258,8 +288,9 @@ def main():
 
     print("[OK] connected as " + name)
     print(
-        "Commands: /names  /rooms  /join <room>  /switch <room>  "
-        "/msg #<room> <text> | /msg <nick> <text>  /part <room>  /help"
+        "Commands: /names  /whois  /rooms  /join <room>  /switch <room>  "
+        "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
+        "/clear  /help"
     )
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "

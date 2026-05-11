@@ -41,21 +41,47 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) SEP=";" ;;
 esac
 
-# Default artifact output ./dist-packages; override if it is root-owned:
-#   SSHCHAT_ARTIFACT_DIR=\"$HOME/sshchat-gui-dist\" ./scripts/build-gui-packages.sh
+# Default: ./build/pack-venv, ./build/pyinstaller, ./dist-packages
+# If those dirs are root-owned (e.g. past sudo run), auto-use TMPDIR — no sudo needed.
 PACKVENV="$ROOT/build/pack-venv"
 PYI_WORKPATH="$ROOT/build/pyinstaller"
 ARTIFACT_DIR="${SSHCHAT_ARTIFACT_DIR:-$ROOT/dist-packages}"
+_sshchat_rm_tree() {
+  local p="$1"
+  [[ ! -e "$p" ]] && return 0
+  rm -rf "$p" 2>/dev/null
+}
 
-# Keep clean fixed directories; fail with clear ownership hint if cleanup is blocked.
+RESCUE_BASE="${TMPDIR:-/tmp}/sshchat-gui-build-$(id -u)"
+failed=""
 for p in "$PACKVENV" "$PYI_WORKPATH" "$ARTIFACT_DIR"; do
-  if [[ -e "$p" ]] && ! rm -rf "$p" 2>/dev/null; then
-    echo "error: cannot remove $p (likely root-owned from previous sudo build)." >&2
-    echo "fix:   sudo chown -R \"$(id -un)\":\"$(id -gn)\" \"$ROOT/build\" \"$ROOT/dist-packages\"" >&2
-    echo "  or:  SSHCHAT_ARTIFACT_DIR=\"\${TMPDIR:-/tmp}/sshchat-gui-dist\" $0" >&2
-    exit 1
+  if [[ -e "$p" ]] && ! _sshchat_rm_tree "$p"; then
+    failed="$p"
+    break
   fi
 done
+
+if [[ -n "$failed" ]]; then
+  if [[ -n "${SSHCHAT_ARTIFACT_DIR:-}" ]]; then
+    echo "error: cannot remove $failed (likely wrong ownership)." >&2
+    echo "fix:   sudo chown -R \"$(id -un)\":\"$(id -gn)\" \"$failed\"" >&2
+    echo "       (if build/ is root-owned, include \"$ROOT/build\".)" >&2
+    exit 1
+  fi
+  echo "warning: default build/output dirs are not removable (often root-owned from an old sudo run)." >&2
+  echo "warning: using $RESCUE_BASE instead (no sudo). To use ./dist-packages again:" >&2
+  echo "warning:   sudo chown -R \"$(id -un)\":\"$(id -gn)\" \"$ROOT/build\" \"$ROOT/dist-packages\"" >&2
+  PACKVENV="$RESCUE_BASE/pack-venv"
+  PYI_WORKPATH="$RESCUE_BASE/pyinstaller"
+  ARTIFACT_DIR="$RESCUE_BASE/dist-packages"
+  mkdir -p "$RESCUE_BASE"
+  for p in "$PACKVENV" "$PYI_WORKPATH" "$ARTIFACT_DIR"; do
+    if [[ -e "$p" ]] && ! _sshchat_rm_tree "$p"; then
+      echo "error: cannot remove $p" >&2
+      exit 1
+    fi
+  done
+fi
 
 python3 -m venv "$PACKVENV"
 if [[ -f "$PACKVENV/bin/activate" ]]; then

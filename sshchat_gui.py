@@ -400,10 +400,19 @@ class SSHChatGUI:
         t = cleaned
         if not t:
             return
+        parsed = _parse_chat_line(t)
+        if (
+            parsed
+            and parsed[0] == ""
+            and parsed[1] == "*"
+            and parsed[2].strip() == "Screen cleared."
+        ):
+            self._room_history[self._active_room] = []
+            self._render_active_room()
+            return
         ts = datetime.now()
         self._display_times.append(ts)
         time_label = self._format_time(ts)
-        parsed = _parse_chat_line(t)
         room_for_line = self._active_room
         prefix = f"[{time_label}] "
         if parsed:
