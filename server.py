@@ -34,6 +34,41 @@ def send_line(conn, text: str) -> None:
         remove_client(conn)
 
 
+def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -> None:
+    """Deliver a private message to all matching nicks; echo status to sender."""
+    targets = find_clients_by_nickname(target_nick)
+    if not targets:
+        send_line(
+            conn,
+            f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
+        )
+        return
+    for peer_conn, peer_name in targets:
+        send_line(peer_conn, f"[PM from {sender_name}] {text}\n")
+    if len(targets) == 1:
+        only = targets[0][1]
+        send_line(conn, f"[*] PM → {only}: {text}\n")
+    else:
+        n = len(targets)
+        send_line(
+            conn,
+            f"[*] PM sent to {n} users matching {target_nick!r}: {text}\n",
+        )
+
+
+def find_clients_by_nickname(nick: str) -> list[tuple]:
+    """Return [(conn, display_name), ...] for online users matching nick (case-insensitive)."""
+    key = nick.strip().lower()
+    if not key:
+        return []
+    with lock:
+        return [
+            (c, clients[c]["name"])
+            for c in list(clients)
+            if c in clients and clients[c]["name"].lower() == key
+        ]
+
+
 def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
     with lock:
         targets = [
@@ -154,25 +189,36 @@ def handle_command(conn, payload: str) -> None:
     if cmd == "/msg":
         parts3 = payload.split(None, 2)
         if len(parts3) < 3 or not parts3[1].strip() or not parts3[2].strip():
-            send_line(conn, "[*] Usage: /msg <room> <text>\n")
-            return
-        target_room = normalize_room(parts3[1])
-        if not target_room:
             send_line(
                 conn,
-                "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
+                "[*] Usage: /msg #<room> <text>  |  /msg <nick> <text>\n"
+                "[*] (Room only if target starts with #; otherwise nick — same as irssi.)\n",
             )
             return
+        target = parts3[1].strip()
         text = parts3[2].strip()
-        with lock:
-            if conn not in clients:
+        if target.startswith("#"):
+            target_room = normalize_room(target[1:])
+            if not target_room:
+                send_line(
+                    conn,
+                    "[*] Invalid room name (1–32 chars: letters, digits, _ -)\n",
+                )
                 return
-            joined = clients[conn]["rooms"]
-            if target_room not in joined:
-                send_line(conn, f"[*] You are not in #{target_room}. Use /join first.\n")
-                return
-        line_out = f"[#{target_room}] [{name}] {text}\n".encode("utf-8")
-        broadcast_room(target_room, line_out)
+            with lock:
+                if conn not in clients:
+                    return
+                joined = clients[conn]["rooms"]
+                if target_room not in joined:
+                    send_line(
+                        conn,
+                        f"[*] You are not in #{target_room}. Use /join first.\n",
+                    )
+                    return
+            line_out = f"[#{target_room}] [{name}] {text}\n".encode("utf-8")
+            broadcast_room(target_room, line_out)
+            return
+        send_private_messages(conn, name, target, text)
         return
 
     if cmd == "/part":
@@ -223,7 +269,7 @@ def handle_command(conn, payload: str) -> None:
         send_line(conn, f"[*] Rooms: {', '.join(labels)}\n")
         return
 
-    if cmd in ("/users", "/who"):
+    if cmd in ("/names", "/users", "/who"):
         with lock:
             r = clients[conn]["current_room"]
             members = sorted(
@@ -238,7 +284,11 @@ def handle_command(conn, payload: str) -> None:
     if cmd == "/help":
         send_line(
             conn,
-            "[*] /users | /rooms | /join | /switch | /msg | /part | /help\n",
+            "[*] /names | /rooms | /join | /switch | /msg | /part | /help\n",
+        )
+        send_line(
+            conn,
+            "[*] /msg: #… → room; no # → nick (no name clash; rooms must use #).\n",
         )
         return
 
@@ -306,7 +356,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{DEFAULT_ROOM}. "
-            f"/users /rooms /join /switch /msg /part /help\n",
+            f"/names /rooms /join /switch /msg /part /help\n",
         )
 
         while True:
