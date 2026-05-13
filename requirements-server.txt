@@ -1,0 +1,2 @@
+prompt_toolkit
+chess>=1.10

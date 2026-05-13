@@ -403,7 +403,7 @@ python3 -m venv "$PREFIX/venv"
 if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
   "$PREFIX/venv/bin/pip" install -q --upgrade pip
 fi
-"$PREFIX/venv/bin/pip" install -q prompt_toolkit
+"$PREFIX/venv/bin/pip" install -q prompt_toolkit 'chess>=1.10'
 rm -rf "$DEPLOY_TMP"
 
 umask 022

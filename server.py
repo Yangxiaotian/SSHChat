@@ -6,6 +6,8 @@ import traceback
 from collections import defaultdict
 from typing import Optional
 
+import games
+
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
@@ -17,6 +19,8 @@ rooms = defaultdict(set)
 room_owners: dict[str, object] = {}
 # room -> announcement text (shown to everyone entering the room)
 room_announcements: dict[str, str] = {}
+# room -> active game session (e.g. games.ChessGame); at most one per room
+room_games: dict[str, object] = {}
 lock = threading.Lock()
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
@@ -45,6 +49,9 @@ HELP_LINES = (
     "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
     "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
+    "[*]\n",
+    "[*] /game ...      房间小游戏（chess、gomoku）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
+    "[*]              详细用法用 /game help 查看。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
     "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
@@ -84,6 +91,29 @@ def send_room_announcement_preview(conn, room: str) -> None:
     if not text:
         return
     send_line(conn, f"[#{room}] [*] 公告：{text}\n")
+
+
+def _format_game_lines(room: str, lines) -> bytes:
+    """Wrap each game-line with the standard [#room] [*] prefix as one byte blob."""
+    return "".join(f"[#{room}] [*] {ln}\n" for ln in lines).encode("utf-8")
+
+
+def send_game_private(conn, room: str, lines) -> None:
+    if not lines:
+        return
+    send_line(conn, _format_game_lines(room, lines).decode("utf-8"))
+
+
+def broadcast_game(room: str, lines) -> None:
+    if not lines:
+        return
+    broadcast_room(room, _format_game_lines(room, lines))
+
+
+def _drop_game_if_room_empty_locked(room: str) -> None:
+    """Caller holds lock; drop the game session when the room has no clients."""
+    if not rooms.get(room):
+        room_games.pop(room, None)
 
 
 def send_line(conn, text: str) -> None:
@@ -158,12 +188,21 @@ def remove_client(conn) -> None:
             return
         name = info["name"]
         joined_rooms = list(info["rooms"])
+        game_notices: list[tuple[str, list[str]]] = []
         for room in joined_rooms:
             rooms[room].discard(conn)
             _reassign_room_owner_locked(room, conn)
+            game = room_games.get(room)
+            if game is not None:
+                _, bcast, _ended = game.on_player_leave(conn, name)
+                if bcast:
+                    game_notices.append((room, bcast))
+            _drop_game_if_room_empty_locked(room)
     for room in joined_rooms:
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
         broadcast_room(room, leave_msg)
+    for room, lines in game_notices:
+        broadcast_game(room, lines)
     try:
         conn.close()
     except Exception:
@@ -314,9 +353,16 @@ def handle_command(conn, payload: str) -> None:
             joined.remove(target_room)
             rooms[target_room].discard(conn)
             _reassign_room_owner_locked(target_room, conn)
+            game_bcast: list[str] = []
+            game = room_games.get(target_room)
+            if game is not None:
+                _, game_bcast, _ended = game.on_player_leave(conn, name)
+            _drop_game_if_room_empty_locked(target_room)
             if active == target_room:
                 switched_to = sorted(joined)[0]
                 clients[conn]["current_room"] = switched_to
+        if game_bcast:
+            broadcast_game(target_room, game_bcast)
         broadcast_room(
             target_room,
             f"[!] {name} left #{target_room}\n".encode("utf-8"),
@@ -402,7 +448,150 @@ def handle_command(conn, payload: str) -> None:
         send_line(conn, f"[*] 已更新 #{room} 的公告。\n")
         return
 
+    if cmd == "/game":
+        _handle_game(conn, name, current_room, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
+
+
+def _handle_game(conn, name: str, room: str, payload: str) -> None:
+    """All /game subcommands. Mutates room_games under the global lock."""
+    raw = payload[len("/game") :].strip()
+    if not raw or raw.lower() == "help":
+        send_line(conn, "[*] /game 用法：\n")
+        for ln in games.HELP_LINES:
+            send_line(conn, ln + "\n")
+        send_line(
+            conn,
+            "[*] 当前支持的游戏：" + ", ".join(sorted(games.GAMES)) + "\n",
+        )
+        return
+
+    sub, _, rest = raw.partition(" ")
+    sub = sub.lower()
+    rest = rest.strip()
+
+    if sub == "list":
+        send_line(
+            conn,
+            "[*] 可玩游戏：" + ", ".join(sorted(games.GAMES)) + "\n",
+        )
+        return
+
+    if sub == "new":
+        game_name = rest.lower() or "chess"
+        cls = games.GAMES.get(game_name)
+        if cls is None:
+            send_line(
+                conn,
+                f"[*] 未知游戏 {game_name!r}；/game list 查看可用。\n",
+            )
+            return
+        with lock:
+            existing = room_games.get(room)
+            if existing is not None and existing.state != "ended":
+                send_line(
+                    conn,
+                    f"[*] 本房已有进行中的对局（{existing.name}/"
+                    f"{existing.state}）；/game end 由房主结束或先等当前局结束。\n",
+                )
+                return
+            new_game = cls(conn, name)
+            room_games[room] = new_game
+        broadcast_game(
+            room,
+            [
+                f"{name} 开了一局 {game_name}（作为白方），"
+                "等另一位玩家用 /game join 加入。",
+            ]
+            + new_game.show(),
+        )
+        return
+
+    if sub == "join":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
+                return
+            priv, bcast, _ = game.try_join(conn, name)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        return
+
+    if sub == "seats":
+        with lock:
+            game = room_games.get(room)
+            lines = game.seats() if game else ["本房没有进行中的对局。"]
+        send_game_private(conn, room, lines)
+        return
+
+    if sub == "show":
+        with lock:
+            game = room_games.get(room)
+            lines = game.show() if game else ["本房没有进行中的对局。"]
+        send_game_private(conn, room, lines)
+        return
+
+    if sub == "move":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            priv, bcast, ended = game.try_move(conn, rest)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        return
+
+    if sub == "resign":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            priv, bcast, _ = game.resign(conn, name)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        return
+
+    if sub == "abort":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            priv, bcast, _ = game.abort(conn, name)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        return
+
+    if sub == "pgn":
+        with lock:
+            game = room_games.get(room)
+            if game is None or not hasattr(game, "pgn_export"):
+                lines = ["本房没有可导出 PGN 的对局（仅 chess 支持）。"]
+            else:
+                lines = game.pgn_export()
+        send_game_private(conn, room, lines)
+        return
+
+    if sub == "end":
+        with lock:
+            game = room_games.get(room)
+            is_owner = room_owners.get(room) is conn
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            if not is_owner:
+                send_line(conn, "[*] 只有房主可以 /game end。\n")
+                return
+            room_games.pop(room, None)
+        broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
+        return
+
+    send_line(conn, f"[*] 未知子命令 /game {sub}；用 /game help 查看。\n")
 
 
 def process_client_line(conn, raw_line: bytes) -> None:
@@ -469,7 +658,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{DEFAULT_ROOM}. "
-            f"/names /rooms /join /switch /msg /part /announce /clear /help\n",
+            f"/names /rooms /join /switch /msg /part /announce /game /clear /help\n",
         )
         send_room_announcement_preview(conn, DEFAULT_ROOM)
 
