@@ -63,10 +63,14 @@ def _render_board(board, *, last_move=None):
     # Each cell is 3 chars wide: " P " for plain or "(P)" for last-move
     # highlight. Header uses the same per-cell format so files line up with
     # piece symbols even when highlights are present.
+    # Left/right rank gutters are both 3 chars (same idea as gomoku's
+    # ``f"{n:>2} "`` / ``f" {n:>2}"``), and the header adds matching blank
+    # gutters so every row has identical width — avoids jagged top/bottom edges.
     def col_label(ch: str) -> str:
         return f" {ch} "
 
-    header = "   " + "".join(col_label(c) for c in "abcdefgh")
+    file_row = "".join(col_label(c) for c in "abcdefgh")
+    header = "   " + file_row + "   "
     lines = [header]
     for rank in range(8, 0, -1):
         cells = []
@@ -75,7 +79,7 @@ def _render_board(board, *, last_move=None):
             piece = board.piece_at(sq)
             sym = piece.symbol() if piece else "."
             cells.append(f"({sym})" if sq in hi else f" {sym} ")
-        lines.append(f" {rank} {''.join(cells)} {rank}")
+        lines.append(f"{rank:>2} " + "".join(cells) + f" {rank:>2}")
     lines.append(header)
     if last_move is not None:
         lines.append(
