@@ -497,7 +497,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     f"{existing.state}）；/game end 由房主结束或先等当前局结束。\n",
                 )
                 return
-            new_game = cls(conn, name)
+            try:
+                new_game = cls(conn, name)
+            except RuntimeError as e:
+                send_line(conn, f"[*] 无法开局：{e}\n")
+                return
             room_games[room] = new_game
         broadcast_game(
             room,

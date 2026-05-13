@@ -25,6 +25,11 @@ RUN_USER=sshchat
 CREATE_RUN_USER=1
 KEEP_ENV=0
 MIGRATE_KEYS=1
+# Mirror / network knobs for pip. Default index left empty (pip uses pypi).
+# sudo strips env by default — also exposed as --pip-index-url.
+PIP_INDEX_URL_ARG="${SSHCHAT_PIP_INDEX_URL:-${PIP_INDEX_URL:-}}"
+PIP_TIMEOUT="${SSHCHAT_PIP_TIMEOUT:-60}"
+PIP_RETRIES="${SSHCHAT_PIP_RETRIES:-5}"
 : "${SSHCHAT_CLIENT_GROUP:=sshchat-clients}"
 CLIENT_GROUP=$SSHCHAT_CLIENT_GROUP
 
@@ -48,6 +53,8 @@ Options:
   --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
   --client-ssh-port PORT  sshd port embedded in client-bundle.json (default: $CLIENT_SSH_PORT)
   --build-gui-packages    After install, run scripts/build-gui-packages.sh if present (needs tkinter + PyInstaller)
+  --pip-index-url URL  Override pip index (e.g. https://pypi.tuna.tsinghua.edu.cn/simple); also reads
+                       \$SSHCHAT_PIP_INDEX_URL / \$PIP_INDEX_URL (sudo strips env unless -E)
   -h, --help         This help
 
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
@@ -294,6 +301,10 @@ while [[ $# -gt 0 ]]; do
       BUILD_GUI_PACKAGES=1
       shift
       ;;
+    --pip-index-url)
+      PIP_INDEX_URL_ARG="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -399,11 +410,20 @@ export TMPDIR="$DEPLOY_TMP"
 export PIP_NO_CACHE_DIR=1
 
 python3 -m venv "$PREFIX/venv"
+
+PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
+if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
+  PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
+  echo "info: using pip index $PIP_INDEX_URL_ARG (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES})"
+else
+  echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
+fi
+
 # Upgrading pip downloads a large wheel; skip by default on low-disk / constrained /tmp setups.
 if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
-  "$PREFIX/venv/bin/pip" install -q --upgrade pip
+  "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
 fi
-"$PREFIX/venv/bin/pip" install -q prompt_toolkit 'chess>=1.10'
+"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" prompt_toolkit 'chess>=1.10'
 rm -rf "$DEPLOY_TMP"
 
 umask 022

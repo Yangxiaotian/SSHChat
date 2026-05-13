@@ -8,10 +8,30 @@ Optional: ``pgn_export()`` for PGN (chess only).
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-import chess
-import chess.pgn
+if TYPE_CHECKING:  # noqa: SIM108
+    import chess as _chess_type  # noqa: F401  only for type hints in annotations
+
+# python-chess is optional at runtime: server starts fine without it; only
+# /game new chess will refuse and report the missing dep. Gomoku is pure stdlib.
+try:
+    import chess as _chess  # type: ignore[no-redef]
+    from chess import pgn as _chess_pgn  # noqa: F401
+    _CHESS_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001
+    _chess = None  # type: ignore[assignment]
+    _chess_pgn = None  # type: ignore[assignment]
+    _CHESS_IMPORT_ERROR = f"{_e!r}"
+
+
+def chess_available() -> bool:
+    return _chess is not None
+
+
+def chess_import_error() -> Optional[str]:
+    return _CHESS_IMPORT_ERROR
+
 
 GameResult = tuple[list[str], list[str], bool]
 
@@ -19,36 +39,32 @@ GOMOKU_SIZE = 15
 
 
 def _color_label(color: bool) -> str:
-    return "白" if color == chess.WHITE else "黑"
+    return "白" if color == _chess.WHITE else "黑"
 
 
-def _squares_of_last_move(move: Optional[chess.Move]) -> set[chess.Square]:
+def _squares_of_last_move(move):
     if move is None:
         return set()
     s = {move.from_square, move.to_square}
     # Castling: rook also moved — highlight rook from/to as well.
-    if move.from_square == chess.E1 and move.to_square == chess.G1:
-        s.update((chess.H1, chess.F1))
-    elif move.from_square == chess.E1 and move.to_square == chess.C1:
-        s.update((chess.A1, chess.D1))
-    elif move.from_square == chess.E8 and move.to_square == chess.G8:
-        s.update((chess.H8, chess.F8))
-    elif move.from_square == chess.E8 and move.to_square == chess.C8:
-        s.update((chess.A8, chess.D8))
+    if move.from_square == _chess.E1 and move.to_square == _chess.G1:
+        s.update((_chess.H1, _chess.F1))
+    elif move.from_square == _chess.E1 and move.to_square == _chess.C1:
+        s.update((_chess.A1, _chess.D1))
+    elif move.from_square == _chess.E8 and move.to_square == _chess.G8:
+        s.update((_chess.H8, _chess.F8))
+    elif move.from_square == _chess.E8 and move.to_square == _chess.C8:
+        s.update((_chess.A8, _chess.D8))
     return s
 
 
-def _render_board(
-    board: chess.Board,
-    *,
-    last_move: Optional[chess.Move] = None,
-) -> list[str]:
+def _render_board(board, *, last_move=None):
     hi = _squares_of_last_move(last_move)
     lines = ["   a b c d e f g h"]
     for rank in range(8, 0, -1):
         cells = []
         for f in range(8):
-            sq = chess.square(f, rank - 1)
+            sq = _chess.square(f, rank - 1)
             piece = board.piece_at(sq)
             sym = piece.symbol() if piece else "."
             if sq in hi:
@@ -60,21 +76,21 @@ def _render_board(
     if last_move is not None:
         lines.append(
             f"  上一步：{board.fullmove_number} "
-            f"{chess.square_name(last_move.from_square)}→"
-            f"{chess.square_name(last_move.to_square)}"
+            f"{_chess.square_name(last_move.from_square)}→"
+            f"{_chess.square_name(last_move.to_square)}"
         )
     return lines
 
 
-def _format_outcome(outcome: chess.Outcome) -> str:
+def _format_outcome(outcome) -> str:
     term_map = {
-        chess.Termination.CHECKMATE: "将杀",
-        chess.Termination.STALEMATE: "逼和",
-        chess.Termination.INSUFFICIENT_MATERIAL: "兵力不足",
-        chess.Termination.FIFTY_MOVES: "50 回合规则",
-        chess.Termination.SEVENTYFIVE_MOVES: "75 回合规则",
-        chess.Termination.THREEFOLD_REPETITION: "三次重复",
-        chess.Termination.FIVEFOLD_REPETITION: "五次重复",
+        _chess.Termination.CHECKMATE: "将杀",
+        _chess.Termination.STALEMATE: "逼和",
+        _chess.Termination.INSUFFICIENT_MATERIAL: "兵力不足",
+        _chess.Termination.FIFTY_MOVES: "50 回合规则",
+        _chess.Termination.SEVENTYFIVE_MOVES: "75 回合规则",
+        _chess.Termination.THREEFOLD_REPETITION: "三次重复",
+        _chess.Termination.FIVEFOLD_REPETITION: "五次重复",
     }
     reason = term_map.get(outcome.termination, "对局结束")
     if outcome.winner is True:
@@ -92,20 +108,25 @@ class ChessGame:
     second_seat_desc = "黑方"
 
     def __init__(self, white_conn, white_name: str) -> None:
-        self.board = chess.Board()
+        if _chess is None:
+            raise RuntimeError(
+                "python-chess 未安装。请在服务端 venv 内 "
+                "`pip install 'chess>=1.10'` 后重启服务。"
+            )
+        self.board = _chess.Board()
         self.white_conn = white_conn
         self.white_name = white_name
         self.black_conn = None
         self.black_name: Optional[str] = None
         self.state = "waiting"
-        self._last_move: Optional[chess.Move] = None
+        self._last_move = None
         self._result_header: Optional[str] = None  # PGN Result when not from board.outcome()
 
     def color_of(self, conn) -> Optional[bool]:
         if conn is self.white_conn:
-            return chess.WHITE
+            return _chess.WHITE
         if conn is self.black_conn:
-            return chess.BLACK
+            return _chess.BLACK
         return None
 
     def is_seated(self, conn) -> bool:
@@ -167,7 +188,7 @@ class ChessGame:
         self.board.push(move)
         self._last_move = move
 
-        mover = self.white_name if side == chess.WHITE else self.black_name
+        mover = self.white_name if side == _chess.WHITE else self.black_name
         bcast = [f"{_color_label(side)}方 {mover} 走 {san}"]
         bcast.extend(_render_board(self.board, last_move=self._last_move))
 
@@ -185,7 +206,7 @@ class ChessGame:
 
         next_color = self.board.turn
         next_name = (
-            self.white_name if next_color == chess.WHITE else self.black_name
+            self.white_name if next_color == _chess.WHITE else self.black_name
         )
         suffix = ""
         if self.board.is_check():
@@ -196,17 +217,17 @@ class ChessGame:
         )
         return ([], bcast, False)
 
-    def _parse_move(self, text: str) -> Optional[chess.Move]:
+    def _parse_move(self, text: str):
         try:
             return self.board.parse_san(text)
         except (
-            chess.InvalidMoveError,
-            chess.IllegalMoveError,
-            chess.AmbiguousMoveError,
+            _chess.InvalidMoveError,
+            _chess.IllegalMoveError,
+            _chess.AmbiguousMoveError,
         ):
             pass
         try:
-            mv = chess.Move.from_uci(text.lower())
+            mv = _chess.Move.from_uci(text.lower())
         except ValueError:
             return None
         if mv in self.board.legal_moves:
@@ -220,7 +241,7 @@ class ChessGame:
         if side is None:
             return (["你不是对局双方。"], [], False)
         self.state = "ended"
-        if side == chess.WHITE:
+        if side == _chess.WHITE:
             self._result_header = "0-1"
             return ([], [f"白方 {name} 认负 — 黑胜 0-1"], True)
         self._result_header = "1-0"
@@ -255,7 +276,7 @@ class ChessGame:
         lines.extend(_render_board(self.board, last_move=self._last_move))
         if self.state == "playing":
             color = self.board.turn
-            who = self.white_name if color == chess.WHITE else self.black_name
+            who = self.white_name if color == _chess.WHITE else self.black_name
             suffix = "（将军）" if self.board.is_check() else ""
             lines.append(
                 f"轮到 {_color_label(color)}方 {who}"
@@ -265,7 +286,7 @@ class ChessGame:
 
     def pgn_export(self) -> list[str]:
         """Multi-line PGN for the current or finished game."""
-        game = chess.pgn.Game()
+        game = _chess_pgn.Game()
         game.headers["Event"] = "SSHChat"
         game.headers["Site"] = "?"
         game.headers["White"] = self.white_name
@@ -287,7 +308,7 @@ class ChessGame:
         node = game
         for mv in self.board.move_stack:
             node = node.add_variation(mv)
-        exporter = chess.pgn.StringExporter(columns=70)
+        exporter = _chess_pgn.StringExporter(columns=70)
         text = game.accept(exporter).strip()
         return text.splitlines() if text else ["(empty game)"]
 
@@ -305,7 +326,7 @@ class ChessGame:
             return ([], [f"{name} 离开，对局取消。"], True)
         if self.state == "playing":
             self.state = "ended"
-            if side == chess.WHITE:
+            if side == _chess.WHITE:
                 self._result_header = "0-1"
                 return ([], [f"白方 {name} 离开 — 黑胜 0-1"], True)
             self._result_header = "1-0"
