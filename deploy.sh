@@ -37,6 +37,36 @@ is_darwin() {
   [[ "$(uname -s)" == "Darwin" ]]
 }
 
+# Stop any previously running server bound to this PREFIX so the restart below
+# actually picks up the freshly copied server.py / games.py / client.py rather
+# than leaving an older interpreter holding the chat port.
+stop_existing_server() {
+  local prefix="$1"
+
+  if command -v systemctl &>/dev/null && systemctl list-unit-files 2>/dev/null | grep -q '^sshchat\.service'; then
+    if systemctl is-active --quiet sshchat.service; then
+      echo "info: stopping running sshchat.service before file swap"
+      systemctl stop sshchat.service || true
+    fi
+  fi
+
+  if command -v pgrep &>/dev/null && pgrep -f "$prefix/server.py" >/dev/null 2>&1; then
+    echo "info: terminating existing server process(es) for $prefix/server.py"
+    pkill -f "$prefix/server.py" || true
+    # Give the kernel a moment to release the listening socket.
+    local i
+    for i in 1 2 3 4 5; do
+      pgrep -f "$prefix/server.py" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if pgrep -f "$prefix/server.py" >/dev/null 2>&1; then
+      echo "warning: server still alive after SIGTERM; forcing"
+      pkill -9 -f "$prefix/server.py" || true
+      sleep 1
+    fi
+  fi
+}
+
 usage() {
   cat >&2 <<EOF
 Usage: sudo $0 [options]
@@ -60,7 +90,37 @@ Options:
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
 scanned authorized_keys so command="…/<basename>" points at PREFIX/chat.sh.
 Override matched basename with env SSHCHAT_COMMAND_BASENAME if needed. Needs perl.
+
+Always stops any running chat server for this PREFIX (systemd sshchat.service
+and/or stray python $PREFIX/server.py) before starting again, so server.py and
+games.py updates always take effect without a manual restart.
 EOF
+}
+
+# Stop chat TCP server so redeploy loads fresh server.py / games.py (in-memory
+# games reset on process exit).
+sshchat_stop_running_server() {
+  local unit="/etc/systemd/system/sshchat.service"
+  if command -v systemctl &>/dev/null && [[ -f "$unit" ]]; then
+    if systemctl is-active --quiet sshchat.service 2>/dev/null; then
+      echo "info: stopping sshchat.service (pick up new server.py / games.py)"
+      systemctl stop sshchat.service || true
+    fi
+  fi
+  local i
+  for ((i = 0; i < 20; i++)); do
+    if ! pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ $i -eq 0 ]]; then
+      echo "info: stopping process(es) matching $PREFIX/server.py"
+    fi
+    pkill -f "$PREFIX/server.py" || true
+    sleep 0.25
+  done
+  if pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+    echo "warning: $PREFIX/server.py still running after stop attempts; deploy may not load new code" >&2
+  fi
 }
 
 detect_ip() {
@@ -397,9 +457,15 @@ if [[ "$INSTALL_SYSTEMD" -eq 1 && "$RUN_USER" == "root" ]]; then
 fi
 
 install -m 0755 -d "$PREFIX"
+# Ensure no stale interpreter is still importing the old server.py/games.py.
+stop_existing_server "$PREFIX"
 cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+# Drop any stale .pyc / __pycache__ so the next import never resurrects an
+# older games.py / server.py from cache.
+find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find "$PREFIX" -maxdepth 2 -name '*.pyc' -delete 2>/dev/null || true
 
 rm -rf "$PREFIX/venv"
 # Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
@@ -509,10 +575,10 @@ EOF
   echo "info: systemd service sshchat.service enabled and restarted"
 else
   # Non-systemd platforms (e.g. macOS): restart a detached server process.
-  if pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
-    pkill -f "$PREFIX/server.py" || true
-    sleep 1
-  fi
+  # stop_existing_server already ran before the file copy; this catches anything
+  # that respawned during the install (unlikely, but cheap insurance) and frees
+  # the listening port before we start the fresh interpreter.
+  stop_existing_server "$PREFIX"
   nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
   SERVER_PID=$!
   echo "info: systemd skipped; started $PREFIX/server.sh in background (pid $SERVER_PID)"
