@@ -60,19 +60,23 @@ def _squares_of_last_move(move):
 
 def _render_board(board, *, last_move=None):
     hi = _squares_of_last_move(last_move)
-    lines = ["   a b c d e f g h"]
+    # Each cell is 3 chars wide: " P " for plain or "(P)" for last-move
+    # highlight. Header uses the same per-cell format so files line up with
+    # piece symbols even when highlights are present.
+    def col_label(ch: str) -> str:
+        return f" {ch} "
+
+    header = "   " + "".join(col_label(c) for c in "abcdefgh")
+    lines = [header]
     for rank in range(8, 0, -1):
         cells = []
         for f in range(8):
             sq = _chess.square(f, rank - 1)
             piece = board.piece_at(sq)
             sym = piece.symbol() if piece else "."
-            if sq in hi:
-                cells.append(f"({sym})")
-            else:
-                cells.append(f" {sym} ")
-        lines.append(f" {rank}{''.join(cells)}{rank}")
-    lines.append("   a b c d e f g h")
+            cells.append(f"({sym})" if sq in hi else f" {sym} ")
+        lines.append(f" {rank} {''.join(cells)} {rank}")
+    lines.append(header)
     if last_move is not None:
         lines.append(
             f"  上一步：{board.fullmove_number} "
@@ -381,7 +385,9 @@ def _gomoku_render(
     last: Optional[tuple[int, int]] = None,
 ) -> list[str]:
     """ASCII board: # = black (first), o = white. last move cell in parens."""
-    hdr = "    " + "".join(f"{i:>3}" for i in range(1, GOMOKU_SIZE + 1))
+    # 3-char cell ("(x)" or " x "), 3-char left prefix matching the column
+    # header offset, so stones sit directly under their column number.
+    hdr = "   " + "".join(f"{i:>2} " for i in range(1, GOMOKU_SIZE + 1))
     lines = [hdr]
     sym = {0: ".", 1: "#", 2: "o"}
     for r in range(GOMOKU_SIZE):
@@ -392,7 +398,7 @@ def _gomoku_render(
                 row_cells.append(f"({ch})")
             else:
                 row_cells.append(f" {ch} ")
-        lines.append(f"{r + 1:>2} " + "".join(row_cells))
+        lines.append(f"{r + 1:>2} " + "".join(row_cells) + f" {r + 1:>2}")
     lines.append(hdr)
     if last is not None:
         lines.append(f"  上一步：({last[0] + 1}, {last[1] + 1})  （行 列，1 起算，左上为 1,1）")
