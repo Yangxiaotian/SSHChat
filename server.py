@@ -13,9 +13,14 @@ PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 clients = {}
 # room -> set of conn
 rooms = defaultdict(set)
+# room -> conn of owner (first joiner; default room = first TCP client in #default)
+room_owners: dict[str, object] = {}
+# room -> announcement text (shown to everyone entering the room)
+room_announcements: dict[str, str] = {}
 lock = threading.Lock()
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+MAX_ANNOUNCE_LEN = 400
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 
 # VT100: clear display + cursor home; trailing \n so line-oriented clients flush it.
@@ -38,6 +43,8 @@ HELP_LINES = (
     "[*]              若有多人同昵称，会全部收到；发件人会收到汇总提示。\n",
     "[*]\n",
     "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
+    "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
+    "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
     "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
@@ -57,6 +64,26 @@ def normalize_room(name: str) -> Optional[str]:
     if not name or not ROOM_RE.match(name):
         return None
     return name
+
+
+def _reassign_room_owner_locked(room: str, departed: object) -> None:
+    """Must hold lock. departed left this room or disconnected."""
+    if room_owners.get(room) != departed:
+        return
+    rem = rooms.get(room, ())
+    if rem:
+        room_owners[room] = next(iter(rem))
+    else:
+        room_owners.pop(room, None)
+
+
+def send_room_announcement_preview(conn, room: str) -> None:
+    """If the room has an announcement, show it to this client (after join/switch)."""
+    with lock:
+        text = (room_announcements.get(room) or "").strip()
+    if not text:
+        return
+    send_line(conn, f"[#{room}] [*] 公告：{text}\n")
 
 
 def send_line(conn, text: str) -> None:
@@ -133,6 +160,7 @@ def remove_client(conn) -> None:
         joined_rooms = list(info["rooms"])
         for room in joined_rooms:
             rooms[room].discard(conn)
+            _reassign_room_owner_locked(room, conn)
     for room in joined_rooms:
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
         broadcast_room(room, leave_msg)
@@ -172,8 +200,11 @@ def handle_command(conn, payload: str) -> None:
             joined = clients[conn]["rooms"]
             prev_room = clients[conn]["current_room"]
             if new_room not in joined:
+                was_empty = len(rooms[new_room]) == 0
                 joined.add(new_room)
                 rooms[new_room].add(conn)
+                if was_empty:
+                    room_owners[new_room] = conn
                 newly_joined = True
             clients[conn]["current_room"] = new_room
 
@@ -187,10 +218,12 @@ def handle_command(conn, payload: str) -> None:
                 conn,
                 f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
             )
+            send_room_announcement_preview(conn, new_room)
         elif new_room == current_room:
             send_line(conn, f"[*] Already active in #{new_room}\n")
         else:
             send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
+            send_room_announcement_preview(conn, new_room)
         return
 
     if cmd == "/switch":
@@ -217,6 +250,7 @@ def handle_command(conn, payload: str) -> None:
                 return
             clients[conn]["current_room"] = target_room
         send_line(conn, f"[*] Switched from #{active} to #{target_room}\n")
+        send_room_announcement_preview(conn, target_room)
         return
 
     if cmd == "/msg":
@@ -279,6 +313,7 @@ def handle_command(conn, payload: str) -> None:
                 return
             joined.remove(target_room)
             rooms[target_room].discard(conn)
+            _reassign_room_owner_locked(target_room, conn)
             if active == target_room:
                 switched_to = sorted(joined)[0]
                 clients[conn]["current_room"] = switched_to
@@ -322,6 +357,49 @@ def handle_command(conn, payload: str) -> None:
     if cmd == "/help":
         for hline in HELP_LINES:
             send_line(conn, hline)
+        return
+
+    if cmd == "/announce":
+        tail = payload[len("/announce") :].strip()
+        with lock:
+            if conn not in clients:
+                return
+            room = clients[conn]["current_room"]
+            is_owner = room_owners.get(room) == conn
+        if not tail:
+            with lock:
+                cur = (room_announcements.get(room) or "").strip()
+            if cur:
+                send_line(conn, f"[*] #{room} 当前公告：{cur}\n")
+            else:
+                send_line(conn, f"[*] #{room} 暂无公告。\n")
+            return
+        if not is_owner:
+            send_line(conn, "[*] 只有房主可以修改公告（查看无需权限）。\n")
+            return
+        if tail.lower() == "clear":
+            with lock:
+                room_announcements.pop(room, None)
+            broadcast_room(
+                room,
+                f"[#{room}] [*] 公告已清除。\n".encode("utf-8"),
+            )
+            send_line(conn, f"[*] 已清除 #{room} 的公告。\n")
+            return
+        one_line = " ".join(tail.split())
+        if len(one_line) > MAX_ANNOUNCE_LEN:
+            send_line(
+                conn,
+                f"[*] 公告过长（最多 {MAX_ANNOUNCE_LEN} 字符）。\n",
+            )
+            return
+        with lock:
+            room_announcements[room] = one_line
+        broadcast_room(
+            room,
+            f"[#{room}] [*] 公告：{one_line}\n".encode("utf-8"),
+        )
+        send_line(conn, f"[*] 已更新 #{room} 的公告。\n")
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -374,12 +452,15 @@ def handle_client(conn, addr) -> None:
         name = _parse_handshake_line(first.decode("utf-8", errors="replace"))
 
         with lock:
+            was_empty_default = len(rooms[DEFAULT_ROOM]) == 0
             clients[conn] = {
                 "name": name,
                 "rooms": {DEFAULT_ROOM},
                 "current_room": DEFAULT_ROOM,
             }
             rooms[DEFAULT_ROOM].add(conn)
+            if was_empty_default:
+                room_owners[DEFAULT_ROOM] = conn
 
         print(f"{name} joined #{DEFAULT_ROOM} (tcp_peer={addr[0]!r}:{addr[1]})")
 
@@ -388,8 +469,9 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{DEFAULT_ROOM}. "
-            f"/names /rooms /join /switch /msg /part /clear /help\n",
+            f"/names /rooms /join /switch /msg /part /announce /clear /help\n",
         )
+        send_room_announcement_preview(conn, DEFAULT_ROOM)
 
         while True:
             if not buffer:

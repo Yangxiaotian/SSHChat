@@ -289,7 +289,7 @@ def main():
     print(
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
-        "/clear  /help"
+        "/announce  /clear  /help"
     )
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
