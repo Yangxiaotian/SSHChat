@@ -64,14 +64,17 @@ def _render_board(board, *, last_move=None):
     # highlight. Header uses the same per-cell format so files line up with
     # piece symbols even when highlights are present.
     # Left/right rank gutters are both 3 chars (same idea as gomoku's
-    # ``f"{n:>2} "`` / ``f" {n:>2}"``), and the header adds matching blank
-    # gutters so every row has identical width — avoids jagged top/bottom edges.
+    # ``f"{n:>2} "`` / ``f" {n:>2}"``). File-letter rows must use the *same*
+    # corner strings as the rank they touch: top row uses rank-8 gutters so
+    # `` a `` sits above `` r `` on a8, not above the ``8`` digit; bottom row
+    # uses rank-1 gutters so `` a `` sits under `` R `` on a1.
     def col_label(ch: str) -> str:
         return f" {ch} "
 
     file_row = "".join(col_label(c) for c in "abcdefgh")
-    header = "   " + file_row + "   "
-    lines = [header]
+    top_files = f"{8:>2} " + file_row + f" {8:>2}"
+    bottom_files = f"{1:>2} " + file_row + f" {1:>2}"
+    lines = [top_files]
     for rank in range(8, 0, -1):
         cells = []
         for f in range(8):
@@ -80,7 +83,7 @@ def _render_board(board, *, last_move=None):
             sym = piece.symbol() if piece else "."
             cells.append(f"({sym})" if sq in hi else f" {sym} ")
         lines.append(f"{rank:>2} " + "".join(cells) + f" {rank:>2}")
-    lines.append(header)
+    lines.append(bottom_files)
     if last_move is not None:
         lines.append(
             f"  上一步：{board.fullmove_number} "
