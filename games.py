@@ -37,14 +37,6 @@ GameResult = tuple[list[str], list[str], bool]
 
 GOMOKU_SIZE = 15
 
-# Chess file rows: corners must match the *visual* width of ``f"{n:>2} "`` /
-# ``f" {n:>2}"`` in proportional fonts (plain spaces are often narrower than
-# digits). FIGURE SPACE (U+2007) is intended to equal digit width in tabular
-# contexts; we still use normal spaces where the rank gutters use them.
-_CHESS_FS = "\u2007"
-_CHESS_FILE_CORNER_L = " " + _CHESS_FS + " "
-_CHESS_FILE_CORNER_R = "  " + _CHESS_FS
-
 
 def _color_label(color: bool) -> str:
     return "白" if color == _chess.WHITE else "黑"
@@ -72,15 +64,18 @@ def _render_board(board, *, last_move=None):
     # highlight. Header uses the same per-cell format so files line up with
     # piece symbols even when highlights are present.
     # Left/right rank gutters are both 3 chars (same idea as gomoku's
-    # ``f"{n:>2} "`` / ``f" {n:>2}"``). File rows use blank corners that mimic
-    # the space/digit/space width of rank gutters (``_CHESS_FILE_CORNER_*``) so
-    # `` a `` stays under `` r `` / `` R `` even in proportional-width UIs.
+    # ``f"{n:>2} "`` / ``f" {n:>2}"``). The a–h rows reuse the same corner
+    # strings as the adjacent rank (8 above, 1 below): plain spaces in the
+    # corners line up in a strict monospace terminal, but many proportional or
+    # web UIs render spaces narrower than digits so columns drift; matching the
+    # real rank digits keeps file letters over the correct squares everywhere.
     def col_label(ch: str) -> str:
         return f" {ch} "
 
     file_row = "".join(col_label(c) for c in "abcdefgh")
-    file_lines = _CHESS_FILE_CORNER_L + file_row + _CHESS_FILE_CORNER_R
-    lines = [file_lines]
+    top_files = f"{8:>2} " + file_row + f" {8:>2}"
+    bottom_files = f"{1:>2} " + file_row + f" {1:>2}"
+    lines = [top_files]
     for rank in range(8, 0, -1):
         cells = []
         for f in range(8):
@@ -89,7 +84,7 @@ def _render_board(board, *, last_move=None):
             sym = piece.symbol() if piece else "."
             cells.append(f"({sym})" if sq in hi else f" {sym} ")
         lines.append(f"{rank:>2} " + "".join(cells) + f" {rank:>2}")
-    lines.append(file_lines)
+    lines.append(bottom_files)
     if last_move is not None:
         lines.append(
             f"  上一步：{board.fullmove_number} "
@@ -595,6 +590,8 @@ HELP_LINES = (
     "[*] /game join             加入空第二席。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘。",
+    "[*] chess 棋盘上下坐标行两端的 8/1 与邻行相同，用于列对齐；"
+    "若仍错位请用等宽字体或 SSH 终端查看。",
     "[*] /game move …           chess: SAN/UCI；gomoku: 行 列（1～15），如 8 8。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game resign           认负（仅对局进行中）。",
