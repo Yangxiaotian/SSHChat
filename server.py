@@ -9,7 +9,7 @@ from typing import Optional
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
-# conn -> {"name": str, "rooms": set[str], "current_room": str, "peer": (host, port)}
+# conn -> {"name", "rooms", "current_room"}
 clients = {}
 # room -> set of conn
 rooms = defaultdict(set)
@@ -31,9 +31,7 @@ HELP_LINES = (
     "[*] /switch <房间>  只在已加入的房间之间切换；未加入会提示先用 /join。\n",
     "[*] /part <房间>    退出某房间；至少保留一间，不能退出最后一个。\n",
     "[*] /rooms         列出你已加入的房间；前面带 * 的是当前活跃房间。\n",
-    "[*] /names 或 /users  列出当前活跃房间内的昵称（不含 IP，二者相同）。\n",
-    "[*] /whois [昵称]     查看当前房间内用户的连接 IP（TCP 对端地址，类似 irssi 的 /whois）。\n",
-    "[*]              不写昵称则列出本房间全员；昵称大小写不敏感。\n",
+    "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
     "[*]\n",
     "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
     "[*] /msg <昵称> <文字>   私聊：发给该昵称的在线用户（大小写不敏感）。\n",
@@ -44,6 +42,14 @@ HELP_LINES = (
     "[*]\n",
     "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
 )
+
+
+def _parse_handshake_line(raw: str) -> str:
+    """First line: nickname only (optional tab suffix from old clients is ignored)."""
+    line = raw.strip()
+    if not line:
+        return "Unknown"
+    return line.split("\t", 1)[0].strip() or "Unknown"
 
 
 def normalize_room(name: str) -> Optional[str]:
@@ -308,37 +314,6 @@ def handle_command(conn, payload: str) -> None:
         )
         return
 
-    if cmd == "/whois":
-        parts2 = payload.split(None, 1)
-        nick_q = parts2[1].strip().lower() if len(parts2) > 1 and parts2[1].strip() else ""
-        with lock:
-            if conn not in clients:
-                return
-            r = clients[conn]["current_room"]
-            rows: list[tuple[str, str]] = []
-            for c in rooms.get(r, ()):
-                if c not in clients:
-                    continue
-                info_c = clients[c]
-                host, _port = info_c.get("peer", ("?", 0))
-                rows.append((info_c["name"], str(host)))
-        if not rows:
-            send_line(conn, f"[*] #{r}: (empty)\n")
-            return
-        if nick_q:
-            hits = [(n, h) for n, h in rows if n.lower() == nick_q]
-            if not hits:
-                send_line(conn, f"[*] {parts2[1].strip()!r} is not in #{r}\n")
-                return
-            send_line(conn, f"[*] /whois #{r}\n")
-            for n, h in sorted(hits, key=lambda t: t[0].lower()):
-                send_line(conn, f"[*]   {n} {h}\n")
-            return
-        send_line(conn, f"[*] /whois #{r} ({len(rows)})\n")
-        for n, h in sorted(rows, key=lambda t: t[0].lower()):
-            send_line(conn, f"[*]   {n} {h}\n")
-        return
-
     if cmd in ("/clear", "/cls"):
         send_line(conn, _CLEAR_SCREEN)
         send_line(conn, _SCREEN_CLEARED_ACK)
@@ -396,25 +371,24 @@ def handle_client(conn, addr) -> None:
                 return
             buffer += chunk
         first, buffer = buffer.split(b"\n", 1)
-        name = first.decode("utf-8").strip() or "Unknown"
+        name = _parse_handshake_line(first.decode("utf-8", errors="replace"))
 
         with lock:
             clients[conn] = {
                 "name": name,
                 "rooms": {DEFAULT_ROOM},
                 "current_room": DEFAULT_ROOM,
-                "peer": (addr[0], addr[1]),
             }
             rooms[DEFAULT_ROOM].add(conn)
 
-        print(f"{name} joined #{DEFAULT_ROOM} ({addr})")
+        print(f"{name} joined #{DEFAULT_ROOM} (tcp_peer={addr[0]!r}:{addr[1]})")
 
         join_msg = f"[+] {name} joined #{DEFAULT_ROOM}\n".encode("utf-8")
         broadcast_room(DEFAULT_ROOM, join_msg, exclude_conn=conn)
         send_line(
             conn,
             f"[*] Active room #{DEFAULT_ROOM}. "
-            f"/names /whois /rooms /join /switch /msg /part /clear /help\n",
+            f"/names /rooms /join /switch /msg /part /clear /help\n",
         )
 
         while True:

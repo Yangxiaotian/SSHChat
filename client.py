@@ -283,12 +283,11 @@ def main():
         print("[ERROR] cannot connect to server")
         return
 
-    # send username
     s.send((name + "\n").encode("utf-8"))
 
     print("[OK] connected as " + name)
     print(
-        "Commands: /names  /whois  /rooms  /join <room>  /switch <room>  "
+        "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
         "/clear  /help"
     )
