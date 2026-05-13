@@ -6,3 +6,4 @@ dist-packages/
 dist-packages-*/
 *.spec
 *.spec.bak
+venv/
