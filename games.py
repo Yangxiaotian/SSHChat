@@ -37,6 +37,14 @@ GameResult = tuple[list[str], list[str], bool]
 
 GOMOKU_SIZE = 15
 
+# Chess file rows: corners must match the *visual* width of ``f"{n:>2} "`` /
+# ``f" {n:>2}"`` in proportional fonts (plain spaces are often narrower than
+# digits). FIGURE SPACE (U+2007) is intended to equal digit width in tabular
+# contexts; we still use normal spaces where the rank gutters use them.
+_CHESS_FS = "\u2007"
+_CHESS_FILE_CORNER_L = " " + _CHESS_FS + " "
+_CHESS_FILE_CORNER_R = "  " + _CHESS_FS
+
 
 def _color_label(color: bool) -> str:
     return "白" if color == _chess.WHITE else "黑"
@@ -64,14 +72,14 @@ def _render_board(board, *, last_move=None):
     # highlight. Header uses the same per-cell format so files line up with
     # piece symbols even when highlights are present.
     # Left/right rank gutters are both 3 chars (same idea as gomoku's
-    # ``f"{n:>2} "`` / ``f" {n:>2}"``). File rows use three spaces in each
-    # corner (not rank digits) but the same total width so `` a `` lines up
-    # with `` r `` / `` R `` in the cells below/above.
+    # ``f"{n:>2} "`` / ``f" {n:>2}"``). File rows use blank corners that mimic
+    # the space/digit/space width of rank gutters (``_CHESS_FILE_CORNER_*``) so
+    # `` a `` stays under `` r `` / `` R `` even in proportional-width UIs.
     def col_label(ch: str) -> str:
         return f" {ch} "
 
     file_row = "".join(col_label(c) for c in "abcdefgh")
-    file_lines = "   " + file_row + "   "
+    file_lines = _CHESS_FILE_CORNER_L + file_row + _CHESS_FILE_CORNER_R
     lines = [file_lines]
     for rank in range(8, 0, -1):
         cells = []
