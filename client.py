@@ -228,8 +228,7 @@ def _is_clear_csi_line(line: str) -> bool:
 
 
 def recv_msg(sock, my_name: str):
-    notif_buf = ""
-    print_buf = ""
+    byte_buf = bytearray()
     while True:
         try:
             data = sock.recv(1024)
@@ -238,32 +237,30 @@ def recv_msg(sock, my_name: str):
                 _DISCONNECTED.set()
                 break
 
-            text = data.decode("utf-8", errors="replace").replace("\a", "")
-            text = text.replace("\r\n", "\n").replace("\r", "")
+            byte_buf.extend(data)
+            while True:
+                nl = byte_buf.find(b"\n")
+                if nl < 0:
+                    break
+                line_bytes = bytes(byte_buf[:nl])
+                del byte_buf[: nl + 1]
+                line_bytes = line_bytes.replace(b"\r", b"")
+                text = line_bytes.decode("utf-8", errors="replace").replace("\a", "")
 
-            notif_buf += text
-            print_buf += text
-            while "\n" in notif_buf:
-                line, notif_buf = notif_buf.split("\n", 1)
-                ok, sender, preview = _line_is_peer_chat(line, my_name)
+                ok, sender, preview = _line_is_peer_chat(text, my_name)
                 if ok:
                     maybe_alert_incoming(sender, preview)
 
-            out_lines: list[str] = []
-            while "\n" in print_buf:
-                line, print_buf = print_buf.split("\n", 1)
-                if _should_skip_display_line(line):
+                if _should_skip_display_line(text):
                     continue
-                if _consume_sent_input_echo(line):
+                if _consume_sent_input_echo(text):
                     continue
-                if _is_clear_csi_line(line):
-                    # Do not print CSI (often echoed as "?[2J?[H"); ack line triggers clear.
+                if _is_clear_csi_line(text):
                     continue
-                if _SCREEN_CLEARED_ACK_RE.match(line.strip()):
+                if _SCREEN_CLEARED_ACK_RE.match(text.strip()):
                     _terminal_hard_clear()
-                out_lines.append(_format_display_line(line, my_name))
-            if out_lines:
-                print("".join(out_lines), end="", flush=True)
+                out = _format_display_line(text, my_name)
+                print(out, end="", flush=True)
 
         except Exception:
             print("\n[ERROR] receive failed")
@@ -291,7 +288,7 @@ def main():
     print(
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
-        "/announce  /game  /clear  /help"
+        "/announce  /game  /news  /news fetch <类> <号>  /clear  /help"
     )
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
