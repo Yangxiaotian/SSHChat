@@ -41,8 +41,9 @@ _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _OTHER_ESC_RE = re.compile(r"\x1b[\][()#%][\d\"A-Za-z]*")
 _PROMPT_PREFIX_RE = re.compile(r"(?:^|\s)>+\s*")
-_CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
-_ROOM_CHAT_LINE_RE = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\]\s*(.*)$")
+# Single space after `]` before body preserves user-leading spaces in chat.
+_CHAT_LINE_RE = re.compile(r"^\[([^\]]+)\] (.*)$")
+_ROOM_CHAT_LINE_RE = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\] (.*)$")
 _TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
 _TIME_ANY_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]\s*")
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -94,10 +95,10 @@ def _parse_chat_line(line: str) -> tuple[str, str, str] | None:
         return m_room.group(1), m_room.group(2), m_room.group(3)
     m = _CHAT_LINE_RE.match(t)
     if not m:
-        all_matches = re.findall(r"\[([^\]]+)\]\s*([^\[]*)", t)
+        all_matches = re.findall(r"\[([^\]]+)\] ([^\[]*)", t)
         if all_matches:
             sender, body = all_matches[-1]
-            return "", sender.strip(), body.strip()
+            return "", sender.strip(), body
         return None
     return "", m.group(1), m.group(2)
 

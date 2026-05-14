@@ -63,19 +63,12 @@ def _render_board(board, *, last_move=None):
     # Each cell is 3 chars wide: " P " for plain or "(P)" for last-move
     # highlight. Header uses the same per-cell format so files line up with
     # piece symbols even when highlights are present.
-    # Left/right rank gutters are both 3 chars (same idea as gomoku's
-    # ``f"{n:>2} "`` / ``f" {n:>2}"``). The a–h rows reuse the same corner
-    # strings as the adjacent rank (8 above, 1 below): plain spaces in the
-    # corners line up in a strict monospace terminal, but many proportional or
-    # web UIs render spaces narrower than digits so columns drift; matching the
-    # real rank digits keeps file letters over the correct squares everywhere.
     def col_label(ch: str) -> str:
         return f" {ch} "
 
     file_row = "".join(col_label(c) for c in "abcdefgh")
-    top_files = f"{8:>2} " + file_row + f" {8:>2}"
-    bottom_files = f"{1:>2} " + file_row + f" {1:>2}"
-    lines = [top_files]
+    # Align file letters under the piece grid (same 3-char gutter as rank column).
+    lines = ["   " + file_row]
     for rank in range(8, 0, -1):
         cells = []
         for f in range(8):
@@ -83,8 +76,8 @@ def _render_board(board, *, last_move=None):
             piece = board.piece_at(sq)
             sym = piece.symbol() if piece else "."
             cells.append(f"({sym})" if sq in hi else f" {sym} ")
-        lines.append(f"{rank:>2} " + "".join(cells) + f" {rank:>2}")
-    lines.append(bottom_files)
+        lines.append(f"{rank:>2} " + "".join(cells))
+    lines.append("   " + file_row)
     if last_move is not None:
         lines.append(
             f"  上一步：{board.fullmove_number} "
@@ -406,7 +399,7 @@ def _gomoku_render(
                 row_cells.append(f"({ch})")
             else:
                 row_cells.append(f" {ch} ")
-        lines.append(f"{r + 1:>2} " + "".join(row_cells) + f" {r + 1:>2}")
+        lines.append(f"{r + 1:>2} " + "".join(row_cells))
     lines.append(hdr)
     if last is not None:
         lines.append(f"  上一步：({last[0] + 1}, {last[1] + 1})  （行 列，1 起算，左上为 1,1）")

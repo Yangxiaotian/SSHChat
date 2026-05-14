@@ -21,8 +21,10 @@ name = pwd.getpwuid(os.getuid()).pw_name
 # beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
 _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
 _ALERT_SOUND = (os.environ.get("SSHCHAT_ALERT_SOUND") or "auto").strip().lower()
-_ROOM_CHAT_PREFIX = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\]\s+(.*)$")
-_CHAT_PREFIX = re.compile(r"^\[([^\]]+)\]\s+(.*)$")
+# One ASCII space after `]` separates sender from body; do not use `\s+` here
+# or leading spaces in the message (e.g. ASCII art / board padding) are lost.
+_ROOM_CHAT_PREFIX = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\] (.*)$")
+_CHAT_PREFIX = re.compile(r"^\[([^\]]+)\] (.*)$")
 _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
