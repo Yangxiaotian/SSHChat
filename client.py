@@ -35,6 +35,12 @@ _PENDING_INPUT_ECHOES: deque[str] = deque(maxlen=32)
 _CLEAR_CSI_STRICT = re.compile(r"^\s*\x1b\[2J\x1b\[H\s*$")
 _CLEAR_CSI_MANGLED = re.compile(r"^\s*\?\[2J\?\[H\s*$")
 _SCREEN_CLEARED_ACK_RE = re.compile(r"^\[\*\]\s*Screen cleared\.\s*$")
+# Xiangqi: server sends {{R}}…{{/R}} markup. SSH/PTY often eats ESC (shows "?[91m"),
+# so never emit ANSI on SSH sessions unless SSHCHAT_XIANGQI_COLOR=ansi is forced.
+_XQ_RED_MARK = re.compile(r"\{\{R\}\}(.*?)\{\{/R\}\}")
+_XQ_BLACK_MARK = re.compile(r"\{\{B\}\}(.*?)\{\{/B\}\}")
+_RAW_ANSI_INLINE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
+_MANGLED_CSI_INLINE = re.compile(r"\?\[[\d;?]*[A-Za-z]")
 
 
 def _terminal_size() -> Size:
@@ -165,19 +171,65 @@ def _format_time(ts: datetime) -> str:
     return ts.strftime("%H:%M:%S")
 
 
+def _xiangqi_use_ansi() -> bool:
+    pref = (
+        os.environ.get("SSHCHAT_XIANGQI_COLOR")
+        or os.environ.get("SSHCHAT_COLOR")
+        or "auto"
+    ).strip().lower()
+    if pref in ("0", "off", "none", "no", "plain", "paren", "markers"):
+        return False
+    if pref in ("ansi", "color", "1", "yes", "on"):
+        if os.environ.get("SSHCHAT_XIANGQI_COLOR_FORCE") == "1":
+            return sys.stdout.isatty()
+        if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"):
+            return False
+        return sys.stdout.isatty()
+    # auto: local TTY only; SSH chat sessions use (红) / <黑> markers instead.
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _expand_xiangqi_color(text: str) -> str:
+    """Render xiangqi markup for this terminal (ANSI, or SSH-safe parentheses)."""
+    text = _RAW_ANSI_INLINE.sub("", text)
+    text = _MANGLED_CSI_INLINE.sub("", text)
+    if _xiangqi_use_ansi():
+
+        def _red(m: re.Match[str]) -> str:
+            return f"\033[91m{m.group(1)}\033[0m"
+
+        def _black(m: re.Match[str]) -> str:
+            return f"\033[1;37m{m.group(1)}\033[0m"
+
+        text = _XQ_RED_MARK.sub(_red, text)
+        return _XQ_BLACK_MARK.sub(_black, text)
+    # Legacy markup → +/-/! prefix form.
+    text = _XQ_RED_MARK.sub(r"+\1", text)
+    text = _XQ_BLACK_MARK.sub(r"-\1", text)
+    text = re.sub(r"【(.*?)】", r"+\1", text)
+    text = re.sub(r"〔(.*?)〕", r"-\1", text)
+    return text
+
+
 def _format_display_line(line: str, my_name: str) -> str:
     # If line was already decorated by a local renderer, avoid double-prefixing.
     if re.match(r"^\[\d{2}:\d{2}:\d{2}\] ", line):
-        return line + ("\n" if not line.endswith("\n") else "")
+        return _expand_xiangqi_color(
+            line + ("\n" if not line.endswith("\n") else "")
+        )
     ts = datetime.now()
     _DISPLAY_TIMES.append(ts)
     time_label = _format_time(ts)
     room, sender, payload = _parse_chat_line(line)
     if not sender:
-        return f"[{time_label}] {line}\n"
+        return _expand_xiangqi_color(f"[{time_label}] {line}\n")
     if room:
-        return f"[{time_label}] [#{room}] [{sender}] {payload}\n"
-    return f"[{time_label}] [{sender}] {payload}\n"
+        body = _expand_xiangqi_color(payload)
+        return f"[{time_label}] [#{room}] [{sender}] {body}\n"
+    body = _expand_xiangqi_color(payload)
+    return f"[{time_label}] [{sender}] {body}\n"
 
 
 def _should_skip_display_line(line: str) -> bool:

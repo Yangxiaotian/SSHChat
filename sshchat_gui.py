@@ -47,6 +47,12 @@ _ROOM_CHAT_LINE_RE = re.compile(r"^\[#([^\]]+)\]\s+\[([^\]]+)\] (.*)$")
 _TIME_PREFIX_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
 _TIME_ANY_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]\s*")
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MANGLED_CSI_RE = re.compile(r"\?\[[\d;?]*[A-Za-z]")
+_XQ_COLOR_SEG = re.compile(
+    r"!([车马炮相仕帅将士象兵卒])"
+    r"|\+([车马炮相仕帅将士象兵卒])"
+    r"|-([车马炮相仕帅将士象兵卒])",
+)
 _LEADING_GARBAGE_RE = re.compile(r"^[\s\uFFFD\u25A1\uFEFF\u00A0]+")
 _SPACE_RE = re.compile(r"\s+")
 _MAX_ROOM_HISTORY = 4000
@@ -56,6 +62,7 @@ _DRAIN_BATCH_ITEMS = 200
 def _clean_chunk(s: str) -> str:
     s = _OSC_RE.sub("", s)
     s = _CSI_RE.sub("", s)
+    s = _MANGLED_CSI_RE.sub("", s)
     s = _OTHER_ESC_RE.sub("", s)
     s = _CTRL_CHARS_RE.sub("", s)
     # Normalize lone CR from PTY without merging unrelated lines.
@@ -240,6 +247,8 @@ class SSHChatGUI:
         self.log.tag_configure("me", foreground="#2e7d32")
         self.log.tag_configure("peer", foreground="#1565c0")
         self.log.tag_configure("system", foreground="#8e24aa")
+        self.log.tag_configure("xq_red", foreground="#c62828")
+        self.log.tag_configure("xq_black", foreground="#263238")
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -318,10 +327,7 @@ class SSHChatGUI:
         self.log.configure(state=tk.NORMAL)
         self.log.delete("1.0", tk.END)
         for text, tag in entries:
-            if tag:
-                self.log.insert(tk.END, text, (tag,))
-            else:
-                self.log.insert(tk.END, text)
+            self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
@@ -348,6 +354,45 @@ class SSHChatGUI:
             return
         self._switch_room_local(room, send_switch=True)
 
+    def _insert_log_fragment(self, text: str, tag: str) -> None:
+        if (
+            "{{R}}" in text
+            or "{{B}}" in text
+            or "【" in text
+            or "〔" in text
+            or re.search(r"[+\-!][车马炮相仕帅将士象兵卒]", text)
+        ):
+            self._insert_xiangqi_colored(text, tag)
+            return
+        if tag:
+            self.log.insert(tk.END, text, (tag,))
+        else:
+            self.log.insert(tk.END, text)
+
+    def _insert_xiangqi_colored(self, text: str, base_tag: str) -> None:
+        pos = 0
+        for m in _XQ_COLOR_SEG.finditer(text):
+            if m.start() > pos:
+                chunk = text[pos : m.start()]
+                if base_tag:
+                    self.log.insert(tk.END, chunk, (base_tag,))
+                else:
+                    self.log.insert(tk.END, chunk)
+            if m.group(1) is not None:
+                piece_out, ptag = "!" + m.group(1), "xq_red"
+            elif m.group(2) is not None:
+                piece_out, ptag = "+" + m.group(2), "xq_red"
+            else:
+                piece_out, ptag = "-" + m.group(3), "xq_black"
+            self.log.insert(tk.END, piece_out, (ptag,))
+            pos = m.end()
+        if pos < len(text):
+            tail = text[pos:]
+            if base_tag:
+                self.log.insert(tk.END, tail, (base_tag,))
+            else:
+                self.log.insert(tk.END, tail)
+
     def _append_room_entry(self, room: str, text: str, tag: str = "") -> None:
         self._ensure_room(room)
         history = self._room_history[room]
@@ -356,10 +401,7 @@ class SSHChatGUI:
             del history[: len(history) - _MAX_ROOM_HISTORY]
         if room == self._active_room and not self._is_minimized:
             self.log.configure(state=tk.NORMAL)
-            if tag:
-                self.log.insert(tk.END, text, (tag,))
-            else:
-                self.log.insert(tk.END, text)
+            self._insert_log_fragment(text, tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
         else:

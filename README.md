@@ -86,7 +86,7 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 | `/msg #房间名 内容` | 不切换当前房间，向指定房间发一行话（`#` 开头表示房间） |
 | `/msg 昵称 内容` | 私聊该昵称（大小写不敏感；同昵称多人则都会收到） |
 | `/game help` | 查看房间小游戏用法 |
-| `/game new chess` 或 `/game new gomoku` | 在当前房间开一局国际象棋或五子棋 |
+| `/game new chess`、`gomoku` 或 `xiangqi` | 在当前房间开一局国际象棋、五子棋或中国象棋 |
 | `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
 | `/news 中文`、`/news 国际`、`/news 科技` | 只看某一类；可加条数，如 `/news 科技 10` |
 | `/news detail 中文 2` 或 `/news 详情 中文 2` | 该分类列表 **第 2 条** 的更长 RSS 提要（非网页全文） |
@@ -102,9 +102,10 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 
 常用命令：
 
-- `/game list`：列出可玩游戏，目前有 `chess` 和 `gomoku`。
+- `/game list`：列出可玩游戏，目前有 `chess`、`gomoku`、`xiangqi`（别名 `cchess`）。
 - `/game new chess`：开国际象棋；发起人执白，另一人用 `/game join` 加入后执黑。走法支持 SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。
 - `/game new gomoku`：开 15×15 五子棋；发起人执黑先手。走法是 `/game move 行 列`，例如 `/game move 8 8` 或 `/game move 8,8`。
+- `/game new xiangqi`：开中国象棋；发起人执红先手。推荐 **棋谱记法**：`/game move 炮二平五`、`/game move 马2进3`（黑方纵线可用 1～9）；同线双子加 **前/后**（如 `前马进七`）。也可用坐标 `/game move 8 二 8 五`（行 1～10；红列 九…一，黑列 1…9）。棋盘用 **`+` 红子**、**`-` 黑子**、**`!` 上一步**（等宽字体下对齐）；底行纵线为红方 **九…一**（汉字），顶行为黑方 **1…9**。**第二席（对手）** 看到的棋盘会自动 **翻转**，己方始终在下方。
 - `/game join`：加入空席位。
 - `/game seats`：查看双方与对局状态。
 - `/game show`：重新显示棋盘。
@@ -114,7 +115,7 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 - `/game abort`：终止尚未开始的对局。
 - `/game end`：房主强制结束当前房间对局。
 
-`gomoku` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。如果没装，服务端仍能启动，但 `/game new chess` 会提示缺依赖。
+`gomoku` 与 `xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。如果没装，服务端仍能启动，但 `/game new chess` 会提示缺依赖。
 
 ### RSS 新闻
 

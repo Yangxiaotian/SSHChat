@@ -1,4 +1,4 @@
-"""Mini game framework: chess (python-chess) + gomoku for SSHChat.
+"""Mini game framework: chess (python-chess) + gomoku + xiangqi for SSHChat.
 
 Each game class exposes the same surface used by ``server.py``:
 ``try_join``, ``try_move``, ``resign``, ``abort``, ``seats``, ``show``,
@@ -8,6 +8,8 @@ Optional: ``pgn_export()`` for PGN (chess only).
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # noqa: SIM108
@@ -58,20 +60,28 @@ def _squares_of_last_move(move):
     return s
 
 
-def _render_board(board, *, last_move=None):
+def _chess_flip_square(sq: int) -> int:
+    return _chess.square(7 - _chess.square_file(sq), 7 - _chess.square_rank(sq))
+
+
+def _render_board(board, *, last_move=None, flip: bool = False):
     hi = _squares_of_last_move(last_move)
-    # Each cell is 3 chars wide: " P " for plain or "(P)" for last-move
-    # highlight. Header uses the same per-cell format so files line up with
-    # piece symbols even when highlights are present.
+    if flip:
+        hi = {_chess_flip_square(s) for s in hi}
+
     def col_label(ch: str) -> str:
         return f" {ch} "
 
-    file_row = "".join(col_label(c) for c in "abcdefgh")
-    # Align file letters under the piece grid (same 3-char gutter as rank column).
+    files = "hgfedcba" if flip else "abcdefgh"
+    file_row = "".join(col_label(c) for c in files)
+    ranks = range(1, 9) if flip else range(8, 0, -1)
     lines = ["   " + file_row]
-    for rank in range(8, 0, -1):
+    if flip:
+        lines.append("  （己方在下方）")
+    for rank in ranks:
         cells = []
-        for f in range(8):
+        file_range = range(7, -1, -1) if flip else range(8)
+        for f in file_range:
             sq = _chess.square(f, rank - 1)
             piece = board.piece_at(sq)
             sym = piece.symbol() if piece else "."
@@ -137,6 +147,14 @@ class ChessGame:
     def is_seated(self, conn) -> bool:
         return self.color_of(conn) is not None
 
+    def _viewer_flip(self, conn) -> bool:
+        return conn is not None and conn is self.black_conn
+
+    def _board_render(self, conn=None) -> list[str]:
+        return _render_board(
+            self.board, last_move=self._last_move, flip=self._viewer_flip(conn)
+        )
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -158,9 +176,8 @@ class ChessGame:
         bcast = [
             f"{name} 加入为黑方，对局开始！",
             f"白：{self.white_name}    黑：{self.black_name}",
+            f"轮到 白方 {self.white_name}（第 1 手）",
         ]
-        bcast.extend(_render_board(self.board, last_move=self._last_move))
-        bcast.append(f"轮到 白方 {self.white_name}（第 1 手）")
         return ([], bcast, False)
 
     def try_move(self, conn, raw: str) -> GameResult:
@@ -195,7 +212,6 @@ class ChessGame:
 
         mover = self.white_name if side == _chess.WHITE else self.black_name
         bcast = [f"{_color_label(side)}方 {mover} 走 {san}"]
-        bcast.extend(_render_board(self.board, last_move=self._last_move))
 
         outcome = self.board.outcome()
         if outcome is not None:
@@ -273,12 +289,12 @@ class ChessGame:
             f"  黑方：{self.black_name or '(空席, 可 /game join)'}",
         ]
 
-    def show(self) -> list[str]:
+    def show(self, conn=None) -> list[str]:
         lines = [
             f"chess 对局（{self.state}）  白：{self.white_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
-        lines.extend(_render_board(self.board, last_move=self._last_move))
+        lines.extend(self._board_render(conn))
         if self.state == "playing":
             color = self.board.turn
             who = self.white_name if color == _chess.WHITE else self.black_name
@@ -384,22 +400,31 @@ def _gomoku_render(
     grid: list[list[int]],
     *,
     last: Optional[tuple[int, int]] = None,
+    flip: bool = False,
 ) -> list[str]:
     """ASCII board: # = black (first), o = white. last move cell in parens."""
-    # 3-char cell ("(x)" or " x "), 3-char left prefix matching the column
-    # header offset, so stones sit directly under their column number.
-    hdr = "   " + "".join(f"{i:>2} " for i in range(1, GOMOKU_SIZE + 1))
+    col_nums = (
+        list(range(GOMOKU_SIZE, 0, -1))
+        if flip
+        else list(range(1, GOMOKU_SIZE + 1))
+    )
+    hdr = "   " + "".join(f"{i:>2} " for i in col_nums)
     lines = [hdr]
+    if flip:
+        lines.append("  （己方在下方；坐标仍按全局 1,1 左上）")
     sym = {0: ".", 1: "#", 2: "o"}
-    for r in range(GOMOKU_SIZE):
+    rows = range(GOMOKU_SIZE - 1, -1, -1) if flip else range(GOMOKU_SIZE)
+    cols = range(GOMOKU_SIZE - 1, -1, -1) if flip else range(GOMOKU_SIZE)
+    for r in rows:
         row_cells = []
-        for c in range(GOMOKU_SIZE):
+        for c in cols:
             ch = sym[grid[r][c]]
             if last is not None and (r, c) == last:
                 row_cells.append(f"({ch})")
             else:
                 row_cells.append(f" {ch} ")
-        lines.append(f"{r + 1:>2} " + "".join(row_cells))
+        label = (GOMOKU_SIZE - r) if flip else (r + 1)
+        lines.append(f"{label:>2} " + "".join(row_cells))
     lines.append(hdr)
     if last is not None:
         lines.append(f"  上一步：({last[0] + 1}, {last[1] + 1})  （行 列，1 起算，左上为 1,1）")
@@ -435,6 +460,15 @@ class GomokuGame:
             return 2
         return None
 
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _viewer_flip(self, conn) -> bool:
+        return conn is not None and conn is self.white_conn
+
+    def _board_render(self, conn=None) -> list[str]:
+        return _gomoku_render(self.grid, last=self._last, flip=self._viewer_flip(conn))
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -457,9 +491,8 @@ class GomokuGame:
             f"{name} 加入为白方，对局开始！",
             f"黑（先手）：{self.black_name}    白：{self.white_name}",
             "落子：/game move <行> <列>  例：8 8  或  8,8  （1～15，左上为 1,1）",
+            f"轮到 黑方 {self.black_name} 落子",
         ]
-        bcast.extend(_gomoku_render(self.grid, last=self._last))
-        bcast.append(f"轮到 黑方 {self.black_name} 落子")
         return ([], bcast, False)
 
     def try_move(self, conn, raw: str) -> GameResult:
@@ -493,7 +526,6 @@ class GomokuGame:
         bname = self.black_name if player == 1 else self.white_name
         stone = "黑" if player == 1 else "白"
         bcast = [f"{stone}方 {bname} 落子 ({row + 1}, {col + 1})"]
-        bcast.extend(_gomoku_render(self.grid, last=self._last))
 
         if _gomoku_winner_at(self.grid, row, col, player):
             self.state = "ended"
@@ -543,12 +575,12 @@ class GomokuGame:
             f"  白方：{self.white_name or '(空席, 可 /game join)'}",
         ]
 
-    def show(self) -> list[str]:
+    def show(self, conn=None) -> list[str]:
         lines = [
             f"gomoku 对局（{self.state}）  黑：{self.black_name}   "
             f"白：{self.white_name or '空席'}"
         ]
-        lines.extend(_gomoku_render(self.grid, last=self._last))
+        lines.extend(self._board_render(conn))
         if self.state == "playing":
             next_is_black = self._turn == 1
             nm = self.black_name if next_is_black else self.white_name
@@ -574,18 +606,854 @@ class GomokuGame:
         return ([], [], False)
 
 
-GAMES = {ChessGame.name: ChessGame, GomokuGame.name: GomokuGame}
+XIANGQI_ROWS = 10
+XIANGQI_COLS = 9
+_XQ_RED = 1
+_XQ_BLACK = -1
+_XQ_K, _XQ_A, _XQ_B, _XQ_N, _XQ_R, _XQ_C, _XQ_P = 1, 2, 3, 4, 5, 6, 7
+_XQ_SYM_RED = ("", "帅", "仕", "相", "马", "车", "炮", "兵")
+_XQ_SYM_BLACK = ("", "将", "士", "象", "马", "车", "炮", "卒")
+_XQ_CN_FILE = "一二三四五六七八九"  # 红方纵线：右=一 … 左=九
+_XQ_CN_RANK = "一二三四五六七八九"  # 进/退步数 1～9
+_XQ_CHAR_TO_TYPE = {
+    "帅": _XQ_K,
+    "将": _XQ_K,
+    "仕": _XQ_A,
+    "士": _XQ_A,
+    "相": _XQ_B,
+    "象": _XQ_B,
+    "马": _XQ_N,
+    "车": _XQ_R,
+    "炮": _XQ_C,
+    "兵": _XQ_P,
+    "卒": _XQ_P,
+}
+_XQ_LINE_PIECES = frozenset({_XQ_R, _XQ_C, _XQ_P, _XQ_K})
+_XQ_NOTATION_RE = re.compile(
+    r"^(?:(前|后))?"
+    r"([车马炮相仕帅将士象兵卒])"
+    r"([一二三四五六七八九1-9])?"
+    r"([进退平])"
+    r"([一二三四五六七八九1-9]+)$"
+)
+_XQ_CELL_W = 4  # 每格显示宽度；+车 / -车 / !车（上一步）适配 SSH 等宽字体
+_XQ_MARK_RE = re.compile(r"\{\{/?[RB]\}\}")
+
+
+def _xq_disp_width(text: str) -> int:
+    plain = _XQ_MARK_RE.sub("", text)
+    w = 0
+    for ch in plain:
+        if unicodedata.east_asian_width(ch) in ("F", "W"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _xq_pad(text: str, width: int) -> str:
+    pad = width - _xq_disp_width(text)
+    return text if pad <= 0 else text + (" " * pad)
+
+
+def _xq_cell_body(cell: int, *, highlight: bool) -> str:
+    if cell == 0:
+        return "*" if highlight else "·"
+    pt = _xq_piece_type(cell)
+    side = _xq_piece_side(cell)
+    assert side is not None
+    sym = _XQ_SYM_RED[pt] if side == _XQ_RED else _XQ_SYM_BLACK[pt]
+    if highlight:
+        return "!" + sym
+    return ("+" if side == _XQ_RED else "-") + sym
+
+
+def _xq_col_label(col: int, side: int) -> str:
+    """Traditional file: red 九..一 (right→left); black 1..9 (left→right)."""
+    if side == _XQ_RED:
+        return _XQ_CN_FILE[8 - col]
+    return str(col + 1)
+
+
+def _xq_digit_token(token: str) -> Optional[int]:
+    t = token.strip()
+    if not t:
+        return None
+    if t.isdigit():
+        n = int(t)
+    elif len(t) == 1 and t in _XQ_CN_FILE:
+        n = _XQ_CN_FILE.index(t) + 1
+    else:
+        return None
+    if 1 <= n <= 9:
+        return n
+    return None
+
+
+def _xq_col_from_token(token: str, side: int) -> Optional[int]:
+    n = _xq_digit_token(token)
+    if n is None:
+        return None
+    if side == _XQ_RED:
+        return XIANGQI_COLS - n
+    return n - 1
+
+
+def _xq_file_num(col: int, side: int) -> int:
+    if side == _XQ_RED:
+        return XIANGQI_COLS - col
+    return col + 1
+
+
+def _xq_rank_label(steps: int, side: int) -> str:
+    if side == _XQ_RED:
+        return _XQ_CN_RANK[steps - 1]
+    return str(steps)
+
+
+def _xq_is_forward(side: int, fr: int, tr: int) -> bool:
+    if side == _XQ_RED:
+        return tr < fr
+    return tr > fr
+
+
+def _xq_slide_dir_char(side: int, fc: int, tc: int) -> str:
+    """马/象/士的进退：纵线号朝棋盘中线一侧为「进」，另一侧为「退」。"""
+    ff = _xq_file_num(fc, side)
+    tf = _xq_file_num(tc, side)
+    if ff == tf:
+        return "平"
+    center = 5
+    if ff < center:
+        return "进" if tf > ff else "退"
+    if ff > center:
+        return "进" if tf < ff else "退"
+    return "进" if tf > ff else "退"
+
+
+def _xq_piece_char(pt: int, side: int) -> str:
+    if pt == _XQ_K:
+        return "帅" if side == _XQ_RED else "将"
+    if pt == _XQ_A:
+        return "仕" if side == _XQ_RED else "士"
+    if pt == _XQ_B:
+        return "相" if side == _XQ_RED else "象"
+    if pt == _XQ_P:
+        return "兵" if side == _XQ_RED else "卒"
+    return { _XQ_N: "马", _XQ_R: "车", _XQ_C: "炮" }[pt]
+
+
+def _xq_front_row(side: int, r: int, r2: int) -> int:
+    """Row index of the '前' piece when two same-type pieces share a file."""
+    if side == _XQ_RED:
+        return min(r, r2)
+    return max(r, r2)
+
+
+def _xq_match_notation_move(
+    board: list[list[int]],
+    side: int,
+    *,
+    pt: int,
+    prefix: Optional[str],
+    from_file_tok: Optional[str],
+    dir_char: str,
+    dest_tok: str,
+) -> Optional[tuple[int, int, int, int]]:
+    dest_num = _xq_digit_token(dest_tok)
+    if dest_num is None:
+        return None
+
+    matches: list[tuple[int, int, int, int]] = []
+    for fr, fc, tr, tc in _xq_legal_moves(board, side):
+        if _xq_piece_type(board[fr][fc]) != pt:
+            continue
+        if from_file_tok is not None:
+            want = _xq_digit_token(from_file_tok)
+            if want is None or _xq_file_num(fc, side) != want:
+                continue
+
+        same_file: dict[int, list[int]] = {}
+        for r in range(XIANGQI_ROWS):
+            cell = board[r][fc]
+            if _xq_piece_side(cell) == side and _xq_piece_type(cell) == pt:
+                same_file.setdefault(fc, []).append(r)
+        rows_on_file = same_file.get(fc, [fr])
+        if prefix and len(rows_on_file) >= 2:
+            other = [x for x in rows_on_file if x != fr][0]
+            front = _xq_front_row(side, fr, other)
+            if prefix == "前" and fr != front:
+                continue
+            if prefix == "后" and fr == front:
+                continue
+
+        dr, dc = tr - fr, tc - fc
+        if pt in _XQ_LINE_PIECES:
+            if dir_char == "平":
+                if dr != 0 or dc == 0:
+                    continue
+                if _xq_file_num(tc, side) != dest_num:
+                    continue
+            elif dir_char == "进":
+                if not _xq_is_forward(side, fr, tr):
+                    continue
+                if dc == 0:
+                    if abs(dr) != dest_num:
+                        continue
+                elif pt == _XQ_P and _xq_file_num(tc, side) != dest_num:
+                    continue
+                elif dc != 0:
+                    continue
+            elif dir_char == "退":
+                if _xq_is_forward(side, fr, tr):
+                    continue
+                if dc == 0:
+                    if abs(dr) != dest_num:
+                        continue
+                elif pt == _XQ_P and _xq_file_num(tc, side) != dest_num:
+                    continue
+                elif dc != 0:
+                    continue
+            else:
+                continue
+        else:
+            got = _xq_slide_dir_char(side, fc, tc)
+            if got != dir_char:
+                continue
+            if _xq_file_num(tc, side) != dest_num:
+                continue
+
+        matches.append((fr, fc, tr, tc))
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _xq_parse_notation(
+    raw: str, side: int, board: list[list[int]]
+) -> Optional[tuple[int, int, int, int]]:
+    s = raw.strip().replace(" ", "")
+    m = _XQ_NOTATION_RE.match(s)
+    if not m:
+        return None
+    prefix, pchar, ftoken, dir_char, dest_tok = m.groups()
+    pt = _XQ_CHAR_TO_TYPE.get(pchar)
+    if pt is None:
+        return None
+    return _xq_match_notation_move(
+        board,
+        side,
+        pt=pt,
+        prefix=prefix or None,
+        from_file_tok=ftoken or None,
+        dir_char=dir_char,
+        dest_tok=dest_tok,
+    )
+
+
+def _xq_format_notation(
+    board: list[list[int]], fr: int, fc: int, tr: int, tc: int, side: int
+) -> str:
+    pt = _xq_piece_type(board[fr][fc])
+    sym = _xq_piece_char(pt, side)
+    from_file = _xq_col_label(fc, side)
+
+    same_file_rows = [
+        r
+        for r in range(XIANGQI_ROWS)
+        if _xq_piece_side(board[r][fc]) == side and _xq_piece_type(board[r][fc]) == pt
+    ]
+    prefix = ""
+    if len(same_file_rows) >= 2:
+        front = _xq_front_row(side, same_file_rows[0], same_file_rows[1])
+        prefix = "前" if fr == front else "后"
+
+    dr, dc = tr - fr, tc - fc
+    if pt in _XQ_LINE_PIECES:
+        if dc == 0:
+            steps = abs(dr)
+            if _xq_is_forward(side, fr, tr):
+                dir_char = "进"
+            else:
+                dir_char = "退"
+            dest = _xq_rank_label(steps, side)
+        else:
+            dir_char = "平"
+            dest = _xq_col_label(tc, side)
+    else:
+        dir_char = _xq_slide_dir_char(side, fc, tc)
+        dest = _xq_col_label(tc, side)
+
+    return f"{prefix}{sym}{from_file}{dir_char}{dest}"
+
+
+def _xq_pos_label(row: int, col: int, side: int) -> str:
+    return f"{_xq_col_label(col, side)}{row + 1}"
+
+
+def _xq_format_cell(cell: int, *, highlight: bool) -> str:
+    return _xq_pad(_xq_cell_body(cell, highlight=highlight), _XQ_CELL_W)
+
+
+def _xq_file_header(side: int) -> str:
+    if side == _XQ_BLACK:
+        labels = [str(i) for i in range(1, XIANGQI_COLS + 1)]
+    else:
+        # 与棋盘格对齐：屏幕从左到右 九…一
+        labels = list(_XQ_CN_FILE[::-1])
+    return "   " + "".join(_xq_pad(lb, _XQ_CELL_W) for lb in labels)
+
+
+def _xq_piece_side(cell: int) -> Optional[int]:
+    if cell > 0:
+        return _XQ_RED
+    if cell < 0:
+        return _XQ_BLACK
+    return None
+
+
+def _xq_piece_type(cell: int) -> int:
+    return abs(cell)
+
+
+def _xq_in_palace(row: int, col: int, side: int) -> bool:
+    if not (3 <= col <= 5):
+        return False
+    if side == _XQ_RED:
+        return 7 <= row <= 9
+    return 0 <= row <= 2
+
+
+def _xq_king_pos(board: list[list[int]], side: int) -> Optional[tuple[int, int]]:
+    target = side * _XQ_K
+    for r in range(XIANGQI_ROWS):
+        for c in range(XIANGQI_COLS):
+            if board[r][c] == target:
+                return (r, c)
+    return None
+
+
+def _xq_flying_kings(board: list[list[int]]) -> bool:
+    rk = _xq_king_pos(board, _XQ_RED)
+    bk = _xq_king_pos(board, _XQ_BLACK)
+    if rk is None or bk is None:
+        return False
+    if rk[1] != bk[1]:
+        return False
+    lo, hi = sorted((rk[0], bk[0]))
+    for r in range(lo + 1, hi):
+        if board[r][rk[1]] != 0:
+            return False
+    return True
+
+
+def _xq_initial_board() -> list[list[int]]:
+    back = [_XQ_R, _XQ_N, _XQ_B, _XQ_A, _XQ_K, _XQ_A, _XQ_B, _XQ_N, _XQ_R]
+    board = [[0 for _ in range(XIANGQI_COLS)] for _ in range(XIANGQI_ROWS)]
+    for c, p in enumerate(back):
+        board[0][c] = -p
+        board[9][c] = p
+    board[2][1] = board[2][7] = -_XQ_C
+    board[7][1] = board[7][7] = _XQ_C
+    for c in range(0, XIANGQI_COLS, 2):
+        board[3][c] = -_XQ_P
+        board[6][c] = _XQ_P
+    return board
+
+
+def _xq_copy(board: list[list[int]]) -> list[list[int]]:
+    return [row[:] for row in board]
+
+
+def _xq_apply(board: list[list[int]], fr: int, fc: int, tr: int, tc: int) -> None:
+    board[tr][tc] = board[fr][fc]
+    board[fr][fc] = 0
+
+
+def _xq_gen_pseudo(
+    board: list[list[int]], row: int, col: int, *, captures_only: bool = False
+) -> list[tuple[int, int]]:
+    cell = board[row][col]
+    if cell == 0:
+        return []
+    side = _xq_piece_side(cell)
+    assert side is not None
+    pt = _xq_piece_type(cell)
+    out: list[tuple[int, int]] = []
+
+    def add(tr: int, tc: int) -> None:
+        if not (0 <= tr < XIANGQI_ROWS and 0 <= tc < XIANGQI_COLS):
+            return
+        target = board[tr][tc]
+        if target != 0 and _xq_piece_side(target) == side:
+            return
+        if captures_only and target == 0:
+            return
+        out.append((tr, tc))
+
+    if pt == _XQ_K:
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            tr, tc = row + dr, col + dc
+            if _xq_in_palace(tr, tc, side):
+                add(tr, tc)
+    elif pt == _XQ_A:
+        for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            tr, tc = row + dr, col + dc
+            if _xq_in_palace(tr, tc, side):
+                add(tr, tc)
+    elif pt == _XQ_B:
+        for dr, dc in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
+            tr, tc = row + dr, col + dc
+            eye_r, eye_c = row + dr // 2, col + dc // 2
+            if not (0 <= tr < XIANGQI_ROWS and 0 <= tc < XIANGQI_COLS):
+                continue
+            if board[eye_r][eye_c] != 0:
+                continue
+            if side == _XQ_RED and tr < 5:
+                continue
+            if side == _XQ_BLACK and tr > 4:
+                continue
+            add(tr, tc)
+    elif pt == _XQ_N:
+        legs = (
+            (-2, -1, -1, 0),
+            (-2, 1, -1, 0),
+            (2, -1, 1, 0),
+            (2, 1, 1, 0),
+            (-1, -2, 0, -1),
+            (-1, 2, 0, 1),
+            (1, -2, 0, -1),
+            (1, 2, 0, 1),
+        )
+        for dr, dc, lr, lc in legs:
+            lr_r, lc_c = row + lr, col + lc
+            if not (0 <= lr_r < XIANGQI_ROWS and 0 <= lc_c < XIANGQI_COLS):
+                continue
+            if board[lr_r][lc_c] != 0:
+                continue
+            add(row + dr, col + dc)
+    elif pt == _XQ_R:
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            r, c = row + dr, col + dc
+            while 0 <= r < XIANGQI_ROWS and 0 <= c < XIANGQI_COLS:
+                if board[r][c] == 0:
+                    if not captures_only:
+                        out.append((r, c))
+                else:
+                    if _xq_piece_side(board[r][c]) != side:
+                        out.append((r, c))
+                    break
+                r += dr
+                c += dc
+    elif pt == _XQ_C:
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            r, c = row + dr, col + dc
+            jumped = False
+            while 0 <= r < XIANGQI_ROWS and 0 <= c < XIANGQI_COLS:
+                if board[r][c] == 0:
+                    if not captures_only and not jumped:
+                        out.append((r, c))
+                elif not jumped:
+                    jumped = True
+                else:
+                    if _xq_piece_side(board[r][c]) != side:
+                        out.append((r, c))
+                    break
+                r += dr
+                c += dc
+    elif pt == _XQ_P:
+        if side == _XQ_RED:
+            add(row - 1, col)
+            if row <= 4:
+                add(row, col - 1)
+                add(row, col + 1)
+        else:
+            add(row + 1, col)
+            if row >= 5:
+                add(row, col - 1)
+                add(row, col + 1)
+    return out
+
+
+def _xq_is_attacked(
+    board: list[list[int]], row: int, col: int, by_side: int
+) -> bool:
+    for r in range(XIANGQI_ROWS):
+        for c in range(XIANGQI_COLS):
+            if _xq_piece_side(board[r][c]) != by_side:
+                continue
+            if (row, col) in _xq_gen_pseudo(board, r, c, captures_only=True):
+                return True
+            if _xq_piece_type(board[r][c]) == _XQ_K:
+                # 将帅对脸时同列无子隔也可视为被“照面”
+                if (
+                    board[row][col] == by_side * _XQ_K
+                    and c == col
+                    and abs(r - row) > 1
+                ):
+                    lo, hi = sorted((r, row))
+                    blocked = False
+                    for rr in range(lo + 1, hi):
+                        if board[rr][col] != 0:
+                            blocked = True
+                            break
+                    if not blocked:
+                        return True
+    return False
+
+
+def _xq_legal_moves(board: list[list[int]], side: int) -> list[tuple[int, int, int, int]]:
+    moves: list[tuple[int, int, int, int]] = []
+    for r in range(XIANGQI_ROWS):
+        for c in range(XIANGQI_COLS):
+            if _xq_piece_side(board[r][c]) != side:
+                continue
+            for tr, tc in _xq_gen_pseudo(board, r, c):
+                nb = _xq_copy(board)
+                _xq_apply(nb, r, c, tr, tc)
+                if _xq_flying_kings(nb):
+                    continue
+                kpos = _xq_king_pos(nb, side)
+                if kpos is not None and _xq_is_attacked(
+                    nb, kpos[0], kpos[1], -side
+                ):
+                    continue
+                moves.append((r, c, tr, tc))
+    return moves
+
+
+def _xq_parse_coord_move(
+    raw: str, side: int
+) -> Optional[tuple[int, int, int, int]]:
+    t = raw.strip().replace(",", " ")
+    parts = t.split()
+    if len(parts) != 4:
+        return None
+    try:
+        fr = int(parts[0])
+        tr = int(parts[2])
+    except ValueError:
+        return None
+    fc = _xq_col_from_token(parts[1], side)
+    tc = _xq_col_from_token(parts[3], side)
+    if fc is None or tc is None:
+        return None
+    if not (1 <= fr <= XIANGQI_ROWS and 1 <= tr <= XIANGQI_ROWS):
+        return None
+    return (fr - 1, fc, tr - 1, tc)
+
+
+def _xq_parse_move(
+    raw: str, side: int, board: list[list[int]]
+) -> Optional[tuple[int, int, int, int]]:
+    t = raw.strip()
+    if not t:
+        return None
+    coord = _xq_parse_coord_move(t, side)
+    if coord is not None:
+        return coord
+    return _xq_parse_notation(t, side, board)
+
+
+def _xq_move_label(
+    board: list[list[int]], fr: int, fc: int, tr: int, tc: int, side: int
+) -> str:
+    return _xq_format_notation(board, fr, fc, tr, tc, side)
+
+
+def _xq_render(
+    board: list[list[int]],
+    *,
+    last_from: Optional[tuple[int, int]] = None,
+    last_to: Optional[tuple[int, int]] = None,
+    last_notation: Optional[str] = None,
+    flip: bool = False,
+) -> list[str]:
+    hi: set[tuple[int, int]] = set()
+    if last_from is not None:
+        hi.add(last_from)
+    if last_to is not None:
+        hi.add(last_to)
+
+    row_ix = list(range(XIANGQI_ROWS - 1, -1, -1)) if flip else list(range(XIANGQI_ROWS))
+    col_ix = list(range(XIANGQI_COLS - 1, -1, -1)) if flip else list(range(XIANGQI_COLS))
+
+    board_w = _xq_disp_width("   ") + XIANGQI_COLS * _XQ_CELL_W
+    if flip:
+        top_hdr = _xq_file_header(_XQ_RED) + "  ← 红方纵线 九…一"
+        bot_hdr = _xq_file_header(_XQ_BLACK) + "  ← 黑方 1～9"
+    else:
+        top_hdr = _xq_file_header(_XQ_BLACK) + "  ← 黑方 1～9"
+        bot_hdr = _xq_file_header(_XQ_RED) + "  ← 红方纵线 九…一（右为一）"
+    lines = [
+        top_hdr,
+        "  图例：+红  -黑  !上一步  ·空  （请用等宽字体）",
+    ]
+    if flip:
+        lines.append("  （己方在下方）")
+    prev_r: Optional[int] = None
+    for r in row_ix:
+        cells = [
+            _xq_format_cell(board[r][c], highlight=(r, c) in hi) for c in col_ix
+        ]
+        label = (XIANGQI_ROWS - r) if flip else (r + 1)
+        lines.append(f"{label:>2} " + "".join(cells))
+        if prev_r is not None and {prev_r, r} == {4, 5}:
+            river = "楚河汉界"
+            pad = max(0, board_w - _xq_disp_width(river))
+            lines.append(" " * (pad // 2) + river)
+        prev_r = r
+    lines.append(bot_hdr)
+    if last_notation:
+        lines.append(f"  上一步：{last_notation}")
+    return lines
+
+
+class XiangqiGame:
+    """Chinese chess (xiangqi). Creator = red (先手); joiner = black."""
+
+    name = "xiangqi"
+    first_seat_desc = "红方（先手）"
+    second_seat_desc = "黑方"
+
+    def __init__(self, red_conn, red_name: str) -> None:
+        self.board = _xq_initial_board()
+        self.red_conn = red_conn
+        self.red_name = red_name
+        self.black_conn = None
+        self.black_name: Optional[str] = None
+        self.state = "waiting"
+        self._turn = _XQ_RED
+        self._last_from: Optional[tuple[int, int]] = None
+        self._last_to: Optional[tuple[int, int]] = None
+        self._last_mover_side: Optional[int] = None
+        self._last_notation: Optional[str] = None
+
+    def _side_of(self, conn) -> Optional[int]:
+        if conn is self.red_conn:
+            return _XQ_RED
+        if conn is self.black_conn:
+            return _XQ_BLACK
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self._side_of(conn) is not None
+
+    def _viewer_flip(self, conn) -> bool:
+        return conn is not None and conn is self.black_conn
+
+    def _board_render(self, conn=None) -> list[str]:
+        return _xq_render(
+            self.board,
+            last_from=self._last_from,
+            last_to=self._last_to,
+            last_notation=self._last_notation,
+            flip=self._viewer_flip(conn),
+        )
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (
+                [f"对局已结束，请先 /game new {self.name} 开新局。"],
+                [],
+                False,
+            )
+        if conn is self.red_conn:
+            return (["你已经是红方。"], [], False)
+        if self.black_conn is not None:
+            return (
+                [f"黑方席位已被 {self.black_name} 占。"],
+                [],
+                False,
+            )
+        self.black_conn = conn
+        self.black_name = name
+        self.state = "playing"
+        bcast = [
+            f"{name} 加入为黑方，对局开始！",
+            f"红（先手）：{self.red_name}    黑：{self.black_name}",
+            "走子：/game move <棋谱>  例：炮二平五、马2进3",
+            "  也可用坐标：/game move 8 二 8 五（行 1～10；红列 九…一/黑列 1～9）",
+            "  同线双子用 前/后；棋盘 +红 -黑 !上一步",
+            f"轮到 红方 {self.red_name} 走子",
+        ]
+        return ([], bcast, False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["对局尚未开始，等黑方 /game join。"], [], False)
+        if self.state != "playing":
+            return (["对局已结束。"], [], False)
+        side = self._side_of(conn)
+        if side is None:
+            return (["你不是对局双方（可 /game show 围观）。"], [], False)
+        if side != self._turn:
+            return (["不是你的回合。"], [], False)
+
+        parsed = _xq_parse_move(raw, side, self.board)
+        if parsed is None:
+            hint = ""
+            compact = raw.strip().replace(" ", "")
+            if _XQ_NOTATION_RE.match(compact):
+                hint = "（棋谱格式已识别，但无合法着法或同型子歧义，试加 前/后）"
+            return (
+                [
+                    "用法：/game move <棋谱>  例：炮二平五、马二进三、马2进3",
+                    "  同线双子加 前/后；或坐标四元组（红列 九…一，黑列 1…9）",
+                    hint,
+                ],
+                [],
+                False,
+            )
+        fr, fc, tr, tc = parsed
+        legal = _xq_legal_moves(self.board, side)
+        if (fr, fc, tr, tc) not in legal:
+            if self.board[fr][fc] == 0:
+                return (["起点无子。"], [], False)
+            if _xq_piece_side(self.board[fr][fc]) != side:
+                return (["不能移动对方的棋子。"], [], False)
+            return (["该走法不合法（蹩马腿、塞象眼、出九宫、照面等）。"], [], False)
+
+        label = _xq_move_label(self.board, fr, fc, tr, tc, side)
+        captured = self.board[tr][tc]
+        _xq_apply(self.board, fr, fc, tr, tc)
+        self._last_from = (fr, fc)
+        self._last_to = (tr, tc)
+        self._last_mover_side = side
+        self._last_notation = label
+
+        mover = self.red_name if side == _XQ_RED else self.black_name
+        color = "红" if side == _XQ_RED else "黑"
+        bcast = [f"{color}方 {mover} 走 {label}"]
+
+        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
+            self.state = "ended"
+            bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
+            return ([], bcast, True)
+
+        self._turn = -side
+        opp_moves = _xq_legal_moves(self.board, self._turn)
+        opp_k = _xq_king_pos(self.board, self._turn)
+        in_check = (
+            opp_k is not None
+            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], side)
+        )
+        if not opp_moves:
+            self.state = "ended"
+            if in_check:
+                bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
+            else:
+                bcast.append("对局结束：双方无合法着法，和棋。")
+            return ([], bcast, True)
+
+        next_name = self.red_name if self._turn == _XQ_RED else self.black_name
+        next_color = "红" if self._turn == _XQ_RED else "黑"
+        suffix = "（将军）" if in_check else ""
+        bcast.append(f"轮到 {next_color}方 {next_name} 走子{suffix}")
+        return ([], bcast, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["对局尚未开始或已结束，无需认负。"], [], False)
+        side = self._side_of(conn)
+        if side is None:
+            return (["你不是对局双方。"], [], False)
+        self.state = "ended"
+        if side == _XQ_RED:
+            return ([], [f"红方 {name} 认负 — 黑胜"], True)
+        return ([], [f"黑方 {name} 认负 — 红胜"], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+        if self._side_of(conn) is None:
+            return (["你不是对局双方，无法终止。"], [], False)
+        if self.state == "playing":
+            return (
+                ["已开始的对局请用 /game resign 认负，不能 /game abort。"],
+                [],
+                False,
+            )
+        self.state = "ended"
+        return ([], [f"{name} 终止了对局（未开始）。"], True)
+
+    def seats(self) -> list[str]:
+        return [
+            f"xiangqi 对局状态：{self.state}",
+            f"  红方（先手）：{self.red_name}",
+            f"  黑方：{self.black_name or '(空席, 可 /game join)'}",
+        ]
+
+    def show(self, conn=None) -> list[str]:
+        lines = [
+            f"xiangqi 对局（{self.state}）  红：{self.red_name}   "
+            f"黑：{self.black_name or '空席'}"
+        ]
+        lines.extend(self._board_render(conn))
+        if self.state == "playing":
+            nm = self.red_name if self._turn == _XQ_RED else self.black_name
+            color = "红" if self._turn == _XQ_RED else "黑"
+            kpos = _xq_king_pos(self.board, self._turn)
+            suffix = ""
+            if kpos is not None and _xq_is_attacked(
+                self.board, kpos[0], kpos[1], -self._turn
+            ):
+                suffix = "（被将军）"
+            lines.append(f"轮到 {color}方 {nm} 走子{suffix}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        side = self._side_of(conn)
+        if side is None:
+            return ([], [], False)
+        if conn is self.red_conn:
+            self.red_conn = None
+        if conn is self.black_conn:
+            self.black_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} 离开，对局取消。"], True)
+        if self.state == "playing":
+            self.state = "ended"
+            if side == _XQ_RED:
+                return ([], [f"红方 {name} 离开 — 黑胜"], True)
+            return ([], [f"黑方 {name} 离开 — 红胜"], True)
+        return ([], [], False)
+
+
+GAMES = {
+    ChessGame.name: ChessGame,
+    GomokuGame.name: GomokuGame,
+    XiangqiGame.name: XiangqiGame,
+}
+GAME_ALIASES = {"cchess": XiangqiGame.name}
+
+
+def resolve_game_name(name: str) -> str:
+    """Map alias (e.g. cchess) to canonical game id."""
+    key = name.lower()
+    return GAME_ALIASES.get(key, key)
+
+
+def list_game_names() -> list[str]:
+    """Canonical game ids for /game list (aliases documented in help)."""
+    return sorted(GAMES)
 
 
 HELP_LINES = (
     "[*] /game list             列出可玩游戏。",
-    "[*] /game new <名称>       在当前房间开一局；发起人坐第一席（chess: 白；gomoku: 黑先手）。",
+    "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
+    "（chess: 白；gomoku/xiangqi: 黑/红先手）。",
     "[*] /game join             加入空第二席。",
     "[*] /game seats            显示双方与对局状态。",
-    "[*] /game show             重新显示棋盘。",
+    "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] chess 棋盘上下坐标行两端的 8/1 与邻行相同，用于列对齐；"
     "若仍错位请用等宽字体或 SSH 终端查看。",
-    "[*] /game move …           chess: SAN/UCI；gomoku: 行 列（1～15），如 8 8。",
+    "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"
+    "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组。",
+    "[*] xiangqi 也可用别名 cchess 开局。",
+    "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",

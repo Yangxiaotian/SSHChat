@@ -127,7 +127,7 @@ HELP_LINES = (
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
     "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
     "[*]\n",
-    "[*] /game ...      房间小游戏（chess、gomoku）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
+    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
     "[*]              详细用法用 /game help 查看。\n",
     "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
@@ -188,6 +188,19 @@ def broadcast_game(room: str, lines) -> None:
     if not lines:
         return
     broadcast_room(room, _format_game_lines(room, lines))
+
+
+def send_oriented_boards(room: str, game) -> None:
+    """Send full board view; second seat sees flipped board (己方在下)."""
+    with lock:
+        targets = [c for c in list(rooms.get(room, ())) if c in clients]
+    for conn in targets:
+        try:
+            lines = game.show(conn)
+        except TypeError:
+            lines = game.show()
+        if lines:
+            send_game_private(conn, room, lines)
 
 
 def _drop_game_if_room_empty_locked(room: str) -> None:
@@ -1029,7 +1042,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             send_line(conn, ln + "\n")
         send_line(
             conn,
-            "[*] 当前支持的游戏：" + ", ".join(sorted(games.GAMES)) + "\n",
+            "[*] 当前支持的游戏：" + ", ".join(games.list_game_names()) + "\n",
         )
         return
 
@@ -1040,12 +1053,12 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "list":
         send_line(
             conn,
-            "[*] 可玩游戏：" + ", ".join(sorted(games.GAMES)) + "\n",
+            "[*] 可玩游戏：" + ", ".join(games.list_game_names()) + "（xiangqi 别名 cchess）\n",
         )
         return
 
     if sub == "new":
-        game_name = rest.lower() or "chess"
+        game_name = games.resolve_game_name(rest.lower() or "chess")
         cls = games.GAMES.get(game_name)
         if cls is None:
             send_line(
@@ -1068,14 +1081,15 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 send_line(conn, f"[*] 无法开局：{e}\n")
                 return
             room_games[room] = new_game
+        seat = getattr(new_game, "first_seat_desc", "第一席")
         broadcast_game(
             room,
             [
-                f"{name} 开了一局 {game_name}（作为白方），"
+                f"{name} 开了一局 {game_name}（{seat}），"
                 "等另一位玩家用 /game join 加入。",
-            ]
-            + new_game.show(),
+            ],
         )
+        send_oriented_boards(room, new_game)
         return
 
     if sub == "join":
@@ -1087,6 +1101,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv, bcast, _ = game.try_join(conn, name)
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        send_oriented_boards(room, game)
         return
 
     if sub == "seats":
@@ -1099,7 +1114,13 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "show":
         with lock:
             game = room_games.get(room)
-            lines = game.show() if game else ["本房没有进行中的对局。"]
+            if game is None:
+                lines = ["本房没有进行中的对局。"]
+            else:
+                try:
+                    lines = game.show(conn)
+                except TypeError:
+                    lines = game.show()
         send_game_private(conn, room, lines)
         return
 
@@ -1112,6 +1133,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv, bcast, ended = game.try_move(conn, rest)
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        send_oriented_boards(room, game)
         return
 
     if sub == "resign":
