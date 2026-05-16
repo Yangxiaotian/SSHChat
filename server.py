@@ -127,7 +127,7 @@ HELP_LINES = (
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
     "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
     "[*]\n",
-    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
+    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、raid）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
     "[*]              详细用法用 /game help 查看。\n",
     "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
@@ -1053,7 +1053,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "list":
         send_line(
             conn,
-            "[*] 可玩游戏：" + ", ".join(games.list_game_names()) + "（xiangqi 别名 cchess）\n",
+            "[*] 可玩游戏：" + ", ".join(games.list_game_names())
+            + "（xiangqi 别名 cchess；raid 别名 sdc/搜打撤）\n",
         )
         return
 
@@ -1082,12 +1083,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 return
             room_games[room] = new_game
         seat = getattr(new_game, "first_seat_desc", "第一席")
+        join_hint = getattr(
+            new_game,
+            "join_blurb",
+            "等另一位玩家用 /game join 加入。",
+        )
         broadcast_game(
             room,
-            [
-                f"{name} 开了一局 {game_name}（{seat}），"
-                "等另一位玩家用 /game join 加入。",
-            ],
+            [f"{name} 开了一局 {game_name}（{seat}），{join_hint}"],
         )
         send_oriented_boards(room, new_game)
         return

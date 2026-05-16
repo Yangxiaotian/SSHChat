@@ -1,4 +1,4 @@
-"""Mini game framework: chess (python-chess) + gomoku + xiangqi for SSHChat.
+"""Mini game framework: chess (python-chess) + gomoku + xiangqi + raid for SSHChat.
 
 Each game class exposes the same surface used by ``server.py``:
 ``try_join``, ``try_move``, ``resign``, ``abort``, ``seats``, ``show``,
@@ -8,6 +8,7 @@ Optional: ``pgn_export()`` for PGN (chess only).
 
 from __future__ import annotations
 
+import random
 import re
 import unicodedata
 from typing import Optional, TYPE_CHECKING
@@ -1413,12 +1414,591 @@ class XiangqiGame:
         return ([], [], False)
 
 
+# --- 搜打撤（合作撤离）---
+
+_RAID_MAX_PLAYERS = 8
+_RAID_MIN_PLAYERS = 2
+_RAID_TURN_LIMIT = 36
+_RAID_TURN_PER_EXTRA = 6
+_RAID_EXTRACT_HOLD = 2
+_RAID_SCAV_SPAWN_EVERY = 5
+_RAID_SCAV_HP = 28
+_RAID_SCAV_DMG = (6, 14)
+_RAID_PLAYER_HP = 100
+_RAID_WIN_VALUE = 400
+_RAID_WIN_PER_EXTRA = 120
+
+_RAID_ROOMS: dict[str, dict] = {
+    "spawn": {
+        "label": "出生点",
+        "neighbors": ("hall", "garage"),
+        "loot": False,
+    },
+    "hall": {
+        "label": "走廊",
+        "neighbors": ("spawn", "wh", "dorm", "plaza"),
+        "loot": True,
+    },
+    "wh": {
+        "label": "仓库",
+        "neighbors": ("hall",),
+        "loot": True,
+    },
+    "dorm": {
+        "label": "宿舍",
+        "neighbors": ("hall",),
+        "loot": True,
+    },
+    "garage": {
+        "label": "车库",
+        "neighbors": ("spawn", "plaza"),
+        "loot": True,
+    },
+    "plaza": {
+        "label": "广场",
+        "neighbors": ("hall", "garage", "extract"),
+        "loot": False,
+    },
+    "extract": {
+        "label": "撤离点",
+        "neighbors": ("plaza",),
+        "loot": False,
+    },
+}
+
+_RAID_LOOT_TABLE: list[tuple[str, str, int]] = [
+    ("绷带", "heal", 22),
+    ("医疗包", "heal", 38),
+    ("三级甲", "armor", 3),
+    ("冲锋枪", "weapon", 4),
+    ("金条", "value", 280),
+    ("弹药箱", "weapon", 2),
+    ("电路板", "value", 90),
+    ("咖啡", "heal", 12),
+]
+
+_RAID_MOVE_ALIASES: dict[str, str] = {
+    "搜": "search",
+    "搜索": "search",
+    "loot": "search",
+    "search": "search",
+    "打": "fight",
+    "战斗": "fight",
+    "fight": "fight",
+    "撤": "extract",
+    "撤离": "extract",
+    "extract": "extract",
+    "去": "go",
+    "走": "go",
+    "go": "go",
+    "move": "go",
+}
+
+
+def _raid_room_key(token: str) -> Optional[str]:
+    t = token.strip().lower()
+    if not t:
+        return None
+    if t in _RAID_ROOMS:
+        return t
+    for key, meta in _RAID_ROOMS.items():
+        if t == meta["label"] or t in meta["label"]:
+            return key
+    return None
+
+
+def _raid_parse_action(raw: str) -> tuple[str, Optional[str]]:
+    text = raw.strip()
+    if not text:
+        return ("", None)
+    parts = text.split(maxsplit=1)
+    head = parts[0].lower()
+    tail = parts[1].strip() if len(parts) > 1 else ""
+    verb = _RAID_MOVE_ALIASES.get(head, head)
+    if verb == "go":
+        dest = _raid_room_key(tail) if tail else None
+        return ("go", dest)
+    if verb in ("search", "fight", "extract"):
+        return (verb, None)
+    # 允许「走廊」「去仓库」等省略动词
+    dest = _raid_room_key(text)
+    if dest is not None:
+        return ("go", dest)
+    return (verb, tail or None)
+
+
+class _RaidPlayer:
+    __slots__ = ("conn", "name", "room", "hp", "armor", "weapon", "value")
+
+    def __init__(self, conn, name: str) -> None:
+        self.conn = conn
+        self.name = name
+        self.room = "spawn"
+        self.hp = _RAID_PLAYER_HP
+        self.armor = 0
+        self.weapon = 1
+        self.value = 0
+
+
+class RaidGame:
+    """Co-op extraction mini-game (搜-打-撤). Multiple raiders, round-robin turns."""
+
+    name = "raid"
+    first_seat_desc = "队长"
+    second_seat_desc = "队员"
+    join_blurb = (
+        f"其它玩家可 /game join 加入（{_RAID_MIN_PLAYERS}～{_RAID_MAX_PLAYERS} 人，"
+        f"满 {_RAID_MIN_PLAYERS} 人后开始行动，进行中仍可加入）。"
+    )
+
+    def __init__(self, leader_conn, leader_name: str) -> None:
+        self.players: list[_RaidPlayer] = [_RaidPlayer(leader_conn, leader_name)]
+        self.state = "waiting"
+        self._turn_idx = 0
+        self._ticks = 0
+        self._looted: set[str] = set()
+        self._scavs: list[dict] = []  # {room, hp}
+        self._extract_hold = 0
+        self._rng = random.Random()
+
+    def _turn_limit(self) -> int:
+        extra = max(0, len(self.players) - _RAID_MIN_PLAYERS)
+        return _RAID_TURN_LIMIT + extra * _RAID_TURN_PER_EXTRA
+
+    def _win_target(self) -> int:
+        extra = max(0, len(self.players) - _RAID_MIN_PLAYERS)
+        return _RAID_WIN_VALUE + extra * _RAID_WIN_PER_EXTRA
+
+    def _who_of(self, conn) -> Optional[int]:
+        for i, p in enumerate(self.players):
+            if conn is p.conn:
+                return i
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self._who_of(conn) is not None
+
+    def _alive(self) -> list[_RaidPlayer]:
+        return [p for p in self.players if p.hp > 0]
+
+    def _current(self) -> _RaidPlayer:
+        return self.players[self._turn_idx]
+
+    def _scavs_in(self, room: str) -> list[dict]:
+        return [s for s in self._scavs if s["room"] == room]
+
+    def _combined_value(self) -> int:
+        return sum(p.value for p in self.players)
+
+    def _all_alive_at_extract(self) -> bool:
+        alive = self._alive()
+        return bool(alive) and all(p.room == "extract" for p in alive)
+
+    def _roster_names(self) -> str:
+        return "、".join(p.name for p in self.players)
+
+    def _render_map(self) -> list[str]:
+        by_room: dict[str, list[str]] = {}
+        for p in self.players:
+            if p.hp <= 0:
+                continue
+            by_room.setdefault(p.room, []).append(p.name)
+        lines = ["  区域连通："]
+        for key, meta in _RAID_ROOMS.items():
+            marks = []
+            if key in self._looted:
+                marks.append("已搜")
+            if self._scavs_in(key):
+                marks.append(f"敌×{len(self._scavs_in(key))}")
+            if key in by_room:
+                marks.append("、".join(by_room[key]))
+            tag = f" [{', '.join(marks)}]" if marks else ""
+            nbs = "、".join(_RAID_ROOMS[n]["label"] for n in meta["neighbors"])
+            lines.append(f"    {meta['label']}({key}) → {nbs}{tag}")
+        return lines
+
+    def _status_line(self, p: _RaidPlayer, slot: int) -> str:
+        dead = " [阵亡]" if p.hp <= 0 else ""
+        return (
+            f"  #{slot} {p.name}{dead}：{max(0, p.hp)}HP  "
+            f"位置={_RAID_ROOMS[p.room]['label']}  "
+            f"甲+{p.armor} 武+{p.weapon}  战利品价值={p.value}"
+        )
+
+    def show(self, conn=None) -> list[str]:
+        target = self._win_target()
+        lines = [
+            f"raid 搜打撤（{self.state}）  队员 {len(self.players)}/{_RAID_MAX_PLAYERS}  "
+            f"回合 {self._ticks}/{self._turn_limit()}  "
+            f"全队价值 {self._combined_value()}（目标 {target} 撤离加分）",
+        ]
+        for i, p in enumerate(self.players, 1):
+            lines.append(self._status_line(p, i))
+        if len(self.players) < _RAID_MAX_PLAYERS and self.state != "ended":
+            lines.append(
+                f"  空席：还可 /game join（至少 {_RAID_MIN_PLAYERS} 人开始）"
+            )
+        lines.extend(self._render_map())
+        if self.state == "playing":
+            cur = self._current()
+            lines.append(f"  当前行动：#{self._turn_idx + 1} {cur.name}")
+            if self._extract_hold:
+                lines.append(
+                    f"  撤离读条：{self._extract_hold}/{_RAID_EXTRACT_HOLD} "
+                    "（所有存活队员须在撤离点；继续 /game move 撤）"
+                )
+            lines.append(
+                "  指令：/game move 搜 | 打 | 撤 | 去 <区域>"
+                "（区域可用 走廊/仓库/撤离点 等）"
+            )
+        return lines
+
+    def _start_playing(self) -> list[str]:
+        self.state = "playing"
+        self._turn_idx = 0
+        self._spawn_scav()
+        limit = self._turn_limit()
+        target = self._win_target()
+        first = self.players[0]
+        return [
+            f"raid 开始！队员：{self._roster_names()}",
+            "合作搜刮、清敌；所有存活队员到撤离点后 /game move 撤（读条 2 次）。",
+            f"风暴 {limit} 回合后封闭；全队战利品价值 ≥ {target} 为肥撤。",
+            f"轮到 #{1} {first.name} 行动",
+        ]
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (
+                [f"对局已结束，请先 /game new {self.name} 开新局。"],
+                [],
+                False,
+            )
+        if self._who_of(conn) is not None:
+            return (["你已经在小队里。"], [], False)
+        if len(self.players) >= _RAID_MAX_PLAYERS:
+            return (
+                [f"小队已满（最多 {_RAID_MAX_PLAYERS} 人）。"],
+                [],
+                False,
+            )
+        self.players.append(_RaidPlayer(conn, name))
+        if self.state == "waiting":
+            if len(self.players) < _RAID_MIN_PLAYERS:
+                priv = [
+                    f"{name} 加入小队（{len(self.players)}/{_RAID_MAX_PLAYERS}），"
+                    f"再等 {_RAID_MIN_PLAYERS - len(self.players)} 人即可开始。",
+                ]
+                bcast = [f"{name} 加入，当前队员：{self._roster_names()}"]
+                return (priv, bcast, False)
+            return ([], self._start_playing(), False)
+        bcast = [
+            f"{name} 中途加入（{len(self.players)} 人），出生点集结。",
+            f"当前队员：{self._roster_names()}",
+        ]
+        return ([], bcast, False)
+
+    def _next_turn(self) -> _RaidPlayer:
+        n = len(self.players)
+        for _ in range(n):
+            self._turn_idx = (self._turn_idx + 1) % n
+            p = self.players[self._turn_idx]
+            if p.hp > 0:
+                return p
+        return self.players[self._turn_idx]
+
+    def _tick_storm(self) -> Optional[str]:
+        self._ticks += 1
+        if self._ticks % _RAID_SCAV_SPAWN_EVERY == 0:
+            self._spawn_scav()
+        if self._ticks >= self._turn_limit():
+            return "风暴封闭，未能撤离 — 行动失败"
+        if not self._alive():
+            return "全队阵亡 — 行动失败"
+        return None
+
+    def _spawn_scav(self) -> None:
+        rooms = [k for k in _RAID_ROOMS if k not in ("spawn", "extract")]
+        if not rooms:
+            return
+        room = self._rng.choice(rooms)
+        self._scavs.append({"room": room, "hp": _RAID_SCAV_HP})
+
+    def _apply_loot(self, player: _RaidPlayer, item: tuple[str, str, int]) -> str:
+        name, kind, val = item
+        if kind == "heal":
+            before = player.hp
+            player.hp = min(_RAID_PLAYER_HP, player.hp + val)
+            return f"使用 {name}，回复 {player.hp - before} HP"
+        if kind == "armor":
+            player.armor += val
+            return f"装备 {name}，护甲 +{val}"
+        if kind == "weapon":
+            player.weapon += val
+            return f"装备 {name}，火力 +{val}"
+        player.value += val
+        return f"获得 {name}，价值 +{val}"
+
+    def _damage_player(self, player: _RaidPlayer, dmg: int) -> int:
+        reduced = max(1, dmg - player.armor)
+        player.hp -= reduced
+        if self._extract_hold and player.hp > 0:
+            self._extract_hold = 0
+        return reduced
+
+    def _do_search(self, actor: _RaidPlayer) -> GameResult:
+        meta = _RAID_ROOMS[actor.room]
+        if not meta["loot"]:
+            return (["此处无物资可搜。"], [], False)
+        if actor.room in self._looted:
+            return (["这里已经搜刮干净了。"], [], False)
+        roll = self._rng.random()
+        if roll < 0.22:
+            self._looted.add(actor.room)
+            return (["翻找一番，只有空箱子和弹壳。"], [], False)
+        item = self._rng.choice(_RAID_LOOT_TABLE)
+        detail = self._apply_loot(actor, item)
+        if roll > 0.55:
+            self._looted.add(actor.room)
+        bcast = [f"{actor.name} 搜刮 {_RAID_ROOMS[actor.room]['label']}：{detail}"]
+        return ([], bcast, False)
+
+    def _do_fight(self, actor: _RaidPlayer) -> GameResult:
+        foes = self._scavs_in(actor.room)
+        if not foes:
+            return (["附近没有敌人。"], [], False)
+        foe = foes[0]
+        atk = actor.weapon + self._rng.randint(2, 8)
+        foe["hp"] -= atk
+        bcast = [
+            f"{actor.name} 交火！造成 {atk} 伤害（敌人剩余 {max(0, foe['hp'])} HP）"
+        ]
+        if foe["hp"] <= 0:
+            self._scavs.remove(foe)
+            loot = self._rng.randint(40, 120)
+            actor.value += loot
+            bcast.append(f"击毙敌人，搜到战利品价值 +{loot}")
+            return ([], bcast, False)
+        dmg = self._rng.randint(*_RAID_SCAV_DMG)
+        taken = self._damage_player(actor, dmg)
+        bcast.append(f"敌人反击！{actor.name} 受到 {taken} 伤害（剩余 {actor.hp} HP）")
+        if actor.hp <= 0:
+            bcast.append(f"{actor.name} 阵亡出局。")
+            if not self._alive():
+                self.state = "ended"
+                bcast.append("对局结束：全队阵亡，行动失败。")
+                return ([], bcast, True)
+        return ([], bcast, False)
+
+    def _do_extract(self, actor: _RaidPlayer) -> GameResult:
+        if actor.room != "extract":
+            return (["不在撤离点（需先到达 撤离点/广场 一侧）。"], [], False)
+        if not self._all_alive_at_extract():
+            missing = [
+                p.name
+                for p in self._alive()
+                if p.room != "extract"
+            ]
+            return (
+                [
+                    "还有存活队员不在撤离点，无法撤离。"
+                    + (f"（未到：{'、'.join(missing)}）" if missing else "")
+                ],
+                [],
+                False,
+            )
+        self._extract_hold += 1
+        bcast = [
+            f"{actor.name} 掩护撤离读条 {self._extract_hold}/{_RAID_EXTRACT_HOLD}…"
+        ]
+        if self._extract_hold < _RAID_EXTRACT_HOLD:
+            return ([], bcast, False)
+        total = self._combined_value()
+        target = self._win_target()
+        self.state = "ended"
+        if total >= target:
+            bcast.append(
+                f"撤离成功！全队战利品价值 {total}（≥ {target}）— 肥撤！"
+            )
+        else:
+            bcast.append(
+                f"撤离成功但物资偏少（{total} < {target}）— 勉强活下来。"
+            )
+        return ([], bcast, True)
+
+    def _do_go(self, actor: _RaidPlayer, dest: Optional[str]) -> GameResult:
+        if dest is None:
+            return (
+                [
+                    "用法：/game move 去 <区域>  例：去 走廊 / 去 hall / 仓库",
+                    f"可选：{', '.join(m['label'] for m in _RAID_ROOMS.values())}",
+                ],
+                [],
+                False,
+            )
+        if dest not in _RAID_ROOMS:
+            return ([f"未知区域 {dest!r}。"], [], False)
+        if dest not in _RAID_ROOMS[actor.room]["neighbors"]:
+            here = _RAID_ROOMS[actor.room]["label"]
+            there = _RAID_ROOMS[dest]["label"]
+            return ([f"无法从 {here} 直接走到 {there}。"], [], False)
+        actor.room = dest
+        label = _RAID_ROOMS[dest]["label"]
+        bcast = [f"{actor.name} 抵达 {label}"]
+        # 进入新区域有小概率踩雷
+        if dest != "extract" and self._scavs_in(dest) and self._rng.random() < 0.35:
+            dmg = self._rng.randint(4, 10)
+            taken = self._damage_player(actor, dmg)
+            bcast.append(f"遭遇伏击！受到 {taken} 伤害（剩余 {actor.hp} HP）")
+            if actor.hp <= 0:
+                bcast.append(f"{actor.name} 阵亡出局。")
+                if not self._alive():
+                    self.state = "ended"
+                    bcast.append("对局结束：全队阵亡，行动失败。")
+                    return ([], bcast, True)
+        return ([], bcast, False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            need = _RAID_MIN_PLAYERS - len(self.players)
+            return (
+                [
+                    f"行动尚未开始，还需 {need} 名队员 /game join"
+                    f"（当前 {len(self.players)}/{_RAID_MAX_PLAYERS}）。"
+                ],
+                [],
+                False,
+            )
+        if self.state != "playing":
+            return (["对局已结束。"], [], False)
+        who = self._who_of(conn)
+        if who is None:
+            return (["你不是行动队员（可 /game show 围观）。"], [], False)
+        if who != self._turn_idx:
+            cur = self._current()
+            return (
+                [f"还没轮到你，当前由 #{self._turn_idx + 1} {cur.name} 行动。"],
+                [],
+                False,
+            )
+
+        actor = self.players[who]
+        if actor.hp <= 0:
+            return (["你已阵亡，无法行动。"], [], False)
+
+        verb, arg = _raid_parse_action(raw)
+        if not verb:
+            return (
+                [
+                    "用法：/game move 搜 | 打 | 撤 | 去 <区域>",
+                    "  例：/game move 搜  /game move 打  /game move 去 走廊",
+                ],
+                [],
+                False,
+            )
+
+        if verb == "search":
+            priv, bcast, ended = self._do_search(actor)
+        elif verb == "fight":
+            priv, bcast, ended = self._do_fight(actor)
+        elif verb == "extract":
+            priv, bcast, ended = self._do_extract(actor)
+        elif verb == "go":
+            priv, bcast, ended = self._do_go(actor, arg)
+        else:
+            return ([f"未知指令 {verb!r}，请用 搜/打/撤/去。"], [], False)
+
+        if ended:
+            return (priv, bcast, True)
+
+        storm = self._tick_storm()
+        if storm is not None:
+            self.state = "ended"
+            bcast = list(bcast) + [storm]
+            return (priv, bcast, True)
+
+        if not ended and self.state == "playing":
+            nxt = self._next_turn()
+            slot = self._turn_idx + 1
+            bcast = list(bcast) + [
+                f"轮到 #{slot} {nxt.name} 行动（回合 {self._ticks}/{self._turn_limit()}）"
+            ]
+
+        return (priv, bcast, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["行动尚未开始或已结束。"], [], False)
+        if self._who_of(conn) is None:
+            return (["你不是行动队员。"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} 放弃任务 — 小队撤离失败。"], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+        if self._who_of(conn) is None:
+            return (["你不是行动队员，无法终止。"], [], False)
+        if self.state == "playing":
+            return (
+                ["任务已开始，请用 /game resign 放弃。"],
+                [],
+                False,
+            )
+        self.state = "ended"
+        return ([], [f"{name} 取消了任务（未开始）。"], True)
+
+    def seats(self) -> list[str]:
+        lines = [
+            f"raid 状态：{self.state}  "
+            f"队员 {len(self.players)}/{_RAID_MAX_PLAYERS}  "
+            f"回合 {self._ticks}/{self._turn_limit()}",
+        ]
+        for i, p in enumerate(self.players, 1):
+            lines.append(f"  #{i}：{p.name}")
+        if len(self.players) < _RAID_MAX_PLAYERS and self.state != "ended":
+            lines.append("  空席：/game join")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        who = self._who_of(conn)
+        if who is None:
+            return ([], [], False)
+        if self.state == "waiting":
+            self.players.pop(who)
+            if not self.players:
+                self.state = "ended"
+                return ([], [f"{name} 离开，任务取消。"], True)
+            return ([], [f"{name} 离开，当前队员：{self._roster_names()}"], False)
+        if self.state == "playing":
+            self.players.pop(who)
+            if who < self._turn_idx:
+                self._turn_idx -= 1
+            elif who == self._turn_idx:
+                self._turn_idx %= max(1, len(self.players))
+            if not self._alive():
+                self.state = "ended"
+                return ([], [f"{name} 离开 — 全队失联，行动失败。"], True)
+            return (
+                [],
+                [f"{name} 离开，剩余队员：{self._roster_names()}"],
+                False,
+            )
+        return ([], [], False)
+
+
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     XiangqiGame.name: XiangqiGame,
+    RaidGame.name: RaidGame,
 }
-GAME_ALIASES = {"cchess": XiangqiGame.name}
+GAME_ALIASES = {
+    "cchess": XiangqiGame.name,
+    "sdc": RaidGame.name,
+    "extract": RaidGame.name,
+    "搜打撤": RaidGame.name,
+}
 
 
 def resolve_game_name(name: str) -> str:
@@ -1435,14 +2015,16 @@ def list_game_names() -> list[str]:
 HELP_LINES = (
     "[*] /game list             列出可玩游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
-    "（chess: 白；gomoku/xiangqi: 黑/红先手）。",
-    "[*] /game join             加入空第二席。",
+    "（chess: 白；gomoku/xiangqi: 黑/红先手；raid: 队长）。",
+    "[*] /game join             加入对局（chess/gomoku/xiangqi 为第二席；"
+    "raid 可多人，最多 8 人）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] chess 棋盘上下坐标行两端的 8/1 与邻行相同，用于列对齐；"
     "若仍错位请用等宽字体或 SSH 终端查看。",
     "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"
-    "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组。",
+    "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组；"
+    "raid: 搜 | 打 | 撤 | 去 <区域>（2～8 人合作撤离，别名 sdc/搜打撤）。",
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
