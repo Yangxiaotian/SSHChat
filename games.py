@@ -60,14 +60,8 @@ def _squares_of_last_move(move):
     return s
 
 
-def _chess_flip_square(sq: int) -> int:
-    return _chess.square(7 - _chess.square_file(sq), 7 - _chess.square_rank(sq))
-
-
 def _render_board(board, *, last_move=None, flip: bool = False):
     hi = _squares_of_last_move(last_move)
-    if flip:
-        hi = {_chess_flip_square(s) for s in hi}
 
     def col_label(ch: str) -> str:
         return f" {ch} "
@@ -717,20 +711,6 @@ def _xq_is_forward(side: int, fr: int, tr: int) -> bool:
     return tr > fr
 
 
-def _xq_slide_dir_char(side: int, fc: int, tc: int) -> str:
-    """马/象/士的进退：纵线号朝棋盘中线一侧为「进」，另一侧为「退」。"""
-    ff = _xq_file_num(fc, side)
-    tf = _xq_file_num(tc, side)
-    if ff == tf:
-        return "平"
-    center = 5
-    if ff < center:
-        return "进" if tf > ff else "退"
-    if ff > center:
-        return "进" if tf < ff else "退"
-    return "进" if tf > ff else "退"
-
-
 def _xq_piece_char(pt: int, side: int) -> str:
     if pt == _XQ_K:
         return "帅" if side == _XQ_RED else "将"
@@ -817,8 +797,15 @@ def _xq_match_notation_move(
             else:
                 continue
         else:
-            got = _xq_slide_dir_char(side, fc, tc)
-            if got != dir_char:
+            if dir_char == "平":
+                continue
+            if dir_char == "进":
+                if not _xq_is_forward(side, fr, tr):
+                    continue
+            elif dir_char == "退":
+                if _xq_is_forward(side, fr, tr):
+                    continue
+            else:
                 continue
             if _xq_file_num(tc, side) != dest_num:
                 continue
@@ -882,7 +869,7 @@ def _xq_format_notation(
             dir_char = "平"
             dest = _xq_col_label(tc, side)
     else:
-        dir_char = _xq_slide_dir_char(side, fc, tc)
+        dir_char = "进" if _xq_is_forward(side, fr, tr) else "退"
         dest = _xq_col_label(tc, side)
 
     return f"{prefix}{sym}{from_file}{dir_char}{dest}"
@@ -896,12 +883,9 @@ def _xq_format_cell(cell: int, *, highlight: bool) -> str:
     return _xq_pad(_xq_cell_body(cell, highlight=highlight), _XQ_CELL_W)
 
 
-def _xq_file_header(side: int) -> str:
-    if side == _XQ_BLACK:
-        labels = [str(i) for i in range(1, XIANGQI_COLS + 1)]
-    else:
-        # 与棋盘格对齐：屏幕从左到右 九…一
-        labels = list(_XQ_CN_FILE[::-1])
+def _xq_file_header_for_cols(col_ix: list[int], side: int) -> str:
+    """表头与同行格子顺序一致：须传入与棋盘相同的 col_ix。"""
+    labels = [_xq_col_label(c, side) for c in col_ix]
     return "   " + "".join(_xq_pad(lb, _XQ_CELL_W) for lb in labels)
 
 
@@ -1181,29 +1165,36 @@ def _xq_render(
 
     board_w = _xq_disp_width("   ") + XIANGQI_COLS * _XQ_CELL_W
     if flip:
-        top_hdr = _xq_file_header(_XQ_RED) + "  ← 红方纵线 九…一"
-        bot_hdr = _xq_file_header(_XQ_BLACK) + "  ← 黑方 1～9"
+        # 黑方视角：顶为对方（红）一…九，底为己方 9…1（屏幕从左到右，即卷轴从右往左读 1…9）
+        top_hdr = _xq_file_header_for_cols(col_ix, _XQ_RED) + "  ← 红方纵线 一…九"
+        bot_hdr = (
+            _xq_file_header_for_cols(col_ix, _XQ_BLACK)
+            + "  ← 黑方纵线 9…1（从右向左为 1～9）"
+        )
     else:
-        top_hdr = _xq_file_header(_XQ_BLACK) + "  ← 黑方 1～9"
-        bot_hdr = _xq_file_header(_XQ_RED) + "  ← 红方纵线 九…一（右为一）"
+        top_hdr = _xq_file_header_for_cols(col_ix, _XQ_BLACK) + "  ← 黑方 1～9"
+        bot_hdr = (
+            _xq_file_header_for_cols(col_ix, _XQ_RED)
+            + "  ← 红方纵线 九…一（右为一）"
+        )
     lines = [
         top_hdr,
         "  图例：+红  -黑  !上一步  ·空  （请用等宽字体）",
     ]
     if flip:
         lines.append("  （己方在下方）")
-    prev_r: Optional[int] = None
     for r in row_ix:
         cells = [
             _xq_format_cell(board[r][c], highlight=(r, c) in hi) for c in col_ix
         ]
-        label = (XIANGQI_ROWS - r) if flip else (r + 1)
-        lines.append(f"{label:>2} " + "".join(cells))
-        if prev_r is not None and {prev_r, r} == {4, 5}:
+        # 传统记谱不标横线号；与顶/底「   +纵线」表头同宽缩进以便对齐
+        lines.append("   " + "".join(cells))
+        # 河界在棋盘上介于内部第 4、5 行之间（对应纵坐标第 5、6 行）；须在画出上行后再插入，
+        # 否则会变成夹在显示的第 6、7 行之间。
+        if (flip and r == 5) or ((not flip) and r == 4):
             river = "楚河汉界"
             pad = max(0, board_w - _xq_disp_width(river))
             lines.append(" " * (pad // 2) + river)
-        prev_r = r
     lines.append(bot_hdr)
     if last_notation:
         lines.append(f"  上一步：{last_notation}")
