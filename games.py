@@ -61,6 +61,15 @@ def _squares_of_last_move(move):
     return s
 
 
+_CHESS_EMPTY = "·"
+
+
+def _chess_piece_glyph(piece) -> str:
+    if piece is None:
+        return _CHESS_EMPTY
+    return piece.unicode_symbol()
+
+
 def _render_board(board, *, last_move=None, flip: bool = False):
     hi = _squares_of_last_move(last_move)
 
@@ -79,7 +88,7 @@ def _render_board(board, *, last_move=None, flip: bool = False):
         for f in file_range:
             sq = _chess.square(f, rank - 1)
             piece = board.piece_at(sq)
-            sym = piece.symbol() if piece else "."
+            sym = _chess_piece_glyph(piece)
             cells.append(f"({sym})" if sq in hi else f" {sym} ")
         lines.append(f"{rank:>2} " + "".join(cells))
     lines.append("   " + file_row)
@@ -2020,8 +2029,8 @@ HELP_LINES = (
     "raid 可多人，最多 8 人）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
-    "[*] chess 棋盘上下坐标行两端的 8/1 与邻行相同，用于列对齐；"
-    "若仍错位请用等宽字体或 SSH 终端查看。",
+    "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
+    "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
     "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"
     "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组；"
     "raid: 搜 | 打 | 撤 | 去 <区域>（2～8 人合作撤离，别名 sdc/搜打撤）。",
