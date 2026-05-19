@@ -1,4 +1,4 @@
-"""Mini game framework: chess (python-chess) + gomoku + xiangqi + raid for SSHChat.
+"""Mini game framework: chess (python-chess) + gomoku + xiangqi + sanguo for SSHChat.
 
 Each game class exposes the same surface used by ``server.py``:
 ``try_join``, ``try_move``, ``resign``, ``abort``, ``seats``, ``show``,
@@ -12,6 +12,26 @@ import random
 import re
 import unicodedata
 from typing import Optional, TYPE_CHECKING
+
+from sgs_data import (
+    SHA_CARDS,
+    SHAN_CARDS,
+    SGS_GENERAL_POOL,
+    TRICK_NAMES,
+    build_junzheng_deck,
+    card_base,
+    card_label,
+    card_suit,
+    equip_slot,
+    find_card_in_hand,
+    format_general_list,
+    format_skills,
+    is_black,
+    is_diamond,
+    is_red,
+    SGS_GENERAL_BY_NAME,
+    weapon_range,
+)
 
 if TYPE_CHECKING:  # noqa: SIM108
     import chess as _chess_type  # noqa: F401  only for type hints in annotations
@@ -1423,160 +1443,305 @@ class XiangqiGame:
         return ([], [], False)
 
 
-# --- 搜打撤（合作撤离）---
+# --- 三国杀军争版（简化身份局，武将池见 sgs_data.py）---
 
-_RAID_MAX_PLAYERS = 8
-_RAID_MIN_PLAYERS = 2
-_RAID_TURN_LIMIT = 36
-_RAID_TURN_PER_EXTRA = 6
-_RAID_EXTRACT_HOLD = 2
-_RAID_SCAV_SPAWN_EVERY = 5
-_RAID_SCAV_HP = 28
-_RAID_SCAV_DMG = (6, 14)
-_RAID_PLAYER_HP = 100
-_RAID_WIN_VALUE = 400
-_RAID_WIN_PER_EXTRA = 120
+_SGS_MAX_PLAYERS = 6
+_SGS_MIN_PLAYERS = 2
+_SGS_INITIAL_HAND = 4
+_SGS_DRAW_PER_TURN = 2
 
-_RAID_ROOMS: dict[str, dict] = {
-    "spawn": {
-        "label": "出生点",
-        "neighbors": ("hall", "garage"),
-        "loot": False,
-    },
-    "hall": {
-        "label": "走廊",
-        "neighbors": ("spawn", "wh", "dorm", "plaza"),
-        "loot": True,
-    },
-    "wh": {
-        "label": "仓库",
-        "neighbors": ("hall",),
-        "loot": True,
-    },
-    "dorm": {
-        "label": "宿舍",
-        "neighbors": ("hall",),
-        "loot": True,
-    },
-    "garage": {
-        "label": "车库",
-        "neighbors": ("spawn", "plaza"),
-        "loot": True,
-    },
-    "plaza": {
-        "label": "广场",
-        "neighbors": ("hall", "garage", "extract"),
-        "loot": False,
-    },
-    "extract": {
-        "label": "撤离点",
-        "neighbors": ("plaza",),
-        "loot": False,
-    },
+_SGS_ROLE_TABLE: dict[int, list[str]] = {
+    2: ["主公", "反贼"],
+    3: ["主公", "反贼", "反贼"],
+    4: ["主公", "忠臣", "反贼", "内奸"],
+    5: ["主公", "忠臣", "忠臣", "反贼", "反贼"],
+    6: ["主公", "忠臣", "忠臣", "反贼", "反贼", "内奸"],
 }
 
-_RAID_LOOT_TABLE: list[tuple[str, str, int]] = [
-    ("绷带", "heal", 22),
-    ("医疗包", "heal", 38),
-    ("三级甲", "armor", 3),
-    ("冲锋枪", "weapon", 4),
-    ("金条", "value", 280),
-    ("弹药箱", "weapon", 2),
-    ("电路板", "value", 90),
-    ("咖啡", "heal", 12),
-]
-
-_RAID_MOVE_ALIASES: dict[str, str] = {
-    "搜": "search",
-    "搜索": "search",
-    "loot": "search",
-    "search": "search",
-    "打": "fight",
-    "战斗": "fight",
-    "fight": "fight",
-    "撤": "extract",
-    "撤离": "extract",
-    "extract": "extract",
-    "去": "go",
-    "走": "go",
-    "go": "go",
-    "move": "go",
+_SGS_MOVE_ALIASES: dict[str, str] = {
+    "杀": "sha",
+    "sha": "sha",
+    "火杀": "sha",
+    "雷杀": "sha",
+    "闪": "shan",
+    "shan": "shan",
+    "桃": "tao",
+    "tao": "tao",
+    "酒": "jiu",
+    "jiu": "jiu",
+    "决斗": "duel",
+    "duel": "duel",
+    "拆": "dismantle",
+    "过河拆桥": "dismantle",
+    "dismantle": "dismantle",
+    "无中生有": "draw2",
+    "draw2": "draw2",
+    "南蛮": "nanman",
+    "南蛮入侵": "nanman",
+    "nanman": "nanman",
+    "万箭": "wanjian",
+    "万箭齐发": "wanjian",
+    "wanjian": "wanjian",
+    "顺手": "shunshou",
+    "顺手牵羊": "shunshou",
+    "顺": "shunshou",
+    "牵": "shunshou",
+    "兵粮": "bingliang",
+    "兵粮寸断": "bingliang",
+    "铁索": "tiesuo",
+    "铁索连环": "tiesuo",
+    "五谷": "wugu",
+    "五谷丰登": "wugu",
+    "桃园": "taoyuan",
+    "桃园结义": "taoyuan",
+    "火攻": "huogong",
+    "huogong": "huogong",
+    "出示": "chushi",
+    "展示": "chushi",
+    "chushi": "chushi",
+    "仁德": "rende",
+    "rende": "rende",
+    "制衡": "zhiheng",
+    "zhiheng": "zhiheng",
+    "裸衣": "luoyi",
+    "luoyi": "luoyi",
+    "突袭": "tuxi",
+    "tuxi": "tuxi",
+    "强袭": "qiangxi",
+    "qiangxi": "qiangxi",
+    "青囊": "qingnang",
+    "qingnang": "qingnang",
+    "巧变": "qiaobian",
+    "qiaobian": "qiaobian",
+    "结姻": "jieyin",
+    "jieyin": "jieyin",
+    "国色": "guose",
+    "guose": "guose",
+    "流离": "liuli",
+    "liuli": "liuli",
+    "奇袭": "qixi",
+    "qixi": "qixi",
+    "武将": "generals",
+    "generals": "generals",
+    "雷击": "leiji",
+    "leiji": "leiji",
+    "天香": "tianxiang",
+    "tianxiang": "tianxiang",
+    "享乐": "xiangle",
+    "xiangle": "xiangle",
+    "英魂": "yinghun",
+    "yinghun": "yinghun",
+    "乱击": "luanji",
+    "luanji": "luanji",
+    "双雄": "shuangxiong",
+    "shuangxiong": "shuangxiong",
+    "蛊惑": "guhuo",
+    "guhuo": "guhuo",
+    "观星": "guanxing",
+    "guanxing": "guanxing",
+    "断粮": "duanliang",
+    "duanliang": "duanliang",
+    "装备": "equip",
+    "equip": "equip",
+    "卸": "unequip",
+    "unequip": "unequip",
+    "过": "pass",
+    "pass": "pass",
+    "结束": "pass",
+    "不出": "pass",
+    "受击": "hurt",
+    "hurt": "hurt",
+    "开始": "start",
+    "开局": "start",
+    "start": "start",
 }
 
 
-def _raid_room_key(token: str) -> Optional[str]:
-    t = token.strip().lower()
-    if not t:
-        return None
-    if t in _RAID_ROOMS:
-        return t
-    for key, meta in _RAID_ROOMS.items():
-        if t == meta["label"] or t in meta["label"]:
-            return key
-    return None
-
-
-def _raid_parse_action(raw: str) -> tuple[str, Optional[str]]:
+def _sgs_parse_action(raw: str) -> tuple[str, list[str], Optional[str]]:
+    """返回 (verb, args, sha_kind)。首词为 杀/火杀/雷杀 时 verb=sha 且 sha_kind 约束牌名。"""
     text = raw.strip()
     if not text:
-        return ("", None)
-    parts = text.split(maxsplit=1)
-    head = parts[0].lower()
-    tail = parts[1].strip() if len(parts) > 1 else ""
-    verb = _RAID_MOVE_ALIASES.get(head, head)
-    if verb == "go":
-        dest = _raid_room_key(tail) if tail else None
-        return ("go", dest)
-    if verb in ("search", "fight", "extract"):
-        return (verb, None)
-    # 允许「走廊」「去仓库」等省略动词
-    dest = _raid_room_key(text)
-    if dest is not None:
-        return ("go", dest)
-    return (verb, tail or None)
+        return ("", [], None)
+    parts = text.split()
+    head = parts[0]
+    if head in SHA_CARDS:
+        sha_kind = None if head == "杀" else head
+        return ("sha", parts[1:], sha_kind)
+    verb = _SGS_MOVE_ALIASES.get(head, _SGS_MOVE_ALIASES.get(head.lower(), head.lower()))
+    sha_kind = head if verb == "sha" and head in SHA_CARDS and head != "杀" else None
+    return (verb, parts[1:], sha_kind)
 
 
-class _RaidPlayer:
-    __slots__ = ("conn", "name", "room", "hp", "armor", "weapon", "value")
+def _peel_hand_tokens_from_args(
+    player: _SgsPlayer, args: list[str]
+) -> tuple[list[str], list[str]]:
+    """从参数末尾剥离手牌 token，至少保留一个目标 token。"""
+    rest = list(args)
+    peeled: list[str] = []
+    while len(rest) > 1:
+        tok = rest[-1]
+        if find_card_in_hand(player.hand, tok) is not None:
+            peeled.insert(0, rest.pop())
+        else:
+            break
+    return rest, peeled
+
+
+def _sgs_sha_target_and_card(
+    player: _SgsPlayer,
+    args: list[str],
+    *,
+    sha_kind: Optional[str],
+    has_zhangba: bool = False,
+) -> tuple[
+    Optional[list[str]],
+    Optional[str],
+    Optional[tuple[str, str]],
+    Optional[str],
+]:
+    """返回 (目标参数, 单张杀牌, 丈八两牌, 错误)。"""
+    if not args:
+        extra = ""
+        if has_zhangba:
+            extra = "；装备【丈八蛇矛】时：/game move 杀 <目标> <牌1> <牌2>"
+        return (
+            None,
+            None,
+            None,
+            f"用法：/game move 杀|火杀|雷杀 <#序号|昵称> [牌名]{extra}",
+        )
+    target_args, peeled = _peel_hand_tokens_from_args(player, args)
+    if not target_args:
+        return (None, None, None, "请指定目标。")
+    if len(peeled) > 2:
+        return (None, None, None, "指定牌过多。")
+    if len(peeled) == 2:
+        if not has_zhangba:
+            return (None, None, None, "只能指定一张【杀】类牌。")
+        if sha_kind and sha_kind != "杀":
+            return (
+                None,
+                None,
+                None,
+                "【丈八蛇矛】只能将两张手牌当普通【杀】，不能当火杀/雷杀。",
+            )
+        return (target_args, None, (peeled[0], peeled[1]), None)
+    if len(peeled) == 1:
+        found = find_card_in_hand(player.hand, peeled[0])
+        assert found is not None
+        if card_base(found) not in SHA_CARDS:
+            if has_zhangba:
+                return (
+                    None,
+                    None,
+                    None,
+                    f"【{peeled[0]}】不是【杀】。"
+                    "使用丈八：/game move 杀 <目标> <牌1> <牌2>",
+                )
+            return (None, None, None, f"【{peeled[0]}】不是【杀】类牌。")
+        if sha_kind and card_base(found) != sha_kind:
+            return (
+                None,
+                None,
+                None,
+                f"请使用【{sha_kind}】（你指定了【{card_label(found)}】）。",
+            )
+        return (target_args, peeled[0], None, None)
+    return (target_args, None, None, None)
+
+
+class _SgsPlayer:
+    __slots__ = (
+        "conn",
+        "name",
+        "general",
+        "kingdom",
+        "skill_ids",
+        "max_hp",
+        "hp",
+        "hand",
+        "role",
+        "dead",
+        "sha_used",
+        "jiu_buff",
+        "luoyi_buff",
+        "skip_play",
+        "skip_draw",
+        "judge_lebu",
+        "judge_bingliang",
+        "drew_this_turn",
+        "chained",
+        "niepan_used",
+        "shuangxiong_color",
+        "zaoxian_awakened",
+        "shuangxiong_duel_used",
+        "weapon",
+        "armor",
+        "horse_plus",
+        "horse_minus",
+    )
 
     def __init__(self, conn, name: str) -> None:
         self.conn = conn
         self.name = name
-        self.room = "spawn"
-        self.hp = _RAID_PLAYER_HP
-        self.armor = 0
-        self.weapon = 1
-        self.value = 0
+        self.general = ""
+        self.kingdom = ""
+        self.skill_ids: tuple[str, ...] = ()
+        self.max_hp = 4
+        self.hp = 4
+        self.hand: list[str] = []
+        self.role = ""
+        self.dead = False
+        self.sha_used = 0
+        self.jiu_buff = False
+        self.luoyi_buff = False
+        self.skip_play = False
+        self.skip_draw = False
+        self.judge_lebu = False
+        self.judge_bingliang = False
+        self.drew_this_turn = False
+        self.chained = False
+        self.niepan_used = False
+        self.shuangxiong_color: Optional[str] = None
+        self.zaoxian_awakened = False
+        self.shuangxiong_duel_used = False
+        self.weapon: Optional[str] = None
+        self.armor: Optional[str] = None
+        self.horse_plus: Optional[str] = None
+        self.horse_minus: Optional[str] = None
 
 
-class RaidGame:
-    """Co-op extraction mini-game (搜-打-撤). Multiple raiders, round-robin turns."""
+class SanguoshaGame:
+    """三国杀军争版简化身份局（2–6 人，武将池见 sgs_data）。"""
 
-    name = "raid"
-    first_seat_desc = "队长"
-    second_seat_desc = "队员"
+    name = "sanguo"
+    # 出牌后不再向全员推送整页 /game show（棋盘类对局仍用 send_oriented_boards）
+    send_view_on_move = False
+    first_seat_desc = "房主"
+    second_seat_desc = "玩家"
     join_blurb = (
-        f"其它玩家可 /game join 加入（{_RAID_MIN_PLAYERS}～{_RAID_MAX_PLAYERS} 人，"
-        f"满 {_RAID_MIN_PLAYERS} 人后开始行动，进行中仍可加入）。"
+        f"其它玩家可 /game join 入座（{_SGS_MIN_PLAYERS}～{_SGS_MAX_PLAYERS} 人）；"
+        f"人满或就绪后由房主 /game move 开始 开局。"
     )
 
-    def __init__(self, leader_conn, leader_name: str) -> None:
-        self.players: list[_RaidPlayer] = [_RaidPlayer(leader_conn, leader_name)]
+    def __init__(self, host_conn, host_name: str) -> None:
+        self.players: list[_SgsPlayer] = [_SgsPlayer(host_conn, host_name)]
         self.state = "waiting"
         self._turn_idx = 0
-        self._ticks = 0
-        self._looted: set[str] = set()
-        self._scavs: list[dict] = []  # {room, hp}
-        self._extract_hold = 0
+        self._deck: list[str] = []
+        self._discard: list[str] = []
+        self._pending: Optional[dict] = None
+        self._extra_privates: list[tuple[object, list[str]]] = []
         self._rng = random.Random()
 
-    def _turn_limit(self) -> int:
-        extra = max(0, len(self.players) - _RAID_MIN_PLAYERS)
-        return _RAID_TURN_LIMIT + extra * _RAID_TURN_PER_EXTRA
+    def drain_extra_privates(self) -> list[tuple[object, list[str]]]:
+        out = self._extra_privates
+        self._extra_privates = []
+        return out
 
-    def _win_target(self) -> int:
-        extra = max(0, len(self.players) - _RAID_MIN_PLAYERS)
-        return _RAID_WIN_VALUE + extra * _RAID_WIN_PER_EXTRA
+    def _queue_private(self, who_idx: int, lines: list[str]) -> None:
+        if lines and 0 <= who_idx < len(self.players):
+            self._extra_privates.append((self.players[who_idx].conn, lines))
 
     def _who_of(self, conn) -> Optional[int]:
         for i, p in enumerate(self.players):
@@ -1587,94 +1752,1082 @@ class RaidGame:
     def is_seated(self, conn) -> bool:
         return self._who_of(conn) is not None
 
-    def _alive(self) -> list[_RaidPlayer]:
-        return [p for p in self.players if p.hp > 0]
+    def _is_alive(self, p: _SgsPlayer) -> bool:
+        return not p.dead and p.hp > 0
 
-    def _current(self) -> _RaidPlayer:
+    def _alive_indices(self) -> list[int]:
+        return [i for i, p in enumerate(self.players) if self._is_alive(p)]
+
+    def _current(self) -> _SgsPlayer:
         return self.players[self._turn_idx]
-
-    def _scavs_in(self, room: str) -> list[dict]:
-        return [s for s in self._scavs if s["room"] == room]
-
-    def _combined_value(self) -> int:
-        return sum(p.value for p in self.players)
-
-    def _all_alive_at_extract(self) -> bool:
-        alive = self._alive()
-        return bool(alive) and all(p.room == "extract" for p in alive)
 
     def _roster_names(self) -> str:
         return "、".join(p.name for p in self.players)
 
-    def _render_map(self) -> list[str]:
-        by_room: dict[str, list[str]] = {}
-        for p in self.players:
-            if p.hp <= 0:
-                continue
-            by_room.setdefault(p.room, []).append(p.name)
-        lines = ["  区域连通："]
-        for key, meta in _RAID_ROOMS.items():
-            marks = []
-            if key in self._looted:
-                marks.append("已搜")
-            if self._scavs_in(key):
-                marks.append(f"敌×{len(self._scavs_in(key))}")
-            if key in by_room:
-                marks.append("、".join(by_room[key]))
-            tag = f" [{', '.join(marks)}]" if marks else ""
-            nbs = "、".join(_RAID_ROOMS[n]["label"] for n in meta["neighbors"])
-            lines.append(f"    {meta['label']}({key}) → {nbs}{tag}")
-        return lines
+    def _lord_index(self) -> int:
+        for i, p in enumerate(self.players):
+            if p.role == "主公":
+                return i
+        return 0
 
-    def _status_line(self, p: _RaidPlayer, slot: int) -> str:
-        dead = " [阵亡]" if p.hp <= 0 else ""
-        return (
-            f"  #{slot} {p.name}{dead}：{max(0, p.hp)}HP  "
-            f"位置={_RAID_ROOMS[p.room]['label']}  "
-            f"甲+{p.armor} 武+{p.weapon}  战利品价值={p.value}"
+    def _draw_cards(self, player: _SgsPlayer, n: int) -> int:
+        drawn = 0
+        for _ in range(n):
+            if not self._deck:
+                if not self._discard:
+                    break
+                self._rng.shuffle(self._discard)
+                self._deck = self._discard[:]
+                self._discard = []
+            if not self._deck:
+                break
+            player.hand.append(self._deck.pop())
+            drawn += 1
+        return drawn
+
+    def _remove_card(self, player: _SgsPlayer, card: str) -> bool:
+        found = find_card_in_hand(player.hand, card)
+        if found is None:
+            return False
+        player.hand.remove(found)
+        self._discard.append(found)
+        return True
+
+    def _find_trick_in_hand(
+        self, player: _SgsPlayer, trick_name: str
+    ) -> Optional[str]:
+        for c in player.hand:
+            if card_base(c) == trick_name:
+                return c
+        return None
+
+    def _has_skill(self, player: _SgsPlayer, skill: str) -> bool:
+        return skill in player.skill_ids
+
+    def _seat_distance(self, a: int, b: int) -> int:
+        """固定座次上的最短步数（含阵亡位，与存活环距离可能不同）。"""
+        n = len(self.players)
+        d = abs(a - b)
+        return min(d, n - d)
+
+    def _alive_distance(self, a: int, b: int) -> int:
+        """存活角色间的最短座次距离（锦囊距离用）。"""
+        if a == b:
+            return 0
+        alive = self._alive_indices()
+        if a not in alive or b not in alive:
+            return 99
+        ai, bi = alive.index(a), alive.index(b)
+        n = len(alive)
+        return min(abs(ai - bi), n - abs(ai - bi))
+
+    def _calc_distance(self, from_idx: int, to_idx: int) -> int:
+        """from 到 to 的距离（目标 +1 马使他人到其距离 +1）。"""
+        d = self._alive_distance(from_idx, to_idx)
+        if self.players[to_idx].horse_plus:
+            d += 1
+        return d
+
+    def _attack_range(self, actor_idx: int) -> int:
+        """攻击范围 = 武器距离 + 进攻马(-1)。"""
+        actor = self.players[actor_idx]
+        r = weapon_range(actor.weapon)
+        if actor.horse_minus:
+            r += 1
+        return r
+
+    def _in_attack_range(self, actor_idx: int, target_idx: int) -> bool:
+        return self._calc_distance(actor_idx, target_idx) <= self._attack_range(
+            actor_idx
         )
 
-    def show(self, conn=None) -> list[str]:
-        target = self._win_target()
+    def _equip_slots(self) -> tuple[str, ...]:
+        return ("weapon", "armor", "horse_plus", "horse_minus")
+
+    def _get_equip(self, player: _SgsPlayer, slot: str) -> Optional[str]:
+        return getattr(player, slot)
+
+    def _set_equip(
+        self, player: _SgsPlayer, slot: str, card: Optional[str]
+    ) -> None:
+        setattr(player, slot, card)
+
+    def _discard_equip(self, card: str) -> None:
+        self._discard.append(card)
+
+    def _seat_order_line(self) -> str:
+        parts: list[str] = []
+        for i, p in enumerate(self.players):
+            mark = ""
+            if self.state == "playing" and i == self._turn_idx and not p.dead:
+                mark = "▸"
+            dead = "×" if p.dead else ""
+            parts.append(f"#{i + 1}{mark}{p.name}{dead}")
+        return "  座次（顺时针）：" + " → ".join(parts)
+
+    def _private_hand_view(self, who: int) -> list[str]:
+        """当前玩家私信：手牌与装备（不必 /game show）。"""
+        p = self.players[who]
+        labels = [card_label(c) for c in p.hand]
         lines = [
-            f"raid 搜打撤（{self.state}）  队员 {len(self.players)}/{_RAID_MAX_PLAYERS}  "
-            f"回合 {self._ticks}/{self._turn_limit()}  "
-            f"全队价值 {self._combined_value()}（目标 {target} 撤离加分）",
-        ]
-        for i, p in enumerate(self.players, 1):
-            lines.append(self._status_line(p, i))
-        if len(self.players) < _RAID_MAX_PLAYERS and self.state != "ended":
-            lines.append(
-                f"  空席：还可 /game join（至少 {_RAID_MIN_PLAYERS} 人开始）"
-            )
-        lines.extend(self._render_map())
-        if self.state == "playing":
-            cur = self._current()
-            lines.append(f"  当前行动：#{self._turn_idx + 1} {cur.name}")
-            if self._extract_hold:
-                lines.append(
-                    f"  撤离读条：{self._extract_hold}/{_RAID_EXTRACT_HOLD} "
-                    "（所有存活队员须在撤离点；继续 /game move 撤）"
+            f"── 你的手牌（{len(p.hand)}张）──",
+            "  " + ("、".join(labels) if labels else "（空）"),
+            "── 你的装备 ──",
+            "  "
+            + "  ".join(
+                (
+                    f"武器：{card_label(p.weapon) if p.weapon else '—'}",
+                    f"防具：{card_label(p.armor) if p.armor else '—'}",
+                    f"+1马：{card_label(p.horse_plus) if p.horse_plus else '—'}",
+                    f"-1马：{card_label(p.horse_minus) if p.horse_minus else '—'}",
                 )
+            ),
+        ]
+        lines.extend(self._distance_lines(who))
+        pend = self._pending
+        if (
+            who == self._turn_idx
+            and not pend
+            and not p.skip_play
+            and not p.dead
+        ):
             lines.append(
-                "  指令：/game move 搜 | 打 | 撤 | 去 <区域>"
-                "（区域可用 走廊/仓库/撤离点 等）"
+                f"  ▸ 轮到你出牌  杀距{self._attack_range(who)}"
             )
+            lines.append("  /game show 帮助  查看完整指令")
+        elif pend and pend.get("kind") == "guanxing" and pend.get("who") == who:
+            n = len(pend.get("cards", []))
+            lines.append(
+                f"  ▸ 观星：/game move 观星 <1～{n} 排列> 或 观星 过"
+            )
+            for i, c in enumerate(pend.get("cards", []), 1):
+                lines.append(f"    牌顶 #{i} 【{card_label(c)}】")
+        elif pend:
+            hint = self._pending_hint().strip()
+            if hint:
+                lines.append(f"  ▸ {hint}")
         return lines
+
+    def push_hand_views(self) -> list[tuple[object, list[str]]]:
+        """返回需私信手牌摘要的 (conn, lines)。"""
+        if self.state != "playing":
+            return []
+        out: list[tuple[object, list[str]]] = []
+        seen: set[int] = set()
+
+        def add(who: int) -> None:
+            if who in seen or who < 0 or who >= len(self.players):
+                return
+            p = self.players[who]
+            if p.dead:
+                return
+            seen.add(who)
+            lines = self._private_hand_view(who)
+            if lines:
+                out.append((p.conn, lines))
+
+        pend = self._pending
+        if pend:
+            kind = pend.get("kind")
+            if kind == "guanxing":
+                add(int(pend["who"]))
+            elif kind == "sha":
+                add(int(pend["target"]))
+            elif kind in ("duel", "nanman", "wanjian"):
+                add(int(pend["turn"]))
+            elif kind == "huogong":
+                phase = pend.get("phase", "show")
+                if phase == "show":
+                    add(int(pend["target"]))
+                else:
+                    add(int(pend["source"]))
+            elif kind in ("shunshou", "dismantle"):
+                add(int(pend["source"]))
+            return out
+
+        who = self._turn_idx
+        p = self.players[who]
+        if not p.dead and not p.skip_play:
+            add(who)
+        return out
+
+    def _distance_lines(self, viewer: Optional[int]) -> list[str]:
+        if viewer is None or self.state != "playing":
+            return []
+        lines = [f"  距离（相对你 #{viewer + 1}，杀距={self._attack_range(viewer)}）："]
+        for i, p in enumerate(self.players):
+            if i == viewer:
+                continue
+            if p.dead:
+                lines.append(f"    #{i + 1} {p.name}  阵亡")
+                continue
+            d = self._calc_distance(viewer, i)
+            tag = "可杀" if self._in_attack_range(viewer, i) else "不可杀"
+            lines.append(f"    #{i + 1} {p.name}  距离{d}  ({tag})")
+        return lines
+
+    def _ignore_target_armor(self, actor_idx: int, target_idx: int) -> bool:
+        actor = self.players[actor_idx]
+        return actor.weapon is not None and card_base(actor.weapon) == "青釭剑"
+
+    def _has_armor(self, player: _SgsPlayer, name: str) -> bool:
+        return (
+            player.armor is not None and card_base(player.armor) == name
+        )
+
+    def _try_bagua_shan(self, target_idx: int) -> tuple[bool, list[str]]:
+        """八卦阵判定：红色视为出闪。返回 (是否视为出闪, 战报)。"""
+        target = self.players[target_idx]
+        card = self._flip_judge_card()
+        lines: list[str] = []
+        if card is None:
+            lines.append(f"{target.name}【八卦阵】判定：牌堆空")
+            return False, lines
+        self._discard.append(card)
+        lines.append(
+            f"{target.name}【八卦阵】判定【{card_label(card)}】"
+        )
+        if is_red(card):
+            lines.append(f"  → 红色，视为出【闪】")
+            return True, lines
+        lines.append(f"  → 非红色，仍需【闪】或受击")
+        return False, lines
+
+    def _qilin_discard_horse(self, target_idx: int, notes: list[str]) -> None:
+        victim = self.players[target_idx]
+        for slot in ("horse_plus", "horse_minus"):
+            card = self._get_equip(victim, slot)
+            if card:
+                self._set_equip(victim, slot, None)
+                self._discard_equip(card)
+                notes.append(
+                    f"{victim.name}麒麟弓弃【{card_label(card)}】"
+                )
+                return
+
+    def _jizhi_draw(self, player: _SgsPlayer, notes: list[str]) -> None:
+        if self._has_skill(player, "jizhi"):
+            if self._draw_cards(player, 1):
+                notes.append(f"{player.name}集智+1牌")
+
+    def _status_line(self) -> str:
+        """单行局面摘要，附在每次出牌广播末尾。"""
+        hint = self._pending_hint().strip()
+        if hint:
+            return hint.lstrip()
+        if self.state == "playing" and not self._pending:
+            cur = self._current()
+            if not cur.dead:
+                return f"▸ #{self._turn_idx + 1} {cur.name} 回合"
+        return ""
+
+    def finalize_broadcast(self, lines: list[str]) -> list[str]:
+        if not lines:
+            return lines
+        foot = self._status_line()
+        if foot and lines[-1] != foot:
+            lines.append(foot)
+        return lines
+
+    def _can_trick_target(self, target_idx: int) -> bool:
+        p = self.players[target_idx]
+        if self._has_skill(p, "qianxun") and not p.hand:
+            return False
+        return True
+
+    def _trick_target_err(self, name: str) -> GameResult:
+        return ([f"{name}（谦逊）无手牌，不能成为锦囊目标。"], [], False)
+
+    def _shangshi_draw(self, player: _SgsPlayer, notes: list[str]) -> None:
+        while (
+            self._has_skill(player, "shangshi")
+            and not player.dead
+            and len(player.hand) <= player.hp
+            and player.hp > 0
+        ):
+            if not self._draw_cards(player, 1):
+                break
+            notes.append(f"{player.name}伤逝+1牌")
+
+    def _kuanggu_check(self, damaged_idx: int, notes: list[str]) -> None:
+        for i, p in enumerate(self.players):
+            if not self._has_skill(p, "kuanggu") or p.dead:
+                continue
+            if self._alive_distance(i, damaged_idx) != 1:
+                continue
+            if p.hp < p.max_hp:
+                p.hp += 1
+                notes.append(f"{p.name}狂骨+1体力")
+
+    def _lieren_steal(
+        self, actor_idx: int, target_idx: int, notes: list[str]
+    ) -> None:
+        actor = self.players[actor_idx]
+        victim = self.players[target_idx]
+        if not self._has_skill(actor, "lieren") or not victim.hand:
+            return
+        card = self._rng.choice(victim.hand)
+        victim.hand.remove(card)
+        actor.hand.append(card)
+        notes.append(f"{actor.name}烈刃得【{card_label(card)}】")
+
+    def _huoshou_kill_draw(
+        self, source_idx: Optional[int], notes: list[str]
+    ) -> None:
+        if source_idx is None:
+            return
+        src = self.players[source_idx]
+        if self._has_skill(src, "huoshou"):
+            n = self._draw_cards(src, 2)
+            if n:
+                notes.append(f"{src.name}祸首+{n}牌")
+
+    def _has_zhangba(self, player: _SgsPlayer) -> bool:
+        return (
+            player.weapon is not None
+            and card_base(player.weapon) == "丈八蛇矛"
+        )
+
+    def _format_sha_label(
+        self, card: str, zhangba_labels: Optional[list[str]] = None
+    ) -> str:
+        if zhangba_labels:
+            return f"【{'】【'.join(zhangba_labels)}】当【杀】"
+        return f"【{card_label(card)}】"
+
+    def _consume_zhangba_sha(
+        self, player: _SgsPlayer, tok1: str, tok2: str
+    ) -> Optional[tuple[str, list[str]]]:
+        """弃两张手牌，视为出【杀】。返回 (虚拟杀, 展示用标签)。"""
+        c1 = find_card_in_hand(player.hand, tok1)
+        if c1 is None:
+            return None
+        player.hand.remove(c1)
+        c2 = find_card_in_hand(player.hand, tok2)
+        if c2 is None:
+            player.hand.append(c1)
+            return None
+        player.hand.remove(c2)
+        self._discard.extend([c1, c2])
+        return ("杀", [card_label(c1), card_label(c2)])
+
+    def _is_sha_card(self, card: str) -> bool:
+        return card_base(card) in SHA_CARDS
+
+    def _is_shan_card(self, card: str) -> bool:
+        return card_base(card) in SHAN_CARDS
+
+    def _has_sha(self, player: _SgsPlayer) -> bool:
+        for c in player.hand:
+            if self._is_sha_card(c):
+                return True
+        if self._has_skill(player, "wusheng"):
+            if any(is_red(c) for c in player.hand):
+                return True
+        if self._has_skill(player, "longdan"):
+            if any(self._is_shan_card(c) for c in player.hand):
+                return True
+        return False
+
+    def _consume_sha(
+        self,
+        player: _SgsPlayer,
+        *,
+        token: Optional[str] = None,
+        sha_kind: Optional[str] = None,
+    ) -> Optional[str]:
+        if token is not None:
+            found = find_card_in_hand(player.hand, token)
+            if found is None or not self._is_sha_card(found):
+                return None
+            if sha_kind and card_base(found) != sha_kind:
+                return None
+            player.hand.remove(found)
+            self._discard.append(found)
+            return found
+        for c in list(player.hand):
+            if self._is_sha_card(c) and (not sha_kind or card_base(c) == sha_kind):
+                player.hand.remove(c)
+                self._discard.append(c)
+                return c
+        if sha_kind:
+            return None
+        if self._has_skill(player, "wusheng"):
+            for c in list(player.hand):
+                if is_red(c):
+                    player.hand.remove(c)
+                    self._discard.append(c)
+                    return c
+        if self._has_skill(player, "longdan"):
+            for c in list(player.hand):
+                if self._is_shan_card(c):
+                    player.hand.remove(c)
+                    self._discard.append(c)
+                    return c
+        return None
+
+    def _consume_shan(self, player: _SgsPlayer) -> bool:
+        for c in list(player.hand):
+            if self._is_shan_card(c):
+                player.hand.remove(c)
+                self._discard.append(c)
+                return True
+        if self._has_skill(player, "longdan"):
+            for c in list(player.hand):
+                if self._is_sha_card(c):
+                    player.hand.remove(c)
+                    self._discard.append(c)
+                    return True
+        return False
+
+    def _consume_card(self, player: _SgsPlayer, card: str) -> bool:
+        if card in SHA_CARDS:
+            return self._consume_sha(player) is not None
+        found = find_card_in_hand(player.hand, card)
+        if found is None:
+            return False
+        player.hand.remove(found)
+        self._discard.append(found)
+        return True
+
+    def _resolve_target(
+        self,
+        actor_idx: int,
+        tokens: list[str],
+        *,
+        allow_self: bool = False,
+    ) -> Optional[int]:
+        if not tokens:
+            return None
+        token = " ".join(tokens).strip()
+        if token.startswith("#"):
+            try:
+                slot = int(token[1:]) - 1
+            except ValueError:
+                return None
+            if 0 <= slot < len(self.players) and (allow_self or slot != actor_idx):
+                return slot
+            return None
+        try:
+            slot = int(token) - 1
+            if 0 <= slot < len(self.players) and (allow_self or slot != actor_idx):
+                return slot
+        except ValueError:
+            pass
+        for i, p in enumerate(self.players):
+            if (allow_self or i != actor_idx) and token in p.name:
+                return i
+        return None
+
+    def _public_status(self, p: _SgsPlayer, slot: int, viewer: Optional[int]) -> str:
+        dead = " [阵亡]" if p.dead else ""
+        role = ""
+        if p.role == "主公" and not p.dead:
+            role = " 身份=主公"
+        elif viewer == slot - 1 or p.dead:
+            role = f" 身份={p.role}"
+        hand = f" 手牌={len(p.hand)}张"
+        if viewer is not None and viewer == slot - 1 and not p.dead:
+            labels = [card_label(c) for c in p.hand]
+            hand = f" 手牌={'、'.join(labels) if labels else '（空）'}"
+        gen = ""
+        if p.general:
+            k = f"·{p.kingdom}" if p.kingdom else ""
+            gen = f" {p.general}{k}"
+        chain = " 铁索" if p.chained else ""
+        judge = ""
+        if p.judge_lebu:
+            judge += " 乐"
+        if p.judge_bingliang:
+            judge += " 兵粮"
+        equip = ""
+        if self.state == "playing" and (
+            p.weapon or p.armor or p.horse_plus or p.horse_minus
+        ):
+            bits: list[str] = []
+            if p.weapon:
+                bits.append(f"武={card_label(p.weapon)}")
+            if p.armor:
+                bits.append(f"防={card_label(p.armor)}")
+            if p.horse_plus:
+                bits.append(f"+1马={card_label(p.horse_plus)}")
+            if p.horse_minus:
+                bits.append(f"-1马={card_label(p.horse_minus)}")
+            equip = "  " + " ".join(bits)
+        return (
+            f"  #{slot} {p.name}{dead}{gen}{role}{chain}{judge}{equip}  "
+            f"体力 {max(0, p.hp)}/{p.max_hp}{hand}"
+        )
+
+    def _pending_hint(self) -> str:
+        if not self._pending:
+            return ""
+        kind = self._pending.get("kind", "")
+        if kind == "sha":
+            tgt = self.players[self._pending["target"]]
+            need = self._pending.get("need_shan", 1)
+            extra = ""
+            if self._has_skill(tgt, "liuli"):
+                extra = "；可 /game move 流离 <牌> <转移目标>"
+            return (
+                f"  【待响应】{tgt.name} 需 {need} 张【闪】或受击{extra}"
+            )
+        if kind == "duel":
+            who = self.players[self._pending["turn"]]
+            return f"  【决斗】轮到 {who.name} 出【杀】或 /game move 受击"
+        if kind in ("nanman", "wanjian"):
+            who = self.players[self._pending["turn"]]
+            label = self._pending.get("label", "")
+            need = "杀" if kind == "nanman" else "闪"
+            return f"  【{label}】轮到 {who.name} 出【{need}】或 /game move 受击"
+        if kind == "guanxing":
+            who = self.players[self._pending["who"]]
+            n = len(self._pending.get("cards", []))
+            return (
+                f"  【观星】{who.name}：/game move 观星 <1～{n} 的排列> 或 观星 过"
+            )
+        if kind == "huogong":
+            phase = self._pending.get("phase", "show")
+            src = self.players[self._pending["source"]]
+            tgt = self.players[self._pending["target"]]
+            if phase == "show":
+                return (
+                    f"  【火攻】{tgt.name} 请出示一张手牌："
+                    "/game move 出示 <牌名>"
+                )
+            suit = self._pending.get("shown_suit", "")
+            return (
+                f"  【火攻】{src.name} 可弃一张【{suit}】牌造成 1 点火焰伤害："
+                "/game move 火攻 <牌名>  或  /game move 过"
+            )
+        if kind in ("shunshou", "dismantle"):
+            who = self.players[self._pending["source"]]
+            verb = "顺手" if kind == "shunshou" else "拆"
+            name = "顺手牵羊" if kind == "shunshou" else "过河拆桥"
+            return (
+                f"  【{name}】{who.name} 选择区域："
+                f"/game move {verb} <手牌|武器|防具|+1马|-1马>"
+            )
+        return ""
+
+    def show(self, conn=None, *, full: bool = False) -> list[str]:
+        viewer = self._who_of(conn) if conn is not None else None
+        lines = [
+            f"三国杀·军争 {self.state}  "
+            f"{len(self.players)}人  牌堆{len(self._deck)}  弃{len(self._discard)}",
+        ]
+        lines.append(self._seat_order_line())
+        for i, p in enumerate(self.players, 1):
+            lines.append(self._public_status(p, i, viewer))
+        lines.extend(self._distance_lines(viewer))
+        if self.state == "waiting":
+            host = self.players[0].name
+            n = len(self.players)
+            if n < _SGS_MAX_PLAYERS:
+                lines.append(f"  空席：/game join（当前 {n}/{_SGS_MAX_PLAYERS}）")
+            if n < _SGS_MIN_PLAYERS:
+                lines.append(
+                    f"  至少 {_SGS_MIN_PLAYERS} 人后可开局"
+                    f"（还差 {_SGS_MIN_PLAYERS - n} 人）"
+                )
+            else:
+                lines.append(
+                    f"  房主 {host} 执行 /game move 开始 即可开局"
+                    f"（满员前仍可 join）"
+                )
+            lines.append("  /game move 武将  查看军争武将池")
+            return lines
+        hint = self._pending_hint()
+        if hint:
+            lines.append(hint)
+        if self.state == "playing" and not self._pending:
+            cur = self._current()
+            if not cur.dead:
+                lines.append(f"  当前回合：#{self._turn_idx + 1} {cur.name}")
+        if viewer is not None and self.state == "playing":
+            vp = self.players[viewer]
+            if vp.role and not vp.dead:
+                lines.append(f"  你的身份：{vp.role}")
+            if vp.skill_ids and not vp.dead:
+                lines.append(f"  你的技能：{format_skills(vp.skill_ids)}")
+                ginfo = SGS_GENERAL_BY_NAME.get(vp.general or "")
+                if ginfo and ginfo.get("desc"):
+                    lines.append(f"    {ginfo['desc']}")
+        if (
+            self._pending
+            and self._pending.get("kind") == "guanxing"
+            and viewer == self._pending.get("who")
+        ):
+            for i, c in enumerate(self._pending.get("cards", []), 1):
+                lines.append(f"  观星 #{i} 【{card_label(c)}】")
+        if full:
+            lines.append(
+                "  出牌：杀/火杀/雷杀 <目标> [牌名|丈八:<牌1> <牌2>] | 桃 | 闪 | 酒 | 决斗 | "
+                "拆/过河拆桥 <目标> [区域] | 顺手/顺手牵羊 <目标> [区域] | 无中生有 | 南蛮 | "
+                "万箭 | 兵粮/铁索 <目标1> <目标2>/五谷/桃园/火攻 <目标> | 装备 <牌名> | "
+                "蛊惑 | 观星 | 武将 | 过"
+            )
+        else:
+            lines.append("  指令详情：/game show 帮助")
+        return lines
+
+    def _guanxing_start(self, actor_idx: int) -> list[str]:
+        actor = self.players[actor_idx]
+        n = min(5, len(self._deck))
+        if n == 0:
+            return []
+        cards = [self._deck.pop() for _ in range(n)]
+        self._pending = {
+            "kind": "guanxing",
+            "cards": cards,
+            "who": actor_idx,
+        }
+        return [
+            f"{actor.name}（观星）观看牌堆顶 {n} 张，"
+            "/game show 查看，/game move 观星 <序号…> 调整（例：观星 3 1 2 5 4）"
+        ]
+
+    def _guanxing_resolve(self, who: int, args: list[str]) -> GameResult:
+        pend = self._pending
+        if not pend or pend.get("kind") != "guanxing":
+            return (["当前没有观星。"], [], False)
+        if who != pend["who"]:
+            return (["不是你的观星。"], [], False)
+        cards: list[str] = list(pend["cards"])
+        if not args or (len(args) == 1 and args[0] in ("过", "pass")):
+            ordered = cards
+        else:
+            if len(args) != len(cards):
+                return (
+                    [f"请给出 {len(cards)} 个序号（1～{len(cards)}），或 观星 过"],
+                    [],
+                    False,
+                )
+            try:
+                idxs = [int(x) - 1 for x in args]
+            except ValueError:
+                return (["序号须为数字。"], [], False)
+            if sorted(idxs) != list(range(len(cards))):
+                return (["序号须为 1～N 的不重复排列。"], [], False)
+            ordered = [cards[i] for i in idxs]
+        for c in reversed(ordered):
+            self._deck.append(c)
+        self._pending = None
+        actor = self.players[who]
+        bcast = [f"{actor.name}（观星）已将 {len(ordered)} 张放回牌堆顶"]
+        bcast.extend(self._turn_draw_core())
+        actor.drew_this_turn = True
+        bcast.extend(self._auto_skip_play_phase(who))
+        return ([], bcast, False)
+
+    def _turn_draw_core(self) -> list[str]:
+        actor = self.players[self._turn_idx]
+        msgs: list[str] = []
+        n = _SGS_DRAW_PER_TURN + self._draw_phase_extra(actor)
+        got = self._draw_cards(actor, n)
+        if self._has_skill(actor, "luoshen"):
+            luoshen_n = 0
+            while self._deck:
+                c = self._deck.pop()
+                actor.hand.append(c)
+                luoshen_n += 1
+                if is_red(c):
+                    break
+            if luoshen_n:
+                msgs.append(f"{actor.name}（洛神）翻牌入手 {luoshen_n} 张")
+        if self._has_skill(actor, "haoshi") and len(actor.hand) >= 2:
+            others = [
+                i
+                for i in self._alive_indices()
+                if i != self._turn_idx
+            ]
+            if others:
+                min_len = min(len(self.players[i].hand) for i in others)
+                targets = [
+                    i
+                    for i in others
+                    if len(self.players[i].hand) == min_len
+                ]
+                for t in targets[:2]:
+                    if len(actor.hand) < 2:
+                        break
+                    c = actor.hand.pop()
+                    self.players[t].hand.append(c)
+                    msgs.append(
+                        f"{actor.name}（好施）将【{card_label(c)}】"
+                        f"交给 {self.players[t].name}"
+                    )
+        if got:
+            msgs.append(f"{actor.name} 摸 {got} 张")
+        return msgs
+
+    def _draw_phase_extra(self, actor: _SgsPlayer) -> int:
+        extra = 0
+        if self._has_skill(actor, "yingzi"):
+            extra += 1
+        if self._has_skill(actor, "zaoxian") and actor.zaoxian_awakened:
+            extra += 1
+        if self._has_skill(actor, "haoshi"):
+            extra += 2
+        if self._has_skill(actor, "yicong"):
+            alive = self._alive_indices()
+            if alive:
+                dists = [
+                    self._calc_distance(self._turn_idx, i)
+                    for i in alive
+                    if i != self._turn_idx
+                ]
+                if dists and min(dists) >= 2:
+                    extra += 1
+        return extra
+
+    def _assign_setup(self) -> list[str]:
+        n = len(self.players)
+        roles = list(_SGS_ROLE_TABLE[n])
+        self._rng.shuffle(roles)
+        pool = list(SGS_GENERAL_POOL)
+        self._rng.shuffle(pool)
+        self._deck = build_junzheng_deck()
+        self._rng.shuffle(self._deck)
+        self._discard = []
+        lines = [f"三国杀·军争开始！玩家：{self._roster_names()}"]
+        for i, p in enumerate(self.players):
+            p.role = roles[i]
+            g = pool[i]
+            p.general = g["name"]
+            p.kingdom = g["kingdom"]
+            p.skill_ids = g["skills"]
+            p.max_hp = g["hp"]
+            if self._has_skill(p, "buqu"):
+                p.max_hp += 1
+            if p.role == "主公":
+                p.max_hp += 1
+            p.hp = p.max_hp
+            p.dead = False
+            p.sha_used = 0
+            p.jiu_buff = False
+            p.luoyi_buff = False
+            p.skip_play = False
+            p.skip_draw = False
+            p.judge_lebu = False
+            p.judge_bingliang = False
+            p.drew_this_turn = False
+            p.chained = False
+            p.niepan_used = False
+            p.shuangxiong_color = None
+            p.zaoxian_awakened = False
+            p.shuangxiong_duel_used = False
+            p.weapon = None
+            p.armor = None
+            p.horse_plus = None
+            p.horse_minus = None
+            if self._has_skill(p, "huashen"):
+                donors = [g for g in pool if g["name"] != p.general and g["skills"]]
+                if donors:
+                    d = self._rng.choice(donors)
+                    extra_s = self._rng.choice(d["skills"])
+                    p.skill_ids = p.skill_ids + (extra_s,)
+            init = _SGS_INITIAL_HAND
+            drawn = self._draw_cards(p, init)
+            lines.append(
+                f"  #{i + 1} {p.name}：{p.general}·{p.kingdom} "
+                f"（体力 {p.max_hp}）— {g['desc']}"
+            )
+            if drawn < init:
+                lines.append(f"    （牌堆不足，仅发到 {drawn} 张）")
+        lord_idx = self._lord_index()
+        self._turn_idx = lord_idx
+        lord = self.players[lord_idx]
+        lines.append(f"主公：#{lord_idx + 1} {lord.name}（身份公开）")
+        lines.append("其余身份请各玩家 /game show 私下查看；/game move 武将 查看武将池。")
+        lines.append(f"轮到 #{lord_idx + 1} {lord.name} 的回合")
+        return lines
+
+    def _flip_judge_card(self) -> Optional[str]:
+        if not self._deck:
+            if not self._discard:
+                return None
+            self._rng.shuffle(self._discard)
+            self._deck = self._discard[:]
+            self._discard = []
+        if not self._deck:
+            return None
+        return self._deck.pop()
+
+    def _run_judge(
+        self, who_idx: int, label: str, *, escape_suit: str
+    ) -> tuple[bool, list[str]]:
+        """判定：escape_suit 则锦囊无效。返回 (是否生效, 战报行)。"""
+        actor = self.players[who_idx]
+        card = self._flip_judge_card()
+        lines: list[str] = []
+        if card is None:
+            lines.append(f"{actor.name}【{label}】判定：牌堆空，视为不生效")
+            return False, lines
+        self._discard.append(card)
+        suit = card_suit(card)
+        lines.append(
+            f"{actor.name}【{label}】判定【{card_label(card)}】"
+            f"（需非{escape_suit}才生效）"
+        )
+        if suit == escape_suit:
+            lines.append(f"  → 判定为{escape_suit}，【{label}】无效并弃置")
+            return False, lines
+        lines.append(f"  → 【{label}】生效")
+        return True, lines
+
+    def _judge_phase(self, who_idx: int) -> list[str]:
+        """回合开始判定阶段：兵粮寸断、乐不思蜀。"""
+        p = self.players[who_idx]
+        msgs: list[str] = []
+        if p.judge_bingliang:
+            p.judge_bingliang = False
+            ok, part = self._run_judge(who_idx, "兵粮寸断", escape_suit="梅花")
+            msgs.extend(part)
+            if ok:
+                p.skip_draw = True
+                msgs.append(
+                    f"{p.name} 本回合跳过摸牌阶段（兵粮寸断判定生效）"
+                )
+        if p.judge_lebu:
+            p.judge_lebu = False
+            ok, part = self._run_judge(who_idx, "乐不思蜀", escape_suit="红桃")
+            msgs.extend(part)
+            if ok:
+                p.skip_play = True
+                msgs.append(
+                    f"{p.name} 本回合跳过出牌阶段（乐不思蜀判定生效）"
+                )
+        return msgs
+
+    def _auto_skip_play_phase(self, who_idx: int) -> list[str]:
+        """乐不思蜀生效后自动结束出牌阶段，无需玩家输入「过」。"""
+        p = self.players[who_idx]
+        if not p.skip_play or who_idx != self._turn_idx:
+            return []
+        p.skip_play = False
+        msgs = [f"{p.name} 出牌阶段自动跳过（乐不思蜀判定生效）"]
+        msgs.extend(self._finish_turn(who_idx))
+        return msgs
+
+    def _catchup_turn_start(self, who_idx: int) -> list[str]:
+        """若回合开始判定/摸牌未结算（不应依赖玩家输入），在此补跑。"""
+        p = self.players[who_idx]
+        msgs: list[str] = []
+        if p.judge_lebu or p.judge_bingliang:
+            msgs.extend(self._judge_phase(who_idx))
+        if p.skip_draw and not p.drew_this_turn:
+            p.skip_draw = False
+            msgs.append(f"{p.name} 摸牌阶段已跳过（兵粮寸断）")
+        elif not p.drew_this_turn and not self._pending:
+            msgs.extend(self._turn_draw_core())
+            p.drew_this_turn = True
+        msgs.extend(self._auto_skip_play_phase(who_idx))
+        return msgs
+
+    def _begin_turn_draw(self) -> list[str]:
+        who = self._turn_idx
+        actor = self.players[who]
+        actor.sha_used = 0
+        actor.jiu_buff = False
+        actor.luoyi_buff = False
+        actor.shuangxiong_duel_used = False
+        actor.drew_this_turn = False
+        msgs: list[str] = []
+        msgs.extend(self._judge_phase(who))
+        if actor.skip_draw:
+            actor.skip_draw = False
+            msgs.append(f"{actor.name} 摸牌阶段已跳过（兵粮寸断）")
+        elif self._has_skill(actor, "guanxing"):
+            msgs.extend(self._guanxing_start(who))
+            return msgs
+        msgs.extend(self._turn_draw_core())
+        actor.drew_this_turn = True
+        msgs.extend(self._auto_skip_play_phase(who))
+        return msgs
+
+    def _end_turn_discard(self, actor: _SgsPlayer) -> list[str]:
+        msgs: list[str] = []
+        dropped = 0
+        while len(actor.hand) > actor.hp:
+            card = actor.hand.pop()
+            self._discard.append(card)
+            dropped += 1
+        if dropped:
+            msgs.append(
+                f"{actor.name} 弃 {dropped} 张（上限 {actor.hp}）"
+            )
+        if self._has_skill(actor, "biyue") and not actor.hand:
+            if self._draw_cards(actor, 1):
+                msgs.append(f"{actor.name} 闭月+1牌")
+        if self._has_skill(actor, "zaoxian") and not actor.zaoxian_awakened:
+            if not actor.hand:
+                actor.zaoxian_awakened = True
+                actor.max_hp += 1
+                actor.hp += 1
+                msgs.append(f"{actor.name} 凿险觉醒+1上限")
+        return msgs
+
+    def _next_alive_turn(self) -> tuple[_SgsPlayer, list[str]]:
+        n = len(self.players)
+        for _ in range(n):
+            self._turn_idx = (self._turn_idx + 1) % n
+            p = self.players[self._turn_idx]
+            if not p.dead:
+                return p, self._begin_turn_draw()
+        return self.players[self._turn_idx], []
+
+    def _damage(
+        self,
+        target_idx: int,
+        source_idx: Optional[int],
+        amount: int = 1,
+        *,
+        reactions: bool = True,
+        damage_card: Optional[str] = None,
+        element: str = "normal",
+        from_sha: bool = False,
+    ) -> list[str]:
+        p = self.players[target_idx]
+        if p.dead or amount <= 0:
+            return []
+        if amount > 1 and self._has_armor(p, "白银狮子"):
+            amount = 1
+        if self._has_armor(p, "藤甲"):
+            if element == "fire":
+                amount += 1
+            elif element == "normal":
+                amount = max(1, amount - 1)
+        notes: list[str] = []
+        dealt = 0
+        for _ in range(amount):
+            if p.dead:
+                break
+            p.hp -= 1
+            dealt += 1
+            if reactions:
+                self._shangshi_draw(p, notes)
+            if p.hp <= 0:
+                p.hp = 0
+                if not p.niepan_used and self._has_skill(p, "niepan"):
+                    p.niepan_used = True
+                    p.hp = 1
+                    p.dead = False
+                    notes.append(f"{p.name}涅槃至1体力")
+                else:
+                    p.dead = True
+                    notes.append(f"{p.name}阵亡（{p.role}）")
+                    if source_idx is not None and self._has_skill(p, "benggu"):
+                        killer = self.players[source_idx]
+                        killer.skill_ids = ()
+                        notes.append(f"{killer.name}断肠失技能")
+                    self._huoshou_kill_draw(source_idx, notes)
+        lines: list[str] = []
+        if dealt:
+            lines.append(
+                f"{p.name} -{dealt} → {max(0, p.hp)}/{p.max_hp}"
+            )
+        if (
+            from_sha
+            and source_idx is not None
+            and not p.dead
+            and dealt > 0
+        ):
+            src = self.players[source_idx]
+            if src.weapon and card_base(src.weapon) == "麒麟弓":
+                self._qilin_discard_horse(target_idx, notes)
+        if reactions and source_idx is not None and not p.dead:
+            src = self.players[source_idx]
+            if self._has_skill(p, "ganglie"):
+                lines.extend(
+                    self._damage(source_idx, None, 1, reactions=False)
+                )
+            if self._has_skill(p, "jianxiong"):
+                taken = False
+                if damage_card and damage_card in self._discard:
+                    self._discard.remove(damage_card)
+                    p.hand.append(damage_card)
+                    notes.append(
+                        f"{p.name}奸雄得【{card_label(damage_card)}】"
+                    )
+                    taken = True
+                if not taken and self._draw_cards(p, 1):
+                    notes.append(f"{p.name}奸雄+1牌")
+            if self._has_skill(p, "fankui") and src.hand:
+                stolen = self._rng.choice(src.hand)
+                src.hand.remove(stolen)
+                p.hand.append(stolen)
+                notes.append(
+                    f"{p.name}反馈得【{card_label(stolen)}】"
+                )
+            if self._has_skill(p, "yiji"):
+                n = self._draw_cards(p, 2)
+                if n:
+                    notes.append(f"{p.name}遗计+{n}牌")
+            if self._has_skill(src, "fangzhu") and p.hand:
+                c = p.hand.pop()
+                self._discard.append(c)
+                notes.append(f"{p.name}放逐弃【{card_label(c)}】")
+        if reactions:
+            self._kuanggu_check(target_idx, notes)
+            self._chain_spread_damage(target_idx, notes)
+        if notes:
+            lines.append("  " + "；".join(notes))
+        return lines
+
+    def _chain_spread_damage(self, origin: int, notes: list[str]) -> None:
+        if not self.players[origin].chained:
+            return
+        hit: list[str] = []
+        for i, other in enumerate(self.players):
+            if i != origin and other.chained and not other.dead:
+                other.hp -= 1
+                hit.append(other.name)
+                if other.hp <= 0:
+                    other.dead = True
+                    notes.append(f"{other.name}阵亡（{other.role}）")
+        if hit:
+            notes.append(f"铁索：{'、'.join(hit)}各-1")
+
+    def _check_win(self) -> Optional[str]:
+        alive = self._alive_indices()
+        if not alive:
+            return "无人存活，平局"
+        lord_alive = any(
+            self._is_alive(self.players[i]) and self.players[i].role == "主公"
+            for i in range(len(self.players))
+        )
+        rebels_alive = any(
+            self._is_alive(self.players[i]) and self.players[i].role == "反贼"
+            for i in range(len(self.players))
+        )
+        traitor_alive = any(
+            self._is_alive(self.players[i]) and self.players[i].role == "内奸"
+            for i in range(len(self.players))
+        )
+        if not lord_alive:
+            if len(alive) == 1 and self.players[alive[0]].role == "内奸":
+                return "内奸胜利！"
+            return "反贼阵营胜利！"
+        if not rebels_alive and not traitor_alive:
+            return "主公阵营胜利！"
+        if len(alive) == 1 and traitor_alive:
+            return "内奸胜利！"
+        return None
+
+    def _maybe_end(self, bcast: list[str]) -> GameResult:
+        win = self._check_win()
+        if win:
+            self.state = "ended"
+            bcast.append(f"对局结束：{win}")
+            return ([], bcast, True)
+        return ([], bcast, False)
 
     def _start_playing(self) -> list[str]:
         self.state = "playing"
-        self._turn_idx = 0
-        self._spawn_scav()
-        limit = self._turn_limit()
-        target = self._win_target()
-        first = self.players[0]
-        return [
-            f"raid 开始！队员：{self._roster_names()}",
-            "合作搜刮、清敌；所有存活队员到撤离点后 /game move 撤（读条 2 次）。",
-            f"风暴 {limit} 回合后封闭；全队战利品价值 ≥ {target} 为肥撤。",
-            f"轮到 #{1} {first.name} 行动",
-        ]
+        bcast = self._assign_setup()
+        bcast.extend(self._begin_turn_draw())
+        return bcast
 
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
@@ -1684,289 +2837,1948 @@ class RaidGame:
                 False,
             )
         if self._who_of(conn) is not None:
-            return (["你已经在小队里。"], [], False)
-        if len(self.players) >= _RAID_MAX_PLAYERS:
+            return (["你已经在座位上。"], [], False)
+        if self.state != "waiting":
+            return (["对局已开始，无法中途加入。"], [], False)
+        if len(self.players) >= _SGS_MAX_PLAYERS:
+            return ([f"座位已满（最多 {_SGS_MAX_PLAYERS} 人）。"], [], False)
+        self.players.append(_SgsPlayer(conn, name))
+        n = len(self.players)
+        priv = [
+            f"{name} 入座（{n}/{_SGS_MAX_PLAYERS}）。",
+            "你的身份将在开局后通过 /game show 查看。",
+        ]
+        if n < _SGS_MIN_PLAYERS:
+            priv.append(
+                f"至少 {_SGS_MIN_PLAYERS} 人后可由房主 /game move 开始 开局。"
+            )
+        elif n < _SGS_MAX_PLAYERS:
+            priv.append("房主可随时 /game move 开始；座位未满仍可 join。")
+        else:
+            priv.append("人数已满，请房主 /game move 开始。")
+        bcast = [f"{name} 加入，当前：{self._roster_names()}（{n}/{_SGS_MAX_PLAYERS}）"]
+        if n >= _SGS_MIN_PLAYERS:
+            host = self.players[0].name
+            bcast.append(f"房主 {host} 可 /game move 开始 开局")
+        return (priv, bcast, False)
+
+    def _finish_turn(self, actor_idx: int) -> list[str]:
+        actor = self.players[actor_idx]
+        msgs = self._end_turn_discard(actor)
+        nxt, draw_msgs = self._next_alive_turn()
+        msgs.extend(draw_msgs)
+        return msgs
+
+    def _sha_limit(self, actor: _SgsPlayer) -> int:
+        if self._has_skill(actor, "paoxiao"):
+            return 99
+        if actor.weapon and card_base(actor.weapon) == "诸葛连弩":
+            return 99
+        if self._has_skill(actor, "tianyi"):
+            return 2
+        return 1
+
+    def _sha_element(self, actor: _SgsPlayer, sha_card: str) -> str:
+        base = card_base(sha_card)
+        if base == "火杀":
+            return "fire"
+        if base == "雷杀":
+            return "thunder"
+        if (
+            actor.weapon
+            and card_base(actor.weapon) == "朱雀羽扇"
+            and base == "杀"
+        ):
+            return "fire"
+        return "normal"
+
+    def _renwang_blocks_sha(
+        self,
+        sha_card: str,
+        target: _SgsPlayer,
+        actor_idx: int,
+        target_idx: int,
+    ) -> bool:
+        if self._ignore_target_armor(actor_idx, target_idx):
+            return False
+        if not self._has_armor(target, "仁王盾"):
+            return False
+        if card_base(sha_card) in ("火杀", "雷杀"):
+            return False
+        return card_base(sha_card) == "杀" and is_black(sha_card)
+
+    def _sha_limit_ok(self, actor: _SgsPlayer) -> bool:
+        return actor.sha_used < self._sha_limit(actor)
+
+    def _sha_base_damage(
+        self, actor: _SgsPlayer, target: _SgsPlayer, *, sha_card: str
+    ) -> int:
+        dmg = 1
+        if actor.jiu_buff or actor.luoyi_buff:
+            dmg += 1
+            actor.jiu_buff = False
+            actor.luoyi_buff = False
+        if self._has_skill(actor, "liegong") and target.hp >= actor.hp:
+            dmg += 1
+        if (
+            actor.weapon
+            and card_base(actor.weapon) == "古锭刀"
+            and not target.hand
+        ):
+            dmg += 1
+        return dmg
+
+    def _do_sha(
+        self,
+        actor_idx: int,
+        target_idx: int,
+        *,
+        card_token: Optional[str] = None,
+        zhangba_tokens: Optional[tuple[str, str]] = None,
+        sha_kind: Optional[str] = None,
+    ) -> GameResult:
+        actor = self.players[actor_idx]
+        target = self.players[target_idx]
+        if target.dead:
+            return (["目标已阵亡。"], [], False)
+        if not self._in_attack_range(actor_idx, target_idx):
+            dist = self._calc_distance(actor_idx, target_idx)
+            ar = self._attack_range(actor_idx)
             return (
-                [f"小队已满（最多 {_RAID_MAX_PLAYERS} 人）。"],
+                [
+                    f"目标超出攻击范围（距离{dist}，你的杀距{ar}）。"
+                    "  /game show 查看座次与距离。"
+                ],
                 [],
                 False,
             )
-        self.players.append(_RaidPlayer(conn, name))
-        if self.state == "waiting":
-            if len(self.players) < _RAID_MIN_PLAYERS:
-                priv = [
-                    f"{name} 加入小队（{len(self.players)}/{_RAID_MAX_PLAYERS}），"
-                    f"再等 {_RAID_MIN_PLAYERS - len(self.players)} 人即可开始。",
-                ]
-                bcast = [f"{name} 加入，当前队员：{self._roster_names()}"]
-                return (priv, bcast, False)
-            return ([], self._start_playing(), False)
-        bcast = [
-            f"{name} 中途加入（{len(self.players)} 人），出生点集结。",
-            f"当前队员：{self._roster_names()}",
-        ]
+        if not self._sha_limit_ok(actor):
+            return (["本回合【杀】次数已用完。"], [], False)
+        zhangba_labels: Optional[list[str]] = None
+        if zhangba_tokens:
+            if not self._has_zhangba(actor):
+                return (["你没有装备【丈八蛇矛】。"], [], False)
+            consumed = self._consume_zhangba_sha(
+                actor, zhangba_tokens[0], zhangba_tokens[1]
+            )
+            if consumed is None:
+                return (
+                    [
+                        "请将两张不同的手牌作为【杀】打出"
+                        "（/game move 杀 <目标> <牌1> <牌2>）"
+                    ],
+                    [],
+                    False,
+                )
+            card, zhangba_labels = consumed
+        else:
+            card = self._consume_sha(actor, token=card_token, sha_kind=sha_kind)
+            if card is None:
+                if sha_kind:
+                    return ([f"你没有【{sha_kind}】。"], [], False)
+                if card_token:
+                    return ([f"你没有【{card_token}】。"], [], False)
+                hint = "你没有【杀】。"
+                if self._has_zhangba(actor) and len(actor.hand) >= 2:
+                    hint += (
+                        " 装备【丈八蛇矛】时可用两张手牌："
+                        "/game move 杀 <目标> <牌1> <牌2>"
+                    )
+                return ([hint], [], False)
+        sha_label = self._format_sha_label(card, zhangba_labels)
+        if self._renwang_blocks_sha(card, target, actor_idx, target_idx):
+            actor.sha_used += 1
+            return (
+                [],
+                [
+                    f"{actor.name}{sha_label}→{target.name}，"
+                    f"【仁王盾】无效（黑色【杀】）"
+                ],
+                False,
+            )
+        actor.sha_used += 1
+        element = self._sha_element(actor, card)
+        if self._has_skill(actor, "tieqi"):
+            need_shan = 0
+        elif self._has_skill(target, "liegong") and target.hp <= actor.hp:
+            need_shan = 0
+        elif self._has_skill(target, "wushuang"):
+            need_shan = 2
+        else:
+            need_shan = 1
+        self._pending = {
+            "kind": "sha",
+            "source": actor_idx,
+            "target": target_idx,
+            "need_shan": need_shan,
+            "got_shan": 0,
+            "damage": self._sha_base_damage(actor, target, sha_card=card),
+            "sha_card": card,
+            "sha_label": sha_label,
+            "element": element,
+            "xiangle": self._has_skill(target, "xiangle"),
+        }
+        if (
+            need_shan > 0
+            and not self._ignore_target_armor(actor_idx, target_idx)
+            and self._has_armor(target, "八卦阵")
+        ):
+            bagua_ok, bagua_lines = self._try_bagua_shan(target_idx)
+            if bagua_ok:
+                self._pending = None
+                bcast = [
+                    f"{actor.name}{sha_label}→{target.name}"
+                ] + bagua_lines + [f"{target.name} 闪避【杀】（八卦阵）。"]
+                return ([], bcast, False)
+            bagua_prefix = bagua_lines
+        else:
+            bagua_prefix = []
+        tags: list[str] = []
+        if self._pending["xiangle"]:
+            tags.append(f"{target.name}可享乐")
+        if self._has_skill(target, "liuli"):
+            tags.append(f"{target.name}可流离")
+        if need_shan == 0:
+            tags.append("不可闪")
+        elif need_shan > 1:
+            tags.append(f"需{need_shan}闪")
+        else:
+            tags.append(f"{target.name}出闪或受击")
+        tag_s = f"（{'，'.join(tags)}）" if tags else ""
+        bcast = [f"{actor.name}{sha_label}→{target.name}{tag_s}"]
+        if bagua_prefix:
+            bcast = bagua_prefix + bcast
+        if need_shan == 0 and not self._pending["xiangle"]:
+            dmg = self._pending["damage"]
+            card_used = self._pending["sha_card"]
+            elem = self._pending.get("element", "normal")
+            self._pending = None
+            notes: list[str] = []
+            bcast.extend(
+                self._damage(
+                    target_idx,
+                    actor_idx,
+                    dmg,
+                    damage_card=card_used,
+                    element=elem,
+                    from_sha=True,
+                )
+            )
+            self._lieren_steal(actor_idx, target_idx, notes)
+            if notes:
+                bcast.append("  " + "；".join(notes))
+            return self._maybe_end(bcast)
         return ([], bcast, False)
 
-    def _next_turn(self) -> _RaidPlayer:
-        n = len(self.players)
-        for _ in range(n):
-            self._turn_idx = (self._turn_idx + 1) % n
-            p = self.players[self._turn_idx]
-            if p.hp > 0:
-                return p
-        return self.players[self._turn_idx]
+    def _resolve_sha_response(
+        self, who: int, verb: str, args: Optional[list[str]] = None
+    ) -> GameResult:
+        pend = self._pending
+        if not pend or pend["kind"] != "sha":
+            return (["当前没有待响应的【杀】。"], [], False)
+        if who != pend["target"]:
+            return (["不是你受到的【杀】。"], [], False)
+        target = self.players[who]
+        if verb == "xiangle" and pend.get("xiangle"):
+            if not args or len(args) < 2:
+                return (
+                    ["用法：/game move 享乐 <牌1> <牌2> 弃2张抵消【杀】"],
+                    [],
+                    False,
+                )
+            removed: list[str] = []
+            for token in args[:2]:
+                found = find_card_in_hand(target.hand, token)
+                if found is None:
+                    return ([f"你没有【{token}】。"], [], False)
+                target.hand.remove(found)
+                self._discard.append(found)
+                removed.append(card_label(found))
+            self._pending = None
+            return (
+                [],
+                [f"{target.name}（享乐）弃置【{'】【'.join(removed)}】，【杀】无效"],
+                False,
+            )
+        if verb == "liuli" and self._has_skill(target, "liuli"):
+            src_idx = pend["source"]
+            if len(args) < 2:
+                return (
+                    [
+                        "用法：/game move 流离 <弃牌> <转移目标> "
+                        "（不能转给出杀者或自己）"
+                    ],
+                    [],
+                    False,
+                )
+            card_tok = args[0]
+            found = find_card_in_hand(target.hand, card_tok)
+            if found is None:
+                return ([f"你没有【{card_tok}】。"], [], False)
+            redir = self._resolve_target(who, args[1:])
+            if redir is None or redir == who or redir == src_idx:
+                return (["无效转移目标（不能为自己或出【杀】者）。"], [], False)
+            if not self._is_alive(self.players[redir]):
+                return (["转移目标已阵亡。"], [], False)
+            target.hand.remove(found)
+            self._discard.append(found)
+            new_tgt = self.players[redir]
+            pend["target"] = redir
+            pend["xiangle"] = self._has_skill(new_tgt, "xiangle")
+            pend["got_shan"] = 0
+            need = pend.get("need_shan", 1)
+            tags = [f"{new_tgt.name}出闪或受击"]
+            if pend["xiangle"]:
+                tags.insert(0, f"{new_tgt.name}可享乐")
+            return (
+                [],
+                [
+                    f"{target.name}（流离）弃【{card_label(found)}】，"
+                    f"【杀】→{new_tgt.name}（{'，'.join(tags)}）"
+                ],
+                False,
+            )
+        if verb == "tianxiang" and self._has_skill(target, "tianxiang"):
+            if len(args) < 2:
+                return (
+                    [
+                        "用法：/game move 天香 <牌> <转移目标> "
+                        "（将伤害转移给该角色）"
+                    ],
+                    [],
+                    False,
+                )
+            card_tok = args[0]
+            found = find_card_in_hand(target.hand, card_tok)
+            if found is None:
+                return ([f"你没有【{card_tok}】。"], [], False)
+            redir = self._resolve_target(who, args[1:])
+            if redir is None or redir == who:
+                return (["无效转移目标。"], [], False)
+            target.hand.remove(found)
+            self._discard.append(found)
+            src = pend["source"]
+            dmg = pend.get("damage", 1)
+            card_used = pend.get("sha_card")
+            elem = pend.get("element", "normal")
+            self._pending = None
+            bcast = [
+                f"{target.name}（天香）弃【{card_label(found)}】，"
+                f"伤害转移给 {self.players[redir].name}"
+            ]
+            notes: list[str] = []
+            bcast.extend(
+                self._damage(
+                    redir,
+                    src,
+                    dmg,
+                    damage_card=card_used,
+                    element=elem,
+                    from_sha=True,
+                )
+            )
+            self._lieren_steal(src, redir, notes)
+            if notes:
+                bcast.append("  " + "；".join(notes))
+            return self._maybe_end(bcast)
+        if verb == "xiangle":
+            return (["当前不能用享乐。"], [], False)
+        if verb == "shan":
+            if not self._consume_shan(target):
+                return (["你没有【闪】。"], [], False)
+            pend["got_shan"] = pend.get("got_shan", 0) + 1
+            if pend["got_shan"] < pend["need_shan"]:
+                return (
+                    [],
+                    [
+                        f"{target.name} 打出【闪】"
+                        f"（{pend['got_shan']}/{pend['need_shan']}）"
+                    ],
+                    False,
+                )
+            self._pending = None
+            return ([], [f"{target.name} 闪避【杀】。"], False)
+        if verb in ("pass", "hurt"):
+            self._pending = None
+            src = pend["source"]
+            dmg = pend.get("damage", 1)
+            card_used = pend.get("sha_card")
+            elem = pend.get("element", "normal")
+            notes: list[str] = []
+            bcast = [f"{target.name}未闪【杀】"]
+            bcast.extend(
+                self._damage(
+                    who,
+                    src,
+                    dmg,
+                    damage_card=card_used,
+                    element=elem,
+                    from_sha=True,
+                )
+            )
+            self._lieren_steal(src, who, notes)
+            if notes:
+                bcast.append("  " + "；".join(notes))
+            return self._maybe_end(bcast)
+        opts = ["闪", "受击"]
+        if pend.get("xiangle"):
+            opts.insert(0, "享乐")
+        if self._has_skill(target, "tianxiang"):
+            opts.insert(0, "天香")
+        if self._has_skill(target, "liuli"):
+            opts.insert(0, "流离")
+        return ([f"请 {' / '.join(opts)}。"], [], False)
 
-    def _tick_storm(self) -> Optional[str]:
-        self._ticks += 1
-        if self._ticks % _RAID_SCAV_SPAWN_EVERY == 0:
-            self._spawn_scav()
-        if self._ticks >= self._turn_limit():
-            return "风暴封闭，未能撤离 — 行动失败"
-        if not self._alive():
-            return "全队阵亡 — 行动失败"
+    def _duel_need_sha(self, player_idx: int) -> int:
+        if self._has_skill(self.players[player_idx], "wushuang"):
+            return 2
+        return 1
+
+    def _play_draw2(self, who: int, *, guhuo: bool = False) -> GameResult:
+        player = self.players[who]
+        if not guhuo and not self._remove_card(player, "无中生有"):
+            return (["你没有【无中生有】。"], [], False)
+        n = self._draw_cards(player, 2)
+        tag = "蛊惑" if guhuo else ""
+        pre = f"{player.name}{tag}" if tag else player.name
+        notes: list[str] = []
+        bcast = [f"{pre}【无中生有】+{n}牌"]
+        self._jizhi_draw(player, notes)
+        if notes:
+            bcast.append("  " + "；".join(notes))
+        return ([], bcast, False)
+
+    def _random_from_hand(
+        self, victim: _SgsPlayer
+    ) -> tuple[Optional[str], Optional[str]]:
+        """对方手牌对出牌者不可见，只能随机选一张。"""
+        if not victim.hand:
+            return None, f"{victim.name} 手牌为空。"
+        return self._rng.choice(victim.hand), None
+
+    _ZONE_SLOT_CN: dict[str, str] = {
+        "weapon": "武器",
+        "armor": "防具",
+        "horse_plus": "+1马",
+        "horse_minus": "-1马",
+    }
+
+    def _parse_zone_pick(self, token: str) -> Optional[str]:
+        t = token.strip()
+        aliases = {
+            "手牌": "hand",
+            "hand": "hand",
+            "武器": "weapon",
+            "weapon": "weapon",
+            "防具": "armor",
+            "armor": "armor",
+            "+1马": "horse_plus",
+            "防御马": "horse_plus",
+            "horse_plus": "horse_plus",
+            "-1马": "horse_minus",
+            "进攻马": "horse_minus",
+            "horse_minus": "horse_minus",
+        }
+        return aliases.get(t, aliases.get(t.lower()))
+
+    def _available_victim_zones(
+        self, victim: _SgsPlayer
+    ) -> dict[str, Optional[str]]:
+        """可选区域：hand→None（随机一张），装备槽→牌。"""
+        zones: dict[str, Optional[str]] = {}
+        if victim.hand:
+            zones["hand"] = None
+        for slot in self._equip_slots():
+            card = self._get_equip(victim, slot)
+            if card:
+                zones[slot] = card
+        return zones
+
+    def _format_zone_pick_menu(self, zones: dict[str, Optional[str]]) -> list[str]:
+        lines: list[str] = []
+        if "hand" in zones:
+            lines.append("  · 手牌（随机 1 张，牌面对他人保密）")
+        for slot in self._equip_slots():
+            card = zones.get(slot)
+            if card:
+                lines.append(
+                    f"  · {self._ZONE_SLOT_CN[slot]}【{card_label(card)}】"
+                )
+        return lines
+
+    def _take_victim_zone(
+        self, victim: _SgsPlayer, zone: str, card: str
+    ) -> None:
+        if zone == "hand":
+            victim.hand.remove(card)
+        else:
+            self._set_equip(victim, zone, None)
+
+    def _trick_distance_err(
+        self, who: int, tgt: int, *, max_dist: int = 1
+    ) -> Optional[str]:
+        d = self._calc_distance(who, tgt)
+        if d > max_dist:
+            return (
+                f"与 {self.players[tgt].name} 距离为 {d}，"
+                f"该锦囊需距离≤{max_dist}。"
+            )
         return None
 
-    def _spawn_scav(self) -> None:
-        rooms = [k for k in _RAID_ROOMS if k not in ("spawn", "extract")]
-        if not rooms:
-            return
-        room = self._rng.choice(rooms)
-        self._scavs.append({"room": room, "hp": _RAID_SCAV_HP})
-
-    def _apply_loot(self, player: _RaidPlayer, item: tuple[str, str, int]) -> str:
-        name, kind, val = item
-        if kind == "heal":
-            before = player.hp
-            player.hp = min(_RAID_PLAYER_HP, player.hp + val)
-            return f"使用 {name}，回复 {player.hp - before} HP"
-        if kind == "armor":
-            player.armor += val
-            return f"装备 {name}，护甲 +{val}"
-        if kind == "weapon":
-            player.weapon += val
-            return f"装备 {name}，火力 +{val}"
-        player.value += val
-        return f"获得 {name}，价值 +{val}"
-
-    def _damage_player(self, player: _RaidPlayer, dmg: int) -> int:
-        reduced = max(1, dmg - player.armor)
-        player.hp -= reduced
-        if self._extract_hold and player.hp > 0:
-            self._extract_hold = 0
-        return reduced
-
-    def _do_search(self, actor: _RaidPlayer) -> GameResult:
-        meta = _RAID_ROOMS[actor.room]
-        if not meta["loot"]:
-            return (["此处无物资可搜。"], [], False)
-        if actor.room in self._looted:
-            return (["这里已经搜刮干净了。"], [], False)
-        roll = self._rng.random()
-        if roll < 0.22:
-            self._looted.add(actor.room)
-            return (["翻找一番，只有空箱子和弹壳。"], [], False)
-        item = self._rng.choice(_RAID_LOOT_TABLE)
-        detail = self._apply_loot(actor, item)
-        if roll > 0.55:
-            self._looted.add(actor.room)
-        bcast = [f"{actor.name} 搜刮 {_RAID_ROOMS[actor.room]['label']}：{detail}"]
-        return ([], bcast, False)
-
-    def _do_fight(self, actor: _RaidPlayer) -> GameResult:
-        foes = self._scavs_in(actor.room)
-        if not foes:
-            return (["附近没有敌人。"], [], False)
-        foe = foes[0]
-        atk = actor.weapon + self._rng.randint(2, 8)
-        foe["hp"] -= atk
-        bcast = [
-            f"{actor.name} 交火！造成 {atk} 伤害（敌人剩余 {max(0, foe['hp'])} HP）"
-        ]
-        if foe["hp"] <= 0:
-            self._scavs.remove(foe)
-            loot = self._rng.randint(40, 120)
-            actor.value += loot
-            bcast.append(f"击毙敌人，搜到战利品价值 +{loot}")
-            return ([], bcast, False)
-        dmg = self._rng.randint(*_RAID_SCAV_DMG)
-        taken = self._damage_player(actor, dmg)
-        bcast.append(f"敌人反击！{actor.name} 受到 {taken} 伤害（剩余 {actor.hp} HP）")
-        if actor.hp <= 0:
-            bcast.append(f"{actor.name} 阵亡出局。")
-            if not self._alive():
-                self.state = "ended"
-                bcast.append("对局结束：全队阵亡，行动失败。")
-                return ([], bcast, True)
-        return ([], bcast, False)
-
-    def _do_extract(self, actor: _RaidPlayer) -> GameResult:
-        if actor.room != "extract":
-            return (["不在撤离点（需先到达 撤离点/广场 一侧）。"], [], False)
-        if not self._all_alive_at_extract():
-            missing = [
-                p.name
-                for p in self._alive()
-                if p.room != "extract"
-            ]
+    def _play_equip(self, who: int, card_tok: str) -> GameResult:
+        player = self.players[who]
+        if not card_tok:
             return (
-                [
-                    "还有存活队员不在撤离点，无法撤离。"
-                    + (f"（未到：{'、'.join(missing)}）" if missing else "")
-                ],
+                ["用法：/game move 装备 <牌名>  （武器/防具/+1马/-1马）"],
                 [],
                 False,
             )
-        self._extract_hold += 1
-        bcast = [
-            f"{actor.name} 掩护撤离读条 {self._extract_hold}/{_RAID_EXTRACT_HOLD}…"
-        ]
-        if self._extract_hold < _RAID_EXTRACT_HOLD:
-            return ([], bcast, False)
-        total = self._combined_value()
-        target = self._win_target()
-        self.state = "ended"
-        if total >= target:
-            bcast.append(
-                f"撤离成功！全队战利品价值 {total}（≥ {target}）— 肥撤！"
-            )
+        found = find_card_in_hand(player.hand, card_tok)
+        if found is None:
+            return ([f"你没有【{card_tok}】。"], [], False)
+        slot = equip_slot(found)
+        if slot is None:
+            return ([f"【{card_label(found)}】不是装备牌。"], [], False)
+        player.hand.remove(found)
+        old = self._get_equip(player, slot)
+        if old:
+            self._discard_equip(old)
+        self._set_equip(player, slot, found)
+        slot_cn = {
+            "weapon": "武器",
+            "armor": "防具",
+            "horse_plus": "+1马(防御)",
+            "horse_minus": "-1马(进攻)",
+        }[slot]
+        msg = f"{player.name} 装备【{card_label(found)}】→{slot_cn}"
+        if old:
+            msg += f"（换下【{card_label(old)}】）"
+        ar = self._attack_range(who)
+        return ([], [msg + f"  当前杀距{ar}"], False)
+
+    def _finish_trick_zone_pick(
+        self,
+        kind: str,
+        who: int,
+        tgt: int,
+        zone: str,
+        *,
+        guhuo: bool = False,
+    ) -> GameResult:
+        player = self.players[who]
+        victim = self.players[tgt]
+        zones = self._available_victim_zones(victim)
+        if zone not in zones:
+            slot_cn = "手牌" if zone == "hand" else self._ZONE_SLOT_CN.get(zone, zone)
+            return ([f"{victim.name} 的{slot_cn}已无法选择。"], [], False)
+        if zone == "hand":
+            if not victim.hand:
+                return ([f"{victim.name} 手牌为空。"], [], False)
+            found = self._rng.choice(victim.hand)
         else:
-            bcast.append(
-                f"撤离成功但物资偏少（{total} < {target}）— 勉强活下来。"
-            )
-        return ([], bcast, True)
+            found = zones.get(zone) or self._get_equip(victim, zone)
+            if not found:
+                return ([f"{victim.name} 的{self._ZONE_SLOT_CN[zone]}已空。"], [], False)
+        self._take_victim_zone(victim, zone, found)
+        label = card_label(found)
+        zone_cn = "手牌" if zone == "hand" else self._ZONE_SLOT_CN[zone]
+        tag = "（蛊惑）" if guhuo else ""
+        trick_name = "顺手牵羊" if kind == "shunshou" else "过河拆桥"
+        notes: list[str] = []
+        if kind == "shunshou":
+            player.hand.append(found)
+            if zone == "hand":
+                bcast = [
+                    f"{player.name}{tag}【{trick_name}】→{victim.name} "
+                    "获得其一张手牌"
+                ]
+                self._queue_private(who, [f"你获得了【{label}】"])
+                self._queue_private(tgt, [f"你失去了手牌【{label}】"])
+            else:
+                bcast = [
+                    f"{player.name}{tag}【{trick_name}】→{victim.name} "
+                    f"获得其{zone_cn}【{label}】"
+                ]
+                self._queue_private(tgt, [f"你失去了{zone_cn}【{label}】"])
+        else:
+            self._discard.append(found)
+            bcast = [
+                f"{player.name}{tag}【{trick_name}】→{victim.name} "
+                f"弃掉其{zone_cn}【{label}】"
+            ]
+            if zone == "hand":
+                self._queue_private(tgt, [f"你失去了手牌【{label}】"])
+            else:
+                self._queue_private(tgt, [f"你失去了{zone_cn}【{label}】"])
+        self._jizhi_draw(player, notes)
+        if notes:
+            bcast.append("  " + "；".join(notes))
+        return ([], bcast, False)
 
-    def _do_go(self, actor: _RaidPlayer, dest: Optional[str]) -> GameResult:
-        if dest is None:
+    def _begin_trick_zone_pick(
+        self,
+        kind: str,
+        who: int,
+        tgt: int,
+        *,
+        guhuo: bool = False,
+        zone_arg: Optional[str] = None,
+    ) -> GameResult:
+        player = self.players[who]
+        victim = self.players[tgt]
+        if not self._can_trick_target(tgt):
+            return self._trick_target_err(victim.name)
+        trick_name = "顺手牵羊" if kind == "shunshou" else "过河拆桥"
+        trick: Optional[str] = None
+        if not guhuo:
+            trick = self._find_trick_in_hand(player, trick_name)
+            if trick is None:
+                return ([f"你没有【{trick_name}】。"], [], False)
+        dist_err = self._trick_distance_err(who, tgt)
+        if dist_err:
+            return ([dist_err], [], False)
+        zones = self._available_victim_zones(victim)
+        if not zones:
+            return ([f"{victim.name} 无手牌且无装备。"], [], False)
+
+        def consume_trick() -> None:
+            if guhuo or trick is None:
+                return
+            player.hand.remove(trick)
+            self._discard.append(trick)
+
+        if zone_arg:
+            zone = self._parse_zone_pick(zone_arg)
+            if zone is None:
+                return (
+                    [
+                        "无效区域，可选：手牌、武器、防具、+1马、-1马"
+                    ],
+                    [],
+                    False,
+                )
+            if zone not in zones:
+                want = "手牌" if zone == "hand" else self._ZONE_SLOT_CN.get(zone, zone)
+                return ([f"{victim.name} 没有可选的{want}。"], [], False)
+            consume_trick()
+            return self._finish_trick_zone_pick(
+                kind, who, tgt, zone, guhuo=guhuo
+            )
+
+        if len(zones) == 1:
+            consume_trick()
+            only = next(iter(zones))
+            return self._finish_trick_zone_pick(
+                kind, who, tgt, only, guhuo=guhuo
+            )
+
+        consume_trick()
+        self._pending = {
+            "kind": kind,
+            "source": who,
+            "target": tgt,
+            "guhuo": guhuo,
+        }
+        verb_cn = "顺手" if kind == "shunshou" else "拆"
+        menu = self._format_zone_pick_menu(zones)
+        priv = [
+            f"【{trick_name}】请选择 {victim.name} 的区域：",
+            *menu,
+            f"  /game move {verb_cn} <手牌|武器|防具|+1马|-1马>",
+        ]
+        tag = "（蛊惑）" if guhuo else ""
+        bcast = [
+            f"{player.name}{tag}对 {victim.name} 使用【{trick_name}】，"
+            "等待选择区域…"
+        ]
+        return (priv, bcast, False)
+
+    def _resolve_trick_zone_pick(
+        self, who: int, verb: str, args: list[str]
+    ) -> GameResult:
+        pend = self._pending
+        if not pend or pend.get("kind") not in ("shunshou", "dismantle"):
+            return (["当前没有待选区域的锦囊。"], [], False)
+        kind = pend["kind"]
+        if who != pend["source"]:
+            actor = self.players[pend["source"]]
+            return ([f"等待 {actor.name} 选择区域。"], [], False)
+        if verb != kind:
+            verb_cn = "顺手" if kind == "shunshou" else "拆"
+            return (
+                [f"请用 /game move {verb_cn} <区域> 完成选择。"],
+                [],
+                False,
+            )
+        victim = self.players[pend["target"]]
+        zones = self._available_victim_zones(victim)
+        if not args:
+            menu = self._format_zone_pick_menu(zones)
+            verb_cn = "顺手" if kind == "shunshou" else "拆"
             return (
                 [
-                    "用法：/game move 去 <区域>  例：去 走廊 / 去 hall / 仓库",
-                    f"可选：{', '.join(m['label'] for m in _RAID_ROOMS.values())}",
+                    "请选择区域：",
+                    *menu,
+                    f"  /game move {verb_cn} <手牌|武器|防具|+1马|-1马>",
                 ],
                 [],
                 False,
             )
-        if dest not in _RAID_ROOMS:
-            return ([f"未知区域 {dest!r}。"], [], False)
-        if dest not in _RAID_ROOMS[actor.room]["neighbors"]:
-            here = _RAID_ROOMS[actor.room]["label"]
-            there = _RAID_ROOMS[dest]["label"]
-            return ([f"无法从 {here} 直接走到 {there}。"], [], False)
-        actor.room = dest
-        label = _RAID_ROOMS[dest]["label"]
-        bcast = [f"{actor.name} 抵达 {label}"]
-        # 进入新区域有小概率踩雷
-        if dest != "extract" and self._scavs_in(dest) and self._rng.random() < 0.35:
-            dmg = self._rng.randint(4, 10)
-            taken = self._damage_player(actor, dmg)
-            bcast.append(f"遭遇伏击！受到 {taken} 伤害（剩余 {actor.hp} HP）")
-            if actor.hp <= 0:
-                bcast.append(f"{actor.name} 阵亡出局。")
-                if not self._alive():
-                    self.state = "ended"
-                    bcast.append("对局结束：全队阵亡，行动失败。")
-                    return ([], bcast, True)
+        zone = self._parse_zone_pick(args[0])
+        if zone is None:
+            return (
+                ["无效区域，可选：手牌、武器、防具、+1马、-1马"],
+                [],
+                False,
+            )
+        if zone not in zones:
+            want = "手牌" if zone == "hand" else self._ZONE_SLOT_CN.get(zone, zone)
+            return ([f"{victim.name} 没有可选的{want}。"], [], False)
+        guhuo = bool(pend.get("guhuo"))
+        self._pending = None
+        return self._finish_trick_zone_pick(
+            kind, who, pend["target"], zone, guhuo=guhuo
+        )
+
+    def _play_dismantle(
+        self,
+        who: int,
+        tgt: int,
+        *,
+        guhuo: bool = False,
+        zone_arg: Optional[str] = None,
+    ) -> GameResult:
+        return self._begin_trick_zone_pick(
+            "dismantle", who, tgt, guhuo=guhuo, zone_arg=zone_arg
+        )
+
+    def _play_shunshou(
+        self,
+        who: int,
+        tgt: int,
+        *,
+        guhuo: bool = False,
+        zone_arg: Optional[str] = None,
+    ) -> GameResult:
+        return self._begin_trick_zone_pick(
+            "shunshou", who, tgt, guhuo=guhuo, zone_arg=zone_arg
+        )
+
+    def _play_bingliang(
+        self,
+        who: int,
+        tgt: int,
+        *,
+        guhuo: bool = False,
+        via_duanliang: bool = False,
+    ) -> GameResult:
+        player = self.players[who]
+        if not self._can_trick_target(tgt):
+            return self._trick_target_err(self.players[tgt].name)
+        dist_err = self._trick_distance_err(who, tgt)
+        if dist_err:
+            return ([dist_err], [], False)
+        if not guhuo and not via_duanliang:
+            if not self._remove_card(player, "兵粮寸断"):
+                return (["你没有【兵粮寸断】。"], [], False)
+        victim = self.players[tgt]
+        if victim.judge_bingliang:
+            return ([f"{victim.name} 判定区已有【兵粮寸断】。"], [], False)
+        victim.judge_bingliang = True
+        src = "断粮" if via_duanliang else ("蛊惑" if guhuo else "兵粮寸断")
+        notes: list[str] = []
+        bcast = [
+            f"{player.name} 对 {victim.name} 使用【{src}】，"
+            "置于其判定区（回合开始时判定：梅花则无效，否则跳过摸牌）"
+        ]
+        self._jizhi_draw(player, notes)
+        if notes:
+            bcast.append("  " + "；".join(notes))
         return ([], bcast, False)
+
+    def _do_guhuo(self, who: int, args: list[str]) -> GameResult:
+        player = self.players[who]
+        if len(args) < 2:
+            return (
+                [
+                    "用法：/game move 蛊惑 <锦囊> [参数…] <牌>",
+                    "  例：蛊惑 无中生有 红桃杀",
+                    "      蛊惑 过河拆桥 yxt 黑桃3",
+                    "      蛊惑 决斗 3 梅花杀",
+                    "      蛊惑 南蛮 方块2",
+                ],
+                [],
+                False,
+            )
+        card_tok = args[-1]
+        found = find_card_in_hand(player.hand, card_tok)
+        if found is None:
+            return ([f"你没有【{card_tok}】。"], [], False)
+        player.hand.remove(found)
+        self._discard.append(found)
+        trick_raw = args[0]
+        mid = args[1:-1]
+        trick = _SGS_MOVE_ALIASES.get(trick_raw, trick_raw.lower())
+
+        if trick in ("draw2", "无中生有"):
+            return self._play_draw2(who, guhuo=True)
+        if trick in ("dismantle", "拆", "过河拆桥"):
+            if not mid:
+                return (
+                    ["用法：/game move 蛊惑 过河拆桥 <目标> <你的牌>"],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, mid)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._play_dismantle(who, tgt, guhuo=True)
+        if trick in ("shunshou", "顺手", "顺手牵羊"):
+            if not mid:
+                return (
+                    ["用法：/game move 蛊惑 顺手 <目标> <你的牌>"],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, mid)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._play_shunshou(who, tgt, guhuo=True)
+        if trick == "duel":
+            if not mid:
+                return (["用法：/game move 蛊惑 决斗 <目标> <牌>"], [], False)
+            tgt = self._resolve_target(who, mid)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_duel(who, tgt, consume_card=False)
+        if trick in ("nanman", "南蛮", "南蛮入侵"):
+            priv, bcast, ended = self._start_area(
+                who, "nanman", "南蛮入侵（蛊惑）", "南蛮入侵", consume_card=False
+            )
+            self._jizhi_draw(player, bcast)
+            return (priv, bcast, ended)
+        if trick in ("wanjian", "万箭", "万箭齐发"):
+            priv, bcast, ended = self._start_area(
+                who, "wanjian", "万箭齐发（蛊惑）", "万箭齐发", consume_card=False
+            )
+            self._jizhi_draw(player, bcast)
+            return (priv, bcast, ended)
+        if trick in ("wugu", "五谷", "五谷丰登"):
+            bcast = [f"{player.name}（蛊惑）【五谷丰登】"]
+            for p in self.players:
+                if not p.dead and self._draw_cards(p, 1):
+                    bcast.append(f"{p.name} 摸 1 张")
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
+        if trick in ("taoyuan", "桃园", "桃园结义"):
+            bcast = [f"{player.name}（蛊惑）【桃园结义】"]
+            for p in self.players:
+                if not p.dead and p.hp < p.max_hp:
+                    p.hp += 1
+                    bcast.append(f"{p.name} 回复 1 点体力")
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
+        if trick in ("huogong", "火攻"):
+            if not mid:
+                return (
+                    ["用法：/game move 蛊惑 火攻 <目标> <蛊惑牌>"],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, mid)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_huogong(who, tgt, consume_card=False, guhuo=True)
+        if trick in ("bingliang", "兵粮", "兵粮寸断"):
+            if not mid:
+                return (["用法：/game move 蛊惑 兵粮 <目标> <牌>"], [], False)
+            tgt = self._resolve_target(who, mid)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._play_bingliang(who, tgt, guhuo=True)
+        if trick in ("tiesuo", "铁索", "铁索连环"):
+            if len(mid) < 2:
+                return (
+                    ["用法：/game move 蛊惑 铁索 <目标1> <目标2> <牌>"],
+                    [],
+                    False,
+                )
+            tgt1 = self._resolve_target(who, mid[:1], allow_self=True)
+            tgt2 = self._resolve_target(who, mid[1:2], allow_self=True)
+            if tgt1 is None or tgt2 is None:
+                return (["无效目标。"], [], False)
+            if tgt1 == tgt2:
+                return (["两名目标不能相同。"], [], False)
+            for t in (tgt1, tgt2):
+                if self.players[t].dead:
+                    return (["不能对阵亡角色使用铁索连环。"], [], False)
+            self.players[tgt1].chained = True
+            self.players[tgt2].chained = True
+            bcast = [
+                f"{player.name}（蛊惑）【铁索连环】"
+                f" {self.players[tgt1].name}、{self.players[tgt2].name} 进入连环"
+            ]
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
+        return (
+            [f"蛊惑不支持宣称【{trick_raw}】。"],
+            [],
+            False,
+        )
+
+    def _do_duel(
+        self, actor_idx: int, target_idx: int, *, consume_card: bool = True
+    ) -> GameResult:
+        actor = self.players[actor_idx]
+        if consume_card and not self._remove_card(actor, "决斗"):
+            return (["你没有【决斗】。"], [], False)
+        need = self._duel_need_sha(target_idx)
+        self._pending = {
+            "kind": "duel",
+            "source": actor_idx,
+            "target": target_idx,
+            "turn": target_idx,
+            "need_sha": need,
+            "got_sha": 0,
+        }
+        tgt_name = self.players[target_idx].name
+        extra = f"（需{need}杀）" if need > 1 else f"（{tgt_name}出杀或受击）"
+        return ([], [f"{actor.name}【决斗】→{tgt_name}{extra}"], False)
+
+    def _resolve_duel_step(self, who: int, verb: str) -> GameResult:
+        pend = self._pending
+        if not pend or pend["kind"] != "duel":
+            return (["当前没有【决斗】。"], [], False)
+        if who != pend["turn"]:
+            cur = self.players[pend["turn"]]
+            return ([f"【决斗】轮到 {cur.name}。"], [], False)
+        player = self.players[who]
+        need = pend.get("need_sha", 1)
+        if verb == "sha":
+            if self._consume_sha(player) is None:
+                return (["请出【杀】或 受击。"], [], False)
+            pend["got_sha"] = pend.get("got_sha", 0) + 1
+            if pend["got_sha"] < need:
+                return (
+                    [],
+                    [
+                        f"{player.name} 打出【杀】"
+                        f"（{pend['got_sha']}/{need}）"
+                    ],
+                    False,
+                )
+            pend["got_sha"] = 0
+            other = (
+                pend["target"] if who == pend["source"] else pend["source"]
+            )
+            pend["turn"] = other
+            pend["need_sha"] = self._duel_need_sha(other)
+            pend["got_sha"] = 0
+            msg = f"{player.name} 打出【杀】，轮到 {self.players[other].name}"
+            if pend["need_sha"] > 1:
+                msg += f"（无双需 {pend['need_sha']} 张【杀】）"
+            return ([], [msg], False)
+        if verb in ("pass", "hurt"):
+            self._pending = None
+            bcast = [f"{player.name} 不出【杀】，【决斗】失败"]
+            bcast.extend(self._damage(who, None, 1))
+            return self._maybe_end(bcast)
+        return (["请出 杀 或 受击。"], [], False)
+
+    def _hand_has_suit(self, player: _SgsPlayer, suit: str) -> bool:
+        return any(card_suit(c) == suit for c in player.hand)
+
+    def _do_huogong(
+        self,
+        actor_idx: int,
+        target_idx: int,
+        *,
+        consume_card: bool = True,
+        guhuo: bool = False,
+    ) -> GameResult:
+        actor = self.players[actor_idx]
+        target = self.players[target_idx]
+        if target_idx == actor_idx:
+            return (["不能对自己使用【火攻】。"], [], False)
+        if target.dead:
+            return (["不能对阵亡角色使用【火攻】。"], [], False)
+        if not self._can_trick_target(target_idx):
+            return self._trick_target_err(target.name)
+        if consume_card and not self._remove_card(actor, "火攻"):
+            return (["你没有【火攻】。"], [], False)
+        tag = "（蛊惑）" if guhuo else ""
+        notes: list[str] = []
+        self._jizhi_draw(actor, notes)
+        if not target.hand:
+            bcast = [
+                f"{actor.name}{tag}对 {target.name} 使用【火攻】，"
+                f"{target.name} 无手牌，结算结束"
+            ]
+            if notes:
+                bcast.append("  " + "；".join(notes))
+            return ([], bcast, False)
+        self._pending = {
+            "kind": "huogong",
+            "source": actor_idx,
+            "target": target_idx,
+            "phase": "show",
+            "guhuo": guhuo,
+        }
+        bcast = [
+            f"{actor.name}{tag}对 {target.name} 使用【火攻】，"
+            f"请 {target.name} 出示一张手牌（/game move 出示 <牌>）"
+        ]
+        if notes:
+            bcast.append("  " + "；".join(notes))
+        return ([], bcast, False)
+
+    def _resolve_huogong_step(
+        self, who: int, verb: str, args: list[str]
+    ) -> GameResult:
+        pend = self._pending
+        if not pend or pend["kind"] != "huogong":
+            return (["当前没有【火攻】待结算。"], [], False)
+        source = int(pend["source"])
+        target = int(pend["target"])
+        actor = self.players[source]
+        victim = self.players[target]
+        phase = pend.get("phase", "show")
+
+        if phase == "show":
+            if who != target:
+                return ([f"请 {victim.name} 出示手牌。"], [], False)
+            if verb not in ("chushi",):
+                return (
+                    ["用法：/game move 出示 <牌名>  （须为你手牌中的一张）"],
+                    [],
+                    False,
+                )
+            if not args:
+                return (["用法：/game move 出示 <牌名>"], [], False)
+            shown = find_card_in_hand(victim.hand, args[0])
+            if shown is None:
+                return ([f"你没有【{args[0]}】可出示。"], [], False)
+            suit = card_suit(shown)
+            label = card_label(shown)
+            bcast = [f"{victim.name} 出示【{label}】"]
+            if not self._hand_has_suit(actor, suit):
+                self._pending = None
+                bcast.append(
+                    f"{actor.name} 无【{suit}】手牌，【火攻】结算结束"
+                )
+                return ([], bcast, False)
+            pend["phase"] = "play"
+            pend["shown_suit"] = suit
+            pend["shown_label"] = label
+            self._pending = pend
+            bcast.append(
+                f"{actor.name} 可弃一张【{suit}】牌造成 1 点火焰伤害"
+                "（/game move 火攻 <牌> 或 过）"
+            )
+            return ([], bcast, False)
+
+        if who != source:
+            return (
+                [f"轮到 {actor.name} 决定是否弃【{pend.get('shown_suit', '')}】牌。"],
+                [],
+                False,
+            )
+        if verb in ("pass",):
+            self._pending = None
+            return (
+                [],
+                [f"{actor.name} 不弃牌，【火攻】结算结束"],
+                False,
+            )
+        if verb != "huogong":
+            suit = pend.get("shown_suit", "")
+            return (
+                [f"请 /game move 火攻 <{suit}牌> 造成伤害，或 /game move 过"],
+                [],
+                False,
+            )
+        if not args:
+            return (
+                ["用法：/game move 火攻 <与出示牌同花色的牌>  或  /game move 过"],
+                [],
+                False,
+            )
+        need_suit = pend.get("shown_suit", "")
+        found = find_card_in_hand(actor.hand, args[0])
+        if found is None:
+            return ([f"你没有【{args[0]}】。"], [], False)
+        if card_suit(found) != need_suit:
+            return (
+                [
+                    f"须弃【{need_suit}】牌（对方出示【{pend.get('shown_label', '')}】）"
+                ],
+                [],
+                False,
+            )
+        actor.hand.remove(found)
+        self._discard.append(found)
+        shown_label = pend.get("shown_label", "")
+        self._pending = None
+        bcast = [
+            f"{actor.name} 弃【{card_label(found)}】，"
+            f"对 {victim.name} 造成 1 点火焰伤害"
+            f"（对方曾出示【{shown_label}】）"
+        ]
+        bcast.extend(
+            self._damage(target, source, 1, element="fire", damage_card=found)
+        )
+        return self._maybe_end(bcast)
+
+    def _area_order(self, actor_idx: int, *, kind: str = "") -> list[int]:
+        n = len(self.players)
+        order = [(actor_idx + 1 + i) % n for i in range(n)]
+        out = [i for i in order if not self.players[i].dead and i != actor_idx]
+        if kind == "nanman":
+            out = [
+                i
+                for i in out
+                if not self._has_skill(self.players[i], "huoshou")
+            ]
+        return out
+
+    def _advance_area(self, pend: dict, who: int, msg: str) -> GameResult:
+        order = pend["order"]
+        pos = order.index(who)
+        for j in range(pos + 1, len(order)):
+            if not self.players[order[j]].dead:
+                pend["turn"] = order[j]
+                self._pending = pend
+                nxt = self.players[order[j]]
+                return (
+                    [],
+                    [f"{msg} → {nxt.name}（{pend['label']}）"],
+                    False,
+                )
+        self._pending = None
+        return ([], [f"{msg}（{pend['label']}完）"], False)
+
+    def _continue_area_after_damage(
+        self, pend: dict, who: int, bcast: list[str]
+    ) -> GameResult:
+        order = pend["order"]
+        pos = order.index(who)
+        for j in range(pos + 1, len(order)):
+            if not self.players[order[j]].dead:
+                self._pending = {
+                    "kind": pend["kind"],
+                    "source": pend.get("source"),
+                    "order": order,
+                    "turn": order[j],
+                    "label": pend["label"],
+                }
+                nxt = self.players[order[j]]
+                bcast.append(f"→ {nxt.name}（{pend['label']}）")
+                return ([], bcast, False)
+        self._pending = None
+        bcast.append(f"{pend['label']} 结算完")
+        return self._maybe_end(bcast)
+
+    def _resolve_area_response(self, who: int, verb: str) -> GameResult:
+        pend = self._pending
+        if not pend or pend["kind"] not in ("nanman", "wanjian"):
+            return (["当前没有群体锦囊待响应。"], [], False)
+        if who != pend["turn"]:
+            return ([f"轮到 {self.players[pend['turn']].name}。"], [], False)
+        need_card = "杀" if pend["kind"] == "nanman" else "闪"
+        player = self.players[who]
+        if verb == "sha" and need_card == "杀":
+            if self._consume_sha(player) is None:
+                return (["你没有【杀】。"], [], False)
+            return self._advance_area(pend, who, f"{player.name} 打出【杀】")
+        if verb == "shan" and need_card == "闪":
+            if not self._consume_shan(player):
+                return (["你没有【闪】。"], [], False)
+            return self._advance_area(pend, who, f"{player.name} 打出【闪】")
+        if verb in ("sha", "shan"):
+            return ([f"请出【{need_card}】或 受击。"], [], False)
+        if verb in ("pass", "hurt"):
+            saved = dict(pend)
+            self._pending = None
+            bcast = [f"{player.name} 未出【{need_card}】，受到 1 点伤害"]
+            bcast.extend(self._damage(who, saved.get("source"), 1))
+            ended = self._maybe_end(bcast)
+            if ended[2]:
+                return ended
+            return self._continue_area_after_damage(saved, who, bcast)
+        return ([f"请出【{need_card}】或 受击。"], [], False)
+
+    def _start_area(
+        self,
+        actor_idx: int,
+        kind: str,
+        label: str,
+        card: str,
+        *,
+        consume_card: bool = True,
+    ) -> GameResult:
+        actor = self.players[actor_idx]
+        if consume_card and not self._remove_card(actor, card):
+            return ([f"你没有【{card}】。"], [], False)
+        order = self._area_order(actor_idx, kind=kind)
+        if not order:
+            extra = ""
+            if kind == "nanman":
+                extra = "（祸首：南蛮无效）"
+            return (
+                [],
+                [f"{actor.name} 使用【{label}】{extra}，无人需响应"],
+                False,
+            )
+        self._pending = {
+            "kind": kind,
+            "source": actor_idx,
+            "order": order,
+            "turn": order[0],
+            "label": label,
+        }
+        return (
+            [],
+            [
+                f"{actor.name} 使用【{label}】！",
+                f"轮到 {self.players[order[0]].name}",
+            ],
+            False,
+        )
+
+    def _try_start(self, conn) -> GameResult:
+        who = self._who_of(conn)
+        if who is None:
+            return (["你不是玩家。"], [], False)
+        if who != 0:
+            host = self.players[0].name
+            return ([f"只有房主 {host} 可以开局。"], [], False)
+        n = len(self.players)
+        if n < _SGS_MIN_PLAYERS:
+            need = _SGS_MIN_PLAYERS - n
+            return (
+                [
+                    f"至少 {_SGS_MIN_PLAYERS} 人才能开局，还需 {need} 人 /game join"
+                    f"（当前 {n}/{_SGS_MAX_PLAYERS}）。"
+                ],
+                [],
+                False,
+            )
+        priv = ["你的身份见 /game show。"]
+        return (priv, self._start_playing(), False)
 
     def try_move(self, conn, raw: str) -> GameResult:
         if self.state == "waiting":
-            need = _RAID_MIN_PLAYERS - len(self.players)
-            return (
-                [
-                    f"行动尚未开始，还需 {need} 名队员 /game join"
-                    f"（当前 {len(self.players)}/{_RAID_MAX_PLAYERS}）。"
-                ],
-                [],
-                False,
-            )
+            verb, _args, _sha_kind = _sgs_parse_action(raw)
+            if verb == "generals":
+                return (format_general_list(), [], False)
+            if verb == "start":
+                return self._try_start(conn)
+            n = len(self.players)
+            host = self.players[0].name
+            lines = [
+                f"对局尚未开始（{n}/{_SGS_MAX_PLAYERS} 人）。",
+                "其它玩家可 /game join 入座。",
+            ]
+            if n < _SGS_MIN_PLAYERS:
+                lines.append(
+                    f"至少 {_SGS_MIN_PLAYERS} 人后可由房主 /game move 开始 开局。"
+                )
+            else:
+                lines.append(f"房主 {host} 执行 /game move 开始 即可开局。")
+            return (lines, [], False)
         if self.state != "playing":
             return (["对局已结束。"], [], False)
         who = self._who_of(conn)
         if who is None:
-            return (["你不是行动队员（可 /game show 围观）。"], [], False)
+            return (["你不是玩家（可 /game show 围观）。"], [], False)
+        player = self.players[who]
+        if player.dead:
+            return (["你已阵亡。"], [], False)
+
+        verb, args, sha_kind = _sgs_parse_action(raw)
+
+        if self._pending and self._pending.get("kind") == "guanxing":
+            if who != self._pending["who"]:
+                return (["等待观星结算。"], [], False)
+            if verb not in ("guanxing", "pass"):
+                return (
+                    ["观星未完成：/game move 观星 <序号…> 或 观星 过"],
+                    [],
+                    False,
+                )
+            use_args = args if verb == "guanxing" else ["过"]
+            return self._guanxing_resolve(who, use_args)
+
+        if self._pending:
+            kind = self._pending["kind"]
+            if kind in ("shunshou", "dismantle"):
+                return self._resolve_trick_zone_pick(who, verb, args)
+            if kind == "huogong":
+                return self._resolve_huogong_step(who, verb, args)
+            if verb in (
+                "shan",
+                "sha",
+                "hurt",
+                "pass",
+                "xiangle",
+                "tianxiang",
+                "liuli",
+            ):
+                if kind == "sha":
+                    return self._resolve_sha_response(who, verb, args)
+                if kind == "duel":
+                    return self._resolve_duel_step(who, verb)
+                return self._resolve_area_response(who, verb)
+            hint = self._pending_hint().strip()
+            return ([hint or "请先响应当前锦囊/杀。"], [], False)
+
         if who != self._turn_idx:
             cur = self._current()
             return (
-                [f"还没轮到你，当前由 #{self._turn_idx + 1} {cur.name} 行动。"],
+                [f"还没轮到你，当前 #{self._turn_idx + 1} {cur.name} 的回合。"],
                 [],
                 False,
             )
 
-        actor = self.players[who]
-        if actor.hp <= 0:
-            return (["你已阵亡，无法行动。"], [], False)
+        if (
+            who == self._turn_idx
+            and not self._pending
+            and (player.judge_lebu or player.judge_bingliang)
+        ):
+            catch = self._catchup_turn_start(who)
+            if catch:
+                return ([], catch, False)
 
-        verb, arg = _raid_parse_action(raw)
+        if player.skip_play and who == self._turn_idx and not self._pending:
+            bcast = self._auto_skip_play_phase(who)
+            return ([], bcast, False)
+
+        if verb == "generals":
+            return (format_general_list(), [], False)
+
         if not verb:
             return (
                 [
-                    "用法：/game move 搜 | 打 | 撤 | 去 <区域>",
-                    "  例：/game move 搜  /game move 打  /game move 去 走廊",
+                    "用法：/game move 杀|火杀|雷杀 <目标> [牌名] | 桃 [目标] | "
+                    "决斗 <目标> | 拆 <目标> [区域] | 顺手 <目标> [区域] | "
+                    "装备 <牌名> | 无中生有 | 南蛮 | 万箭 | 酒 | 过",
                 ],
                 [],
                 False,
             )
 
-        if verb == "search":
-            priv, bcast, ended = self._do_search(actor)
-        elif verb == "fight":
-            priv, bcast, ended = self._do_fight(actor)
-        elif verb == "extract":
-            priv, bcast, ended = self._do_extract(actor)
-        elif verb == "go":
-            priv, bcast, ended = self._do_go(actor, arg)
-        else:
-            return ([f"未知指令 {verb!r}，请用 搜/打/撤/去。"], [], False)
+        if verb == "pass":
+            bcast = [f"{player.name} 结束出牌阶段"]
+            bcast.extend(self._finish_turn(who))
+            return ([], bcast, False)
 
-        if ended:
-            return (priv, bcast, True)
+        if verb == "jiu":
+            used: Optional[str] = None
+            for c in list(player.hand):
+                if card_base(c) == "酒":
+                    player.hand.remove(c)
+                    self._discard.append(c)
+                    used = c
+                    break
+            if used is None and self._has_skill(player, "jiuchi"):
+                for c in list(player.hand):
+                    if card_suit(c) == "梅花":
+                        player.hand.remove(c)
+                        self._discard.append(c)
+                        used = c
+                        break
+            if used is None:
+                return (["你没有【酒】（酒池可用【梅花】牌）。"], [], False)
+            player.jiu_buff = True
+            msg = f"{player.name} 喝酒，下一张【杀】伤害 +1"
+            if card_base(used) != "酒":
+                msg = (
+                    f"{player.name}（酒池）将【{card_label(used)}】当【酒】，"
+                    "下一张【杀】伤害 +1"
+                )
+            return ([], [msg], False)
 
-        storm = self._tick_storm()
-        if storm is not None:
-            self.state = "ended"
-            bcast = list(bcast) + [storm]
-            return (priv, bcast, True)
+        if verb == "luoyi":
+            if not self._has_skill(player, "luoyi"):
+                return (["你没有裸衣技能。"], [], False)
+            player.luoyi_buff = True
+            return ([], [f"{player.name}（裸衣）下一张【杀】伤害 +1"], False)
 
-        if not ended and self.state == "playing":
-            nxt = self._next_turn()
-            slot = self._turn_idx + 1
-            bcast = list(bcast) + [
-                f"轮到 #{slot} {nxt.name} 行动（回合 {self._ticks}/{self._turn_limit()}）"
+        if verb == "tao":
+            tgt = who
+            if args:
+                t = self._resolve_target(who, args)
+                if t is None:
+                    return (["无效目标。"], [], False)
+                tgt = t
+            target = self.players[tgt]
+            if target.dead:
+                return (["不能救阵亡角色。"], [], False)
+            if target.hp >= target.max_hp:
+                return (["目标体力已满。"], [], False)
+            turn_p = self.players[self._turn_idx]
+            if (
+                self._has_skill(turn_p, "wansha")
+                and target.hp <= 1
+                and who != target
+                and who != self._turn_idx
+            ):
+                return (
+                    ["完杀：贾诩回合内，体力为 1 的角色只能由贾诩使用【桃】。"],
+                    [],
+                    False,
+                )
+            if not self._remove_card(player, "桃"):
+                return (["你没有【桃】。"], [], False)
+            target.hp += 1
+            return (
+                [],
+                [
+                    f"{player.name} 对 {target.name} 使用【桃】，"
+                    f"体力 {target.hp}/{target.max_hp}"
+                ],
+                False,
+            )
+
+        if verb == "draw2":
+            return self._play_draw2(who)
+
+        if verb == "equip":
+            card_tok = " ".join(args).strip() if args else ""
+            return self._play_equip(who, card_tok)
+
+        if verb == "sha":
+            target_args, card_tok, zhangba_tok, err = _sgs_sha_target_and_card(
+                player,
+                args,
+                sha_kind=sha_kind,
+                has_zhangba=self._has_zhangba(player),
+            )
+            if err:
+                return ([err], [], False)
+            assert target_args is not None
+            tgt = self._resolve_target(who, target_args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_sha(
+                who,
+                tgt,
+                card_token=card_tok,
+                zhangba_tokens=zhangba_tok,
+                sha_kind=sha_kind,
+            )
+
+        if verb == "duel":
+            if not args:
+                return (["用法：/game move 决斗 <目标>"], [], False)
+            if (
+                self._has_skill(player, "shuangxiong")
+                and player.shuangxiong_color
+                and len(args) >= 2
+                and not player.shuangxiong_duel_used
+            ):
+                tgt = self._resolve_target(who, args[:1])
+                card_tok = args[-1]
+                if tgt is None:
+                    return (["无效目标。"], [], False)
+                found = find_card_in_hand(player.hand, card_tok)
+                if found is None:
+                    return ([f"你没有【{card_tok}】。"], [], False)
+                if player.shuangxiong_color == "red" and not is_black(found):
+                    return (["双雄：需使用黑色牌当【决斗】。"], [], False)
+                if player.shuangxiong_color == "black" and not is_red(found):
+                    return (["双雄：需使用红色牌当【决斗】。"], [], False)
+                player.hand.remove(found)
+                self._discard.append(found)
+                player.shuangxiong_duel_used = True
+                return self._do_duel(who, tgt)
+            tgt = self._resolve_target(who, args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_duel(who, tgt)
+
+        if verb == "dismantle":
+            if not args:
+                return (
+                    [
+                        "用法：/game move 拆 <目标> [区域]  或  /game move 过河拆桥 <目标> [区域]",
+                        "  区域：手牌 | 武器 | 防具 | +1马 | -1马（多选时须指定；仅一项可省略）",
+                    ],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, args[:1])
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            zone_arg = args[1] if len(args) > 1 else None
+            return self._play_dismantle(who, tgt, zone_arg=zone_arg)
+
+        if verb == "nanman":
+            if not self._remove_card(player, "南蛮入侵"):
+                return (["你没有【南蛮入侵】。"], [], False)
+            priv, bcast, ended = self._start_area(
+                who, "nanman", "南蛮入侵", "南蛮入侵"
+            )
+            self._jizhi_draw(player, bcast)
+            return (priv, bcast, ended)
+
+        if verb == "wanjian":
+            if not self._remove_card(player, "万箭齐发"):
+                return (["你没有【万箭齐发】。"], [], False)
+            priv, bcast, ended = self._start_area(
+                who, "wanjian", "万箭齐发", "万箭齐发"
+            )
+            self._jizhi_draw(player, bcast)
+            return (priv, bcast, ended)
+
+        if verb == "shunshou":
+            if not args:
+                return (
+                    [
+                        "用法：/game move 顺手 <目标> [区域]  或  顺手牵羊 <目标> [区域]",
+                        "  区域：手牌 | 武器 | 防具 | +1马 | -1马（多选时须指定；仅一项可省略）",
+                    ],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, args[:1])
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            zone_arg = args[1] if len(args) > 1 else None
+            return self._play_shunshou(who, tgt, zone_arg=zone_arg)
+
+        if verb == "bingliang":
+            if not args:
+                return (["用法：/game move 兵粮 <目标>"], [], False)
+            tgt = self._resolve_target(who, args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._play_bingliang(who, tgt)
+
+        if verb == "duanliang":
+            if not self._has_skill(player, "duanliang"):
+                return (["你没有断粮技能。"], [], False)
+            if len(args) < 2:
+                return (["用法：/game move 断粮 <目标> <黑色牌>"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            card_tok = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            found = find_card_in_hand(player.hand, card_tok)
+            if found is None or not is_black(found):
+                return (["请使用黑色牌（黑桃/梅花）。"], [], False)
+            player.hand.remove(found)
+            self._discard.append(found)
+            return self._play_bingliang(who, tgt, via_duanliang=True)
+
+        if verb == "wugu":
+            if not self._remove_card(player, "五谷丰登"):
+                return (["你没有【五谷丰登】。"], [], False)
+            bcast = [f"{player.name} 使用【五谷丰登】"]
+            for p in self.players:
+                if not p.dead and self._draw_cards(p, 1):
+                    bcast.append(f"{p.name} 摸 1 张")
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
+
+        if verb == "taoyuan":
+            if not self._remove_card(player, "桃园结义"):
+                return (["你没有【桃园结义】。"], [], False)
+            bcast = [f"{player.name} 使用【桃园结义】"]
+            for p in self.players:
+                if not p.dead and p.hp < p.max_hp:
+                    p.hp += 1
+                    bcast.append(f"{p.name} 回复 1 点体力")
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
+
+        if verb == "huogong":
+            if not args:
+                return (["用法：/game move 火攻 <目标>"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_huogong(who, tgt)
+
+        if verb == "tiesuo":
+            if len(args) < 2:
+                return (
+                    ["用法：/game move 铁索 <目标1> <目标2>"],
+                    [],
+                    False,
+                )
+            tgt1 = self._resolve_target(who, args[:1], allow_self=True)
+            tgt2 = self._resolve_target(who, args[1:2], allow_self=True)
+            if tgt1 is None or tgt2 is None:
+                return (["无效目标。"], [], False)
+            if tgt1 == tgt2:
+                return (["两名目标不能相同。"], [], False)
+            for t in (tgt1, tgt2):
+                if self.players[t].dead:
+                    return (["不能对阵亡角色使用铁索连环。"], [], False)
+            if not self._remove_card(player, "铁索连环"):
+                return (["你没有【铁索连环】。"], [], False)
+            self.players[tgt1].chained = True
+            self.players[tgt2].chained = True
+            bcast = [
+                f"{player.name} 对 {self.players[tgt1].name}、"
+                f"{self.players[tgt2].name} 使用【铁索连环】"
+                "（受到伤害时传导）"
             ]
+            self._jizhi_draw(player, bcast)
+            return ([], bcast, False)
 
-        return (priv, bcast, False)
+        if verb == "rende":
+            if len(args) < 2:
+                return (
+                    ["用法：/game move 仁德 <目标> <牌名>"],
+                    [],
+                    False,
+                )
+            if not self._has_skill(player, "rende"):
+                return (["你没有仁德技能。"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            card = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            found = find_card_in_hand(player.hand, card)
+            if found is None:
+                return ([f"你没有【{card}】。"], [], False)
+            player.hand.remove(found)
+            self.players[tgt].hand.append(found)
+            return (
+                [],
+                [
+                    f"{player.name}（仁德）将【{card_label(found)}】"
+                    f"交给 {self.players[tgt].name}"
+                ],
+                False,
+            )
+
+        if verb == "zhiheng":
+            if not self._has_skill(player, "zhiheng"):
+                return (["你没有制衡技能。"], [], False)
+            if not args:
+                return (["用法：/game move 制衡 <牌名>"], [], False)
+            card = args[0]
+            if not self._remove_card(player, card):
+                return ([f"你没有【{card}】。"], [], False)
+            n = self._draw_cards(player, 1)
+            return ([], [f"{player.name}（制衡）弃【{card}】摸 {n} 张"], False)
+
+        if verb == "qiaobian":
+            if not self._has_skill(player, "qiaobian"):
+                return (["你没有巧变技能。"], [], False)
+            if not args:
+                return (["用法：/game move 巧变 <牌名>"], [], False)
+            card = args[0]
+            if not self._remove_card(player, card):
+                return ([f"你没有【{card}】。"], [], False)
+            n = self._draw_cards(player, 1)
+            return ([], [f"{player.name}（巧变）弃【{card}】摸 {n} 张"], False)
+
+        if verb == "tuxi":
+            if not self._has_skill(player, "tuxi"):
+                return (["你没有突袭技能。"], [], False)
+            if not args:
+                return (["用法：/game move 突袭 <目标>"], [], False)
+            tgt = self._resolve_target(who, args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            victim = self.players[tgt]
+            if not victim.hand:
+                return ([f"{victim.name} 没有手牌。"], [], False)
+            card = self._rng.choice(victim.hand)
+            victim.hand.remove(card)
+            player.hand.append(card)
+            return (
+                [],
+                [f"{player.name}（突袭）获得 {victim.name} 的【{card}】"],
+                False,
+            )
+
+        if verb == "qiangxi":
+            if not self._has_skill(player, "qiangxi"):
+                return (["你没有强袭技能。"], [], False)
+            if len(args) < 2:
+                return (["用法：/game move 强袭 <目标> <弃牌>"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            card = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            if not self._remove_card(player, card):
+                return ([f"你没有【{card}】。"], [], False)
+            bcast = [f"{player.name}（强袭）对 {self.players[tgt].name} 造成伤害"]
+            bcast.extend(self._damage(tgt, who, 1))
+            return self._maybe_end(bcast)
+
+        if verb == "qingnang":
+            if not self._has_skill(player, "qingnang"):
+                return (["你没有青囊技能。"], [], False)
+            if len(args) < 2:
+                return (["用法：/game move 青囊 <目标> <弃牌>"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            card = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            target = self.players[tgt]
+            if target.hp >= target.max_hp:
+                return (["目标体力已满。"], [], False)
+            if not self._remove_card(player, card):
+                return ([f"你没有【{card}】。"], [], False)
+            target.hp += 1
+            return (
+                [],
+                [
+                    f"{player.name}（青囊）令 {target.name} 回复 1 点"
+                    f"（{target.hp}/{target.max_hp}）"
+                ],
+                False,
+            )
+
+        if verb == "jieyin":
+            if not self._has_skill(player, "jieyin"):
+                return (["你没有结姻技能。"], [], False)
+            if not args:
+                return (["用法：/game move 结姻 <目标>"], [], False)
+            tgt = self._resolve_target(who, args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            other = self.players[tgt]
+            if player.hp > 2 or other.hp > 2:
+                return (["双方体力均须≤2。"], [], False)
+            healed = []
+            if player.hp < player.max_hp:
+                player.hp += 1
+                healed.append(player.name)
+            if other.hp < other.max_hp:
+                other.hp += 1
+                healed.append(other.name)
+            if not healed:
+                return (["双方体力均已满。"], [], False)
+            return ([], [f"结姻：{'、'.join(healed)} 各回复 1 点"], False)
+
+        if verb == "guose":
+            if not self._has_skill(player, "guose"):
+                return (["你没有国色技能。"], [], False)
+            if len(args) < 2:
+                return (
+                    ["用法：/game move 国色 <目标> <方块牌>（当【乐不思蜀】）"],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, args[:1])
+            card_tok = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            if not self._can_trick_target(tgt):
+                return self._trick_target_err(self.players[tgt].name)
+            dist_err = self._trick_distance_err(who, tgt)
+            if dist_err:
+                return ([dist_err], [], False)
+            found = find_card_in_hand(player.hand, card_tok)
+            if found is None or not is_diamond(found):
+                return (["国色须使用【方块】花色的牌。"], [], False)
+            player.hand.remove(found)
+            self._discard.append(found)
+            victim = self.players[tgt]
+            if victim.judge_lebu:
+                return ([f"{victim.name} 判定区已有【乐不思蜀】。"], [], False)
+            victim.judge_lebu = True
+            return (
+                [],
+                [
+                    f"{player.name}（国色）将【{card_label(found)}】当【乐不思蜀】"
+                    f"→{victim.name} 判定区"
+                    "（其回合判定：红桃则无效，否则跳过出牌）",
+                ],
+                False,
+            )
+
+        if verb == "liuli":
+            return (
+                ["流离仅在成为【杀】的目标时，于响应阶段使用。"],
+                [],
+                False,
+            )
+
+        if verb == "qixi":
+            if not self._has_skill(player, "qixi"):
+                return (["你没有奇袭技能。"], [], False)
+            if len(args) < 2:
+                return (["用法：/game move 奇袭 <目标> <黑色牌>"], [], False)
+            tgt = self._resolve_target(who, args[:1])
+            card_tok = args[-1]
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            if not self._can_trick_target(tgt):
+                return self._trick_target_err(self.players[tgt].name)
+            found = find_card_in_hand(player.hand, card_tok)
+            if found is None or not is_black(found):
+                return (["请使用黑色牌（黑桃/梅花）。"], [], False)
+            player.hand.remove(found)
+            self._discard.append(found)
+            victim = self.players[tgt]
+            if not victim.hand:
+                return ([f"{victim.name} 没有手牌。"], [], False)
+            taken = self._rng.choice(victim.hand)
+            victim.hand.remove(taken)
+            self._discard.append(taken)
+            return (
+                [],
+                [
+                    f"{player.name}（奇袭）将【{card_label(found)}】当【过河拆桥】，"
+                    f"拆掉 {victim.name} 的【{card_label(taken)}】"
+                ],
+                False,
+            )
+
+        if verb == "leiji":
+            if not self._has_skill(player, "leiji"):
+                return (["你没有雷击技能。"], [], False)
+            if not args:
+                return (["用法：/game move 雷击 <目标>"], [], False)
+            tgt = self._resolve_target(who, args)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            if not self._deck:
+                return (["牌堆已空，无法判定。"], [], False)
+            judge = self._deck.pop()
+            self._discard.append(judge)
+            dmg = 2 if is_black(judge) else 1
+            bcast = [
+                f"{player.name}（雷击）判定【{card_label(judge)}】，"
+                f"{self.players[tgt].name} 受到 {dmg} 点雷电伤害"
+            ]
+            bcast.extend(self._damage(tgt, who, dmg))
+            return self._maybe_end(bcast)
+
+        if verb == "shuangxiong":
+            if not self._has_skill(player, "shuangxiong"):
+                return (["你没有双雄技能。"], [], False)
+            if not args:
+                return (["用法：/game move 双雄 红|黑"], [], False)
+            color = args[0]
+            if color in ("红", "红色"):
+                player.shuangxiong_color = "red"
+            elif color in ("黑", "黑色"):
+                player.shuangxiong_color = "black"
+            else:
+                return (["请指定 红 或 黑。"], [], False)
+            label = "红色" if player.shuangxiong_color == "red" else "黑色"
+            return (
+                [],
+                [
+                    f"{player.name}（双雄）展示{label}，"
+                    "可将异色手牌当【决斗】（/game move 决斗 <目标> <牌>）"
+                ],
+                False,
+            )
+
+        if verb == "luanji":
+            if not self._has_skill(player, "luanji"):
+                return (["你没有乱击技能。"], [], False)
+            if len(args) < 2:
+                return (["用法：/game move 乱击 <牌1> <牌2>"], [], False)
+            removed: list[str] = []
+            for tok in args[:2]:
+                found = find_card_in_hand(player.hand, tok)
+                if found is None:
+                    return ([f"你没有【{tok}】。"], [], False)
+                player.hand.remove(found)
+                self._discard.append(found)
+                removed.append(card_label(found))
+            priv, bcast, ended = self._start_area(
+                who,
+                "wanjian",
+                "万箭齐发（乱击）",
+                "万箭齐发",
+                consume_card=False,
+            )
+            bcast.insert(
+                0,
+                f"{player.name}（乱击）弃【{'】【'.join(removed)}】发动【万箭齐发】",
+            )
+            return (priv, bcast, ended)
+
+        if verb == "guhuo":
+            if not self._has_skill(player, "guhuo"):
+                return (["你没有蛊惑技能。"], [], False)
+            return self._do_guhuo(who, args)
+
+        if verb == "yinghun":
+            if not self._has_skill(player, "yinghun"):
+                return (["你没有英魂技能。"], [], False)
+            if not args:
+                return (
+                    ["用法：/game move 英魂 己 | 英魂 他 <目标>"],
+                    [],
+                    False,
+                )
+            mode = args[0]
+            if mode in ("己", "自己"):
+                if self._draw_cards(player, 1):
+                    return ([], [f"{player.name}（英魂）摸 1 张"], False)
+                return (["牌堆已空。"], [], False)
+            if mode in ("他",) and len(args) >= 2:
+                tgt = self._resolve_target(who, args[1:])
+                if tgt is None:
+                    return (["无效目标。"], [], False)
+                if self._draw_cards(self.players[tgt], 1):
+                    return (
+                        [],
+                        [f"{player.name}（英魂）令 {self.players[tgt].name} 摸 1 张"],
+                        False,
+                    )
+                return (["牌堆已空。"], [], False)
+            return (["用法：/game move 英魂 己 | 英魂 他 <目标>"], [], False)
+
+        head_tok = raw.strip().split()[0] if raw.strip() else verb
+        hint = "输入 /game show 帮助 查看可用命令。"
+        if head_tok in ("顺", "牵", "顺手"):
+            hint += " 顺手牵羊：/game move 顺手 <目标> 或 /game move 顺 <目标>"
+        return ([f"无法识别指令「{head_tok}」。{hint}"], [], False)
 
     def resign(self, conn, name: str) -> GameResult:
         if self.state != "playing":
-            return (["行动尚未开始或已结束。"], [], False)
-        if self._who_of(conn) is None:
-            return (["你不是行动队员。"], [], False)
-        self.state = "ended"
-        return ([], [f"{name} 放弃任务 — 小队撤离失败。"], True)
+            return (["对局尚未开始或已结束。"], [], False)
+        who = self._who_of(conn)
+        if who is None:
+            return (["你不是玩家。"], [], False)
+        self.players[who].dead = True
+        self.players[who].hp = 0
+        bcast = [f"{name} 认输阵亡，身份：{self.players[who].role}"]
+        ended = self._maybe_end(bcast)
+        if not ended[2]:
+            bcast.append("对局继续。")
+        return ended
 
     def abort(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (["对局已结束。"], [], False)
         if self._who_of(conn) is None:
-            return (["你不是行动队员，无法终止。"], [], False)
+            return (["你不是玩家，无法终止。"], [], False)
         if self.state == "playing":
-            return (
-                ["任务已开始，请用 /game resign 放弃。"],
-                [],
-                False,
-            )
+            return (["对局已开始，请用 /game resign 认输。"], [], False)
         self.state = "ended"
-        return ([], [f"{name} 取消了任务（未开始）。"], True)
+        return ([], [f"{name} 取消了对局（未开始）。"], True)
 
     def seats(self) -> list[str]:
         lines = [
-            f"raid 状态：{self.state}  "
-            f"队员 {len(self.players)}/{_RAID_MAX_PLAYERS}  "
-            f"回合 {self._ticks}/{self._turn_limit()}",
+            f"sanguo 状态：{self.state}  "
+            f"玩家 {len(self.players)}/{_SGS_MAX_PLAYERS}",
         ]
         for i, p in enumerate(self.players, 1):
-            lines.append(f"  #{i}：{p.name}")
-        if len(self.players) < _RAID_MAX_PLAYERS and self.state != "ended":
-            lines.append("  空席：/game join")
+            dead = "（阵亡）" if p.dead else ""
+            lines.append(f"  #{i}：{p.name}{dead}")
+        if self.state == "waiting":
+            n = len(self.players)
+            if n < _SGS_MAX_PLAYERS:
+                lines.append(f"  空席：/game join（{n}/{_SGS_MAX_PLAYERS}）")
+            if n >= _SGS_MIN_PLAYERS:
+                lines.append(
+                    f"  房主 {self.players[0].name}：/game move 开始"
+                )
         return lines
 
     def on_player_leave(self, conn, name: str) -> GameResult:
@@ -1977,36 +4789,24 @@ class RaidGame:
             self.players.pop(who)
             if not self.players:
                 self.state = "ended"
-                return ([], [f"{name} 离开，任务取消。"], True)
-            return ([], [f"{name} 离开，当前队员：{self._roster_names()}"], False)
-        if self.state == "playing":
-            self.players.pop(who)
-            if who < self._turn_idx:
-                self._turn_idx -= 1
-            elif who == self._turn_idx:
-                self._turn_idx %= max(1, len(self.players))
-            if not self._alive():
-                self.state = "ended"
-                return ([], [f"{name} 离开 — 全队失联，行动失败。"], True)
-            return (
-                [],
-                [f"{name} 离开，剩余队员：{self._roster_names()}"],
-                False,
-            )
-        return ([], [], False)
+                return ([], [f"{name} 离开，对局取消。"], True)
+            return ([], [f"{name} 离开，当前：{self._roster_names()}"], False)
+        self.players[who].dead = True
+        self.players[who].hp = 0
+        bcast = [f"{name} 断线，视为阵亡（身份：{self.players[who].role}）"]
+        return self._maybe_end(bcast)
 
 
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     XiangqiGame.name: XiangqiGame,
-    RaidGame.name: RaidGame,
+    SanguoshaGame.name: SanguoshaGame,
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
-    "sdc": RaidGame.name,
-    "extract": RaidGame.name,
-    "搜打撤": RaidGame.name,
+    "sgs": SanguoshaGame.name,
+    "三国杀": SanguoshaGame.name,
 }
 
 
@@ -2016,28 +4816,38 @@ def resolve_game_name(name: str) -> str:
     return GAME_ALIASES.get(key, key)
 
 
-def list_game_names() -> list[str]:
-    """Canonical game ids for /game list (aliases documented in help)."""
+def all_game_names() -> list[str]:
+    """All registered game ids (for owner catalog / defaults)."""
     return sorted(GAMES)
 
 
+def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
+    """Canonical game ids for /game list; optional room filter (online only)."""
+    if enabled is None:
+        return all_game_names()
+    return sorted(n for n in GAMES if n in enabled)
+
+
 HELP_LINES = (
-    "[*] /game list             列出可玩游戏。",
+    "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
-    "（chess: 白；gomoku/xiangqi: 黑/红先手；raid: 队长）。",
+    "（chess: 白；gomoku/xiangqi: 黑/红先手；sanguo: 房主）。",
     "[*] /game join             加入对局（chess/gomoku/xiangqi 为第二席；"
-    "raid 可多人，最多 8 人）。",
+    "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
     "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
     "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"
     "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组；"
-    "raid: 搜 | 打 | 撤 | 去 <区域>（2～8 人合作撤离，别名 sdc/搜打撤）。",
+    "sanguo: 军争版；等待时房主 开始；/game move 武将 查武将池；"
+    "观星/蛊惑/断粮等技能见 /game show（别名 sgs/三国杀）。",
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",
+    "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
+    "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
 )

@@ -29,6 +29,8 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# room -> set of canonical game ids enabled for /game list and /game new
+room_enabled_games: dict[str, set[str]] = {}
 lock = threading.Lock()
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
@@ -127,7 +129,7 @@ HELP_LINES = (
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
     "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
     "[*]\n",
-    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、raid）。/game list /new /join /seats /show /move /pgn /resign /abort /end。\n",
+    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
     "[*]              详细用法用 /game help 查看。\n",
     "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
@@ -201,6 +203,35 @@ def send_oriented_boards(room: str, game) -> None:
             lines = game.show()
         if lines:
             send_game_private(conn, room, lines)
+
+
+def send_sanguo_hand_views(room: str, game) -> None:
+    """三国杀：轮到出牌/需响应时私信手牌与装备。"""
+    if getattr(game, "name", "") != "sanguo":
+        return
+    push = getattr(game, "push_hand_views", None)
+    if not push:
+        return
+    try:
+        pairs = push()
+    except Exception as e:
+        print(f"send_sanguo_hand_views error: {e!r}")
+        return
+    for conn, lines in pairs:
+        send_game_private(conn, room, lines)
+
+
+def _default_enabled_games() -> set[str]:
+    return set(games.GAMES)
+
+
+def _enabled_games_for_room_locked(room: str) -> set[str]:
+    """Per-room online games; new rooms default to all registered games."""
+    enabled = room_enabled_games.get(room)
+    if enabled is None:
+        enabled = _default_enabled_games()
+        room_enabled_games[room] = enabled
+    return enabled
 
 
 def _drop_game_if_room_empty_locked(room: str) -> None:
@@ -1040,9 +1071,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_line(conn, "[*] /game 用法：\n")
         for ln in games.HELP_LINES:
             send_line(conn, ln + "\n")
+        with lock:
+            enabled = _enabled_games_for_room_locked(room)
         send_line(
             conn,
-            "[*] 当前支持的游戏：" + ", ".join(games.list_game_names()) + "\n",
+            "[*] 本房可玩：" + ", ".join(games.list_game_names(enabled)) + "\n",
         )
         return
 
@@ -1051,11 +1084,63 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     rest = rest.strip()
 
     if sub == "list":
-        send_line(
-            conn,
-            "[*] 可玩游戏：" + ", ".join(games.list_game_names())
-            + "（xiangqi 别名 cchess；raid 别名 sdc/搜打撤）\n",
-        )
+        with lock:
+            enabled = _enabled_games_for_room_locked(room)
+            names = games.list_game_names(enabled)
+        if names:
+            line = "[*] 可玩游戏：" + ", ".join(names)
+            line += "（xiangqi 别名 cchess；sanguo 别名 sgs/三国杀）\n"
+        else:
+            line = (
+                "[*] 本房暂无已上线游戏；房主可用 /game on <名称> 上线。\n"
+            )
+        send_line(conn, line)
+        return
+
+    if sub in ("on", "off", "上线", "下线"):
+        enable = sub in ("on", "上线")
+        if not rest:
+            send_line(conn, f"[*] 用法：/game {'on' if enable else 'off'} <名称>\n")
+            return
+        game_name = games.resolve_game_name(rest.split()[0].lower())
+        if game_name not in games.GAMES:
+            send_line(
+                conn,
+                f"[*] 未知游戏 {game_name!r}；可用："
+                + ", ".join(games.all_game_names())
+                + "\n",
+            )
+            return
+        with lock:
+            is_owner = room_owners.get(room) is conn
+            if not is_owner:
+                send_line(conn, "[*] 只有房主可以上下线游戏。\n")
+                return
+            enabled = _enabled_games_for_room_locked(room)
+            if enable:
+                if game_name in enabled:
+                    send_line(conn, f"[*] {game_name} 已在本房上线。\n")
+                else:
+                    enabled.add(game_name)
+                    send_line(conn, f"[*] 已上线 {game_name}，/game list 可见。\n")
+                return
+            if game_name not in enabled:
+                send_line(conn, f"[*] {game_name} 已在本房下线。\n")
+                return
+            game = room_games.get(room)
+            if (
+                game is not None
+                and getattr(game, "name", "") == game_name
+                and getattr(game, "state", "ended") != "ended"
+            ):
+                send_line(
+                    conn,
+                    f"[*] 本房仍有进行中的 {game_name} 对局；"
+                    "请先 /game end 或等对局结束再下线。\n",
+                )
+                return
+            enabled.discard(game_name)
+        send_line(conn, f"[*] 已下线 {game_name}，/game list 不再显示。\n")
         return
 
     if sub == "new":
@@ -1065,6 +1150,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             send_line(
                 conn,
                 f"[*] 未知游戏 {game_name!r}；/game list 查看可用。\n",
+            )
+            return
+        with lock:
+            enabled = _enabled_games_for_room_locked(room)
+        if game_name not in enabled:
+            send_line(
+                conn,
+                f"[*] 游戏 {game_name} 在本房未上线；/game list 查看可玩。\n",
             )
             return
         with lock:
@@ -1120,10 +1213,15 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             if game is None:
                 lines = ["本房没有进行中的对局。"]
             else:
-                try:
-                    lines = game.show(conn)
-                except TypeError:
-                    lines = game.show()
+                rest_show = rest.strip().lower()
+                full_help = rest_show in ("help", "帮助", "?", "h")
+                if getattr(game, "name", "") == "sanguo":
+                    lines = game.show(conn, full=full_help)
+                else:
+                    try:
+                        lines = game.show(conn)
+                    except TypeError:
+                        lines = game.show()
         send_game_private(conn, room, lines)
         return
 
@@ -1134,9 +1232,17 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 send_line(conn, "[*] 本房没有进行中的对局。\n")
                 return
             priv, bcast, ended = game.try_move(conn, rest)
+        if bcast and hasattr(game, "finalize_broadcast"):
+            bcast = game.finalize_broadcast(bcast)
         send_game_private(conn, room, priv)
+        drain = getattr(game, "drain_extra_privates", None)
+        if drain:
+            for peer_conn, extra in drain():
+                send_game_private(peer_conn, room, extra)
         broadcast_game(room, bcast)
-        send_oriented_boards(room, game)
+        if getattr(game, "send_view_on_move", True):
+            send_oriented_boards(room, game)
+        send_sanguo_hand_views(room, game)
         return
 
     if sub == "resign":

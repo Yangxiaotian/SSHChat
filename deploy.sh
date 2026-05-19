@@ -185,8 +185,8 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py"
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py"
   chmod 700 "$PREFIX/server.sh"
 
   chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh"
@@ -208,8 +208,8 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
 
   chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
@@ -388,7 +388,7 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py chat.sh server.sh admin-add-user.sh; do
+for f in server.py client.py games.py sgs_data.py chat.sh server.sh admin-add-user.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 
@@ -459,7 +459,7 @@ fi
 install -m 0755 -d "$PREFIX"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/sgs_data.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -536,7 +536,7 @@ else
   chown -R "$ROOT_OWN" "$PREFIX"
   chmod 755 "$PREFIX"
   chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/client.py"
+  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
 fi
 
