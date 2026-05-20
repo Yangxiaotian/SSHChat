@@ -15,9 +15,12 @@ export class SSHManager {
   private onData: ((data: Buffer) => void) | null = null;
   private onEnd: (() => void) | null = null;
   private readonly ansiCsiRe = /\x1b\[[\d;?]*[A-Za-z]/g;
+  private readonly ansiCsiExtRe = /[\u001b\u009b]\[[0-?]*[ -/]*[@-~]/g;
   private readonly oscRe = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
+  private readonly oscLooseRe = /[\u001b\u009b]\][^\u0007]*(?:\u0007|[\u001b\u009b]\\)/g;
   private readonly otherEscRe = /\x1b[\][()#%][\d"A-Za-z]*/g;
   private readonly mangledCsiRe = /\?\[[\d;?]*[A-Za-z]/g;
+  private readonly csiFragmentRe = /\[(?:\??\d{1,4}(?:;\d{1,4})*)[ABCDHJKfhlmnpqrstsu]/g;
   private readonly ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
   async connect(
@@ -145,10 +148,15 @@ export class SSHManager {
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '')
       .replace(this.oscRe, '')
+      .replace(this.oscLooseRe, '')
       .replace(this.ansiCsiRe, '')
+      .replace(this.ansiCsiExtRe, '')
       .replace(this.mangledCsiRe, '')
+      .replace(this.csiFragmentRe, '')
       .replace(this.otherEscRe, '')
       .replace(this.ctrlRe, '');
+    // Remove any left-over ESC bytes rendered as glyphs.
+    s = s.replace(/\u001b/g, '');
     return s.trimEnd();
   }
 
