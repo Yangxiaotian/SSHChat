@@ -45,6 +45,7 @@ interface ChatState {
   sidebarView: 'rooms' | 'users' | 'news';
   theme: 'dark' | 'light';
   privacyMode: boolean;
+  composerText: string;
 
   // Actions
   setStatus: (status: ConnectionStatus) => void;
@@ -64,6 +65,7 @@ interface ChatState {
   toggleTheme: () => void;
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
+  setComposerText: (value: string) => void;
   clearMessages: () => void;
 }
 
@@ -81,14 +83,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sidebarView: 'rooms',
   theme: 'dark',
   privacyMode: true,
+  composerText: '',
 
   // Actions
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
   setConfig: (config) => set({ config }),
   setNickname: (nickname) => set({ nickname }),
-  setRooms: (rooms) => set({ rooms }),
-  setActiveRoom: (room) => set({ activeRoom: room }),
+  setRooms: (rooms) => {
+    const { rooms: prevRooms } = get();
+    const byName = new Map(prevRooms.map((r) => [r.name, r]));
+    const merged = rooms.map((next) => {
+      const prev = byName.get(next.name);
+      return prev
+        ? { ...next, unreadCount: prev.unreadCount, lastActivity: prev.lastActivity }
+        : next;
+    });
+    for (const prev of prevRooms) {
+      if (!merged.find((r) => r.name === prev.name)) {
+        merged.push(prev);
+      }
+    }
+    set({ rooms: merged });
+  },
+  setActiveRoom: (room) => {
+    const { rooms } = get();
+    set({
+      activeRoom: room,
+      rooms: rooms.map((r) => (r.name === room ? { ...r, unreadCount: 0 } : r)),
+    });
+  },
 
   addRoom: (room) => {
     const { rooms } = get();
@@ -140,5 +164,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
   setPrivacyMode: (value) => set({ privacyMode: value }),
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
+  setComposerText: (value) => set({ composerText: value }),
   clearMessages: () => set({ messages: new Map() }),
 }));

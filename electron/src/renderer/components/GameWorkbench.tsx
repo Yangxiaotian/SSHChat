@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useChatStore } from '../store/chatStore';
 
-type GameKind = 'none' | 'chess' | 'gomoku' | 'xiangqi' | 'sanguo';
+type GameKind = 'none' | 'chess' | 'gomoku' | 'xiangqi' | 'sanguo' | 'werewolf';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
@@ -9,11 +9,12 @@ function detectGameKind(text: string): GameKind {
   if (t.includes('gomoku')) return 'gomoku';
   if (t.includes('xiangqi') || t.includes('cchess')) return 'xiangqi';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
+  if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
   return 'none';
 }
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo'];
+  const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo', 'werewolf'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -42,6 +43,7 @@ const quickByGame: Record<GameKind, Array<{ label: string; cmd: string }>> = {
     { label: 'New Gomoku', cmd: '/game new gomoku' },
     { label: 'New Xiangqi', cmd: '/game new xiangqi' },
     { label: 'New Sanguo', cmd: '/game new sanguo' },
+    { label: 'New Werewolf', cmd: '/game new werewolf' },
   ],
   chess: [
     { label: 'Show', cmd: '/game show' },
@@ -71,10 +73,17 @@ const quickByGame: Record<GameKind, Array<{ label: string; cmd: string }>> = {
     { label: 'Generals', cmd: '/game move generals' },
     { label: 'Pass', cmd: '/game move pass' },
   ],
+  werewolf: [
+    { label: 'Show', cmd: '/game show' },
+    { label: 'Join', cmd: '/game join' },
+    { label: 'Seats', cmd: '/game seats' },
+    { label: 'Start', cmd: '/game move start' },
+    { label: 'Vote', cmd: '/game move vote ' },
+  ],
 };
 
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, setComposerText } = useChatStore();
   const [moveText, setMoveText] = useState('');
   const roomMessages = messages.get(activeRoom) || [];
 
@@ -90,14 +99,20 @@ export default function GameWorkbench() {
   }, [roomMessages]);
 
   const send = async (cmd: string) => {
-    await window.api.sendMessage(cmd);
+    if (status !== 'connected') return false;
+    return window.api.sendMessage(cmd);
   };
 
   const onMove = async () => {
     const t = moveText.trim();
     if (!t) return;
-    await send(`/game move ${t}`);
+    const cmd = t.startsWith('/') ? t : `/game move ${t}`;
+    await send(cmd);
     setMoveText('');
+  };
+
+  const fillToComposer = (cmd: string) => {
+    setComposerText(cmd + ' ');
   };
 
   return (
@@ -105,15 +120,15 @@ export default function GameWorkbench() {
       <div className="game-workbench-header">
         <span>{privacyMode ? 'Diagnostics View' : 'Game Workbench'}</span>
         <div className="game-workbench-actions">
-          <button className="mini-btn" onClick={() => send('/game show')}>Refresh</button>
-          <button className="mini-btn" onClick={() => send('/game help')}>Help</button>
-          <button className="mini-btn" onClick={() => send('/game list')}>List</button>
+          <button className="mini-btn" disabled={status !== 'connected'} onClick={() => fillToComposer('/game show')}>Show Cmd</button>
+          <button className="mini-btn" disabled={status !== 'connected'} onClick={() => fillToComposer('/game help')}>Help Cmd</button>
+          <button className="mini-btn" disabled={status !== 'connected'} onClick={() => fillToComposer('/game list')}>List Cmd</button>
         </div>
       </div>
 
       <div className="game-workbench-quick">
         {quickByGame[game].map((q) => (
-          <button key={q.label} className="mini-btn" onClick={() => send(q.cmd)}>
+          <button key={q.label} className="mini-btn" disabled={status !== 'connected'} onClick={() => fillToComposer(q.cmd)}>
             {q.label}
           </button>
         ))}
@@ -127,11 +142,12 @@ export default function GameWorkbench() {
           value={moveText}
           onChange={(e) => setMoveText(e.target.value)}
           placeholder={privacyMode ? 'Run command...' : 'Enter move...'}
+          disabled={status !== 'connected'}
           onKeyDown={(e) => {
             if (e.key === 'Enter') onMove();
           }}
         />
-        <button className="send-button" onClick={onMove}>Apply</button>
+        <button className="send-button" onClick={onMove} disabled={status !== 'connected' || !moveText.trim()}>Apply</button>
       </div>
     </div>
   );

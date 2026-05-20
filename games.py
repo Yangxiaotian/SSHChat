@@ -4797,15 +4797,364 @@ class SanguoshaGame:
         return self._maybe_end(bcast)
 
 
+class WerewolfGame:
+    name = "werewolf"
+    first_seat_desc = "host"
+    second_seat_desc = "player"
+    send_view_on_move = False
+
+    def __init__(self, owner_conn, owner_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(owner_conn, owner_name)]
+        self.state = "waiting"
+        self.round = 0
+        self.roles: dict[str, str] = {}
+        self.alive: set[str] = {owner_name}
+        self.day_votes: dict[str, str] = {}
+        self.wolf_target: Optional[str] = None
+        self.seer_target: Optional[str] = None
+        self.pending_kill: Optional[str] = None
+        self.pending_poison: Optional[str] = None
+        self.witch_saved = False
+        self.witch_save_available = True
+        self.witch_poison_available = True
+        self._extra_privates: list[tuple[object, list[str]]] = []
+
+    def _norm(self, s: str) -> str:
+        return s.strip().lower()
+
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+
+    def _conn_of(self, name: str):
+        for c, n in self.players:
+            if n == name:
+                return c
+        return None
+
+    def _find_player(self, token: str, *, alive_only: bool = True) -> Optional[str]:
+        q = self._norm(token)
+        for _c, n in self.players:
+            if alive_only and n not in self.alive:
+                continue
+            if self._norm(n) == q:
+                return n
+        return None
+
+    def _queue_private(self, conn, lines: list[str]) -> None:
+        if conn is not None and lines:
+            self._extra_privates.append((conn, lines))
+
+    def drain_extra_privates(self):
+        out = self._extra_privates
+        self._extra_privates = []
+        return out
+
+    def _wolves_alive(self) -> list[str]:
+        return [n for n in self.alive if self.roles.get(n) == "wolf"]
+
+    def _villagers_alive(self) -> list[str]:
+        return [n for n in self.alive if self.roles.get(n) != "wolf"]
+
+    def _alive_line(self) -> str:
+        return "Alive: " + ", ".join(sorted(self.alive))
+
+    def _check_win(self) -> Optional[str]:
+        wolves = len(self._wolves_alive())
+        villagers = len(self._villagers_alive())
+        if wolves <= 0:
+            self.state = "ended"
+            return "Villagers win."
+        if wolves >= villagers:
+            self.state = "ended"
+            return "Wolves win."
+        return None
+
+    def _assign_roles(self) -> None:
+        n = len(self.players)
+        wolf_n = 2 if n <= 7 else 3
+        villager_n = n - wolf_n - 2
+        deck = (["wolf"] * wolf_n) + ["seer", "witch"] + (["villager"] * villager_n)
+        random.shuffle(deck)
+        self.roles = {}
+        for i, (_c, name) in enumerate(self.players):
+            self.roles[name] = deck[i]
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting":
+            return (["Game already started."], [], False)
+        if any(c is conn for c, _ in self.players):
+            return (["You already joined."], [], False)
+        if any(self._norm(n) == self._norm(name) for _c, n in self.players):
+            return (["Nickname already used in this game."], [], False)
+        if len(self.players) >= 12:
+            return (["Room is full for werewolf (max 12)."], [], False)
+        self.players.append((conn, name))
+        self.alive.add(name)
+        msg = [f"{name} joined werewolf ({len(self.players)} players)."]
+        if len(self.players) >= 5:
+            msg.append("Host can start: /game move start")
+        return ([], msg, False)
+
+    def _start_game(self) -> GameResult:
+        if len(self.players) < 5:
+            return (["Need at least 5 players."], [], False)
+        self._assign_roles()
+        self.state = "night"
+        self.round = 1
+        self.day_votes = {}
+        self.wolf_target = None
+        self.seer_target = None
+        self.pending_kill = None
+        self.pending_poison = None
+        self.witch_saved = False
+        self.witch_save_available = True
+        self.witch_poison_available = True
+
+        for conn, name in self.players:
+            role = self.roles[name]
+            self._queue_private(conn, [f"Your role: {role}"])
+            if role == "wolf":
+                mates = [n for n, r in self.roles.items() if r == "wolf" and n != name]
+                self._queue_private(conn, ["Wolf mates: " + (", ".join(mates) if mates else "(none)")])
+                self._queue_private(conn, ["Night cmd: /game move kill <name>"])
+            elif role == "seer":
+                self._queue_private(conn, ["Night cmd: /game move check <name>"])
+            elif role == "witch":
+                self._queue_private(conn, ["Night cmd: /game move save | poison <name> | pass"])
+        return ([], [f"Werewolf started. Night {self.round}.", "Use /game show for commands."], False)
+
+    def _resolve_night_if_ready(self) -> list[str]:
+        wolves_done = (not self._wolves_alive()) or (self.wolf_target is not None)
+        seer_done = (not any(r == "seer" and n in self.alive for n, r in self.roles.items())) or (self.seer_target is not None)
+        witch_alive = any(r == "witch" and n in self.alive for n, r in self.roles.items())
+        witch_done = (not witch_alive) or (self.witch_saved or self.pending_poison is not None or self.pending_kill is None)
+        if not (wolves_done and seer_done and witch_done):
+            return []
+
+        dead: set[str] = set()
+        if self.pending_kill and not self.witch_saved:
+            dead.add(self.pending_kill)
+        if self.pending_poison:
+            dead.add(self.pending_poison)
+        for n in dead:
+            self.alive.discard(n)
+
+        self.state = "day"
+        self.day_votes = {}
+        out = [f"Day {self.round} begins."]
+        out.append("Night deaths: " + (", ".join(sorted(dead)) if dead else "none"))
+        win = self._check_win()
+        if win:
+            out.append(win)
+            return out
+        out.append(self._alive_line())
+        out.append("Day cmd: /game move vote <name>")
+        return out
+
+    def _resolve_day_if_ready(self) -> list[str]:
+        alive = sorted(self.alive)
+        if any(n not in self.day_votes for n in alive):
+            return []
+        counts: dict[str, int] = {}
+        for _v, t in self.day_votes.items():
+            counts[t] = counts.get(t, 0) + 1
+        top = max(counts.values())
+        winners = [k for k, v in counts.items() if v == top]
+        out: list[str] = []
+        if len(winners) == 1:
+            kicked = winners[0]
+            self.alive.discard(kicked)
+            out.append(f"Voted out: {kicked}")
+        else:
+            out.append("Vote tie, no one is out.")
+        win = self._check_win()
+        if win:
+            out.append(win)
+            return out
+        self.round += 1
+        self.state = "night"
+        self.day_votes = {}
+        self.wolf_target = None
+        self.seer_target = None
+        self.pending_kill = None
+        self.pending_poison = None
+        self.witch_saved = False
+        out.append(f"Night {self.round} begins.")
+        return out
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        actor = self._name_of(conn)
+        if actor is None:
+            return (["You are not in this game."], [], False)
+        text = raw.strip()
+        if not text:
+            return (["Usage: /game move <cmd>"], [], False)
+        parts = text.split()
+        cmd = self._norm(parts[0])
+        arg = " ".join(parts[1:]).strip()
+
+        if cmd == "start":
+            if self.state != "waiting":
+                return (["Already started."], [], False)
+            if self.players[0][0] is not conn:
+                return (["Only host can start."], [], False)
+            return self._start_game()
+
+        if self.state == "waiting":
+            return (["Not started. Host: /game move start"], [], False)
+        if self.state == "ended":
+            return (["Game ended."], [], False)
+        if actor not in self.alive:
+            return (["You are out. Use /game show to spectate."], [], False)
+
+        if self.state == "night":
+            role = self.roles.get(actor, "villager")
+            priv: list[str] = []
+            if cmd == "kill":
+                if role != "wolf":
+                    return (["Only wolf can kill."], [], False)
+                target = self._find_player(arg, alive_only=True) if arg else None
+                if not target or target == actor:
+                    return (["Invalid target."], [], False)
+                self.wolf_target = target
+                self.pending_kill = target
+                priv.append(f"Kill target set: {target}")
+            elif cmd == "check":
+                if role != "seer":
+                    return (["Only seer can check."], [], False)
+                target = self._find_player(arg, alive_only=True) if arg else None
+                if not target or target == actor:
+                    return (["Invalid target."], [], False)
+                self.seer_target = target
+                team = "wolf" if self.roles.get(target) == "wolf" else "villager"
+                priv.append(f"Check result: {target} is {team}.")
+            elif cmd == "save":
+                if role != "witch":
+                    return (["Only witch can save."], [], False)
+                if not self.witch_save_available:
+                    return (["Save potion already used."], [], False)
+                if not self.pending_kill:
+                    return (["No kill target yet."], [], False)
+                self.witch_saved = True
+                self.witch_save_available = False
+                priv.append(f"Saved: {self.pending_kill}")
+            elif cmd == "poison":
+                if role != "witch":
+                    return (["Only witch can poison."], [], False)
+                if not self.witch_poison_available:
+                    return (["Poison already used."], [], False)
+                target = self._find_player(arg, alive_only=True) if arg else None
+                if not target or target == actor:
+                    return (["Invalid target."], [], False)
+                self.pending_poison = target
+                self.witch_poison_available = False
+                priv.append(f"Poison target set: {target}")
+            elif cmd == "pass":
+                if role != "witch":
+                    return (["Only witch can pass."], [], False)
+                if self.pending_poison is None:
+                    self.pending_poison = ""
+                if self.pending_kill is None:
+                    self.witch_saved = True
+                priv.append("Witch skipped.")
+            else:
+                return (["Night cmds: kill/check/save/poison/pass"], [], False)
+            return (priv, self._resolve_night_if_ready(), self.state == "ended")
+
+        if self.state == "day":
+            if cmd != "vote":
+                return (["Day cmd: /game move vote <name>"], [], False)
+            target = self._find_player(arg, alive_only=True) if arg else None
+            if not target or target == actor:
+                return (["Invalid vote target."], [], False)
+            self.day_votes[actor] = target
+            bcast = [f"{actor} voted {target} ({len(self.day_votes)}/{len(self.alive)})"]
+            bcast.extend(self._resolve_day_if_ready())
+            return ([], bcast, self.state == "ended")
+
+        return (["Invalid state."], [], False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        actor = self._name_of(conn)
+        if actor is None or actor not in self.alive:
+            return (["You are not alive in this game."], [], False)
+        self.alive.discard(actor)
+        out = [f"{name} resigned and is out."]
+        win = self._check_win()
+        if win:
+            out.append(win)
+            return ([], out, True)
+        out.append(self._alive_line())
+        return ([], out, False)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.players[0][0] is not conn:
+            return (["Only host can abort."], [], False)
+        if self.state == "ended":
+            return (["Game already ended."], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted the werewolf game."], True)
+
+    def seats(self) -> list[str]:
+        lines = [f"werewolf state: {self.state}", f"players: {len(self.players)} (min 5)"]
+        for _c, n in self.players:
+            mark = "alive" if n in self.alive else "out"
+            lines.append(f" - {n} ({mark})")
+        if self.state == "waiting":
+            lines.append("Host start cmd: /game move start")
+        return lines
+
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = [f"werewolf state: {self.state}", f"round: {self.round}", self._alive_line()]
+        if self.state == "waiting":
+            lines.append("waiting for players, then host /game move start")
+        elif self.state == "night":
+            lines.append("night cmds: wolf kill, seer check, witch save/poison/pass")
+        elif self.state == "day":
+            lines.append("day cmd: /game move vote <name>")
+            lines.append(f"votes: {len(self.day_votes)}/{len(self.alive)}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        idx = None
+        for i, (c, _n) in enumerate(self.players):
+            if c is conn:
+                idx = i
+                break
+        if idx is None:
+            return ([], [], False)
+        _c, pname = self.players.pop(idx)
+        self.alive.discard(pname)
+        self.roles.pop(pname, None)
+        if not self.players:
+            self.state = "ended"
+            return ([], [f"{name} left. No players left, game ended."], True)
+        if self.state == "waiting":
+            return ([], [f"{name} left. waiting players: {len(self.players)}"], False)
+        out = [f"{name} disconnected and is out."]
+        win = self._check_win()
+        if win:
+            out.append(win)
+            return ([], out, True)
+        out.append(self._alive_line())
+        return ([], out, False)
+
+
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     XiangqiGame.name: XiangqiGame,
     SanguoshaGame.name: SanguoshaGame,
+    WerewolfGame.name: WerewolfGame,
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
     "sgs": SanguoshaGame.name,
+    "langrensha": WerewolfGame.name,
+    "were-wolf": WerewolfGame.name,
     "三国杀": SanguoshaGame.name,
 }
 

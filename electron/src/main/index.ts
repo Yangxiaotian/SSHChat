@@ -11,8 +11,18 @@ import { ConnectionConfig, IPC_CHANNELS, ConnectionStatus } from '../shared/prot
 
 // Set app name
 app.setName('VsCodeEn');
-app.setPath('userData', path.join(app.getPath('appData'), 'VsCodeEnWorkspaceData'));
-app.commandLine.appendSwitch('disk-cache-dir', path.join(app.getPath('appData'), 'VsCodeEnWorkspaceData', 'Cache'));
+const hasUserDataArg = process.argv.some((arg) => arg.startsWith('--user-data-dir='));
+const hasCacheArg = process.argv.some((arg) => arg.startsWith('--disk-cache-dir='));
+if (!hasUserDataArg) {
+  const exeDir = path.dirname(app.getPath('exe'));
+  const portableDataDir = path.join(exeDir, 'user-data');
+  app.setPath('userData', portableDataDir);
+  if (!hasCacheArg) {
+    app.commandLine.appendSwitch('disk-cache-dir', path.join(portableDataDir, 'Cache'));
+  }
+}
+app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
+app.commandLine.appendSwitch('disable-background-networking');
 
 // Set user agent to look like VSCode
 app.userAgentFallback = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) VsCodeEn/1.96.0';
@@ -27,6 +37,11 @@ const sshManager = new SSHManager();
 const configManager = new ConfigManager();
 let currentRoom = 'default';
 let currentNickname = '';
+const singleInstanceLock = app.requestSingleInstanceLock();
+
+if (!singleInstanceLock) {
+  app.quit();
+}
 
 function createWindow(): void {
   const appIcon = process.platform === 'win32'
@@ -44,6 +59,7 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: false,
       spellcheck: false,
     },
     backgroundColor: '#1e1e1e',
@@ -66,7 +82,7 @@ function createWindow(): void {
   Menu.setApplicationMenu(null);
 
   // Load the app
-  if (process.env.NODE_ENV === 'development') {
+  if (!app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
@@ -75,6 +91,26 @@ function createWindow(): void {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    mainWindow?.focus();
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  // Fallback: force-show in case ready-to-show is never emitted on some machines.
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+    mainWindow.focus();
+  }, 3000);
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error('[VsCodeEn] renderer load failed:', errorCode, errorDescription);
   });
 
   mainWindow.on('closed', () => {
@@ -220,6 +256,15 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+});
+
+app.on('second-instance', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 app.on('window-all-closed', () => {

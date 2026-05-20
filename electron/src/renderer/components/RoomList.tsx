@@ -2,22 +2,35 @@ import React, { useState } from 'react';
 import { useChatStore } from '../store/chatStore';
 
 export default function RoomList() {
-  const { rooms, activeRoom, setActiveRoom } = useChatStore();
+  const { rooms, activeRoom, setActiveRoom, removeRoom } = useChatStore();
   const [expanded, setExpanded] = useState(true);
   const [showJoinDialog, setShowJoinDialog] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
 
-  const handleRoomClick = (roomName: string) => {
-    setActiveRoom(roomName);
-    window.api.switchRoom(roomName);
+  const handleRoomClick = async (roomName: string) => {
+    const ok = await window.api.switchRoom(roomName);
+    if (ok) {
+      setActiveRoom(roomName);
+      window.api.requestUsers();
+    }
   };
 
-  const handleJoin = () => {
+  const handleJoin = async () => {
     const name = newRoomName.trim();
     if (!name) return;
-    window.api.joinRoom(name);
+    const ok = await window.api.joinRoom(name);
+    if (ok) {
+      setActiveRoom(name);
+      window.api.requestUsers();
+    }
     setNewRoomName('');
     setShowJoinDialog(false);
+  };
+
+  const handleRemove = async (roomName: string) => {
+    if (roomName === 'default') return;
+    await window.api.sendMessage(`/part ${roomName}`);
+    removeRoom(roomName);
   };
 
   return (
@@ -85,6 +98,18 @@ export default function RoomList() {
               <span className="room-icon">#</span>
               <span className="room-name">{room.name}</span>
               {room.unreadCount > 0 && <span className="room-unread">{room.unreadCount}</span>}
+              {room.name !== 'default' && (
+                <span
+                  className="tab-close"
+                  title="Remove room"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRemove(room.name);
+                  }}
+                >
+                  x
+                </span>
+              )}
             </div>
           ))}
         </div>

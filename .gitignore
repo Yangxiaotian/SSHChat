@@ -7,3 +7,12 @@ dist-packages/
 dist-packages-*/
 *.spec
 *.spec.bak
+client-bundle.json
+**/client-bundle.json
+
+# Electron local artifacts (may contain runtime config/cache)
+electron/.vite/
+electron/dist/
+electron/release/
+electron/**/.runtime/
+electron/**/user-data/

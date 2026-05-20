@@ -16,15 +16,14 @@ const COMMANDS = [
 ];
 
 export default function InputBar() {
-  const [text, setText] = useState('');
   const [suggestions, setSuggestions] = useState<typeof COMMANDS>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { status, nickname } = useChatStore();
+  const { status, activeRoom, composerText, setComposerText } = useChatStore();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
-    setText(value);
+    setComposerText(value);
 
     // Show command suggestions
     if (value.startsWith('/') && !value.includes(' ')) {
@@ -49,33 +48,16 @@ export default function InputBar() {
   };
 
   const handleSend = async () => {
-    const trimmed = text.trim();
+    const trimmed = composerText.trim();
     if (!trimmed) return;
 
-    // Parse room commands for local state update
-    const joinMatch = trimmed.match(/^\/join\s+(\S+)$/);
-    if (joinMatch) {
-      useChatStore.getState().addRoom(joinMatch[1]);
-      useChatStore.getState().setActiveRoom(joinMatch[1]);
-    }
-
-    const switchMatch = trimmed.match(/^\/switch\s+(\S+)$/);
-    if (switchMatch) {
-      useChatStore.getState().setActiveRoom(switchMatch[1]);
-    }
-
-    const partMatch = trimmed.match(/^\/part\s+(\S+)$/);
-    if (partMatch) {
-      useChatStore.getState().removeRoom(partMatch[1]);
-    }
-
     await window.api.sendMessage(trimmed);
-    setText('');
+    setComposerText('');
     setShowSuggestions(false);
   };
 
   const handleSuggestionClick = (command: string) => {
-    setText(command + ' ');
+    setComposerText(command + ' ');
     setShowSuggestions(false);
     inputRef.current?.focus();
   };
@@ -103,16 +85,16 @@ export default function InputBar() {
           ref={inputRef}
           type="text"
           className="input-field"
-          value={text}
+          value={composerText}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder={isConnected ? `Message #${useChatStore.getState().activeRoom}...` : 'Not connected'}
+          placeholder={isConnected ? `Message #${activeRoom}...` : 'Not connected'}
           disabled={!isConnected}
         />
         <button
           className="send-button"
           onClick={handleSend}
-          disabled={!isConnected || !text.trim()}
+          disabled={!isConnected || !composerText.trim()}
         >
           Send
         </button>

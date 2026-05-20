@@ -1,5 +1,19 @@
 # SSHChat
 
+## Update (2026-05)
+
+- Electron portable startup stability improved (runtime cache isolation, single-instance focus, preload diagnostics).
+- Room UX improved: join/remove in sidebar, keep room list unless manually removed, preserve per-room history when switching.
+- Game Workbench quick actions now fill command into the chat composer first, then send after manual confirm/edit.
+- Added `werewolf` game:
+  - `/game new werewolf`
+  - `/game join`
+  - host starts with `/game move start`
+  - night/day flow with `kill/check/save/poison/pass/vote`
+- GitHub safety:
+  - login/server addresses remain outside repo (user profile/app data)
+  - local sensitive/runtime artifacts ignored: `electron/release/`, `.runtime/`, `client-bundle.json`, build/runtime caches.
+
 **在自己控制的 Linux 服务器上开文字聊天室。**  
 用户这边**只用 SSH 登录**——和平时 `ssh 用户@服务器` 一样，不装微信、不装 Slack，**网络上看就是一条普通的 SSH 连接**。
 
