@@ -38,7 +38,14 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("祝融", 4, "蜀", ("lieren",), "烈刃：【杀】造成伤害后获得目标1张手牌"),
     # —— 吴 ——
     ("孙权", 4, "吴", ("zhiheng",), "制衡：/game move 制衡 <牌>"),
-    ("周瑜", 3, "吴", ("yingzi",), "英姿：摸牌阶段多摸1张"),
+    (
+        "周瑜",
+        3,
+        "吴",
+        ("yingzi", "fanjian"),
+        "英姿：摸牌阶段多摸1张；"
+        "反间：/game move 反间 <目标> <其选花色> <你交出的牌>",
+    ),
     ("孙尚香", 3, "吴", ("jieyin",), "结姻：/game move 结姻 <目标>（双方≤2体力）"),
     ("陆逊", 3, "吴", ("qianxun",), "谦逊：无手牌时不能成为锦囊目标"),
     (
@@ -113,6 +120,7 @@ SGS_SKILL_LABELS: dict[str, str] = {
     "lieren": "烈刃",
     "zhiheng": "制衡",
     "yingzi": "英姿",
+    "fanjian": "反间",
     "jieyin": "结姻",
     "qianxun": "谦逊",
     "guose": "国色",

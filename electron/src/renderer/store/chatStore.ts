@@ -67,7 +67,8 @@ interface ChatState {
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
   setComposerText: (value: string) => void;
-  clearMessages: () => void;
+  /** 清空某房间本地消息；省略 room 时为当前活动房间 */
+  clearMessages: (room?: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -166,5 +167,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPrivacyMode: (value) => set({ privacyMode: value }),
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
   setComposerText: (value) => set({ composerText: value }),
-  clearMessages: () => set({ messages: new Map() }),
+  clearMessages: (room) => {
+    const target = room ?? get().activeRoom;
+    const { messages } = get();
+    const next = new Map(messages);
+    next.set(target, []);
+    set({ messages: next });
+  },
 }));

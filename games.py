@@ -14,6 +14,7 @@ import unicodedata
 from typing import Optional, TYPE_CHECKING
 
 from sgs_data import (
+    ALL_SUITS,
     SHA_CARDS,
     SHAN_CARDS,
     SGS_GENERAL_POOL,
@@ -1458,6 +1459,19 @@ _SGS_ROLE_TABLE: dict[int, list[str]] = {
     6: ["主公", "忠臣", "忠臣", "反贼", "反贼", "内奸"],
 }
 
+def _normalize_declared_suit(tok: str) -> Optional[str]:
+    """反间等：将玩家输入的花色声明规范为 红桃/方块/黑桃/梅花。"""
+    t = tok.strip()
+    if t in ALL_SUITS:
+        return t
+    return {
+        "红": "红桃",
+        "方": "方块",
+        "黑": "黑桃",
+        "梅": "梅花",
+    }.get(t)
+
+
 _SGS_MOVE_ALIASES: dict[str, str] = {
     "杀": "sha",
     "sha": "sha",
@@ -1531,6 +1545,8 @@ _SGS_MOVE_ALIASES: dict[str, str] = {
     "xiangle": "xiangle",
     "英魂": "yinghun",
     "yinghun": "yinghun",
+    "反间": "fanjian",
+    "fanjian": "fanjian",
     "乱击": "luanji",
     "luanji": "luanji",
     "双雄": "shuangxiong",
@@ -1672,6 +1688,7 @@ class _SgsPlayer:
         "drew_this_turn",
         "chained",
         "niepan_used",
+        "fanjian_used",
         "shuangxiong_color",
         "zaoxian_awakened",
         "shuangxiong_duel_used",
@@ -1702,6 +1719,7 @@ class _SgsPlayer:
         self.drew_this_turn = False
         self.chained = False
         self.niepan_used = False
+        self.fanjian_used = False
         self.shuangxiong_color: Optional[str] = None
         self.zaoxian_awakened = False
         self.shuangxiong_duel_used = False
@@ -2364,8 +2382,9 @@ class SanguoshaGame:
             lines.append(
                 "  出牌：杀/火杀/雷杀 <目标> [牌名|丈八:<牌1> <牌2>] | 桃 | 闪 | 酒 | 决斗 | "
                 "拆/过河拆桥 <目标> [区域] | 顺手/顺手牵羊 <目标> [区域] | 无中生有 | 南蛮 | "
-                "万箭 | 兵粮/铁索 <目标1> <目标2>/五谷/桃园/火攻 <目标> | 装备 <牌名> | "
-                "蛊惑 | 观星 | 武将 | 过"
+                "万箭 | 兵粮/铁索 <目标1> <目标2> | 铁索 重铸 | "
+                "五谷/桃园/火攻 <目标> | 装备 <牌名> | "
+                "反间 <目标> <花色> <牌> | 蛊惑 | 观星 | 武将 | 过"
             )
         else:
             lines.append("  指令详情：/game show 帮助")
@@ -2514,6 +2533,7 @@ class SanguoshaGame:
             p.drew_this_turn = False
             p.chained = False
             p.niepan_used = False
+            p.fanjian_used = False
             p.shuangxiong_color = None
             p.zaoxian_awakened = False
             p.shuangxiong_duel_used = False
@@ -2631,6 +2651,7 @@ class SanguoshaGame:
         actor.sha_used = 0
         actor.jiu_buff = False
         actor.luoyi_buff = False
+        actor.fanjian_used = False
         actor.shuangxiong_duel_used = False
         actor.drew_this_turn = False
         msgs: list[str] = []
@@ -2774,6 +2795,15 @@ class SanguoshaGame:
         if notes:
             lines.append("  " + "；".join(notes))
         return lines
+
+    def _tiesuo_toggle_player(self, idx: int) -> str:
+        """横置/重置武将牌：已在连环则解除，否则进入连环。"""
+        p = self.players[idx]
+        if p.chained:
+            p.chained = False
+            return f"{p.name} 解除连环"
+        p.chained = True
+        return f"{p.name} 进入连环"
 
     def _chain_spread_damage(self, origin: int, notes: list[str]) -> None:
         if not self.players[origin].chained:
@@ -3697,9 +3727,16 @@ class SanguoshaGame:
                 return (["无效目标。"], [], False)
             return self._play_bingliang(who, tgt, guhuo=True)
         if trick in ("tiesuo", "铁索", "铁索连环"):
+            if len(mid) == 1 and mid[0] in ("重铸", "recast", "chongzhu"):
+                n = self._draw_cards(player, 1)
+                bcast = [f"{player.name}（蛊惑）重铸【铁索连环】，摸 {n} 张"]
+                return ([], bcast, False)
             if len(mid) < 2:
                 return (
-                    ["用法：/game move 蛊惑 铁索 <目标1> <目标2> <牌>"],
+                    [
+                        "用法：/game move 蛊惑 铁索 <目标1> <目标2> <牌> | "
+                        "蛊惑 铁索 重铸 <牌>"
+                    ],
                     [],
                     False,
                 )
@@ -3712,11 +3749,12 @@ class SanguoshaGame:
             for t in (tgt1, tgt2):
                 if self.players[t].dead:
                     return (["不能对阵亡角色使用铁索连环。"], [], False)
-            self.players[tgt1].chained = True
-            self.players[tgt2].chained = True
+            parts = [
+                self._tiesuo_toggle_player(tgt1),
+                self._tiesuo_toggle_player(tgt2),
+            ]
             bcast = [
-                f"{player.name}（蛊惑）【铁索连环】"
-                f" {self.players[tgt1].name}、{self.players[tgt2].name} 进入连环"
+                f"{player.name}（蛊惑）【铁索连环】" + "；".join(parts)
             ]
             self._jizhi_draw(player, bcast)
             return ([], bcast, False)
@@ -4401,9 +4439,22 @@ class SanguoshaGame:
             return self._do_huogong(who, tgt)
 
         if verb == "tiesuo":
+            if args and args[0] in ("重铸", "recast", "chongzhu"):
+                if len(args) != 1:
+                    return (["用法：/game move 铁索 重铸"], [], False)
+                if not self._remove_card(player, "铁索连环"):
+                    return (["你没有【铁索连环】。"], [], False)
+                n = self._draw_cards(player, 1)
+                return (
+                    [],
+                    [f"{player.name} 重铸【铁索连环】，摸 {n} 张"],
+                    False,
+                )
             if len(args) < 2:
                 return (
-                    ["用法：/game move 铁索 <目标1> <目标2>"],
+                    [
+                        "用法：/game move 铁索 <目标1> <目标2> | /game move 铁索 重铸"
+                    ],
                     [],
                     False,
                 )
@@ -4418,12 +4469,12 @@ class SanguoshaGame:
                     return (["不能对阵亡角色使用铁索连环。"], [], False)
             if not self._remove_card(player, "铁索连环"):
                 return (["你没有【铁索连环】。"], [], False)
-            self.players[tgt1].chained = True
-            self.players[tgt2].chained = True
+            parts = [
+                self._tiesuo_toggle_player(tgt1),
+                self._tiesuo_toggle_player(tgt2),
+            ]
             bcast = [
-                f"{player.name} 对 {self.players[tgt1].name}、"
-                f"{self.players[tgt2].name} 使用【铁索连环】"
-                "（受到伤害时传导）"
+                f"{player.name} 使用【铁索连环】：" + "；".join(parts)
             ]
             self._jizhi_draw(player, bcast)
             return ([], bcast, False)
@@ -4511,6 +4562,53 @@ class SanguoshaGame:
             bcast = [f"{player.name}（强袭）对 {self.players[tgt].name} 造成伤害"]
             bcast.extend(self._damage(tgt, who, 1))
             return self._maybe_end(bcast)
+
+        if verb == "fanjian":
+            if not self._has_skill(player, "fanjian"):
+                return (["你没有反间技能。"], [], False)
+            if player.fanjian_used:
+                return (["本回合已使用过【反间】。"], [], False)
+            if len(args) < 3:
+                return (
+                    [
+                        "用法：/game move 反间 <目标> <其声明花色> <你交出的牌>",
+                        "  花色：红桃|方块|黑桃|梅花（可简写 红/方/黑/梅）",
+                    ],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, args[:1])
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            declared = _normalize_declared_suit(args[1])
+            if declared is None:
+                return (
+                    [f"无效花色「{args[1]}」。请用：红桃/方块/黑桃/梅花。"],
+                    [],
+                    False,
+                )
+            card_tok = args[2]
+            found = find_card_in_hand(player.hand, card_tok)
+            if found is None:
+                return ([f"你没有【{card_tok}】。"], [], False)
+            victim = self.players[tgt]
+            if victim.dead:
+                return (["不能对阵亡角色反间。"], [], False)
+            player.hand.remove(found)
+            victim.hand.append(found)
+            player.fanjian_used = True
+            suit_shown = card_suit(found)
+            head = (
+                f"{player.name}（反间）{victim.name} 声明【{declared}】，"
+                f"获得并展示【{card_label(found)}】"
+            )
+            if suit_shown:
+                head += f"（{suit_shown}）"
+            if suit_shown != declared:
+                bcast = [head + "，花色不符"]
+                bcast.extend(self._damage(tgt, who, 1))
+                return self._maybe_end(bcast)
+            return ([], [head + "，花色相符"], False)
 
         if verb == "qingnang":
             if not self._has_skill(player, "qingnang"):
