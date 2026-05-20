@@ -14,6 +14,11 @@ export class SSHManager {
   private tcpSocket: net.Socket | null = null;
   private onData: ((data: Buffer) => void) | null = null;
   private onEnd: (() => void) | null = null;
+  private readonly ansiCsiRe = /\x1b\[[\d;?]*[A-Za-z]/g;
+  private readonly oscRe = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
+  private readonly otherEscRe = /\x1b[\][()#%][\d"A-Za-z]*/g;
+  private readonly mangledCsiRe = /\?\[[\d;?]*[A-Za-z]/g;
+  private readonly ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
   async connect(
     config: ConnectionConfig,
@@ -116,8 +121,12 @@ export class SSHManager {
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (line.trim()) {
-          onDataCallback(Buffer.from(line, 'utf-8'));
+        const cleaned = this.cleanLine(line);
+        if (this.shouldSkipLine(cleaned)) {
+          continue;
+        }
+        if (cleaned.trim()) {
+          onDataCallback(Buffer.from(cleaned, 'utf-8'));
         }
       }
     });
@@ -129,6 +138,26 @@ export class SSHManager {
     stream.on('error', (err: Error) => {
       onError(`Stream error: ${err.message}`);
     });
+  }
+
+  private cleanLine(raw: string): string {
+    let s = raw
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '')
+      .replace(this.oscRe, '')
+      .replace(this.ansiCsiRe, '')
+      .replace(this.mangledCsiRe, '')
+      .replace(this.otherEscRe, '')
+      .replace(this.ctrlRe, '');
+    return s.trimEnd();
+  }
+
+  private shouldSkipLine(line: string): boolean {
+    const t = line.trim();
+    if (!t) return true;
+    if (t === '>' || t.startsWith('> ')) return true;
+    if (t.startsWith('WARNING: your terminal doesn\'t support cursor position requests')) return true;
+    return false;
   }
 
   private findSSHKey(): string | null {
