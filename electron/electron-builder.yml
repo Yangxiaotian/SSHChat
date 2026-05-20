@@ -1,0 +1,61 @@
+appId: com.vscodeen.app
+productName: VsCodeEn
+executableName: VsCodeEn
+copyright: Copyright (C) 2024 Microsoft Corporation. All rights reserved.
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+extraResources:
+  - from: assets/
+    to: assets/
+asar: true
+asarUnpack:
+  - node_modules/ssh2/**/*
+win:
+  icon: assets/icon.ico
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  legalTrademarks: VsCodeEn
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  installerHeaderIcon: assets/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: VsCodeEn
+  uninstallDisplayName: VsCodeEn
+  menuCategory: Development
+  artifactName: VsCodeEnSetup-${version}.${ext}
+linux:
+  icon: assets/icon.png
+  target:
+    - AppImage
+  executableName: code
+  category: Development
+  desktop:
+    Name: VsCodeEn
+    Comment: Code Editing. Redefined.
+    GenericName: Text Editor
+    Keywords: vscodeen;
+    StartupNotify: true
+    MimeType: text/plain;inode/directory;
+    Actions: new-empty-window;
+    X-Desktop-File-Install-Version: 0.26
+mac:
+  icon: assets/icon.icns
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - dmg
+    - zip

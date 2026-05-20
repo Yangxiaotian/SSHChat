@@ -1,0 +1,41 @@
+{
+  "name": "visual-studio-code",
+  "version": "1.96.0",
+  "description": "Visual Studio Code - Code Editing. Redefined.",
+  "main": "dist/main/index.js",
+  "author": {
+    "name": "Microsoft Corporation"
+  },
+  "license": "MIT",
+  "homepage": "https://code.visualstudio.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode"
+  },
+  "scripts": {
+    "dev": "concurrently \"vite\" \"tsc -p tsconfig.node.json -w\" \"wait-on http://localhost:5173 && node scripts/run-electron-dev.cjs\"",
+    "build": "vite build && tsc -p tsconfig.node.json && electron-builder",
+    "build:win": "vite build && tsc -p tsconfig.node.json && electron-builder --win",
+    "build:unpack": "vite build && tsc -p tsconfig.node.json && electron-builder --dir",
+    "build:portable": "vite build && tsc -p tsconfig.node.json && electron-builder --win dir && powershell -ExecutionPolicy Bypass -File scripts/make-portable.ps1",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ssh2": "^1.16.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ssh2": "^1.15.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}
