@@ -14,6 +14,7 @@ declare global {
       switchRoom: (room: string) => Promise<boolean>;
       requestUsers: () => Promise<boolean>;
       requestNews: (category?: string) => Promise<boolean>;
+      notifyAttention: () => Promise<boolean>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;

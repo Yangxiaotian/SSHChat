@@ -16,6 +16,7 @@
     "dev": "concurrently \"vite\" \"tsc -p tsconfig.node.json -w\" \"wait-on http://localhost:5173 && node scripts/run-electron-dev.cjs\"",
     "build": "vite build && tsc -p tsconfig.node.json && electron-builder",
     "build:win": "vite build && tsc -p tsconfig.node.json && electron-builder --win",
+    "build:mac": "vite build && tsc -p tsconfig.node.json && electron-builder --mac",
     "build:unpack": "vite build && tsc -p tsconfig.node.json && electron-builder --dir",
     "build:portable": "vite build && tsc -p tsconfig.node.json && electron-builder --win dir && powershell -ExecutionPolicy Bypass -File scripts/make-portable.ps1",
     "preview": "vite preview"

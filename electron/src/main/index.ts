@@ -47,6 +47,8 @@ function createWindow(): void {
   const appIcon = process.platform === 'win32'
     ? path.join(__dirname, '../../assets/icon.ico')
     : path.join(__dirname, '../../assets/icon.png');
+  const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
 
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -65,16 +67,20 @@ function createWindow(): void {
     backgroundColor: '#1e1e1e',
     autoHideMenuBar: true,
     show: false,
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#323233',
-      symbolColor: '#cccccc',
-      height: 30,
-    },
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isWin
+      ? {
+          titleBarOverlay: {
+            color: '#323233',
+            symbolColor: '#cccccc',
+            height: 30,
+          },
+        }
+      : {}),
   });
 
   // Set Windows specific properties
-  if (process.platform === 'win32') {
+  if (isWin) {
     mainWindow.setThumbarButtons([]);
   }
 
@@ -239,6 +245,44 @@ function setupIPC(): void {
     const cmd = category ? `/news ${category}` : '/news';
     const message = buildSendMessage(currentNickname, cmd);
     return sshManager.send(message);
+  });
+
+  // Flash taskbar icon for new message attention.
+  ipcMain.handle(IPC_CHANNELS.NOTIFY_ATTENTION, () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (mainWindow.isFocused()) return true;
+
+    if (process.platform === 'darwin') {
+      const dock = app.dock;
+      if (dock) {
+        const bounceId = dock.bounce('informational');
+        setTimeout(() => {
+          try {
+            dock.cancelBounce(bounceId);
+          } catch {
+            // ignore
+          }
+        }, 2200);
+      }
+      return true;
+    }
+
+    let ticks = 0;
+    const timer = setInterval(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        clearInterval(timer);
+        return;
+      }
+      const on = ticks % 2 === 0;
+      mainWindow.flashFrame(on);
+      ticks += 1;
+      if (ticks >= 6) { // on/off * 3 times
+        mainWindow.flashFrame(false);
+        clearInterval(timer);
+      }
+    }, 260);
+
+    return true;
   });
 
   // Get connection status

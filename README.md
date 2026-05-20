@@ -10,6 +10,9 @@
   - `/game join`
   - host starts with `/game move start`
   - night/day flow with `kill/check/save/poison/pass/vote`
+- macOS build support:
+  - `cd electron && npm run build:mac`
+  - outputs DMG/ZIP in `electron/release/`
 - GitHub safety:
   - login/server addresses remain outside repo (user profile/app data)
   - local sensitive/runtime artifacts ignored: `electron/release/`, `.runtime/`, `client-bundle.json`, build/runtime caches.

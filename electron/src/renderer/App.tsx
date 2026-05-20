@@ -19,7 +19,13 @@ export default function App() {
     });
 
     const unsubMessage = window.api.onChatMessage((message) => {
+      const { nickname: me, activeRoom: currentRoom } = useChatStore.getState();
       useChatStore.getState().addMessage(message);
+      const isPeerMessage = message.sender !== me && (message.type === 'chat' || message.type === 'pm' || message.type === 'game');
+      const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());
+      if (needAttention) {
+        window.api.notifyAttention();
+      }
       if (message.type === 'join' || message.type === 'leave') {
         window.api.requestUsers();
       }

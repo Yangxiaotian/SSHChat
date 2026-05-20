@@ -37,6 +37,9 @@ const api = {
   requestNews: (category?: string): Promise<boolean> => {
     return ipcRenderer.invoke(IPC_CHANNELS.REQUEST_NEWS, category);
   },
+  notifyAttention: (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.NOTIFY_ATTENTION);
+  },
 
   // Event listeners
   onChatMessage: (callback: (message: ChatMessage) => void) => {

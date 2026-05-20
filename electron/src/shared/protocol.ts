@@ -48,6 +48,7 @@ export const IPC_CHANNELS = {
   DISCONNECT: 'chat:disconnect',
   REQUEST_USERS: 'chat:request-users',
   REQUEST_NEWS: 'chat:request-news',
+  NOTIFY_ATTENTION: 'chat:notify-attention',
   SAVE_CONFIG: 'config:save',
   LOAD_CONFIG: 'config:load',
 } as const;
