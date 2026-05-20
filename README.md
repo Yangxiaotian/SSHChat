@@ -72,6 +72,31 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 
 不打包也可以：用户直接用上面的 **`ssh`** 命令，或在本机用 **`easy_connect.py`** + 简单 JSON 配置（见下文「进阶」）。
 
+### 本次更新：Electron 客户端（VSCode 布局）
+
+- 新增目录：`SSHChat/electron/`（与原 `server.py` 协议兼容，仍走 SSH + 端口转发）。
+- 进程与外观：`name/appId/VsCodeEn.exe`、任务栏分组、深浅色主题、ActivityBar/Sidebar/Tab/StatusBar。
+- 默认开启“保密模式”（Focus）：界面文案偏开发工具风格，避免显眼的“聊天/游戏”提示。
+- 新增游戏工作台：在 VSCode 布局内直接执行 `/game show|seats|move`，并显示当前棋盘/对局文本。
+
+**开发启动（Electron）**
+
+```bash
+cd electron
+npm ci
+npm run dev
+```
+
+**Windows 免安装打包（推荐）**
+
+```bash
+cd electron
+npm run build:portable
+```
+
+产物：`electron/release/VsCodeEn-portable.zip`  
+解压后双击：`Start-VsCodeEn.cmd`
+
 ---
 
 ## 聊天命令（连上以后）
