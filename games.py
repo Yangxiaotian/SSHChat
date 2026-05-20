@@ -1840,11 +1840,17 @@ class SanguoshaGame:
         return min(abs(ai - bi), n - abs(ai - bi))
 
     def _calc_distance(self, from_idx: int, to_idx: int) -> int:
-        """from 到 to 的距离（目标 +1 马使他人到其距离 +1）。"""
+        """from 到 to 的距离：座次环距；目标 +1 马 +1；双方 -1 马各 -1。"""
         d = self._alive_distance(from_idx, to_idx)
-        if self.players[to_idx].horse_plus:
+        to_p = self.players[to_idx]
+        from_p = self.players[from_idx]
+        if to_p.horse_plus:
             d += 1
-        return d
+        if from_p.horse_minus:
+            d -= 1
+        if to_p.horse_minus:
+            d -= 1
+        return max(1, d)
 
     def _attack_range(self, actor_idx: int) -> int:
         """攻击范围 = 武器距离 + 进攻马(-1)。"""
