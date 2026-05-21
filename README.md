@@ -1,5 +1,26 @@
 # SSHChat
 
+## Update (2026-05-21)
+
+- Added new room game: `zjh` (炸金花).
+- Quick start:
+  - `/game new zjh`
+  - `/game join`
+  - host: `/game move start`
+- Main actions:
+  - `/game move look`
+  - `/game move follow`
+  - `/game move raise <amount>`
+  - `/game move compare <name>`
+  - `/game move fold`
+- Added aliases:
+  - `zjh`
+  - `zhajinhua`
+- Game Workbench now includes a dedicated ZJH panel with buttons for Start/Look/Follow/Raise/Fold/Compare.
+- Portable build command (Windows):
+  - `cd electron && npm run build:portable`
+  - output: `electron/release/VsCodeEn-portable.zip`
+
 ## Update (2026-05)
 
 - **Monitor 功能（新增）**：左侧栏新增「M」图标，通过前置摄像头检测画面中的人数。当检测到 2 人及以上时，自动执行预设动作（最小化窗口 / 关闭应用 / 杀指定进程并最小化）。详见下方「Monitor 功能」章节。

@@ -94,7 +94,7 @@ export default function InputBar() {
     const trimmed = composerText.trim();
     if (!trimmed) return;
 
-    if (/^\/clear$/i.test(trimmed)) {
+    if (/^\/(?:clear|cls)$/i.test(trimmed)) {
       clearMessages();
       setComposerText('');
       setShowSuggestions(false);

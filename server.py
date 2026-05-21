@@ -1312,6 +1312,22 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_sanguo_hand_views(room, game)
         return
 
+    if sub == "undo":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            fn = getattr(game, "try_undo", None)
+            if fn is None:
+                send_line(conn, "[*] 当前游戏不支持悔棋。\n")
+                return
+            priv, bcast, _ = fn(conn, name)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        send_oriented_boards(room, game)
+        return
+
     if sub == "resign":
         with lock:
             game = room_games.get(room)
