@@ -34,9 +34,16 @@ export default function MonitorPanel() {
   const { videoRef, personCount, isRunning, modelLoaded, error, start, stop } =
     useCameraMonitor(monitorEnabled, handlePersonCount);
 
-  // Auto-start camera when component mounts with monitor already enabled
+  // Auto-start camera when component mounts with monitor already enabled,
+  // or re-attach detection loop when remounting while already running.
   useEffect(() => {
     if (monitorEnabled && !isRunning) {
+      start();
+    }
+    // If the monitor was already running (module-level state) but this component
+    // just mounted, the detection loop needs the new video element reference.
+    // The hook's mount effect re-attaches the stream; we restart detection via start().
+    if (monitorEnabled && isRunning && videoRef.current && !videoRef.current.srcObject) {
       start();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
