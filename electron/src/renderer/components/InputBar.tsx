@@ -117,7 +117,7 @@ export default function InputBar() {
   const isConnected = status === 'connected';
   const triggerRoomShake = async () => {
     if (!isConnected) return;
-    await window.api.shakeWindow();
+    // Send shake signal to server; all clients (including sender via echo) will shake
     await window.api.sendMessage('__VSCODEEN_SHAKE__');
   };
 
