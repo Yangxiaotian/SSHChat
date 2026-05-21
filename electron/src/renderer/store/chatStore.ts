@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+﻿import { create } from 'zustand';
 import { ChatMessage, ConnectionConfig, ConnectionStatus, ProcessInfo, RoomInfo } from '../../shared/protocol';
 
 declare global {
@@ -30,37 +30,29 @@ declare global {
 }
 
 interface ChatState {
-  // Connection
   status: ConnectionStatus;
   error: string | null;
   config: ConnectionConfig | null;
   nickname: string;
 
-  // Rooms
   rooms: RoomInfo[];
   activeRoom: string;
 
-  // Messages
   messages: Map<string, ChatMessage[]>;
-
-  // Users
   users: string[];
 
-  // UI State
   showLogin: boolean;
   sidebarView: 'rooms' | 'users' | 'news' | 'monitor';
   theme: 'dark' | 'light';
   privacyMode: boolean;
   composerText: string;
 
-  // Monitor
   monitorEnabled: boolean;
   monitorPersonCount: number;
   monitorTargetProcesses: string[];
   monitorAction: 'minimize' | 'close' | 'kill';
   monitorCooldown: boolean;
 
-  // Actions
   setStatus: (status: ConnectionStatus) => void;
   setError: (error: string | null) => void;
   setConfig: (config: ConnectionConfig | null) => void;
@@ -79,9 +71,8 @@ interface ChatState {
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
   setComposerText: (value: string) => void;
-  clearMessages: () => void;
+  clearMessages: (room?: string) => void;
 
-  // Monitor actions
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
   addMonitorTargetProcess: (name: string) => void;
@@ -91,7 +82,6 @@ interface ChatState {
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
-  // Initial state
   status: 'disconnected',
   error: null,
   config: null,
@@ -106,14 +96,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   privacyMode: true,
   composerText: '',
 
-  // Monitor
   monitorEnabled: false,
   monitorPersonCount: 0,
   monitorTargetProcesses: [],
   monitorAction: 'minimize',
   monitorCooldown: false,
 
-  // Actions
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
   setConfig: (config) => set({ config }),
@@ -144,14 +132,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   addRoom: (room) => {
     const { rooms } = get();
-    if (!rooms.find(r => r.name === room)) {
+    if (!rooms.find((r) => r.name === room)) {
       set({ rooms: [...rooms, { name: room, isDefault: room === 'default', unreadCount: 0, lastActivity: Date.now() }] });
     }
   },
 
   removeRoom: (room) => {
     const { rooms, activeRoom } = get();
-    const filtered = rooms.filter(r => r.name !== room);
+    const filtered = rooms.filter((r) => r.name !== room);
     if (filtered.length === 0) {
       filtered.push({ name: 'default', isDefault: true, unreadCount: 0, lastActivity: Date.now() });
     }
@@ -164,7 +152,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setRoomUnread: (room, count) => {
     const { rooms } = get();
     set({
-      rooms: rooms.map(r => r.name === room ? { ...r, unreadCount: count } : r),
+      rooms: rooms.map((r) => (r.name === room ? { ...r, unreadCount: count } : r)),
     });
   },
 
@@ -174,11 +162,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const newMessages = new Map(messages);
     newMessages.set(message.room, [...roomMessages, message]);
 
-    // Update unread count if not active room
     let newRooms = rooms;
     if (message.room !== activeRoom && message.type !== 'system') {
-      newRooms = rooms.map(r =>
-        r.name === message.room ? { ...r, unreadCount: r.unreadCount + 1, lastActivity: Date.now() } : r
+      newRooms = rooms.map((r) =>
+        r.name === message.room ? { ...r, unreadCount: r.unreadCount + 1, lastActivity: Date.now() } : r,
       );
     }
 
@@ -193,9 +180,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPrivacyMode: (value) => set({ privacyMode: value }),
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
   setComposerText: (value) => set({ composerText: value }),
-  clearMessages: () => set({ messages: new Map() }),
+  clearMessages: (room) => {
+    const target = room ?? get().activeRoom;
+    const { messages } = get();
+    const next = new Map(messages);
+    next.set(target, []);
+    set({ messages: next });
+  },
 
-  // Monitor actions
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),
   addMonitorTargetProcess: (name) => {

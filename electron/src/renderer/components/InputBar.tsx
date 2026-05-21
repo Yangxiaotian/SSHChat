@@ -9,7 +9,7 @@ const COMMANDS = [
   { name: '/switch', desc: 'Switch active room' },
   { name: '/part', desc: 'Leave a room' },
   { name: '/msg', desc: 'Send private message' },
-  { name: '/clear', desc: 'Clear screen' },
+  { name: '/clear', desc: 'Clear local view (current room)' },
   { name: '/game', desc: 'Game commands' },
   { name: '/news', desc: 'Show news' },
   { name: '/announce', desc: 'Room announcement' },
@@ -45,6 +45,7 @@ export default function InputBar() {
       // no-op
     }
   };
+  const { clearMessages } = useChatStore();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -92,6 +93,13 @@ export default function InputBar() {
   const handleSend = async () => {
     const trimmed = composerText.trim();
     if (!trimmed) return;
+
+    if (/^\/clear$/i.test(trimmed)) {
+      clearMessages();
+      setComposerText('');
+      setShowSuggestions(false);
+      return;
+    }
 
     await window.api.sendMessage(trimmed);
     const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);

@@ -105,6 +105,8 @@ npm ci
 npm run dev
 ```
 
+若 `npm ci` 在安装 `electron` 时报 `TypeError: Invalid URL`，多半是本地的 `electron_mirror` / `ELECTRON_MIRROR` 或项目 `electron/.npmrc` 配成了无效地址；见 **`electron/NPM-ELECTRON-INSTALL.md`** 与 **`electron/.npmrc.example`**。
+
 **Windows 免安装打包（推荐）**
 
 ```bash

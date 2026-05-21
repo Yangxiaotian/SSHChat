@@ -38,7 +38,14 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("祝融", 4, "蜀", ("lieren",), "烈刃：【杀】造成伤害后获得目标1张手牌"),
     # —— 吴 ——
     ("孙权", 4, "吴", ("zhiheng",), "制衡：/game move 制衡 <牌>"),
-    ("周瑜", 3, "吴", ("yingzi",), "英姿：摸牌阶段多摸1张"),
+    (
+        "周瑜",
+        3,
+        "吴",
+        ("yingzi", "fanjian"),
+        "英姿：摸牌阶段多摸1张；"
+        "反间：/game move 反间 <目标> <其选花色> <你交出的牌>",
+    ),
     ("孙尚香", 3, "吴", ("jieyin",), "结姻：/game move 结姻 <目标>（双方≤2体力）"),
     ("陆逊", 3, "吴", ("qianxun",), "谦逊：无手牌时不能成为锦囊目标"),
     (
@@ -71,6 +78,24 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("公孙瓒", 4, "群", ("yicong",), "义从：与所有人生座次距离≥2时多摸1张"),
 ]
 
+# 雌雄双股剑等判定用；未列出的武将默认为男性
+SGS_FEMALE_GENERALS = frozenset({
+    "甄姬",
+    "张春华",
+    "黄月英",
+    "祝融",
+    "孙尚香",
+    "大乔",
+    "小乔",
+    "貂蝉",
+    "蔡文姬",
+})
+
+
+def general_gender(name: str) -> str:
+    return "female" if name in SGS_FEMALE_GENERALS else "male"
+
+
 SGS_GENERAL_BY_NAME: dict[str, dict] = {}
 for _name, _hp, _kingdom, _skills, _desc in _SGS_GENERAL_ROWS:
     SGS_GENERAL_BY_NAME[_name] = {
@@ -79,6 +104,7 @@ for _name, _hp, _kingdom, _skills, _desc in _SGS_GENERAL_ROWS:
         "kingdom": _kingdom,
         "skills": _skills,
         "desc": _desc,
+        "gender": general_gender(_name),
     }
 
 SGS_GENERAL_POOL: list[dict] = list(SGS_GENERAL_BY_NAME.values())
@@ -113,6 +139,7 @@ SGS_SKILL_LABELS: dict[str, str] = {
     "lieren": "烈刃",
     "zhiheng": "制衡",
     "yingzi": "英姿",
+    "fanjian": "反间",
     "jieyin": "结姻",
     "qianxun": "谦逊",
     "guose": "国色",

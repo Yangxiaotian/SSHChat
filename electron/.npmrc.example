@@ -1,0 +1,16 @@
+# Example local npm configuration for the electron app (copy to `.npmrc` only if needed).
+# The `electron` package postinstall downloads the Chromium binary separately from npm tarballs.
+# Misconfigured mirror URLs are a common cause of: `TypeError: Invalid URL` in got/@electron/get.
+
+# --- Electron binary mirror (optional) ---
+# MUST be an absolute URL with scheme (https://). Missing `https://` breaks the downloader.
+#
+# Typical China mirror:
+# electron_mirror=https://npmmirror.com/mirrors/electron/
+
+# npm package registry (optional; lockfile URLs may already point at a mirror)
+# registry=https://registry.npmmirror.com/
+
+# Avoid setting these unless you know the exact filenames @electron/get expects:
+# electron_custom_dir=
+# electron_custom_filename=

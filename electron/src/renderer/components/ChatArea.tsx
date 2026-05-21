@@ -6,7 +6,7 @@ import MessageBubble from './MessageBubble';
 import GameWorkbench from './GameWorkbench';
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode } = useChatStore();
+  const { messages, activeRoom, nickname, status, privacyMode, clearMessages } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
@@ -24,13 +24,25 @@ export default function ChatArea() {
       <TabBar />
 
       <div className="breadcrumb">
-        <span className="breadcrumb-item">
-          <span>{privacyMode ? 'Workspace' : 'SSHChat'}</span>
-        </span>
-        <span className="breadcrumb-separator">{'>'}</span>
-        <span className="breadcrumb-item">
-          <span>#{activeRoom}</span>
-        </span>
+        <div className="breadcrumb-path">
+          <span className="breadcrumb-item">
+            <span>{privacyMode ? 'Workspace' : 'SSHChat'}</span>
+          </span>
+          <span className="breadcrumb-separator">{'>'}</span>
+          <span className="breadcrumb-item">
+            <span>#{activeRoom}</span>
+          </span>
+        </div>
+        {status === 'connected' && (
+          <button
+            type="button"
+            className="breadcrumb-clear-btn"
+            title="Clear local messages in this room (not sent to server)"
+            onClick={() => clearMessages()}
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <GameWorkbench />
