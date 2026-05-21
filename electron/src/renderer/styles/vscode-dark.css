@@ -403,6 +403,14 @@ html, body, #root {
   overflow-x: auto;
 }
 
+.game-workbench-hint {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--vscode-text-secondary);
+  border-bottom: 1px dashed var(--vscode-border-light);
+  background: var(--vscode-bg);
+}
+
 .game-interaction-panel {
   padding: 8px 10px;
   border-top: 1px solid var(--vscode-border-light);
@@ -416,6 +424,37 @@ html, body, #root {
   margin-bottom: 6px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
+}
+
+.poker-section {
+  margin-bottom: 8px;
+}
+
+.poker-title {
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+  margin-bottom: 4px;
+}
+
+.poker-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.poker-card {
+  min-width: 72px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-border);
+  background: #f6f6f6;
+  color: #111;
+  font-size: 12px;
+  text-align: center;
+}
+
+.poker-card.red {
+  color: #b01717;
 }
 
 .game-grid-row {
@@ -523,13 +562,18 @@ html, body, #root {
 }
 
 .mini-btn {
-  height: 22px;
-  padding: 0 8px;
+  height: 26px;
+  padding: 0 10px;
   border: 1px solid var(--vscode-border);
   background: var(--vscode-button-secondary);
   color: var(--vscode-fg);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
+  border-radius: 4px;
+}
+
+.mini-btn:hover:not(:disabled) {
+  border-color: var(--vscode-focus);
 }
 
 .game-workbench-body {

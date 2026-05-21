@@ -1,4 +1,4 @@
-"""Mini game framework: chess (python-chess) + gomoku + xiangqi + sanguo for SSHChat.
+﻿"""Mini game framework: chess (python-chess) + gomoku + xiangqi + sanguo for SSHChat.
 
 Each game class exposes the same surface used by ``server.py``:
 ``try_join``, ``try_move``, ``resign``, ``abort``, ``seats``, ``show``,
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import re
+import itertools
 import unicodedata
 from typing import Optional, TYPE_CHECKING
 
@@ -5749,11 +5750,67 @@ class ZhaJinHuaGame:
         self.folded: set[str] = set()
         self.looked: set[str] = set()
         self.cards: dict[str, list[str]] = {}
-        self.stacks: dict[str, int] = {host_name: 100}
+        self.stacks: dict[str, int] = {host_name: 1000}
         self.pot = 0
         self.current_bet = 1
         self.turn_idx = 0
         self.rng = random.Random()
+    def _is_bot(self, name: str) -> bool:
+        return name in self.bot_names
+    def _auto_add_bots(self) -> list[str]:
+        human = sum(1 for c, _n in self.players if c is not None)
+        if human >= 2:
+            return []
+        add_n = min(5, max(3, self.rng.randint(3, 5)), 6 - len(self.players))
+        added: list[str] = []
+        for _ in range(add_n):
+            idx = len(self.bot_names) + 1
+            bn = f"BOT{idx}"
+            while any(n == bn for _c, n in self.players):
+                idx += 1
+                bn = f"BOT{idx}"
+            bc = object()
+            self.players.append((bc, bn))
+            self.bot_names.add(bn)
+            self.bot_conns[bn] = bc
+            self.stacks.setdefault(bn, 1000)
+            added.append(bn)
+        return added
+    def _bot_action(self, name: str) -> str:
+        cat, tie = _zjh_eval3(self.cards[name])
+        score = cat * 100 + (tie[0] if tie else 0)
+        if self.bot_level == "easy":
+            return self.rng.choice(["follow", "follow", "fold", "look"])
+        if self.bot_level == "pro":
+            if score >= 500:
+                return "raise 2"
+            if score < 220 and self.current_bet >= 3:
+                return "fold"
+            targets = [n for n in self._alive() if n != name]
+            if score >= 350 and len(targets) >= 1 and self.rng.random() < 0.35:
+                return f"compare {self.rng.choice(targets)}"
+            return "follow"
+        if score >= 450:
+            return "raise 1"
+        if score < 220 and self.current_bet >= 4:
+            return "fold"
+        return self.rng.choice(["follow", "follow", "look"])
+    def _run_bots(self) -> list[str]:
+        out: list[str] = []
+        guard = 0
+        while self.state == "playing" and guard < 32:
+            guard += 1
+            cur = self.players[self.turn_idx][1]
+            if cur not in self.bot_names:
+                break
+            bot_conn = self.bot_conns.get(cur)
+            if bot_conn is None:
+                break
+            _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
+            out.extend(b)
+            if self.state == "ended":
+                break
+        return out
     def _name_of(self, conn) -> Optional[str]:
         for c, n in self.players:
             if c is conn:
@@ -5781,6 +5838,8 @@ class ZhaJinHuaGame:
         return [f"{w} wins by fold. pot +{gain}"]
     def _start(self) -> list[str]:
         if len(self.players) < 2:
+            self._auto_add_bots()
+        if len(self.players) < 2:
             return ["need at least 2 players"]
         self.state = "playing"
         self.folded.clear(); self.looked.clear(); self.cards.clear()
@@ -5789,15 +5848,19 @@ class ZhaJinHuaGame:
         self.rng.shuffle(deck)
         for _c, n in self.players:
             self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
-            self.stacks.setdefault(n, 100)
+            self.stacks.setdefault(n, 1000)
             if self.stacks[n] > 0:
                 self.stacks[n] -= 1; self.pot += 1
-        return ["zjh started. use /game show to see your cards.", f"pot={self.pot}", f"turn: {self.players[self.turn_idx][1]}"]
+        out = ["zjh started. use /game show to see your cards.", f"pot={self.pot}", f"turn: {self.players[self.turn_idx][1]}"]
+        if self.bot_names:
+            out.append(f"bots: {', '.join(sorted(self.bot_names))} (level={self.bot_level})")
+        out.extend(self._run_bots())
+        return out
     def try_join(self, conn, name: str) -> GameResult:
         if self.state != "waiting": return (["game already started"], [], False)
         if len(self.players) >= 6: return (["zjh max 6 players"], [], False)
         if any(n == name for _c, n in self.players): return (["name already in seats"], [], False)
-        self.players.append((conn, name)); self.stacks.setdefault(name, 100)
+        self.players.append((conn, name)); self.stacks.setdefault(name, 1000)
         return ([], [f"{name} joined zjh ({len(self.players)}/6)"], False)
     def try_move(self, conn, raw: str) -> GameResult:
         actor = self._name_of(conn)
@@ -5805,6 +5868,13 @@ class ZhaJinHuaGame:
         parts = raw.strip().split()
         if not parts: return (["usage: /game move <start/look/follow/raise/fold/compare>"], [], False)
         cmd = parts[0].lower()
+        if cmd == "bot":
+            if conn is not self.players[0][0]:
+                return (["only host can set bot level"], [], False)
+            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
+                return (["usage: /game move bot <easy|hard|pro>"], [], False)
+            self.bot_level = parts[1].lower()
+            return ([], [f"bot level set to {self.bot_level}"], False)
         if cmd == "start":
             if self.state != "waiting": return (["already started"], [], False)
             if conn is not self.players[0][0]: return (["only host can start"], [], False)
@@ -5839,6 +5909,7 @@ class ZhaJinHuaGame:
         else: return (["cmds: start/look/follow/raise/fold/compare"], [], False)
         done = self._finish_if_one()
         if done: return ([], bcast + done, True)
+        bcast.extend(self._run_bots())
         bcast.append(f"pot={self.pot}, current_bet={self.current_bet}, turn={self.players[self.turn_idx][1]}")
         return ([], bcast, False)
     def resign(self, conn, name: str) -> GameResult: return self.try_move(conn, "fold")
@@ -5867,21 +5938,683 @@ class ZhaJinHuaGame:
         return ([], [f"{name} left zjh"], False)
 
 
+class HoldemGame:
+    name = "holdem"
+    first_seat_desc = "host"
+    join_blurb = "others use /game join, host starts with /game move start"
+
+    def __init__(self, host_conn, host_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.bot_names: set[str] = set()
+        self.bot_conns: dict[str, object] = {}
+        self.bot_level = "hard"
+        self.state = "waiting"
+        self.folded: set[str] = set()
+        self.hands: dict[str, list[str]] = {}
+        self.stacks: dict[str, int] = {host_name: 1000}
+        self.board: list[str] = []
+        self.pot = 0
+        self.current_bet = 2
+        self.turn_idx = 0
+        self.street = "preflop"
+        self.rng = random.Random()
+        self.acted: set[str] = set()
+
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+
+    def _alive(self) -> list[str]:
+        return [n for _c, n in self.players if n not in self.folded]
+    def _auto_add_bots(self) -> list[str]:
+        human = sum(1 for c, _n in self.players if c is not None)
+        if human >= 2:
+            return []
+        add_n = min(5, max(3, self.rng.randint(3, 5)), 6 - len(self.players))
+        added: list[str] = []
+        for _ in range(add_n):
+            idx = len(self.bot_names) + 1
+            bn = f"BOT{idx}"
+            while any(n == bn for _c, n in self.players):
+                idx += 1
+                bn = f"BOT{idx}"
+            bc = object()
+            self.players.append((bc, bn))
+            self.bot_names.add(bn)
+            self.bot_conns[bn] = bc
+            self.stacks.setdefault(bn, 1000)
+            added.append(bn)
+        return added
+    def _bot_action(self, name: str) -> str:
+        if self.street == "preflop":
+            a, b = self.hands[name]
+            va = _ZJH_VALUES[a[0]]
+            vb = _ZJH_VALUES[b[0]]
+            pair = a[0] == b[0]
+            high = max(va, vb)
+            if self.bot_level == "easy":
+                return self.rng.choice(["check", "call", "fold"])
+            if self.bot_level == "pro":
+                if pair and high >= 9:
+                    return "raise 4"
+                if pair or high >= 13:
+                    return "call"
+                return "fold" if self.current_bet >= 6 else "check"
+            if pair or high >= 12:
+                return "call"
+            return "fold" if self.current_bet >= 5 else "check"
+        score = self._best7(self.hands[name] + self.board)[0]
+        if self.bot_level == "easy":
+            return self.rng.choice(["check", "call", "fold"])
+        if self.bot_level == "pro":
+            if score >= 6:
+                return "raise 6"
+            if score >= 3:
+                return "call"
+            return "fold" if self.current_bet >= 8 else "check"
+        if score >= 4:
+            return "call"
+        return "fold" if self.current_bet >= 7 else "check"
+    def _run_bots(self) -> list[str]:
+        out: list[str] = []
+        guard = 0
+        while self.state == "playing" and guard < 48:
+            guard += 1
+            cur = self.players[self.turn_idx][1]
+            if cur not in self.bot_names:
+                break
+            bot_conn = self.bot_conns.get(cur)
+            if bot_conn is None:
+                break
+            _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
+            out.extend(b)
+            if self.state == "ended":
+                break
+        return out
+
+    def _advance(self):
+        alive = self._alive()
+        if len(alive) <= 1:
+            return
+        for _ in range(len(self.players)):
+            self.turn_idx = (self.turn_idx + 1) % len(self.players)
+            if self.players[self.turn_idx][1] in alive:
+                return
+
+    def _fmt(self, cards: list[str]) -> str:
+        suit_zh = {"S": "黑桃", "H": "红桃", "D": "方块", "C": "梅花"}
+        rank_zh = {"A": "A", "K": "K", "Q": "Q", "J": "J", "T": "10"}
+        out = []
+        for c in cards:
+            r, s = c[0], c[1]
+            out.append(f"{suit_zh.get(s, s)}{rank_zh.get(r, r)}")
+        return " ".join(out)
+
+    def _eval5(self, cards: list[str]) -> tuple[int, list[int]]:
+        vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
+        suits = [c[1] for c in cards]
+        counts = {v: vals.count(v) for v in set(vals)}
+        ordered = sorted(counts.items(), key=lambda x: (x[1], x[0]), reverse=True)
+        uniq = sorted(set(vals))
+        straight = len(uniq) == 5 and uniq[-1] - uniq[0] == 4
+        if sorted(vals) == [2, 3, 4, 5, 14]:
+            straight = True
+            vals = [5, 4, 3, 2, 1]
+        flush = len(set(suits)) == 1
+        if straight and flush:
+            return (9, vals)
+        if ordered[0][1] == 4:
+            return (8, [ordered[0][0]])
+        if ordered[0][1] == 3 and ordered[1][1] == 2:
+            return (7, [ordered[0][0], ordered[1][0]])
+        if flush:
+            return (6, vals)
+        if straight:
+            return (5, vals)
+        if ordered[0][1] == 3:
+            return (4, [ordered[0][0]])
+        if ordered[0][1] == 2 and ordered[1][1] == 2:
+            return (3, sorted([ordered[0][0], ordered[1][0]], reverse=True))
+        if ordered[0][1] == 2:
+            return (2, [ordered[0][0]])
+        return (1, vals)
+
+    def _best7(self, cards: list[str]) -> tuple[int, list[int]]:
+        best = None
+        for c5 in itertools.combinations(cards, 5):
+            sc = self._eval5(list(c5))
+            if best is None or sc > best:
+                best = sc
+        return best if best is not None else (0, [])
+
+    def _finish_if_one(self) -> Optional[list[str]]:
+        alive = self._alive()
+        if len(alive) != 1:
+            return None
+        w = alive[0]
+        gain = self.pot
+        self.stacks[w] += gain
+        self.pot = 0
+        self.state = "ended"
+        return [f"{w} wins by fold. pot +{gain}"]
+
+    def _showdown(self) -> list[str]:
+        alive = self._alive()
+        scored = sorted([(n, self._best7(self.hands[n] + self.board)) for n in alive], key=lambda kv: kv[1], reverse=True)
+        winner = scored[0][0]
+        gain = self.pot
+        self.stacks[winner] += gain
+        self.pot = 0
+        self.state = "ended"
+        lines = ["showdown:", f"公共牌：{self._fmt(self.board)}"]
+        for n, _sc in scored:
+            lines.append(f"- {n}: {self._fmt(self.hands[n])}")
+        lines.append(f"winner: {winner}, pot +{gain}")
+        return lines
+
+    def _next_street(self) -> list[str]:
+        self.acted.clear()
+        if self.street == "preflop":
+            self.street = "flop"
+            self.board.extend([self.deck.pop(), self.deck.pop(), self.deck.pop()])
+        elif self.street == "flop":
+            self.street = "turn"
+            self.board.append(self.deck.pop())
+        elif self.street == "turn":
+            self.street = "river"
+            self.board.append(self.deck.pop())
+        else:
+            return self._showdown()
+        self.current_bet = 2
+        return [f"street: {self.street}", f"公共牌：{self._fmt(self.board)}", f"turn: {self.players[self.turn_idx][1]}"]
+
+    def _start(self) -> list[str]:
+        if len(self.players) < 2:
+            self._auto_add_bots()
+        if len(self.players) < 2:
+            return ["need at least 2 players"]
+        if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
+            return ["有玩家积分已耗尽。请重开游戏重置为1000积分。"]
+        self.state = "playing"
+        self.folded.clear()
+        self.hands.clear()
+        self.board = []
+        self.pot = 0
+        self.street = "preflop"
+        self.acted.clear()
+        self.turn_idx = 0
+        self.current_bet = 2
+        self.deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
+        self.rng.shuffle(self.deck)
+        for _c, n in self.players:
+            self.hands[n] = [self.deck.pop(), self.deck.pop()]
+            self.stacks.setdefault(n, 1000)
+            blind = min(2, self.stacks[n])
+            self.stacks[n] -= blind
+            self.pot += blind
+        out = ["德州扑克开始", f"pot={self.pot}", f"turn: {self.players[self.turn_idx][1]}"]
+        if self.bot_names:
+            out.append(f"bots: {', '.join(sorted(self.bot_names))} (level={self.bot_level})")
+        out.extend(self._run_bots())
+        return out
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting":
+            return (["game already started"], [], False)
+        if len(self.players) >= 6:
+            return (["max 6 players"], [], False)
+        if any(n == name for _c, n in self.players):
+            return (["name already used"], [], False)
+        self.players.append((conn, name))
+        self.stacks.setdefault(name, 1000)
+        return ([], [f"{name} joined holdem ({len(self.players)}/6)"], False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        name = self._name_of(conn)
+        if name is None:
+            return (["you are not in this game"], [], False)
+        parts = raw.strip().split()
+        if not parts:
+            return (["usage: /game move <start/check/call/raise/fold/allin>"], [], False)
+        cmd = parts[0].lower()
+        if cmd == "bot":
+            if conn is not self.players[0][0]:
+                return (["only host can set bot level"], [], False)
+            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
+                return (["usage: /game move bot <easy|hard|pro>"], [], False)
+            self.bot_level = parts[1].lower()
+            return ([], [f"bot level set to {self.bot_level}"], False)
+        if cmd == "start":
+            if self.state != "waiting":
+                return (["already started"], [], False)
+            if conn is not self.players[0][0]:
+                return (["only host can start"], [], False)
+            return ([], self._start(), False)
+        if self.state != "playing":
+            return (["not in playing state"], [], False)
+        if name in self.folded:
+            return (["you already folded"], [], False)
+        cur = self.players[self.turn_idx][1]
+        if name != cur:
+            return ([f"not your turn, current: {cur}"], [], False)
+        b: list[str] = []
+        if cmd == "fold":
+            self.folded.add(name)
+            b.append(f"{name} folded")
+        elif cmd == "check":
+            b.append(f"{name} check")
+            self.acted.add(name)
+        elif cmd == "call":
+            pay = min(self.current_bet, self.stacks[name])
+            self.stacks[name] -= pay
+            self.pot += pay
+            b.append(f"{name} call {pay}")
+            self.acted.add(name)
+        elif cmd == "raise":
+            if len(parts) < 2 or not parts[1].isdigit():
+                return (["usage: /game move raise <amount>"], [], False)
+            add = int(parts[1])
+            if add <= 0:
+                return (["raise amount must > 0"], [], False)
+            pay = min(self.current_bet + add, self.stacks[name])
+            self.current_bet += add
+            self.stacks[name] -= pay
+            self.pot += pay
+            b.append(f"{name} raise to {self.current_bet} (paid {pay})")
+            self.acted = {name}
+        elif cmd == "allin":
+            pay = self.stacks[name]
+            self.stacks[name] = 0
+            self.pot += pay
+            b.append(f"{name} all-in {pay}")
+            self.acted.add(name)
+        else:
+            return (["cmds: check/call/raise/fold/allin"], [], False)
+        done = self._finish_if_one()
+        if done:
+            return ([], b + done, True)
+        self._advance()
+        alive = self._alive()
+        if len(self.acted) >= len(alive):
+            b.extend(self._next_street())
+            b.extend(self._run_bots())
+            return ([], b, self.state == "ended")
+        b.extend(self._run_bots())
+        b.append(f"pot={self.pot}, board={self._fmt(self.board) if self.board else 'none'}")
+        b.append(f"turn: {self.players[self.turn_idx][1]}")
+        return ([], b, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        return self.try_move(conn, "fold")
+
+    def abort(self, conn, name: str) -> GameResult:
+        if conn is not self.players[0][0]:
+            return (["only host can abort"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted holdem"], True)
+
+    def seats(self) -> list[str]:
+        lines = [f"holdem state: {self.state}", f"street: {self.street}", f"pot={self.pot}", f"公共牌：{self._fmt(self.board) if self.board else 'none'}"]
+        for i, (_c, n) in enumerate(self.players, start=1):
+            tag = "folded" if n in self.folded else "alive"
+            lines.append(f"#{i} {n}: score={self.stacks.get(n, 0)} {tag}")
+        return lines
+
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = self.seats()
+        me = self._name_of(conn) if conn is not None else None
+        if me and me in self.hands:
+            lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        idx = None
+        for i, (c, _n) in enumerate(self.players):
+            if c is conn:
+                idx = i
+                break
+        if idx is None:
+            return ([], [], False)
+        _c, pname = self.players.pop(idx)
+        self.folded.add(pname)
+        self.hands.pop(pname, None)
+        if not self.players:
+            self.state = "ended"
+            return ([], [f"{name} left, holdem ended"], True)
+        done = self._finish_if_one() if self.state == "playing" else None
+        if done:
+            return ([], [f"{name} left"] + done, True)
+        return ([], [f"{name} left holdem"], False)
+
+
+def _nt_bulls(card: int) -> int:
+    if card == 55:
+        return 7
+    if card % 11 == 0:
+        return 5
+    if card % 10 == 0:
+        return 3
+    if card % 5 == 0:
+        return 2
+    return 1
+
+
+class NiuTouWangGame:
+    name = "niutou"
+    first_seat_desc = "host"
+    join_blurb = "others /game join, host /game move start"
+
+    def __init__(self, host_conn, host_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.bot_names: set[str] = set()
+        self.bot_conns: dict[str, object] = {}
+        self.bot_level = "hard"
+        self.state = "waiting"
+        self.rng = random.Random()
+        self.hands: dict[str, list[int]] = {}
+        self.rows: list[list[int]] = []
+        self.penalty: dict[str, int] = {host_name: 0}
+        self.picks: dict[str, int] = {}
+        self.resolve_queue: list[tuple[str, int]] = []
+        self.await_player: Optional[str] = None
+        self.await_card: Optional[int] = None
+        self.turn = 0
+    def _auto_add_bots(self) -> list[str]:
+        human = sum(1 for c, _n in self.players if c is not None)
+        if human >= 2:
+            return []
+        add_n = min(5, max(3, self.rng.randint(3, 5)), 10 - len(self.players))
+        added: list[str] = []
+        for _ in range(add_n):
+            idx = len(self.bot_names) + 1
+            bn = f"BOT{idx}"
+            while any(n == bn for _c, n in self.players):
+                idx += 1
+                bn = f"BOT{idx}"
+            bc = object()
+            self.players.append((bc, bn))
+            self.bot_names.add(bn)
+            self.bot_conns[bn] = bc
+            self.penalty.setdefault(bn, 0)
+            added.append(bn)
+        return added
+    def _bot_pick(self, name: str) -> int:
+        hand = sorted(self.hands.get(name, []))
+        if not hand:
+            return -1
+        tails = sorted(row[-1] for row in self.rows)
+        if self.bot_level == "easy":
+            return self.rng.choice(hand)
+        safe = [c for c in hand if c > tails[0]]
+        if self.bot_level == "pro":
+            best = min(hand, key=lambda c: min(abs(c - t) for t in tails))
+            return best if best > tails[0] else min(hand)
+        return min(safe) if safe else min(hand)
+    def _bot_choose_row(self, name: str) -> int:
+        if self.bot_level == "easy":
+            return self.rng.randint(0, 3)
+        scores = [self._row_bulls(r) for r in self.rows]
+        return min(range(4), key=lambda i: scores[i])
+    def _auto_bot_pick_until_resolve(self) -> list[str]:
+        out: list[str] = []
+        if self.state != "playing":
+            return out
+        for _c, n in self.players:
+            if n in self.bot_names and n not in self.picks and self.hands.get(n):
+                c = self._bot_pick(n)
+                if c in self.hands[n]:
+                    self.hands[n].remove(c)
+                    self.picks[n] = c
+                    out.append(f"{n} picked ({len(self.picks)}/{len(self.players)})")
+        if len(self.picks) == len(self.players):
+            self.resolve_queue = sorted(self.picks.items(), key=lambda kv: kv[1])
+            out.append("all picked, resolving in ascending order")
+            out.extend(self._resolve_queue_until_pause_or_end())
+        return out
+
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+
+    def _row_bulls(self, row: list[int]) -> int:
+        return sum(_nt_bulls(x) for x in row)
+
+    def _render_rows(self) -> list[str]:
+        return [f"row{i}: {' '.join(str(x) for x in row)} (bulls={self._row_bulls(row)})" for i, row in enumerate(self.rows, start=1)]
+
+    def _start(self) -> list[str]:
+        if len(self.players) < 2:
+            self._auto_add_bots()
+        if len(self.players) < 2:
+            return ["need at least 2 players"]
+        if len(self.players) > 10:
+            return ["max 10 players"]
+        deck = list(range(1, 105))
+        self.rng.shuffle(deck)
+        self.hands.clear()
+        self.picks.clear()
+        self.penalty = {name: 0 for _c, name in self.players}
+        self.rows = [[deck.pop()] for _ in range(4)]
+        for _c, name in self.players:
+            self.hands[name] = sorted([deck.pop() for _ in range(10)])
+        self.turn = 1
+        self.state = "playing"
+        out = ["牛头王开始：每回合 pick 一张牌；若比所有行尾都小，必须 row 1~4 选择吃行。"] + self._render_rows()
+        if self.bot_names:
+            out.append(f"bots: {', '.join(sorted(self.bot_names))} (level={self.bot_level})")
+        return out
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting":
+            return (["game already started"], [], False)
+        if any(n == name for _c, n in self.players):
+            return (["name already used"], [], False)
+        if len(self.players) >= 10:
+            return (["room is full"], [], False)
+        self.players.append((conn, name))
+        self.penalty.setdefault(name, 0)
+        return ([], [f"{name} joined niutou ({len(self.players)}/10)"], False)
+
+    def _need_row_choice(self, card: int) -> bool:
+        return card < min(row[-1] for row in self.rows)
+
+    def _apply_card(self, name: str, card: int) -> tuple[list[str], bool]:
+        b = [f"{name} played {card}"]
+        if self._need_row_choice(card):
+            self.state = "await_row"
+            self.await_player = name
+            self.await_card = card
+            b.append(f"{name} must choose row: /game move row 1~4")
+            return (b, True)
+        best_idx = max([i for i, row in enumerate(self.rows) if row[-1] < card], key=lambda i: self.rows[i][-1])
+        row = self.rows[best_idx]
+        row.append(card)
+        if len(row) > 5:
+            taken = row[:-1]
+            bulls = self._row_bulls(taken)
+            self.penalty[name] += bulls
+            self.rows[best_idx] = [row[-1]]
+            b.append(f"{name} took row {best_idx+1}, +{bulls} bulls")
+        return (b, False)
+
+    def _finish_turn_or_next(self) -> list[str]:
+        out = self._render_rows()
+        if all(len(self.hands[n]) == 0 for _c, n in self.players):
+            self.state = "ended"
+            rank = sorted(self.penalty.items(), key=lambda kv: kv[1])
+            out.append("game over (lower bulls wins):")
+            for i, (n, p) in enumerate(rank, start=1):
+                out.append(f"{i}. {n} - {p}")
+            return out
+        self.turn += 1
+        self.picks.clear()
+        self.resolve_queue.clear()
+        out.append(f"turn {self.turn}: please /game move pick <card>")
+        return out
+
+    def _resolve_queue_until_pause_or_end(self) -> list[str]:
+        out: list[str] = []
+        while self.resolve_queue:
+            n, c = self.resolve_queue.pop(0)
+            b, paused = self._apply_card(n, c)
+            out.extend(b)
+            if paused:
+                if self.await_player in self.bot_names:
+                    idx = self._bot_choose_row(self.await_player)
+                    taken = self.rows[idx]
+                    bulls = self._row_bulls(taken)
+                    self.penalty[self.await_player] += bulls
+                    self.rows[idx] = [self.await_card]
+                    out.append(f"{self.await_player} chose row {idx+1}, +{bulls} bulls")
+                    self.await_card = None
+                    self.await_player = None
+                    self.state = "playing"
+                    continue
+                out.extend(self._render_rows())
+                return out
+        out.extend(self._finish_turn_or_next())
+        return out
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        name = self._name_of(conn)
+        if name is None:
+            return (["you are not in this game"], [], False)
+        parts = raw.strip().split()
+        if not parts:
+            return (["usage: /game move start | pick <n> | row <1-4>"], [], False)
+        cmd = parts[0].lower()
+        if cmd == "bot":
+            if conn is not self.players[0][0]:
+                return (["only host can set bot level"], [], False)
+            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
+                return (["usage: /game move bot <easy|hard|pro>"], [], False)
+            self.bot_level = parts[1].lower()
+            return ([], [f"bot level set to {self.bot_level}"], False)
+        if cmd == "start":
+            if self.state != "waiting":
+                return (["already started"], [], False)
+            if conn is not self.players[0][0]:
+                return (["only host can start"], [], False)
+            return ([], self._start(), False)
+        if self.state == "waiting":
+            return (["not started"], [], False)
+        if self.state == "ended":
+            return (["game ended, /game new niutou to restart"], [], False)
+        if self.state == "await_row":
+            if name != self.await_player:
+                return ([f"waiting {self.await_player} to choose row"], [], False)
+            if cmd != "row" or len(parts) < 2 or not parts[1].isdigit():
+                return (["usage: /game move row 1~4"], [], False)
+            idx = int(parts[1]) - 1
+            if idx < 0 or idx >= 4:
+                return (["row out of range"], [], False)
+            if self.await_player in self.bot_names:
+                idx = self._bot_choose_row(self.await_player)
+            taken = self.rows[idx]
+            bulls = self._row_bulls(taken)
+            self.penalty[name] += bulls
+            self.rows[idx] = [self.await_card]
+            self.await_card = None
+            self.await_player = None
+            self.state = "playing"
+            out = [f"{name} chose row {idx+1}, +{bulls} bulls"]
+            out.extend(self._resolve_queue_until_pause_or_end())
+            out.extend(self._auto_bot_pick_until_resolve())
+            return ([], out, self.state == "ended")
+        if cmd != "pick" or len(parts) < 2 or not parts[1].isdigit():
+            return (["usage: /game move pick <card>"], [], False)
+        card = int(parts[1])
+        hand = self.hands.get(name, [])
+        if card not in hand:
+            return ([f"card {card} not in your hand"], [], False)
+        if name in self.picks:
+            return (["you already picked this turn"], [], False)
+        hand.remove(card)
+        self.picks[name] = card
+        bcast = [f"{name} picked ({len(self.picks)}/{len(self.players)})"]
+        bcast.extend(self._auto_bot_pick_until_resolve())
+        if len(self.picks) < len(self.players):
+            return ([], bcast, False)
+        self.resolve_queue = sorted(self.picks.items(), key=lambda kv: kv[1])
+        bcast.append("all picked, resolving in ascending order")
+        bcast.extend(self._resolve_queue_until_pause_or_end())
+        return ([], bcast, self.state == "ended")
+
+    def resign(self, conn, name: str) -> GameResult:
+        return (["niutou does not support resign, use /game abort"], [], False)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if conn is not self.players[0][0]:
+            return (["only host can abort"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted niutou"], True)
+
+    def seats(self) -> list[str]:
+        lines = [f"niutou state: {self.state}", f"turn: {self.turn}"]
+        for _c, n in self.players:
+            lines.append(f"- {n}: bulls={self.penalty.get(n, 0)}, hand={len(self.hands.get(n, []))}")
+        lines.extend(self._render_rows() if self.rows else [])
+        return lines
+
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = self.seats()
+        me = self._name_of(conn) if conn is not None else None
+        if me and me in self.hands:
+            lines.append(f"your hand: {' '.join(str(x) for x in sorted(self.hands[me]))}")
+        if self.state == "await_row" and self.await_player == me:
+            lines.append("you must choose row: /game move row 1~4")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        idx = None
+        for i, (c, _n) in enumerate(self.players):
+            if c is conn:
+                idx = i
+                break
+        if idx is None:
+            return ([], [], False)
+        _c, pname = self.players.pop(idx)
+        self.hands.pop(pname, None)
+        self.picks.pop(pname, None)
+        self.penalty.pop(pname, None)
+        if not self.players:
+            self.state = "ended"
+            return ([], [f"{name} left, niutou ended"], True)
+        if self.state in ("playing", "await_row"):
+            self.state = "ended"
+            return ([], [f"{name} left, niutou ended"], True)
+        return ([], [f"{name} left niutou"], False)
+
+
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     XiangqiGame.name: XiangqiGame,
     SanguoshaGame.name: SanguoshaGame,
     WerewolfGame.name: WerewolfGame,
+    HoldemGame.name: HoldemGame,
     ZhaJinHuaGame.name: ZhaJinHuaGame,
+    NiuTouWangGame.name: NiuTouWangGame,
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
     "sgs": SanguoshaGame.name,
     "langrensha": WerewolfGame.name,
     "were-wolf": WerewolfGame.name,
+    "poker": HoldemGame.name,
+    "texas": HoldemGame.name,
+    "texasholdem": HoldemGame.name,
+    "holdem": HoldemGame.name,
+    "dezhou": HoldemGame.name,
     "zhajinhua": ZhaJinHuaGame.name,
     "zjh": ZhaJinHuaGame.name,
+    "niutou": NiuTouWangGame.name,
+    "niutouwang": NiuTouWangGame.name,
+    "ntw": NiuTouWangGame.name,
     "三国杀": SanguoshaGame.name,
 }
 

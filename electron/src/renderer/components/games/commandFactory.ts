@@ -7,11 +7,16 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: 'New Xiangqi', cmd: '/game new xiangqi' },
     { label: 'New Sanguo', cmd: '/game new sanguo' },
     { label: 'New Werewolf', cmd: '/game new werewolf' },
+    { label: 'New Holdem', cmd: '/game new holdem' },
+    { label: 'New ZJH', cmd: '/game new zjh' },
+    { label: 'New Niutou', cmd: '/game new niutou' },
   ],
   chess: [
     { label: 'Show', cmd: '/game show' },
     { label: 'Join', cmd: '/game join' },
     { label: 'Seats', cmd: '/game seats' },
+    { label: 'Undo', cmd: '/game undo' },
+    { label: 'Accept Undo', cmd: '/game undo accept' },
     { label: 'PGN', cmd: '/game pgn' },
     { label: 'Resign', cmd: '/game resign' },
   ],
@@ -19,6 +24,8 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: 'Show', cmd: '/game show' },
     { label: 'Join', cmd: '/game join' },
     { label: 'Seats', cmd: '/game seats' },
+    { label: 'Undo', cmd: '/game undo' },
+    { label: 'Accept Undo', cmd: '/game undo accept' },
     { label: 'Resign', cmd: '/game resign' },
     { label: 'Abort', cmd: '/game abort' },
   ],
@@ -26,6 +33,8 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: 'Show', cmd: '/game show' },
     { label: 'Join', cmd: '/game join' },
     { label: 'Seats', cmd: '/game seats' },
+    { label: 'Undo', cmd: '/game undo' },
+    { label: 'Accept Undo', cmd: '/game undo accept' },
     { label: 'Resign', cmd: '/game resign' },
     { label: 'Abort', cmd: '/game abort' },
   ],
@@ -43,10 +52,35 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: 'Start', cmd: '/game move start' },
     { label: 'Pass', cmd: '/game move pass' },
   ],
+  holdem: [
+    { label: 'Show', cmd: '/game show' },
+    { label: 'Join', cmd: '/game join' },
+    { label: 'Seats', cmd: '/game seats' },
+    { label: 'Start', cmd: '/game move start' },
+    { label: 'Check', cmd: '/game move check' },
+    { label: 'Call', cmd: '/game move call' },
+    { label: 'All-in', cmd: '/game move allin' },
+    { label: 'Fold', cmd: '/game move fold' },
+    { label: 'Bot Hard', cmd: '/game move bot hard' },
+  ],
+  zjh: [
+    { label: 'Show', cmd: '/game show' },
+    { label: 'Join', cmd: '/game join' },
+    { label: 'Seats', cmd: '/game seats' },
+    { label: 'Start', cmd: '/game move start' },
+    { label: 'Look', cmd: '/game move look' },
+    { label: 'Follow', cmd: '/game move follow' },
+    { label: 'Fold', cmd: '/game move fold' },
+    { label: 'Bot Hard', cmd: '/game move bot hard' },
+  ],
+  niutou: [
+    { label: 'Show', cmd: '/game show' },
+    { label: 'Join', cmd: '/game join' },
+    { label: 'Seats', cmd: '/game seats' },
+    { label: 'Start', cmd: '/game move start' },
+    { label: 'Bot Hard', cmd: '/game move bot hard' },
+  ],
 };
-
-type SanguoAction = 'attack' | 'duel' | 'fire' | 'pass';
-type WerewolfAction = 'vote' | 'kill' | 'check' | 'save' | 'poison';
 
 export const GameCommandFactory = {
   move(payload: string): string {
@@ -60,20 +94,5 @@ export const GameCommandFactory = {
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number): string {
     return this.move(`${fr} ${fc} ${tr} ${tc}`);
-  },
-  sanguoAction(action: SanguoAction, target?: string): string {
-    if (action === 'pass') return this.move('过');
-    if (!target) return this.move('过');
-    if (action === 'attack') return this.move(`杀 ${target}`);
-    if (action === 'duel') return this.move(`决斗 ${target}`);
-    return this.move(`火攻 ${target}`);
-  },
-  werewolfAction(action: WerewolfAction, target?: string): string {
-    if (action === 'save') return this.move('save');
-    if (!target) return this.move('pass');
-    if (action === 'vote') return this.move(`vote ${target}`);
-    if (action === 'kill') return this.move(`kill ${target}`);
-    if (action === 'check') return this.move(`check ${target}`);
-    return this.move(`poison ${target}`);
   },
 };

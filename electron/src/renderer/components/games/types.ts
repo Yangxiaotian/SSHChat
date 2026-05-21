@@ -1,4 +1,13 @@
-﻿export type GameKind = 'none' | 'chess' | 'gomoku' | 'xiangqi' | 'sanguo' | 'werewolf';
+export type GameKind =
+  | 'none'
+  | 'chess'
+  | 'gomoku'
+  | 'xiangqi'
+  | 'sanguo'
+  | 'werewolf'
+  | 'holdem'
+  | 'zjh'
+  | 'niutou';
 
 export type QuickAction = { label: string; cmd: string };
 
