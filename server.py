@@ -1211,7 +1211,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub == "new":
-        game_name = games.resolve_game_name(rest.lower() or "chess")
+        game_arg = (rest.strip().split()[0] if rest.strip() else "chess")
+        game_name = games.resolve_game_name(game_arg.lower())
         cls = games.GAMES.get(game_name)
         if cls is None:
             send_line(
@@ -1293,12 +1294,17 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub == "move":
-        with lock:
-            game = room_games.get(room)
-            if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局。\n")
-                return
-            priv, bcast, ended = game.try_move(conn, rest)
+        try:
+            with lock:
+                game = room_games.get(room)
+                if game is None:
+                    send_line(conn, "[*] 本房没有进行中的对局。\n")
+                    return
+                priv, bcast, ended = game.try_move(conn, rest)
+        except Exception as e:
+            print(f"/game move failed: room={room} user={name} cmd={rest!r} err={e!r}")
+            send_line(conn, f"[*] /game move 执行失败：{e}\n")
+            return
         if bcast and hasattr(game, "finalize_broadcast"):
             bcast = game.finalize_broadcast(bcast)
         send_game_private(conn, room, priv)

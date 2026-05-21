@@ -406,9 +406,96 @@ html, body, #root {
 .game-workbench-hint {
   padding: 6px 10px;
   font-size: 12px;
-  color: var(--vscode-text-secondary);
+  color: #cfdaf7;
   border-bottom: 1px dashed var(--vscode-border-light);
-  background: var(--vscode-bg);
+  background: #1a212d;
+}
+
+.game-advisor {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--vscode-border-light);
+  border-top: 1px solid var(--vscode-border-light);
+  background: #1d2532;
+}
+
+.game-advisor-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.game-advisor-detail {
+  font-size: 12px;
+  color: #d2d9e6;
+  line-height: 1.45;
+}
+
+.game-advisor-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.game-advisor-info .game-advisor-title {
+  color: #86b7ff;
+}
+
+.game-advisor-warn .game-advisor-title {
+  color: #ffd166;
+}
+
+.game-advisor-error .game-advisor-title {
+  color: #ff8f8f;
+}
+
+.game-advisor-info {
+  border-left: 3px solid #5aa0ff;
+}
+
+.game-advisor-warn {
+  border-left: 3px solid #ffbf3f;
+}
+
+.game-advisor-error {
+  border-left: 3px solid #ff6f6f;
+}
+
+.game-workbench-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--vscode-border-light);
+  background: #161c27;
+}
+
+.game-workbench-toolbar-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.game-workbench-hint-inline {
+  font-size: 11px;
+  color: #c4cde0;
+}
+
+.game-workbench-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: #c4cde0;
+  background: #131923;
+  border-bottom: 1px solid var(--vscode-border-light);
+}
+
+.game-workbench-input-compact {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #c9d3e8;
+  background: #111722;
+  border-top: 1px solid var(--vscode-border-light);
 }
 
 .game-interaction-panel {
@@ -582,9 +669,9 @@ html, body, #root {
   margin: 0;
   padding: 8px 10px;
   font-size: 12px;
-  line-height: 1.35;
-  color: var(--vscode-fg);
-  background: var(--vscode-bg);
+  line-height: 1.45;
+  color: #e8eefc;
+  background: #111722;
   border-top: 1px solid var(--vscode-border-light);
   border-bottom: 1px solid var(--vscode-border-light);
 }
