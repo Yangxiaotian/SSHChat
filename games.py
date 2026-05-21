@@ -63,6 +63,126 @@ GameResult = tuple[list[str], list[str], bool]
 GOMOKU_SIZE = 15
 
 
+class BoardUndoMixin:
+    """悔棋：上一步走子方 /game undo，对方 /game undo accept。"""
+
+    supports_undo = True
+
+    def _undo_clear_pending(self) -> None:
+        self._undo_requester_conn = None
+
+    def _undo_last_mover_conn(self):
+        raise NotImplementedError
+
+    def _undo_has_moves(self) -> bool:
+        raise NotImplementedError
+
+    def _undo_pop_last_move(self) -> bool:
+        raise NotImplementedError
+
+    def _undo_opponent_conn(self, conn):
+        raise NotImplementedError
+
+    def _undo_player_name(self, conn) -> str:
+        raise NotImplementedError
+
+    def _undo_turn_line(self) -> str:
+        raise NotImplementedError
+
+    def request_undo(self, conn) -> GameResult:
+        if self.state != "playing":
+            return (["对局未进行中，无法悔棋。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方，无法悔棋。"], [], False)
+        if not self._undo_has_moves():
+            return (["尚无走子，无法悔棋。"], [], False)
+        last_conn = self._undo_last_mover_conn()
+        if last_conn is None or conn is not last_conn:
+            return (["只有上一步的走子方可以请求悔棋。"], [], False)
+        if self._undo_requester_conn is not None:
+            if self._undo_requester_conn is conn:
+                return (
+                    [
+                        "你已发起悔棋请求，等对方 "
+                        "/game undo accept 或 /game undo reject。"
+                    ],
+                    [],
+                    False,
+                )
+            return (["已有悔棋请求待对方处理。"], [], False)
+        self._undo_requester_conn = conn
+        opp = self._undo_opponent_conn(conn)
+        opp_name = self._undo_player_name(opp) if opp else "对方"
+        req_name = self._undo_player_name(conn)
+        return (
+            [f"已向 {opp_name} 发起悔棋请求，等对方同意或拒绝。"],
+            [
+                f"{req_name} 请求悔棋（撤销上一步），"
+                f"请 {opp_name} 执行 /game undo accept 同意，"
+                "或 /game undo reject 拒绝。"
+            ],
+            False,
+        )
+
+    def accept_undo(self, conn) -> GameResult:
+        if self.state != "playing":
+            return (["对局未进行中。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方。"], [], False)
+        if self._undo_requester_conn is None:
+            return (["当前没有待处理的悔棋请求。"], [], False)
+        if conn is self._undo_requester_conn:
+            return (
+                [
+                    "你是悔棋请求方，请等对方 /game undo accept，"
+                    "或 /game undo cancel 取消请求。"
+                ],
+                [],
+                False,
+            )
+        requester = self._undo_requester_conn
+        req_name = self._undo_player_name(requester)
+        ac_name = self._undo_player_name(conn)
+        if not self._undo_pop_last_move():
+            self._undo_clear_pending()
+            return (["无法撤销（棋盘状态异常）。"], [], False)
+        self._undo_clear_pending()
+        bcast = [
+            f"{ac_name} 同意悔棋，已撤销 {req_name} 的上一步。",
+            self._undo_turn_line(),
+        ]
+        return ([f"悔棋成功，已撤销你的上一步。"], bcast, False)
+
+    def reject_undo(self, conn) -> GameResult:
+        if self._undo_requester_conn is None:
+            return (["当前没有待处理的悔棋请求。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方。"], [], False)
+        if conn is self._undo_requester_conn:
+            return (
+                ["对方尚未回应；可用 /game undo cancel 取消你的悔棋请求。"],
+                [],
+                False,
+            )
+        req_name = self._undo_player_name(self._undo_requester_conn)
+        ac_name = self._undo_player_name(conn)
+        self._undo_clear_pending()
+        return (
+            [],
+            [f"{ac_name} 拒绝了 {req_name} 的悔棋请求。"],
+            False,
+        )
+
+    def cancel_undo(self, conn) -> GameResult:
+        if self._undo_requester_conn is None:
+            return (["当前没有悔棋请求可取消。"], [], False)
+        if conn is not self._undo_requester_conn:
+            return (["只有悔棋请求方可以 /game undo cancel 取消。"], [], False)
+        name = self._undo_player_name(conn)
+        self._undo_clear_pending()
+        return ([], [f"{name} 取消了悔棋请求。"], False)
+
+
 def _color_label(color: bool) -> str:
     return "白" if color == _chess.WHITE else "黑"
 
@@ -141,7 +261,7 @@ def _format_outcome(outcome) -> str:
     return f"对局结束：和棋（{reason}） 1/2-1/2"
 
 
-class ChessGame:
+class ChessGame(BoardUndoMixin):
     """Two-seat chess. Creator = white; joiner = black."""
 
     name = "chess"
@@ -162,6 +282,49 @@ class ChessGame:
         self.state = "waiting"
         self._last_move = None
         self._result_header: Optional[str] = None  # PGN Result when not from board.outcome()
+        self._undo_clear_pending()
+
+    def _undo_has_moves(self) -> bool:
+        return bool(self.board.move_stack)
+
+    def _undo_last_mover_conn(self):
+        if not self.board.move_stack:
+            return None
+        last_color = not self.board.turn
+        return self.white_conn if last_color == _chess.WHITE else self.black_conn
+
+    def _undo_opponent_conn(self, conn):
+        side = self.color_of(conn)
+        if side is None:
+            return None
+        return self.black_conn if side == _chess.WHITE else self.white_conn
+
+    def _undo_player_name(self, conn) -> str:
+        side = self.color_of(conn)
+        if side == _chess.WHITE:
+            return self.white_name
+        if side == _chess.BLACK:
+            return self.black_name or "黑方"
+        return "?"
+
+    def _undo_pop_last_move(self) -> bool:
+        if not self.board.move_stack:
+            return False
+        self.board.pop()
+        if self.board.move_stack:
+            self._last_move = self.board.peek()
+        else:
+            self._last_move = None
+        return True
+
+    def _undo_turn_line(self) -> str:
+        color = self.board.turn
+        who = self.white_name if color == _chess.WHITE else self.black_name
+        suffix = "（将军）" if self.board.is_check() else ""
+        return (
+            f"轮到 {_color_label(color)}方 {who}"
+            f"（第 {self.board.fullmove_number} 手）{suffix}"
+        )
 
     def color_of(self, conn) -> Optional[bool]:
         if conn is self.white_conn:
@@ -217,6 +380,7 @@ class ChessGame:
         if side != self.board.turn:
             return (["不是你的回合。"], [], False)
 
+        self._undo_clear_pending()
         text = raw.strip()
         if not text:
             return (["用法：/game move <走法>，如 e4 / Nf3 / O-O / e2e4。"], [], False)
@@ -457,7 +621,7 @@ def _gomoku_render(
     return lines
 
 
-class GomokuGame:
+class GomokuGame(BoardUndoMixin):
     """15×15 gomoku. Creator = black (先手); joiner = white."""
 
     name = "gomoku"
@@ -475,6 +639,49 @@ class GomokuGame:
         self.state = "waiting"
         self._turn = 1  # 1=black, 2=white
         self._last: Optional[tuple[int, int]] = None
+        self._history: list[tuple[int, int, int]] = []  # row, col, player
+        self._undo_clear_pending()
+
+    def _undo_has_moves(self) -> bool:
+        return bool(self._history)
+
+    def _undo_last_mover_conn(self):
+        if not self._history:
+            return None
+        player = self._history[-1][2]
+        return self._seat_conn(player)
+
+    def _undo_opponent_conn(self, conn):
+        who = self.who_of(conn)
+        if who is None:
+            return None
+        return self._seat_conn(3 - who)
+
+    def _undo_player_name(self, conn) -> str:
+        who = self.who_of(conn)
+        if who == 1:
+            return self.black_name
+        if who == 2:
+            return self.white_name or "白方"
+        return "?"
+
+    def _undo_pop_last_move(self) -> bool:
+        if not self._history:
+            return False
+        row, col, player = self._history.pop()
+        self.grid[row][col] = 0
+        self._turn = player
+        if self._history:
+            lr, lc, _ = self._history[-1]
+            self._last = (lr, lc)
+        else:
+            self._last = None
+        return True
+
+    def _undo_turn_line(self) -> str:
+        next_is_black = self._turn == 1
+        nm = self.black_name if next_is_black else self.white_name
+        return f"轮到 {'黑' if next_is_black else '白'}方 {nm} 落子"
 
     def _seat_conn(self, who: int):
         return self.black_conn if who == 1 else self.white_conn
@@ -532,6 +739,7 @@ class GomokuGame:
         if player != self._turn:
             return (["不是你的回合。"], [], False)
 
+        self._undo_clear_pending()
         pos = _gomoku_parse_move(raw)
         if pos is None:
             return (
@@ -548,6 +756,7 @@ class GomokuGame:
 
         self.grid[row][col] = player
         self._last = (row, col)
+        self._history.append((row, col, player))
 
         bname = self.black_name if player == 1 else self.white_name
         stone = "黑" if player == 1 else "白"
@@ -1233,7 +1442,7 @@ def _xq_render(
     return lines
 
 
-class XiangqiGame:
+class XiangqiGame(BoardUndoMixin):
     """Chinese chess (xiangqi). Creator = red (先手); joiner = black."""
 
     name = "xiangqi"
@@ -1252,6 +1461,81 @@ class XiangqiGame:
         self._last_to: Optional[tuple[int, int]] = None
         self._last_mover_side: Optional[int] = None
         self._last_notation: Optional[str] = None
+        self._history: list[
+            tuple[
+                list[list[int]],
+                int,
+                Optional[tuple[int, int]],
+                Optional[tuple[int, int]],
+                Optional[int],
+                Optional[str],
+            ]
+        ] = []
+        self._undo_clear_pending()
+
+    def _undo_has_moves(self) -> bool:
+        return bool(self._history)
+
+    def _undo_last_mover_conn(self):
+        if self._last_mover_side is None:
+            return None
+        return self.red_conn if self._last_mover_side == _XQ_RED else self.black_conn
+
+    def _undo_opponent_conn(self, conn):
+        side = self._side_of(conn)
+        if side is None:
+            return None
+        return self.black_conn if side == _XQ_RED else self.red_conn
+
+    def _undo_player_name(self, conn) -> str:
+        side = self._side_of(conn)
+        if side == _XQ_RED:
+            return self.red_name
+        if side == _XQ_BLACK:
+            return self.black_name or "黑方"
+        return "?"
+
+    def _undo_pop_last_move(self) -> bool:
+        if not self._history:
+            return False
+        self._history.pop()
+        if self._history:
+            snap = self._history[-1]
+            self.board = [row[:] for row in snap[0]]
+            self._turn = snap[1]
+            self._last_from = snap[2]
+            self._last_to = snap[3]
+            self._last_mover_side = snap[4]
+            self._last_notation = snap[5]
+        else:
+            self.board = _xq_initial_board()
+            self._turn = _XQ_RED
+            self._last_from = None
+            self._last_to = None
+            self._last_mover_side = None
+            self._last_notation = None
+        return True
+
+    def _undo_turn_line(self) -> str:
+        nm = self.red_name if self._turn == _XQ_RED else self.black_name
+        color = "红" if self._turn == _XQ_RED else "黑"
+        kpos = _xq_king_pos(self.board, self._turn)
+        suffix = ""
+        if kpos is not None and _xq_is_attacked(
+            self.board, kpos[0], kpos[1], -self._turn
+        ):
+            suffix = "（被将军）"
+        return f"轮到 {color}方 {nm} 走子{suffix}"
+
+    def _xq_snapshot(self) -> tuple:
+        return (
+            [row[:] for row in self.board],
+            self._turn,
+            self._last_from,
+            self._last_to,
+            self._last_mover_side,
+            self._last_notation,
+        )
 
     def _side_of(self, conn) -> Optional[int]:
         if conn is self.red_conn:
@@ -1314,6 +1598,7 @@ class XiangqiGame:
         if side != self._turn:
             return (["不是你的回合。"], [], False)
 
+        self._undo_clear_pending()
         parsed = _xq_parse_move(raw, side, self.board)
         if parsed is None:
             hint = ""
@@ -1345,6 +1630,7 @@ class XiangqiGame:
         self._last_to = (tr, tc)
         self._last_mover_side = side
         self._last_notation = label
+        self._history.append(self._xq_snapshot())
 
         mover = self.red_name if side == _XQ_RED else self.black_name
         color = "红" if side == _XQ_RED else "黑"
@@ -5475,6 +5761,8 @@ HELP_LINES = (
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
+    "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
+    "（chess/gomoku/xiangqi；reject 拒绝，cancel 取消请求）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",

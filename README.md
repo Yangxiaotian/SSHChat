@@ -182,6 +182,7 @@ npm run build:portable
 - `/game seats`：查看双方与对局状态。
 - `/game show`：重新显示棋盘。
 - `/game move ...`：走子。
+- `/game undo`：悔棋（仅 `chess` / `gomoku` / `xiangqi`）。**上一步的走子方**发起请求，对方执行 `/game undo accept`（或 `同意`）后撤销一步；对方可用 `/game undo reject` 拒绝，请求方可用 `/game undo cancel` 取消。
 - `/game pgn`：导出国际象棋 PGN（仅 `chess`）。
 - `/game resign`：认负。
 - `/game abort`：终止尚未开始的对局。
@@ -209,6 +210,8 @@ npm run build:portable
 若 **「中文」类几乎空白**（标题都很少），多半是 **跑 `server.py` 的那台机器出不了网**（防火墙、无默认路由）、**访问境外 RSS 被拦**（常见于境内机房直连 BBC/NYT 等），或 **个别源超时**。
 
 **代理说明：** 新闻在 **运行聊天服务的那台机器** 上抓取。代码里 **默认使用 `http://127.0.0.1:7897`** 作为 HTTP(S) 代理（适合本机已开 Clash / sing-box 且 mixed 端口为 7897）。若你的代理端口不同，可设 **`SSHCHAT_NEWS_PROXY_DEFAULT`**（例如 `http://127.0.0.1:7890`）或 **`SSHCHAT_NEWS_PROXY`** 覆盖。不需要代理时，在 `sshchat.env` 里设 **`SSHCHAT_NEWS_NO_PROXY=1`** 后重启服务。若服务在 **远程 Linux** 上，`127.0.0.1` 是 **服务器自己**，不是你笔记本；要让远端走你本机出口，需 **SSH 反向转发**（例如 `ssh -R 7897:127.0.0.1:7897 ...`）再把 `SSHCHAT_NEWS_PROXY` 指到转发端口，或直接在远端填可达的代理地址。也可用 **`SSHCHAT_NEWS_PROXY`**、`HTTPS_PROXY` 等覆盖默认端口（见 `server.py` 中 `_news_proxy_url`）。改环境后需 **重启聊天服务**；新闻有缓存，最多约 10 分钟才刷新。
+
+**`/news fetch` 报 `SSLEOFError` / 握手失败：** 多为 **代理对个别站点 HTTPS 不稳定**（RSS 能读、网页全文失败较常见）。服务端默认会 **自动重试**：放宽 TLS 校验、再 **不经代理直连**（`SSHCHAT_NEWS_PROXY_FALLBACK_DIRECT=1`，可设 `0` 关闭）。仍失败时可 **`SSHCHAT_NEWS_NO_PROXY=1`** 全程直连，或换节点/端口；并加大 **`SSHCHAT_NEWS_PAGE_TIMEOUT`**（默认 15 秒）。
 
 内置来源包括 BBC 中文、纽约时报中文网、美国之音中文、RFI 华语、德国之声中文、BBC World、Al Jazeera、NPR、The Guardian、Ars Technica、The Verge、Wired、Hacker News。可通过环境变量调整：`SSHCHAT_NEWS_TIMEOUT`、`SSHCHAT_NEWS_CACHE_SECONDS`、`SSHCHAT_NEWS_BODY_CHARS`（单条提要最大字符数）、`SSHCHAT_NEWS_WRAP`（自动换行宽度），以及网页抓取相关变量见上一段。
 

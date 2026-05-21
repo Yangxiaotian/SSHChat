@@ -6,6 +6,7 @@ import textwrap
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,6 +45,9 @@ _SCREEN_CLEARED_ACK = "[*] Screen cleared.\n"
 NEWS_CACHE_TTL = int(os.environ.get("SSHCHAT_NEWS_CACHE_SECONDS", "600"))
 NEWS_FETCH_TIMEOUT = float(os.environ.get("SSHCHAT_NEWS_TIMEOUT", "4"))
 NEWS_TLS_FALLBACK = os.environ.get("SSHCHAT_NEWS_TLS_FALLBACK", "1") != "0"
+NEWS_PROXY_FALLBACK_DIRECT = (
+    os.environ.get("SSHCHAT_NEWS_PROXY_FALLBACK_DIRECT", "1") != "0"
+)
 NEWS_BODY_MAX_CHARS = int(os.environ.get("SSHCHAT_NEWS_BODY_CHARS", "900"))
 NEWS_DETAIL_MAX_CHARS = int(os.environ.get("SSHCHAT_NEWS_DETAIL_CHARS", "4000"))
 NEWS_WRAP_WIDTH = int(os.environ.get("SSHCHAT_NEWS_WRAP", "88"))
@@ -376,10 +380,58 @@ def _news_proxy_url() -> str:
     return NEWS_PROXY_LOCAL_DEFAULT or ""
 
 
-def _news_build_opener(ssl_context: Optional[ssl.SSLContext] = None):
+def _news_transport_retryable(exc: BaseException) -> bool:
+    """SSL/代理/握手类错误：可换 TLS 策略或改走直连重试。"""
+    if isinstance(exc, ssl.SSLError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, ssl.SSLError):
+            return True
+        if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError)):
+            return True
+        if isinstance(reason, OSError) and reason.errno in (54, 104):
+            return True
+    msg = str(exc)
+    return any(
+        token in msg
+        for token in (
+            "CERTIFICATE_VERIFY_FAILED",
+            "SSLEOFError",
+            "SSL: ",
+            "UNEXPECTED_EOF",
+            "EOF occurred",
+            "handshake operation timed out",
+            "Connection reset",
+        )
+    )
+
+
+def _news_urlopen_strategies() -> list[tuple[Optional[ssl.SSLContext], bool]]:
+    """(ssl_context, use_proxy) 尝试顺序：代理→TLS 放宽→（可选）代理失败后直连。"""
+    proxy = _news_proxy_url()
+    strategies: list[tuple[Optional[ssl.SSLContext], bool]] = []
+    if proxy:
+        strategies.append((None, True))
+        if NEWS_TLS_FALLBACK:
+            strategies.append((ssl._create_unverified_context(), True))
+        if NEWS_PROXY_FALLBACK_DIRECT:
+            strategies.append((None, False))
+            if NEWS_TLS_FALLBACK:
+                strategies.append((ssl._create_unverified_context(), False))
+    else:
+        strategies.append((None, False))
+        if NEWS_TLS_FALLBACK:
+            strategies.append((ssl._create_unverified_context(), False))
+    return strategies
+
+
+def _news_build_opener(
+    ssl_context: Optional[ssl.SSLContext] = None, *, use_proxy: bool = True
+):
     """Return a custom opener, or None to use urllib.request.urlopen defaults."""
     handlers: list = []
-    proxy = _news_proxy_url()
+    proxy = _news_proxy_url() if use_proxy else ""
     if proxy:
         handlers.append(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy})
@@ -414,8 +466,10 @@ def _news_urlopen_read_limited(
 ) -> tuple[bytes, Optional[str]]:
     """GET up to max_bytes; returns (data, charset from Content-Type if any)."""
 
-    def _once(ssl_ctx: Optional[ssl.SSLContext]) -> tuple[bytes, Optional[str]]:
-        opener = _news_build_opener(ssl_ctx)
+    def _once(
+        ssl_ctx: Optional[ssl.SSLContext], use_proxy: bool
+    ) -> tuple[bytes, Optional[str]]:
+        opener = _news_build_opener(ssl_ctx, use_proxy=use_proxy)
         if opener is not None:
             resp = opener.open(req, timeout=timeout)
         else:
@@ -428,12 +482,17 @@ def _news_urlopen_read_limited(
         finally:
             resp.close()
 
-    try:
-        return _once(None)
-    except Exception as e:
-        if not NEWS_TLS_FALLBACK or "CERTIFICATE_VERIFY_FAILED" not in str(e):
-            raise
-        return _once(ssl._create_unverified_context())
+    last_exc: Optional[BaseException] = None
+    for ssl_ctx, use_proxy in _news_urlopen_strategies():
+        try:
+            return _once(ssl_ctx, use_proxy)
+        except Exception as e:
+            if not _news_transport_retryable(e):
+                raise
+            last_exc = e
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("news urlopen: no strategies")
 
 
 def _news_http_get(req: urllib.request.Request) -> bytes:
@@ -509,6 +568,9 @@ def _fetch_article_plain(url: str) -> str:
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             ),
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            # 经 HTTP 代理时避免长连接/压缩流被中途掐断导致 SSLEOFError
+            "Connection": "close",
+            "Accept-Encoding": "identity",
         },
     )
     data, charset = _news_urlopen_read_limited(
@@ -546,8 +608,13 @@ def _send_news_item_fetched(conn, category: str, index_1based: int) -> None:
         send_line(conn, f"[*] 抓取失败：{e!r}\n")
         send_line(
             conn,
-            "[*] 常见原因：付费墙、需登录、反爬、仅 JS 渲染页面、或超时。"
-            "可加大 SSHCHAT_NEWS_PAGE_TIMEOUT / 检查代理。\n",
+            "[*] 常见原因：付费墙、需登录、反爬、仅 JS 渲染页面、超时，"
+            "或代理 HTTPS 异常（SSLEOF/握手失败）。\n",
+        )
+        send_line(
+            conn,
+            "[*] 可试：加大 SSHCHAT_NEWS_PAGE_TIMEOUT；确认代理端口；"
+            "或 SSHCHAT_NEWS_NO_PROXY=1 直连（境外源在境内机房常需代理）。\n",
         )
         return
     if not plain.strip():
@@ -1254,6 +1321,33 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv, bcast, _ = game.resign(conn, name)
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        return
+
+    if sub == "undo":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            if not hasattr(game, "request_undo"):
+                send_line(
+                    conn,
+                    "[*] 当前对局不支持悔棋（仅 chess、gomoku、xiangqi）。\n",
+                )
+                return
+            action = rest.lower()
+            if action in ("accept", "同意", "ok", "yes"):
+                priv, bcast, _ = game.accept_undo(conn)
+            elif action in ("reject", "拒绝", "no"):
+                priv, bcast, _ = game.reject_undo(conn)
+            elif action in ("cancel", "取消"):
+                priv, bcast, _ = game.cancel_undo(conn)
+            else:
+                priv, bcast, _ = game.request_undo(conn)
+        send_game_private(conn, room, priv)
+        broadcast_game(room, bcast)
+        if bcast and hasattr(game, "supports_undo"):
+            send_oriented_boards(room, game)
         return
 
     if sub == "abort":
