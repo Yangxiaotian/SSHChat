@@ -20,8 +20,7 @@ export default function App() {
 
     const unsubMessage = window.api.onChatMessage((message) => {
       const { nickname: me, activeRoom: currentRoom } = useChatStore.getState();
-      const isShakeSignal =
-        message.type === 'chat' && message.content.trim() === '__VSCODEEN_SHAKE__';
+      const isShakeSignal = message.content.trim() === '__VSCODEEN_SHAKE__';
       if (isShakeSignal) {
         // Show who sent the shake in chat
         const sender = message.sender === me ? 'You' : message.sender;

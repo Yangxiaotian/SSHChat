@@ -137,16 +137,48 @@ function shakeMainWindow(): boolean {
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
+  mainWindow.show();
   const base = mainWindow.getBounds();
-  const sequence = [-14, 14, -14, 14, -10, 10, 0];
-  sequence.forEach((offset, idx) => {
+  const sequence: Array<[number, number]> = [
+    [-16, 0],
+    [16, 0],
+    [-12, 0],
+    [12, 0],
+    [0, -8],
+    [0, 8],
+    [0, 0],
+  ];
+  if (process.platform === 'darwin' && app.dock) {
+    try {
+      const bounceId = app.dock.bounce('critical');
+      setTimeout(() => {
+        try {
+          app.dock?.cancelBounce(bounceId);
+        } catch {
+          // ignore
+        }
+      }, 1600);
+    } catch {
+      // ignore
+    }
+  }
+  sequence.forEach(([dx, dy], idx) => {
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
-      mainWindow.setBounds({ ...base, x: base.x + offset });
-      if (idx === sequence.length - 1) {
-        mainWindow.setBounds(base);
+      try {
+        mainWindow.setBounds({ ...base, x: base.x + dx, y: base.y + dy });
+      } catch {
+        // ignore transient setBounds issues
       }
-    }, idx * 55);
+      if (idx === sequence.length - 1) {
+        try {
+          mainWindow.setBounds(base);
+          mainWindow.focus();
+        } catch {
+          // ignore
+        }
+      }
+    }, idx * 60);
   });
   return true;
 }
