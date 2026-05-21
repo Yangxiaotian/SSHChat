@@ -37,6 +37,7 @@ export default function NiuTouPanel({ disabled, boardText, onCmd }: Props) {
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 2')}>吃第2行</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 3')}>吃第3行</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 4')}>吃第4行</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
       <div className="game-chip-row">
         {hand.map((n) => (
