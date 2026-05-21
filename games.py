@@ -5714,6 +5714,18 @@ class WerewolfGame:
 _ZJH_RANKS = "23456789TJQKA"
 _ZJH_VALUES = {r: i + 2 for i, r in enumerate(_ZJH_RANKS)}
 _ZJH_SUITS = ["S", "H", "D", "C"]
+_POKER_SUIT_ZH = {"S": "黑桃", "H": "红桃", "D": "方块", "C": "梅花"}
+_POKER_RANK_ZH = {"A": "A", "K": "K", "Q": "Q", "J": "J", "T": "10"}
+
+def _fmt_poker_cards(cards: list[str]) -> str:
+    out: list[str] = []
+    for c in cards:
+        if len(c) < 2:
+            out.append(c)
+            continue
+        r, s = c[0], c[1]
+        out.append(f"{_POKER_SUIT_ZH.get(s, s)}{_POKER_RANK_ZH.get(r, r)}")
+    return " ".join(out)
 
 def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
     vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
@@ -5746,6 +5758,9 @@ class ZhaJinHuaGame:
     join_blurb = "others use /game join, host starts with /game move start"
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.bot_names: set[str] = set()
+        self.bot_conns: dict[str, object] = {}
+        self.bot_level = "hard"
         self.state = "waiting"
         self.folded: set[str] = set()
         self.looked: set[str] = set()
@@ -5926,7 +5941,7 @@ class ZhaJinHuaGame:
         return lines
     def show(self, conn=None, full: bool = False) -> list[str]:
         lines = self.seats(); me = self._name_of(conn) if conn is not None else None
-        if me and me in self.cards: lines.append(f"your cards: {' '.join(self.cards[me])}")
+        if me and me in self.cards: lines.append(f"你的手牌：{_fmt_poker_cards(self.cards[me])}")
         return lines
     def on_player_leave(self, conn, name: str) -> GameResult:
         for i, (c, n) in enumerate(self.players):
@@ -6044,13 +6059,7 @@ class HoldemGame:
                 return
 
     def _fmt(self, cards: list[str]) -> str:
-        suit_zh = {"S": "黑桃", "H": "红桃", "D": "方块", "C": "梅花"}
-        rank_zh = {"A": "A", "K": "K", "Q": "Q", "J": "J", "T": "10"}
-        out = []
-        for c in cards:
-            r, s = c[0], c[1]
-            out.append(f"{suit_zh.get(s, s)}{rank_zh.get(r, r)}")
-        return " ".join(out)
+        return _fmt_poker_cards(cards)
 
     def _eval5(self, cards: list[str]) -> tuple[int, list[int]]:
         vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
@@ -6610,11 +6619,15 @@ GAME_ALIASES = {
     "texasholdem": HoldemGame.name,
     "holdem": HoldemGame.name,
     "dezhou": HoldemGame.name,
+    "德州": HoldemGame.name,
+    "德州扑克": HoldemGame.name,
     "zhajinhua": ZhaJinHuaGame.name,
     "zjh": ZhaJinHuaGame.name,
+    "炸金花": ZhaJinHuaGame.name,
     "niutou": NiuTouWangGame.name,
     "niutouwang": NiuTouWangGame.name,
     "ntw": NiuTouWangGame.name,
+    "牛头王": NiuTouWangGame.name,
     "三国杀": SanguoshaGame.name,
 }
 
