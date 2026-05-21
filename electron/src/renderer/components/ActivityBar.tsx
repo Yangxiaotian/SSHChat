@@ -13,7 +13,7 @@ export default function ActivityBar({ onToggleSidebar, sidebarVisible }: Activit
     { id: 'rooms' as const, icon: 'E', tooltip: 'Explorer' },
     { id: 'users' as const, icon: 'U', tooltip: 'Online Users' },
     { id: 'news' as const, icon: 'N', tooltip: 'News' },
-    { id: 'monitor' as const, icon: 'M', tooltip: 'Monitor' },
+    { id: 'monitor' as const, icon: 'M', tooltip: '监控' },
   ];
 
   const bottomItems = [

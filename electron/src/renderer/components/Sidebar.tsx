@@ -19,7 +19,7 @@ export default function Sidebar() {
         rooms: 'ROOMS',
         users: 'ONLINE USERS',
         news: 'NEWS',
-        monitor: 'MONITOR',
+        monitor: '监控',
       };
 
   return (

@@ -11,7 +11,7 @@ export default function ChatArea() {
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
     return roomMessages.filter(
-      (msg) => msg.type === 'chat' || msg.type === 'pm' || msg.type === 'game',
+      (msg) => msg.type === 'chat' || msg.type === 'pm' || msg.type === 'game' || msg.type === 'system',
     );
   }, [roomMessages]);
 
