@@ -41,10 +41,44 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
   const out: string[] = [];
   for (let i = start; i < systemLines.length; i++) {
     const line = systemLines[i];
-    if (line.startsWith('---') && out.length > 0) break;
+    const trimmed = line.trim();
+    if (trimmed.startsWith('---') && out.length > 0) break;
+    if (/^\[\*\]\s/.test(trimmed) && out.length > 0) break;
+    if (/^\/game\s+/i.test(trimmed) && out.length > 0) break;
+    if (/^>>\s+/.test(trimmed) && out.length > 0) break;
+    if (/^\[\d{2}:\d{2}:\d{2}\]/.test(trimmed) && out.length > 0) break;
     out.push(line);
   }
   return { board: out.join('\n'), game };
+}
+
+function isLikelyGameLine(line: string): boolean {
+  const t = line.trim().toLowerCase();
+  if (!t) return false;
+  const keywords = [
+    'chess',
+    'gomoku',
+    'xiangqi',
+    'holdem',
+    'zjh',
+    'niutou',
+    'sanguo',
+    'werewolf',
+    'state:',
+    'turn:',
+    'street:',
+    'pot=',
+    'row1:',
+    'row2:',
+    'row3:',
+    'row4:',
+    'your hand',
+    '你的手牌',
+    '公共牌',
+    '开了一局',
+    '对局',
+  ];
+  return keywords.some((k) => t.includes(k));
 }
 
 function inferOpenGame(lines: string[]): GameKind {
@@ -267,16 +301,17 @@ export default function GameWorkbench() {
 
   const roomMessages = messages.get(activeRoom) || [];
   const { board, game, systemLines } = useMemo(() => {
-    const systemLines = roomMessages
+    const allLines = roomMessages
       .filter((m) => m.type === 'system' || m.type === 'game')
       .map((m) => m.content);
-    const parsed = extractBoardBlock(systemLines);
+    const gameLines = allLines.filter(isLikelyGameLine);
+    const parsed = extractBoardBlock(gameLines.length > 0 ? gameLines : allLines);
     if (parsed.game === 'none' && parsed.board) {
-      return { board: parsed.board, game: detectGameKind(parsed.board), systemLines };
+      return { board: parsed.board, game: detectGameKind(parsed.board), systemLines: allLines };
     }
-    if (parsed.game !== 'none') return { ...parsed, systemLines };
-    const openGame = inferOpenGame(systemLines);
-    return { board: parsed.board, game: openGame, systemLines };
+    if (parsed.game !== 'none') return { ...parsed, systemLines: allLines };
+    const openGame = inferOpenGame(allLines);
+    return { board: parsed.board, game: openGame, systemLines: allLines };
   }, [roomMessages]);
   const advisor = useMemo(
     () => buildAdvisor(game, board, systemLines, nickname),
@@ -293,6 +328,10 @@ export default function GameWorkbench() {
   const sendMove = async (payload: string) => {
     const text = payload.trim();
     if (!text) return;
+    if (text.startsWith('/')) {
+      await send(text);
+      return;
+    }
     await send(GameCommandFactory.move(text));
   };
 
@@ -315,6 +354,9 @@ export default function GameWorkbench() {
           <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game show')}>显示局面</button>
           <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game help')}>玩法帮助</button>
           <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game list')}>可玩列表</button>
+          {game !== 'none' && (
+            <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game end')}>结束对局</button>
+          )}
         </div>
       </div>
 

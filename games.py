@@ -5761,6 +5761,7 @@ class ZhaJinHuaGame:
         self.bot_names: set[str] = set()
         self.bot_conns: dict[str, object] = {}
         self.bot_level = "hard"
+        self._bot_running = False
         self.state = "waiting"
         self.folded: set[str] = set()
         self.looked: set[str] = set()
@@ -5811,20 +5812,26 @@ class ZhaJinHuaGame:
             return "fold"
         return self.rng.choice(["follow", "follow", "look"])
     def _run_bots(self) -> list[str]:
+        if self._bot_running:
+            return []
         out: list[str] = []
         guard = 0
-        while self.state == "playing" and guard < 32:
-            guard += 1
-            cur = self.players[self.turn_idx][1]
-            if cur not in self.bot_names:
-                break
-            bot_conn = self.bot_conns.get(cur)
-            if bot_conn is None:
-                break
-            _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
-            out.extend(b)
-            if self.state == "ended":
-                break
+        self._bot_running = True
+        try:
+            while self.state == "playing" and guard < 32:
+                guard += 1
+                cur = self.players[self.turn_idx][1]
+                if cur not in self.bot_names:
+                    break
+                bot_conn = self.bot_conns.get(cur)
+                if bot_conn is None:
+                    break
+                _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
+                out.extend(b)
+                if self.state == "ended":
+                    break
+        finally:
+            self._bot_running = False
         return out
     def _name_of(self, conn) -> Optional[str]:
         for c, n in self.players:
@@ -5924,7 +5931,8 @@ class ZhaJinHuaGame:
         else: return (["cmds: start/look/follow/raise/fold/compare"], [], False)
         done = self._finish_if_one()
         if done: return ([], bcast + done, True)
-        bcast.extend(self._run_bots())
+        if not self._bot_running:
+            bcast.extend(self._run_bots())
         bcast.append(f"pot={self.pot}, current_bet={self.current_bet}, turn={self.players[self.turn_idx][1]}")
         return ([], bcast, False)
     def resign(self, conn, name: str) -> GameResult: return self.try_move(conn, "fold")
@@ -5963,6 +5971,7 @@ class HoldemGame:
         self.bot_names: set[str] = set()
         self.bot_conns: dict[str, object] = {}
         self.bot_level = "hard"
+        self._bot_running = False
         self.state = "waiting"
         self.folded: set[str] = set()
         self.hands: dict[str, list[str]] = {}
@@ -6033,20 +6042,26 @@ class HoldemGame:
             return "call"
         return "fold" if self.current_bet >= 7 else "check"
     def _run_bots(self) -> list[str]:
+        if self._bot_running:
+            return []
         out: list[str] = []
         guard = 0
-        while self.state == "playing" and guard < 48:
-            guard += 1
-            cur = self.players[self.turn_idx][1]
-            if cur not in self.bot_names:
-                break
-            bot_conn = self.bot_conns.get(cur)
-            if bot_conn is None:
-                break
-            _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
-            out.extend(b)
-            if self.state == "ended":
-                break
+        self._bot_running = True
+        try:
+            while self.state == "playing" and guard < 48:
+                guard += 1
+                cur = self.players[self.turn_idx][1]
+                if cur not in self.bot_names:
+                    break
+                bot_conn = self.bot_conns.get(cur)
+                if bot_conn is None:
+                    break
+                _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
+                out.extend(b)
+                if self.state == "ended":
+                    break
+        finally:
+            self._bot_running = False
         return out
 
     def _advance(self):
@@ -6248,9 +6263,11 @@ class HoldemGame:
         alive = self._alive()
         if len(self.acted) >= len(alive):
             b.extend(self._next_street())
-            b.extend(self._run_bots())
+            if not self._bot_running:
+                b.extend(self._run_bots())
             return ([], b, self.state == "ended")
-        b.extend(self._run_bots())
+        if not self._bot_running:
+            b.extend(self._run_bots())
         b.append(f"pot={self.pot}, board={self._fmt(self.board) if self.board else 'none'}")
         b.append(f"turn: {self.players[self.turn_idx][1]}")
         return ([], b, False)
