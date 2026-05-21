@@ -44,9 +44,31 @@ async function loadModelShared(): Promise<any> {
   return model;
 }
 
+async function tryForceWiderFov(track: MediaStreamTrack): Promise<void> {
+  try {
+    const anyTrack = track as MediaStreamTrack & {
+      getCapabilities?: () => Record<string, any>;
+      applyConstraints?: (constraints: MediaTrackConstraints) => Promise<void>;
+    };
+    if (!anyTrack.getCapabilities || !anyTrack.applyConstraints) return;
+    const caps = anyTrack.getCapabilities() as Record<string, any>;
+    const constraints: MediaTrackConstraints = {
+      width: { ideal: 1920, max: 3840 },
+      height: { ideal: 1080, max: 2160 },
+      aspectRatio: { ideal: 16 / 9 },
+    };
+    if (caps.zoom && typeof caps.zoom.min === 'number') {
+      (constraints as any).advanced = [{ zoom: caps.zoom.min }];
+    }
+    await anyTrack.applyConstraints(constraints);
+  } catch {
+    // Best-effort only: keep defaults if the browser/device rejects constraints.
+  }
+}
+
 // Serialized detection loop: each frame waits for inference to finish before scheduling next.
-// This prevents requestAnimationFrame from queuing up multiple concurrent detect() calls
-// which was the root cause of multi-second latency.
+// Uses setTimeout instead of requestAnimationFrame so detection continues running
+// even when the window is minimized or the tab is in the background.
 function ensureDetectionLoop() {
   if (detectRunning) return;
   detectRunning = true;
@@ -58,8 +80,7 @@ function ensureDetectionLoop() {
     }
     const video = sharedVideo;
     if (!video || !sharedModel || video.readyState < 2) {
-      // Video not ready — retry very soon without wasting a full rAF cycle
-      setTimeout(detect, 50);
+      setTimeout(detect, 100);
       return;
     }
     try {
@@ -69,16 +90,17 @@ function ensureDetectionLoop() {
     } catch {
       // video detached mid-frame; skip
     }
-    // Schedule next detection immediately after current one finishes
     if (sharedIsRunning) {
-      requestAnimationFrame(detect);
+      // Use setTimeout(0) — keeps running when window is minimized/backgrounded.
+      // requestAnimationFrame pauses when the window is not visible.
+      setTimeout(detect, 0);
     } else {
       detectRunning = false;
     }
   };
 
   // Kick off first detection immediately
-  requestAnimationFrame(detect);
+  setTimeout(detect, 0);
 }
 
 function stopShared() {
@@ -150,10 +172,15 @@ export function useCameraMonitor(
             facingMode: 'user',
             width: { ideal: 1920 },
             height: { ideal: 1080 },
+            aspectRatio: { ideal: 16 / 9 },
           },
           audio: false,
         });
         sharedStream = stream;
+        const track = stream.getVideoTracks()[0];
+        if (track) {
+          await tryForceWiderFov(track);
+        }
       }
       if (videoRef.current) {
         sharedVideo = videoRef.current;
@@ -182,10 +209,13 @@ export function useCameraMonitor(
     stopShared();
   }, []);
 
-  // Cleanup on app unload only (not on component unmount)
+  // Cleanup only when the page is actually unloading.
+  // Do not stop on component unmount, so monitor survives tab/sidebar switches.
   useEffect(() => {
+    const onBeforeUnload = () => stopShared();
+    window.addEventListener('beforeunload', onBeforeUnload);
     return () => {
-      stopShared();
+      window.removeEventListener('beforeunload', onBeforeUnload);
     };
   }, []);
 

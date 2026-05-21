@@ -5710,18 +5710,178 @@ class WerewolfGame:
         return ([], out, False)
 
 
+_ZJH_RANKS = "23456789TJQKA"
+_ZJH_VALUES = {r: i + 2 for i, r in enumerate(_ZJH_RANKS)}
+_ZJH_SUITS = ["S", "H", "D", "C"]
+
+def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
+    vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
+    suits = [c[1] for c in cards]
+    counts = {v: vals.count(v) for v in set(vals)}
+    ordered = sorted(counts.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    is_flush = len(set(suits)) == 1
+    uniq = sorted(set(vals))
+    is_straight = len(uniq) == 3 and uniq[2] - uniq[0] == 2 and uniq[1] - uniq[0] == 1
+    if sorted(vals) == [2, 3, 14]:
+        is_straight = True
+        vals = [3, 2, 1]
+    if ordered[0][1] == 3:
+        return (6, [ordered[0][0]])
+    if is_straight and is_flush:
+        return (5, vals)
+    if is_flush:
+        return (4, vals)
+    if is_straight:
+        return (3, vals)
+    if ordered[0][1] == 2:
+        pair = ordered[0][0]
+        kick = max(v for v in vals if v != pair)
+        return (2, [pair, kick])
+    return (1, vals)
+
+class ZhaJinHuaGame:
+    name = "zjh"
+    first_seat_desc = "host"
+    join_blurb = "others use /game join, host starts with /game move start"
+    def __init__(self, host_conn, host_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.state = "waiting"
+        self.folded: set[str] = set()
+        self.looked: set[str] = set()
+        self.cards: dict[str, list[str]] = {}
+        self.stacks: dict[str, int] = {host_name: 100}
+        self.pot = 0
+        self.current_bet = 1
+        self.turn_idx = 0
+        self.rng = random.Random()
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+    def _alive(self) -> list[str]:
+        return [n for _c, n in self.players if n not in self.folded and self.stacks.get(n, 0) > 0]
+    def _advance(self):
+        alive = self._alive()
+        if len(alive) <= 1:
+            return
+        for _ in range(len(self.players)):
+            self.turn_idx = (self.turn_idx + 1) % len(self.players)
+            if self.players[self.turn_idx][1] in alive:
+                return
+    def _finish_if_one(self) -> Optional[list[str]]:
+        alive = self._alive()
+        if len(alive) != 1:
+            return None
+        w = alive[0]
+        gain = self.pot
+        self.stacks[w] += gain
+        self.pot = 0
+        self.state = "ended"
+        return [f"{w} wins by fold. pot +{gain}"]
+    def _start(self) -> list[str]:
+        if len(self.players) < 2:
+            return ["need at least 2 players"]
+        self.state = "playing"
+        self.folded.clear(); self.looked.clear(); self.cards.clear()
+        self.turn_idx = 0; self.pot = 0; self.current_bet = 1
+        deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
+        self.rng.shuffle(deck)
+        for _c, n in self.players:
+            self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
+            self.stacks.setdefault(n, 100)
+            if self.stacks[n] > 0:
+                self.stacks[n] -= 1; self.pot += 1
+        return ["zjh started. use /game show to see your cards.", f"pot={self.pot}", f"turn: {self.players[self.turn_idx][1]}"]
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting": return (["game already started"], [], False)
+        if len(self.players) >= 6: return (["zjh max 6 players"], [], False)
+        if any(n == name for _c, n in self.players): return (["name already in seats"], [], False)
+        self.players.append((conn, name)); self.stacks.setdefault(name, 100)
+        return ([], [f"{name} joined zjh ({len(self.players)}/6)"], False)
+    def try_move(self, conn, raw: str) -> GameResult:
+        actor = self._name_of(conn)
+        if actor is None: return (["you are not in this game"], [], False)
+        parts = raw.strip().split()
+        if not parts: return (["usage: /game move <start/look/follow/raise/fold/compare>"], [], False)
+        cmd = parts[0].lower()
+        if cmd == "start":
+            if self.state != "waiting": return (["already started"], [], False)
+            if conn is not self.players[0][0]: return (["only host can start"], [], False)
+            return ([], self._start(), False)
+        if self.state != "playing": return (["zjh not playing"], [], False)
+        if actor in self.folded: return (["you already folded"], [], False)
+        current = self.players[self.turn_idx][1]
+        if actor != current: return ([f"not your turn, current: {current}"], [], False)
+        mult = 2 if actor in self.looked else 1; cost = self.current_bet * mult; bcast: list[str] = []
+        if cmd == "look": self.looked.add(actor); bcast.append(f"{actor} looked at cards"); self._advance()
+        elif cmd in ("follow", "call"):
+            if self.stacks[actor] < cost: return ([f"not enough chips, need {cost}"], [], False)
+            self.stacks[actor] -= cost; self.pot += cost; bcast.append(f"{actor} follow {cost}"); self._advance()
+        elif cmd == "raise":
+            if len(parts) < 2 or not parts[1].isdigit(): return (["usage: /game move raise <amount>"], [], False)
+            add = int(parts[1])
+            if add <= 0: return (["raise amount must > 0"], [], False)
+            new_bet = self.current_bet + add; pay = new_bet * mult
+            if self.stacks[actor] < pay: return ([f"not enough chips, need {pay}"], [], False)
+            self.current_bet = new_bet; self.stacks[actor] -= pay; self.pot += pay; bcast.append(f"{actor} raise to {self.current_bet} (paid {pay})"); self._advance()
+        elif cmd == "fold": self.folded.add(actor); bcast.append(f"{actor} folded"); self._advance()
+        elif cmd == "compare":
+            if len(parts) < 2: return (["usage: /game move compare <name>"], [], False)
+            target = parts[1]
+            if target == actor: return (["cannot compare with yourself"], [], False)
+            if target not in self._alive(): return (["target not alive"], [], False)
+            if self.stacks[actor] < cost: return ([f"not enough chips, need {cost}"], [], False)
+            self.stacks[actor] -= cost; self.pot += cost
+            me = _zjh_eval3(self.cards[actor]); tg = _zjh_eval3(self.cards[target])
+            loser = target if me >= tg else actor; winner = actor if me >= tg else target
+            self.folded.add(loser); bcast.append(f"{actor} compare vs {target}: {winner} wins, {loser} folded"); self._advance()
+        else: return (["cmds: start/look/follow/raise/fold/compare"], [], False)
+        done = self._finish_if_one()
+        if done: return ([], bcast + done, True)
+        bcast.append(f"pot={self.pot}, current_bet={self.current_bet}, turn={self.players[self.turn_idx][1]}")
+        return ([], bcast, False)
+    def resign(self, conn, name: str) -> GameResult: return self.try_move(conn, "fold")
+    def abort(self, conn, name: str) -> GameResult:
+        if conn is not self.players[0][0]: return (["only host can abort"], [], False)
+        self.state = "ended"; return ([], [f"{name} aborted zjh game"], True)
+    def seats(self) -> list[str]:
+        lines = [f"zjh state: {self.state}", f"pot={self.pot}", f"current_bet={self.current_bet}"]
+        for i, (_c, n) in enumerate(self.players, start=1):
+            tag = "folded" if n in self.folded else "alive"; looked = ", looked" if n in self.looked else ""
+            lines.append(f"#{i} {n}: chips={self.stacks.get(n, 0)} {tag}{looked}")
+        if self.state == "waiting": lines.append("host: /game move start")
+        if self.state == "playing": lines.append(f"turn: {self.players[self.turn_idx][1]}")
+        return lines
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = self.seats(); me = self._name_of(conn) if conn is not None else None
+        if me and me in self.cards: lines.append(f"your cards: {' '.join(self.cards[me])}")
+        return lines
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        for i, (c, n) in enumerate(self.players):
+            if c is conn:
+                self.players.pop(i); self.folded.add(n); self.cards.pop(n, None); break
+        if not self.players: self.state = "ended"; return ([], [f"{name} left, zjh ended"], True)
+        done = self._finish_if_one() if self.state == "playing" else None
+        if done: return ([], [f"{name} left"] + done, True)
+        return ([], [f"{name} left zjh"], False)
+
+
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     XiangqiGame.name: XiangqiGame,
     SanguoshaGame.name: SanguoshaGame,
     WerewolfGame.name: WerewolfGame,
+    ZhaJinHuaGame.name: ZhaJinHuaGame,
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
     "sgs": SanguoshaGame.name,
     "langrensha": WerewolfGame.name,
     "were-wolf": WerewolfGame.name,
+    "zhajinhua": ZhaJinHuaGame.name,
+    "zjh": ZhaJinHuaGame.name,
     "三国杀": SanguoshaGame.name,
 }
 

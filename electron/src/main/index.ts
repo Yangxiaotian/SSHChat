@@ -64,6 +64,7 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      backgroundThrottling: false,
     },
     backgroundColor: '#1e1e1e',
     autoHideMenuBar: true,

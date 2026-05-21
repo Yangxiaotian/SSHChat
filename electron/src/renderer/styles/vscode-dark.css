@@ -403,6 +403,125 @@ html, body, #root {
   overflow-x: auto;
 }
 
+.game-interaction-panel {
+  padding: 8px 10px;
+  border-top: 1px solid var(--vscode-border-light);
+  border-bottom: 1px solid var(--vscode-border-light);
+  background: var(--vscode-tab-inactive);
+}
+
+.game-interaction-title {
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.game-grid-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.game-chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.game-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+}
+
+.game-select {
+  height: 26px;
+  min-width: 64px;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-border);
+  background: var(--vscode-input-bg);
+  color: var(--vscode-fg);
+}
+
+.game-arrow {
+  color: var(--vscode-text-secondary);
+  font-size: 12px;
+}
+
+.mini-btn.active {
+  border-color: var(--vscode-focus);
+  box-shadow: inset 0 0 0 1px var(--vscode-focus);
+}
+
+.chess-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 34px);
+  gap: 2px;
+}
+
+.chess-cell {
+  height: 34px;
+  border: 1px solid var(--vscode-border);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.chess-cell.light {
+  background: #ead8b6;
+  color: #222;
+}
+
+.chess-cell.dark {
+  background: #b58863;
+  color: #fff;
+}
+
+.chess-cell.selected {
+  outline: 2px solid var(--vscode-focus);
+}
+
+.gomoku-grid {
+  display: grid;
+  grid-template-columns: repeat(15, 20px);
+  gap: 1px;
+}
+
+.gomoku-cell {
+  height: 20px;
+  border: 1px solid var(--vscode-border);
+  background: #d8b26f;
+  font-size: 11px;
+  line-height: 1;
+  color: #222;
+  cursor: pointer;
+  padding: 0;
+}
+
+.xiangqi-grid {
+  display: grid;
+  grid-template-columns: repeat(9, 34px);
+  gap: 2px;
+}
+
+.xiangqi-cell {
+  height: 30px;
+  border: 1px solid var(--vscode-border);
+  background: #f1deb8;
+  color: #222;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.xiangqi-cell.selected {
+  outline: 2px solid var(--vscode-focus);
+}
+
 .mini-btn {
   height: 22px;
   padding: 0 8px;
@@ -430,6 +549,32 @@ html, body, #root {
   display: flex;
   gap: 8px;
   padding: 8px 10px;
+  align-items: flex-end;
+}
+
+.game-workbench-command {
+  flex: 1;
+  min-height: 34px;
+  max-height: 220px;
+  resize: vertical;
+  padding: 8px 10px;
+  background-color: var(--vscode-input-bg);
+  border: 1px solid var(--vscode-input-border);
+  color: var(--vscode-fg);
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  border-radius: 2px;
+  line-height: 1.35;
+}
+
+.game-workbench-command:focus {
+  border-color: var(--vscode-input-focus);
+}
+
+.game-workbench-command:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ============================================================
@@ -681,6 +826,7 @@ html, body, #root {
   flex: 1;
   min-width: 0;
   user-select: text;
+  white-space: pre-wrap;
 }
 
 .message-text.system {
@@ -952,6 +1098,14 @@ html, body, #root {
   padding: 8px 12px;
 }
 
+.news-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 8px;
+  background: linear-gradient(to bottom, var(--vscode-sidebar) 75%, rgba(0, 0, 0, 0));
+}
+
 .news-category {
   margin-bottom: 16px;
 }
@@ -967,14 +1121,38 @@ html, body, #root {
 }
 
 .news-item {
-  padding: 8px 4px;
+  padding: 6px 4px;
   border-bottom: 1px solid var(--vscode-border-light);
-  cursor: pointer;
   border-radius: 3px;
 }
 
 .news-item:hover {
   background-color: var(--vscode-sidebar-hover);
+}
+
+.news-item.expanded {
+  background-color: var(--vscode-hover);
+}
+
+.news-item-main {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.news-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.news-rank {
+  font-size: 10px;
+  color: var(--vscode-text-secondary);
 }
 
 .news-source {
@@ -986,6 +1164,7 @@ html, body, #root {
 
 .news-title {
   font-size: 12px;
+  font-weight: 600;
   color: var(--vscode-fg);
   margin-top: 4px;
   line-height: 1.4;
@@ -1000,6 +1179,28 @@ html, body, #root {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.news-item.expanded .news-body {
+  -webkit-line-clamp: unset;
+}
+
+.news-item-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.news-loading {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--vscode-info);
+}
+
+.news-empty {
+  color: var(--vscode-text-secondary);
+  font-style: italic;
+  padding: 8px 0;
 }
 
 /* ============================================================
