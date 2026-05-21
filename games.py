@@ -30,6 +30,7 @@ from sgs_data import (
     is_black,
     is_diamond,
     is_red,
+    general_gender,
     SGS_GENERAL_BY_NAME,
     weapon_range,
 )
@@ -1567,6 +1568,10 @@ _SGS_MOVE_ALIASES: dict[str, str] = {
     "不出": "pass",
     "受击": "hurt",
     "hurt": "hurt",
+    "雌雄弃": "cixiong_discard",
+    "cixiong_discard": "cixiong_discard",
+    "雌雄摸": "cixiong_draw",
+    "cixiong_draw": "cixiong_draw",
     "开始": "start",
     "开局": "start",
     "start": "start",
@@ -1967,6 +1972,8 @@ class SanguoshaGame:
                     add(int(pend["source"]))
             elif kind in ("shunshou", "dismantle"):
                 add(int(pend["source"]))
+            elif kind == "cixiong":
+                add(int(pend["target"]))
             return out
 
         who = self._turn_idx
@@ -1999,6 +2006,11 @@ class SanguoshaGame:
             player.armor is not None and card_base(player.armor) == name
         )
 
+    def _can_bagua_for_target(self, actor_idx: int, target_idx: int) -> bool:
+        if self._ignore_target_armor(actor_idx, target_idx):
+            return False
+        return self._has_armor(self.players[target_idx], "八卦阵")
+
     def _try_bagua_shan(self, target_idx: int) -> tuple[bool, list[str]]:
         """八卦阵判定：红色视为出闪。返回 (是否视为出闪, 战报)。"""
         target = self.players[target_idx]
@@ -2016,6 +2028,32 @@ class SanguoshaGame:
             return True, lines
         lines.append(f"  → 非红色，仍需【闪】或受击")
         return False, lines
+
+    def _bagua_try_for_need(
+        self,
+        actor_idx: int,
+        target_idx: int,
+        got_shan: int,
+        need_shan: int,
+    ) -> tuple[int, list[str], bool]:
+        """依次判定八卦直至无效、满足需闪数或无法发动。返回 (got_shan, 战报, 是否已抵消)."""
+        lines: list[str] = []
+        while got_shan < need_shan and self._can_bagua_for_target(
+            actor_idx, target_idx
+        ):
+            prev = got_shan
+            ok, one = self._try_bagua_shan(target_idx)
+            lines.extend(one)
+            if not ok:
+                break
+            got_shan += 1
+            if got_shan >= need_shan:
+                return got_shan, lines, True
+            lines.append(
+                f"  → 视为出【闪】（{got_shan}/{need_shan}），"
+                f"可继续判定【八卦阵】或打出【闪】"
+            )
+        return got_shan, lines, False
 
     def _qilin_discard_horse(self, target_idx: int, notes: list[str]) -> None:
         victim = self.players[target_idx]
@@ -2095,6 +2133,102 @@ class SanguoshaGame:
         actor.hand.append(card)
         notes.append(f"{actor.name}烈刃得【{card_label(card)}】")
 
+    def _player_gender(self, player: _SgsPlayer) -> str:
+        g = SGS_GENERAL_BY_NAME.get(player.general or "")
+        if g:
+            return g.get("gender", general_gender(player.general))
+        return general_gender(player.general or "")
+
+    def _opposite_gender(self, a_idx: int, b_idx: int) -> bool:
+        return self._player_gender(self.players[a_idx]) != self._player_gender(
+            self.players[b_idx]
+        )
+
+    def _start_cixiong_pending(
+        self, source_idx: int, target_idx: int
+    ) -> list[str]:
+        """【杀】造成伤害后：雌雄双股剑令异性目标选择弃牌或令使用者摸牌。"""
+        src = self.players[source_idx]
+        tgt = self.players[target_idx]
+        if tgt.dead or src.dead:
+            return []
+        if not (
+            src.weapon is not None
+            and card_base(src.weapon) == "雌雄双股剑"
+        ):
+            return []
+        if not self._opposite_gender(source_idx, target_idx):
+            return []
+        if not tgt.hand:
+            n = self._draw_cards(src, 1)
+            return [f"【雌雄双股剑】{tgt.name}无手牌，{src.name}摸{n}张"]
+        self._pending = {
+            "kind": "cixiong",
+            "source": source_idx,
+            "target": target_idx,
+        }
+        return [
+            f"【雌雄双股剑】{tgt.name}请选择："
+            f"/game move 雌雄弃 <牌> 或 /game move 雌雄摸"
+        ]
+
+    def _sha_damage_followup(
+        self,
+        source_idx: int,
+        target_idx: int,
+        bcast: list[str],
+        notes: list[str],
+    ) -> GameResult:
+        self._lieren_steal(source_idx, target_idx, notes)
+        if notes:
+            bcast.append("  " + "；".join(notes))
+        cixiong_msgs = self._start_cixiong_pending(source_idx, target_idx)
+        if cixiong_msgs:
+            bcast.extend(cixiong_msgs)
+        if self._pending and self._pending.get("kind") == "cixiong":
+            return ([], bcast, False)
+        return self._maybe_end(bcast)
+
+    def _resolve_cixiong(
+        self, who: int, verb: str, args: Optional[list[str]]
+    ) -> GameResult:
+        pend = self._pending
+        if not pend or pend.get("kind") != "cixiong":
+            return (["当前没有【雌雄双股剑】待结算。"], [], False)
+        if who != pend["target"]:
+            tgt = self.players[pend["target"]]
+            return ([f"请 {tgt.name} 选择雌雄双股剑效果。"], [], False)
+        src = self.players[pend["source"]]
+        tgt = self.players[pend["target"]]
+        if verb == "cixiong_discard":
+            if not args:
+                return (
+                    ["用法：/game move 雌雄弃 <牌名>  或  /game move 雌雄摸"],
+                    [],
+                    False,
+                )
+            found = find_card_in_hand(tgt.hand, args[0])
+            if found is None:
+                return ([f"你没有【{args[0]}】。"], [], False)
+            tgt.hand.remove(found)
+            self._discard.append(found)
+            self._pending = None
+            bcast = [
+                f"【雌雄双股剑】{tgt.name}弃【{card_label(found)}】"
+                f"（{src.name} 未摸牌）"
+            ]
+            return self._maybe_end(bcast)
+        if verb == "cixiong_draw":
+            self._pending = None
+            n = self._draw_cards(src, 1)
+            bcast = [f"【雌雄双股剑】{tgt.name}选择令{src.name}摸{n}张"]
+            return self._maybe_end(bcast)
+        return (
+            ["请 /game move 雌雄弃 <牌> 或 /game move 雌雄摸"],
+            [],
+            False,
+        )
+
     def _huoshou_kill_draw(
         self, source_idx: Optional[int], notes: list[str]
     ) -> None:
@@ -2121,8 +2255,8 @@ class SanguoshaGame:
 
     def _consume_zhangba_sha(
         self, player: _SgsPlayer, tok1: str, tok2: str
-    ) -> Optional[tuple[str, list[str]]]:
-        """弃两张手牌，视为出【杀】。返回 (虚拟杀, 展示用标签)。"""
+    ) -> Optional[tuple[str, list[str], tuple[str, str]]]:
+        """弃两张手牌，视为出【杀】。返回 (虚拟杀, 展示用标签, 实际两牌)。"""
         c1 = find_card_in_hand(player.hand, tok1)
         if c1 is None:
             return None
@@ -2133,7 +2267,7 @@ class SanguoshaGame:
             return None
         player.hand.remove(c2)
         self._discard.extend([c1, c2])
-        return ("杀", [card_label(c1), card_label(c2)])
+        return ("杀", [card_label(c1), card_label(c2)], (c1, c2))
 
     def _is_sha_card(self, card: str) -> bool:
         return card_base(card) in SHA_CARDS
@@ -2331,6 +2465,12 @@ class SanguoshaGame:
             return (
                 f"  【{name}】{who.name} 选择区域："
                 f"/game move {verb} <手牌|武器|防具|+1马|-1马>"
+            )
+        if kind == "cixiong":
+            tgt = self.players[self._pending["target"]]
+            return (
+                f"  【雌雄双股剑】{tgt.name}："
+                f"/game move 雌雄弃 <牌> 或 /game move 雌雄摸"
             )
         return ""
 
@@ -2763,6 +2903,10 @@ class SanguoshaGame:
             src = self.players[source_idx]
             if src.weapon and card_base(src.weapon) == "麒麟弓":
                 self._qilin_discard_horse(target_idx, notes)
+        if reactions and dealt > 0 and not p.dead and self._has_skill(p, "yiji"):
+            n = self._draw_cards(p, 2)
+            if n:
+                notes.append(f"{p.name}遗计+{n}牌")
         if reactions and source_idx is not None and not p.dead:
             src = self.players[source_idx]
             if self._has_skill(p, "ganglie"):
@@ -2787,10 +2931,6 @@ class SanguoshaGame:
                 notes.append(
                     f"{p.name}反馈得【{card_label(stolen)}】"
                 )
-            if self._has_skill(p, "yiji"):
-                n = self._draw_cards(p, 2)
-                if n:
-                    notes.append(f"{p.name}遗计+{n}牌")
             if self._has_skill(src, "fangzhu") and p.hand:
                 c = p.hand.pop()
                 self._discard.append(c)
@@ -2934,6 +3074,8 @@ class SanguoshaGame:
         target: _SgsPlayer,
         actor_idx: int,
         target_idx: int,
+        *,
+        zhangba_cards: Optional[tuple[str, str]] = None,
     ) -> bool:
         if self._ignore_target_armor(actor_idx, target_idx):
             return False
@@ -2941,7 +3083,11 @@ class SanguoshaGame:
             return False
         if card_base(sha_card) in ("火杀", "雷杀"):
             return False
-        return card_base(sha_card) == "杀" and is_black(sha_card)
+        if zhangba_cards is not None:
+            return all(is_black(c) for c in zhangba_cards)
+        if card_base(sha_card) == "杀":
+            return is_black(sha_card)
+        return is_black(sha_card)
 
     def _sha_limit_ok(self, actor: _SgsPlayer) -> bool:
         return actor.sha_used < self._sha_limit(actor)
@@ -2991,6 +3137,7 @@ class SanguoshaGame:
         if not self._sha_limit_ok(actor):
             return (["本回合【杀】次数已用完。"], [], False)
         zhangba_labels: Optional[list[str]] = None
+        zhangba_cards: Optional[tuple[str, str]] = None
         if zhangba_tokens:
             if not self._has_zhangba(actor):
                 return (["你没有装备【丈八蛇矛】。"], [], False)
@@ -3006,7 +3153,7 @@ class SanguoshaGame:
                     [],
                     False,
                 )
-            card, zhangba_labels = consumed
+            card, zhangba_labels, zhangba_cards = consumed
         else:
             card = self._consume_sha(actor, token=card_token, sha_kind=sha_kind)
             if card is None:
@@ -3022,7 +3169,13 @@ class SanguoshaGame:
                     )
                 return ([hint], [], False)
         sha_label = self._format_sha_label(card, zhangba_labels)
-        if self._renwang_blocks_sha(card, target, actor_idx, target_idx):
+        if self._renwang_blocks_sha(
+            card,
+            target,
+            actor_idx,
+            target_idx,
+            zhangba_cards=zhangba_cards,
+        ):
             actor.sha_used += 1
             return (
                 [],
@@ -3054,21 +3207,20 @@ class SanguoshaGame:
             "element": element,
             "xiangle": self._has_skill(target, "xiangle"),
         }
-        if (
-            need_shan > 0
-            and not self._ignore_target_armor(actor_idx, target_idx)
-            and self._has_armor(target, "八卦阵")
-        ):
-            bagua_ok, bagua_lines = self._try_bagua_shan(target_idx)
-            if bagua_ok:
+        bagua_prefix: list[str] = []
+        if need_shan > 0 and self._can_bagua_for_target(actor_idx, target_idx):
+            got, bagua_lines, dodged = self._bagua_try_for_need(
+                actor_idx, target_idx, 0, need_shan
+            )
+            if bagua_lines:
+                bagua_prefix = bagua_lines
+            self._pending["got_shan"] = got
+            if dodged:
                 self._pending = None
                 bcast = [
                     f"{actor.name}{sha_label}→{target.name}"
-                ] + bagua_lines + [f"{target.name} 闪避【杀】（八卦阵）。"]
+                ] + bagua_prefix + [f"{target.name} 闪避【杀】（八卦阵）。"]
                 return ([], bcast, False)
-            bagua_prefix = bagua_lines
-        else:
-            bagua_prefix = []
         tags: list[str] = []
         if self._pending["xiangle"]:
             tags.append(f"{target.name}可享乐")
@@ -3100,10 +3252,9 @@ class SanguoshaGame:
                     from_sha=True,
                 )
             )
-            self._lieren_steal(actor_idx, target_idx, notes)
-            if notes:
-                bcast.append("  " + "；".join(notes))
-            return self._maybe_end(bcast)
+            return self._sha_damage_followup(
+                actor_idx, target_idx, bcast, notes
+            )
         return ([], bcast, False)
 
     def _resolve_sha_response(
@@ -3166,14 +3317,22 @@ class SanguoshaGame:
             tags = [f"{new_tgt.name}出闪或受击"]
             if pend["xiangle"]:
                 tags.insert(0, f"{new_tgt.name}可享乐")
-            return (
-                [],
-                [
-                    f"{target.name}（流离）弃【{card_label(found)}】，"
-                    f"【杀】→{new_tgt.name}（{'，'.join(tags)}）"
-                ],
-                False,
-            )
+            bcast = [
+                f"{target.name}（流离）弃【{card_label(found)}】，"
+                f"【杀】→{new_tgt.name}（{'，'.join(tags)}）"
+            ]
+            if need > 0 and self._can_bagua_for_target(src_idx, redir):
+                got, bagua_lines, dodged = self._bagua_try_for_need(
+                    src_idx, redir, 0, need
+                )
+                if bagua_lines:
+                    bcast = bagua_lines + bcast
+                pend["got_shan"] = got
+                if dodged:
+                    self._pending = None
+                    bcast.append(f"{new_tgt.name} 闪避【杀】（八卦阵）。")
+                    return ([], bcast, False)
+            return ([], bcast, False)
         if verb == "tianxiang" and self._has_skill(target, "tianxiang"):
             if len(args) < 2:
                 return (
@@ -3213,27 +3372,31 @@ class SanguoshaGame:
                     from_sha=True,
                 )
             )
-            self._lieren_steal(src, redir, notes)
-            if notes:
-                bcast.append("  " + "；".join(notes))
-            return self._maybe_end(bcast)
+            return self._sha_damage_followup(src, redir, bcast, notes)
         if verb == "xiangle":
             return (["当前不能用享乐。"], [], False)
         if verb == "shan":
+            src_idx = pend["source"]
+            need = pend["need_shan"]
             if not self._consume_shan(target):
                 return (["你没有【闪】。"], [], False)
-            pend["got_shan"] = pend.get("got_shan", 0) + 1
-            if pend["got_shan"] < pend["need_shan"]:
-                return (
-                    [],
-                    [
-                        f"{target.name} 打出【闪】"
-                        f"（{pend['got_shan']}/{pend['need_shan']}）"
-                    ],
-                    False,
-                )
-            self._pending = None
-            return ([], [f"{target.name} 闪避【杀】。"], False)
+            got = pend.get("got_shan", 0) + 1
+            pend["got_shan"] = got
+            if got >= need:
+                self._pending = None
+                return ([], [f"{target.name} 闪避【杀】。"], False)
+            bcast = [f"{target.name} 打出【闪】（{got}/{need}）"]
+            got, bagua_lines, dodged = self._bagua_try_for_need(
+                src_idx, who, got, need
+            )
+            pend["got_shan"] = got
+            if bagua_lines:
+                bcast.extend(bagua_lines)
+            if dodged:
+                self._pending = None
+                bcast.append(f"{target.name} 闪避【杀】（八卦阵）。")
+                return ([], bcast, False)
+            return ([], bcast, False)
         if verb in ("pass", "hurt"):
             self._pending = None
             src = pend["source"]
@@ -3252,10 +3415,7 @@ class SanguoshaGame:
                     from_sha=True,
                 )
             )
-            self._lieren_steal(src, who, notes)
-            if notes:
-                bcast.append("  " + "；".join(notes))
-            return self._maybe_end(bcast)
+            return self._sha_damage_followup(src, who, bcast, notes)
         opts = ["闪", "受击"]
         if pend.get("xiangle"):
             opts.insert(0, "享乐")
@@ -3823,9 +3983,12 @@ class SanguoshaGame:
                 msg += f"（无双需 {pend['need_sha']} 张【杀】）"
             return ([], [msg], False)
         if verb in ("pass", "hurt"):
+            other = (
+                pend["target"] if who == pend["source"] else pend["source"]
+            )
             self._pending = None
             bcast = [f"{player.name} 不出【杀】，【决斗】失败"]
-            bcast.extend(self._damage(who, None, 1))
+            bcast.extend(self._damage(who, other, 1))
             return self._maybe_end(bcast)
         return (["请出 杀 或 受击。"], [], False)
 
@@ -4035,6 +4198,18 @@ class SanguoshaGame:
                 return (["你没有【杀】。"], [], False)
             return self._advance_area(pend, who, f"{player.name} 打出【杀】")
         if verb == "shan" and need_card == "闪":
+            src_idx = int(pend["source"])
+            if self._can_bagua_for_target(src_idx, who):
+                _, bagua_lines, dodged = self._bagua_try_for_need(
+                    src_idx, who, 0, 1
+                )
+                if dodged:
+                    tail = (
+                        f"{player.name} 闪避【{pend.get('label', '万箭')}】"
+                        "（八卦阵）"
+                    )
+                    msg = "；".join(bagua_lines + [tail]) if bagua_lines else tail
+                    return self._advance_area(pend, who, msg)
             if not self._consume_shan(player):
                 return (["你没有【闪】。"], [], False)
             return self._advance_area(pend, who, f"{player.name} 打出【闪】")
@@ -4155,6 +4330,8 @@ class SanguoshaGame:
 
         if self._pending:
             kind = self._pending["kind"]
+            if kind == "cixiong":
+                return self._resolve_cixiong(who, verb, args)
             if kind in ("shunshou", "dismantle"):
                 return self._resolve_trick_zone_pick(who, verb, args)
             if kind == "huogong":

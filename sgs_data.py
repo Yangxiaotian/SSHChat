@@ -78,6 +78,24 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("公孙瓒", 4, "群", ("yicong",), "义从：与所有人生座次距离≥2时多摸1张"),
 ]
 
+# 雌雄双股剑等判定用；未列出的武将默认为男性
+SGS_FEMALE_GENERALS = frozenset({
+    "甄姬",
+    "张春华",
+    "黄月英",
+    "祝融",
+    "孙尚香",
+    "大乔",
+    "小乔",
+    "貂蝉",
+    "蔡文姬",
+})
+
+
+def general_gender(name: str) -> str:
+    return "female" if name in SGS_FEMALE_GENERALS else "male"
+
+
 SGS_GENERAL_BY_NAME: dict[str, dict] = {}
 for _name, _hp, _kingdom, _skills, _desc in _SGS_GENERAL_ROWS:
     SGS_GENERAL_BY_NAME[_name] = {
@@ -86,6 +104,7 @@ for _name, _hp, _kingdom, _skills, _desc in _SGS_GENERAL_ROWS:
         "kingdom": _kingdom,
         "skills": _skills,
         "desc": _desc,
+        "gender": general_gender(_name),
     }
 
 SGS_GENERAL_POOL: list[dict] = list(SGS_GENERAL_BY_NAME.values())
