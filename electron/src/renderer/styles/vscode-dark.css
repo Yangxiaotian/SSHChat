@@ -375,7 +375,7 @@ html, body, #root {
 
 .game-workbench {
   border-bottom: 1px solid var(--vscode-border);
-  background: var(--vscode-tab-inactive);
+  background: #1f2022;
 }
 
 .game-workbench-header {
@@ -399,23 +399,23 @@ html, body, #root {
   padding: 6px 10px;
   border-top: 1px solid var(--vscode-border-light);
   border-bottom: 1px solid var(--vscode-border-light);
-  background: var(--vscode-sidebar);
+  background: #202224;
   overflow-x: auto;
 }
 
 .game-workbench-hint {
   padding: 6px 10px;
   font-size: 12px;
-  color: #cfdaf7;
+  color: #b9bec6;
   border-bottom: 1px dashed var(--vscode-border-light);
-  background: #1a212d;
+  background: #1f2124;
 }
 
 .game-advisor {
   padding: 8px 10px;
   border-bottom: 1px solid var(--vscode-border-light);
   border-top: 1px solid var(--vscode-border-light);
-  background: #1d2532;
+  background: #202328;
 }
 
 .game-advisor-title {
@@ -426,7 +426,7 @@ html, body, #root {
 
 .game-advisor-detail {
   font-size: 12px;
-  color: #d2d9e6;
+  color: #b5bcc7;
   line-height: 1.45;
 }
 
@@ -438,27 +438,27 @@ html, body, #root {
 }
 
 .game-advisor-info .game-advisor-title {
-  color: #86b7ff;
+  color: #9fb3c8;
 }
 
 .game-advisor-warn .game-advisor-title {
-  color: #ffd166;
+  color: #c7bc97;
 }
 
 .game-advisor-error .game-advisor-title {
-  color: #ff8f8f;
+  color: #c8a3a3;
 }
 
 .game-advisor-info {
-  border-left: 3px solid #5aa0ff;
+  border-left: 2px solid #4e5968;
 }
 
 .game-advisor-warn {
-  border-left: 3px solid #ffbf3f;
+  border-left: 2px solid #6b6654;
 }
 
 .game-advisor-error {
-  border-left: 3px solid #ff6f6f;
+  border-left: 2px solid #6f5858;
 }
 
 .game-workbench-toolbar {
@@ -468,7 +468,7 @@ html, body, #root {
   align-items: center;
   padding: 6px 10px;
   border-bottom: 1px solid var(--vscode-border-light);
-  background: #161c27;
+  background: #1e2023;
 }
 
 .game-workbench-toolbar-actions {
@@ -479,22 +479,22 @@ html, body, #root {
 
 .game-workbench-hint-inline {
   font-size: 11px;
-  color: #c4cde0;
+  color: #9ea5af;
 }
 
 .game-workbench-empty {
   padding: 10px;
   font-size: 12px;
-  color: #c4cde0;
-  background: #131923;
+  color: #a4acb8;
+  background: #1d1f22;
   border-bottom: 1px solid var(--vscode-border-light);
 }
 
 .game-workbench-input-compact {
   padding: 8px 10px;
   font-size: 12px;
-  color: #c9d3e8;
-  background: #111722;
+  color: #adb6c1;
+  background: #1d1f22;
   border-top: 1px solid var(--vscode-border-light);
 }
 
@@ -502,7 +502,7 @@ html, body, #root {
   padding: 8px 10px;
   border-top: 1px solid var(--vscode-border-light);
   border-bottom: 1px solid var(--vscode-border-light);
-  background: var(--vscode-tab-inactive);
+  background: #1e2022;
 }
 
 .game-interaction-title {
@@ -534,14 +534,14 @@ html, body, #root {
   padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid var(--vscode-border);
-  background: #f6f6f6;
-  color: #111;
+  background: #2a2d31;
+  color: #d0d4da;
   font-size: 12px;
   text-align: center;
 }
 
 .poker-card.red {
-  color: #b01717;
+  color: #c8a4a4;
 }
 
 .game-grid-row {
@@ -581,8 +581,8 @@ html, body, #root {
 }
 
 .mini-btn.active {
-  border-color: var(--vscode-focus);
-  box-shadow: inset 0 0 0 1px var(--vscode-focus);
+  border-color: #687280;
+  box-shadow: inset 0 0 0 1px #687280;
 }
 
 .chess-grid {
@@ -599,17 +599,17 @@ html, body, #root {
 }
 
 .chess-cell.light {
-  background: #ead8b6;
-  color: #222;
+  background: #2c3139;
+  color: #d2d7de;
 }
 
 .chess-cell.dark {
-  background: #b58863;
-  color: #fff;
+  background: #252a31;
+  color: #bbc2cc;
 }
 
 .chess-cell.selected {
-  outline: 2px solid var(--vscode-focus);
+  outline: 2px solid #6f7885;
 }
 
 .gomoku-grid {
@@ -621,10 +621,10 @@ html, body, #root {
 .gomoku-cell {
   height: 20px;
   border: 1px solid var(--vscode-border);
-  background: #d8b26f;
+  background: #2c3036;
   font-size: 11px;
   line-height: 1;
-  color: #222;
+  color: #c8ced7;
   cursor: pointer;
   padding: 0;
 }
@@ -638,21 +638,21 @@ html, body, #root {
 .xiangqi-cell {
   height: 30px;
   border: 1px solid var(--vscode-border);
-  background: #f1deb8;
-  color: #222;
+  background: #2d3239;
+  color: #d0d6de;
   font-size: 10px;
   cursor: pointer;
 }
 
 .xiangqi-cell.selected {
-  outline: 2px solid var(--vscode-focus);
+  outline: 2px solid #6f7885;
 }
 
 .mini-btn {
   height: 26px;
   padding: 0 10px;
   border: 1px solid var(--vscode-border);
-  background: var(--vscode-button-secondary);
+  background: #31343a;
   color: var(--vscode-fg);
   font-size: 12px;
   cursor: pointer;
@@ -660,7 +660,8 @@ html, body, #root {
 }
 
 .mini-btn:hover:not(:disabled) {
-  border-color: var(--vscode-focus);
+  border-color: #5f6773;
+  background: #363a41;
 }
 
 .game-workbench-body {
@@ -670,8 +671,8 @@ html, body, #root {
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.45;
-  color: #e8eefc;
-  background: #111722;
+  color: #bcc4cf;
+  background: #1a1d22;
   border-top: 1px solid var(--vscode-border-light);
   border-bottom: 1px solid var(--vscode-border-light);
 }
