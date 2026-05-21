@@ -47,6 +47,7 @@ export default function HoldemPanel({ disabled, onCmd, boardText }: Props) {
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('call')}>跟注</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('allin')}>全下</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('fold')}>弃牌</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
       <div className="game-chip-row">
         <input className="monitor-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />

@@ -2,6 +2,7 @@ import { Client, ClientChannel, ConnectConfig } from 'ssh2';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { StringDecoder } from 'string_decoder';
 import { ConnectionConfig } from '../shared/protocol';
 
 export type SSHStatusCallback = (status: string) => void;
@@ -117,9 +118,11 @@ export class SSHManager {
     onEndCallback: () => void,
     onError: SSHErrorCallback,
   ): void {
+    const decoder = new StringDecoder('utf8');
     let buffer = '';
     stream.on('data', (data: Buffer) => {
-      buffer += data.toString('utf-8');
+      // Use StringDecoder to preserve multibyte UTF-8 characters across chunk boundaries.
+      buffer += decoder.write(data);
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
@@ -135,6 +138,13 @@ export class SSHManager {
     });
 
     stream.on('end', () => {
+      const rest = decoder.end();
+      if (rest) {
+        const cleaned = this.cleanLine(rest);
+        if (!this.shouldSkipLine(cleaned) && cleaned.trim()) {
+          onDataCallback(Buffer.from(cleaned, 'utf-8'));
+        }
+      }
       onEndCallback();
     });
 

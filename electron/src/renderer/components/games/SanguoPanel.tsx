@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+ï»¿import React, { useState } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -10,18 +10,19 @@ export default function SanguoPanel({ disabled, users, onCmd }: Props) {
   const [target, setTarget] = useState('');
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">Èı¹úÉ±»¥¶¯Ãæ°å</div>
+      <div className="game-interaction-title">ä¸‰å›½æ€äº’åŠ¨é¢æ¿</div>
       <div className="game-chip-row">
         {users.map((u) => (
           <button key={u} className={`mini-btn ${target === u ? 'active' : ''}`} onClick={() => setTarget(u)}>{u}</button>
         ))}
       </div>
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`É± ${target}`)}>É±</button>
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`¾ö¶· ${target}`)}>¾ö¶·</button>
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`»ğ¹¥ ${target}`)}>»ğ¹¥</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('¹ı')}>¹ı</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('¿ªÊ¼')}>¿ªÊ¼</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`æ€ ${target}`)}>æ€</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`å†³æ–— ${target}`)}>å†³æ–—</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`ç«æ”» ${target}`)}>ç«æ”»</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('è¿‡')}>è¿‡</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('å¼€å§‹')}>å¼€å§‹</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>ç»“æŸå¯¹å±€</button>
       </div>
     </div>
   );

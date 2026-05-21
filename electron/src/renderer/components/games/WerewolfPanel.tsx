@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+ï»¿import React, { useState } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -10,18 +10,19 @@ export default function WerewolfPanel({ disabled, users, onCmd }: Props) {
   const [target, setTarget] = useState('');
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">ÀÇÈËÉ±»¥¶¯Ãæ°å</div>
+      <div className="game-interaction-title">ç‹¼äººæ€äº’åŠ¨é¢æ¿</div>
       <div className="game-chip-row">
         {users.map((u) => (
           <button key={u} className={`mini-btn ${target === u ? 'active' : ''}`} onClick={() => setTarget(u)}>{u}</button>
         ))}
       </div>
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`vote ${target}`)}>Í¶Æ±</button>
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`kill ${target}`)}>µ¶ÈË</button>
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`check ${target}`)}>²éÑé</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('save')}>¾ÈÈË</button>
-        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`poison ${target}`)}>¶¾ÈË</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`vote ${target}`)}>æŠ•ç¥¨</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`kill ${target}`)}>åˆ€äºº</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`check ${target}`)}>æŸ¥éªŒ</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('save')}>æ•‘äºº</button>
+        <button className="mini-btn" disabled={disabled || !target} onClick={() => onCmd(`poison ${target}`)}>æ¯’äºº</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>ç»“æŸå¯¹å±€</button>
       </div>
     </div>
   );
