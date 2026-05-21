@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 
 type Props = {
   disabled: boolean;
@@ -8,7 +8,7 @@ type Props = {
 export default function GomokuPanel({ disabled, onPick }: Props) {
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">Gomoku Board Click Mode</div>
+      <div className="game-interaction-title">五子棋棋盘（点击落子）</div>
       <div className="gomoku-grid">
         {Array.from({ length: 15 }, (_, rIx) =>
           Array.from({ length: 15 }, (_, cIx) => {
@@ -22,7 +22,7 @@ export default function GomokuPanel({ disabled, onPick }: Props) {
                 disabled={disabled}
                 title={`${row},${col}`}
               >
-                {row === 8 && col === 8 ? '��' : '��'}
+                {row === 8 && col === 8 ? '◎' : '·'}
               </button>
             );
           }),

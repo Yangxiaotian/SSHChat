@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -10,7 +10,7 @@ export default function XiangqiPanel({ disabled, onMove }: Props) {
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">Xiangqi Board Click Mode (click from {'->'} to)</div>
+      <div className="game-interaction-title">中国象棋棋盘（先点起点，再点终点）</div>
       <div className="xiangqi-grid">
         {Array.from({ length: 10 }, (_, rIx) =>
           Array.from({ length: 9 }, (_, cIx) => {

@@ -17,7 +17,7 @@ export default function ChessPanel({ disabled, sendMove }: GamePanelProps) {
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">Chess Board Click Mode (click from {'->'} to)</div>
+      <div className="game-interaction-title">国际象棋棋盘（先点起点，再点终点）</div>
       <div className="chess-grid">
         {Array.from({ length: 8 }, (_, rIx) => {
           const rank = 8 - rIx;
