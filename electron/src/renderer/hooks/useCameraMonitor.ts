@@ -10,13 +10,14 @@ interface UseCameraMonitorResult {
   stop: () => void;
 }
 
-// Module-level state: persists across component mounts/unmounts (tab switches)
+// Module-level state: persists across component mounts/unmounts (tab switches, sidebar hide)
 let sharedStream: MediaStream | null = null;
 let sharedModel: any = null;
 let sharedModelLoaded = false;
-let sharedRafId = 0;
 let sharedIsRunning = false;
 let sharedPersonCount = 0;
+let sharedVideo: HTMLVideoElement | null = null;
+let detectRunning = false; // prevents concurrent detect() calls
 const sharedListeners = new Set<(count: number) => void>();
 const sharedStateListeners = new Set<() => void>();
 
@@ -43,32 +44,46 @@ async function loadModelShared(): Promise<any> {
   return model;
 }
 
-function startDetectionLoop(video: HTMLVideoElement) {
-  // Cancel any existing loop first to prevent duplicates
-  if (sharedRafId) {
-    cancelAnimationFrame(sharedRafId);
-    sharedRafId = 0;
-  }
+// Serialized detection loop: each frame waits for inference to finish before scheduling next.
+// This prevents requestAnimationFrame from queuing up multiple concurrent detect() calls
+// which was the root cause of multi-second latency.
+function ensureDetectionLoop() {
+  if (detectRunning) return;
+  detectRunning = true;
+
   const detect = async () => {
-    if (!video || !sharedModel || video.readyState < 2) {
-      sharedRafId = requestAnimationFrame(detect);
+    if (!sharedIsRunning) {
+      detectRunning = false;
       return;
     }
-    const predictions: { class: string; score: number }[] = await sharedModel.detect(video);
-    const count = predictions.filter((p) => p.class === 'person' && p.score > 0.5).length;
-    notifyCountListeners(count);
+    const video = sharedVideo;
+    if (!video || !sharedModel || video.readyState < 2) {
+      // Video not ready — retry very soon without wasting a full rAF cycle
+      setTimeout(detect, 50);
+      return;
+    }
+    try {
+      const predictions: { class: string; score: number }[] = await sharedModel.detect(video);
+      const count = predictions.filter((p) => p.class === 'person' && p.score > 0.5).length;
+      notifyCountListeners(count);
+    } catch {
+      // video detached mid-frame; skip
+    }
+    // Schedule next detection immediately after current one finishes
     if (sharedIsRunning) {
-      sharedRafId = requestAnimationFrame(detect);
+      requestAnimationFrame(detect);
+    } else {
+      detectRunning = false;
     }
   };
-  sharedRafId = requestAnimationFrame(detect);
+
+  // Kick off first detection immediately
+  requestAnimationFrame(detect);
 }
 
 function stopShared() {
-  if (sharedRafId) {
-    cancelAnimationFrame(sharedRafId);
-    sharedRafId = 0;
-  }
+  sharedIsRunning = false;
+  detectRunning = false;
   if (sharedStream) {
     sharedStream.getTracks().forEach((t) => t.stop());
     sharedStream = null;
@@ -78,7 +93,7 @@ function stopShared() {
     sharedModel = null;
     sharedModelLoaded = false;
   }
-  sharedIsRunning = false;
+  sharedVideo = null;
   notifyCountListeners(0);
   notifyStateListeners();
 }
@@ -92,7 +107,6 @@ export function useCameraMonitor(
   const [isRunning, setIsRunning] = useState(sharedIsRunning);
   const [modelLoaded, setModelLoaded] = useState(sharedModelLoaded);
   const [error, setError] = useState<string | null>(null);
-  const mountedRef = useRef(false);
 
   // Sync with shared state
   useEffect(() => {
@@ -110,19 +124,19 @@ export function useCameraMonitor(
     };
   }, [onPersonCountChange]);
 
-  // Re-attach stream to video element when component mounts/remounts
+  // Attach stream to video element when component mounts/remounts.
+  // On unmount, only detach the DOM element — camera and model stay alive.
   useEffect(() => {
-    mountedRef.current = true;
-    if (sharedStream && videoRef.current && sharedIsRunning) {
-      videoRef.current.srcObject = sharedStream;
-      videoRef.current.play().catch(() => { /* ignore autoplay block */ });
+    if (sharedStream && sharedIsRunning && videoRef.current) {
+      sharedVideo = videoRef.current;
+      sharedVideo.srcObject = sharedStream;
+      sharedVideo.play().catch(() => { /* ignore autoplay block */ });
     }
     return () => {
-      mountedRef.current = false;
-      // Detach stream from video element but don't stop it
       if (videoRef.current) {
         videoRef.current.srcObject = null;
       }
+      sharedVideo = null;
     };
   }, []);
 
@@ -130,15 +144,21 @@ export function useCameraMonitor(
     try {
       setError(null);
       if (!sharedStream) {
+        // Request 1080p for maximum coverage; browser falls back to best available
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: 640, height: 480 },
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
           audio: false,
         });
         sharedStream = stream;
       }
-      if (videoRef.current && mountedRef.current) {
-        videoRef.current.srcObject = sharedStream;
-        await videoRef.current.play();
+      if (videoRef.current) {
+        sharedVideo = videoRef.current;
+        sharedVideo.srcObject = sharedStream;
+        await sharedVideo.play();
       }
       const model = await loadModelShared();
       if (!model) {
@@ -146,16 +166,15 @@ export function useCameraMonitor(
           sharedStream.getTracks().forEach((t) => t.stop());
           sharedStream = null;
         }
-        setError('Failed to load detection model');
+        sharedVideo = null;
+        setError('模型加载失败');
         return;
       }
       sharedIsRunning = true;
       notifyStateListeners();
-      if (videoRef.current && mountedRef.current) {
-        startDetectionLoop(videoRef.current);
-      }
+      ensureDetectionLoop();
     } catch (e: any) {
-      setError('Camera access denied: ' + e.message);
+      setError('摄像头访问失败: ' + e.message);
     }
   }, []);
 

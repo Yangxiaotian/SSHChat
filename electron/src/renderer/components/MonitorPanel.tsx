@@ -34,16 +34,11 @@ export default function MonitorPanel() {
   const { videoRef, personCount, isRunning, modelLoaded, error, start, stop } =
     useCameraMonitor(monitorEnabled, handlePersonCount);
 
-  // Auto-start camera when component mounts with monitor already enabled,
-  // or re-attach detection loop when remounting while already running.
+  // Auto-start camera on first mount if monitor is enabled.
+  // On remount (tab switch / sidebar toggle), the hook's mount effect
+  // re-attaches the existing stream to the new video element — no need to call start() again.
   useEffect(() => {
     if (monitorEnabled && !isRunning) {
-      start();
-    }
-    // If the monitor was already running (module-level state) but this component
-    // just mounted, the detection loop needs the new video element reference.
-    // The hook's mount effect re-attaches the stream; we restart detection via start().
-    if (monitorEnabled && isRunning && videoRef.current && !videoRef.current.srcObject) {
       start();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -110,7 +105,7 @@ export default function MonitorPanel() {
     <div className="monitor-panel">
       {/* Camera Preview */}
       <div className="monitor-section">
-        <div className="monitor-section-title">Camera</div>
+        <div className="monitor-section-title">摄像头</div>
         <div className="monitor-preview">
           <video
             ref={videoRef}
@@ -121,7 +116,7 @@ export default function MonitorPanel() {
           />
           {!isRunning && (
             <div className="monitor-preview-placeholder">
-              Camera Off
+              摄像头未开启
             </div>
           )}
         </div>
@@ -130,30 +125,30 @@ export default function MonitorPanel() {
 
       {/* Controls */}
       <div className="monitor-section">
-        <div className="monitor-section-title">Status</div>
+        <div className="monitor-section-title">状态</div>
         <div className="monitor-status-row">
           <span className={`monitor-dot ${isRunning ? 'active' : ''}`} />
-          <span>{isRunning ? 'Running' : 'Stopped'}</span>
+          <span>{isRunning ? '运行中' : '已停止'}</span>
           {isRunning && (
             <span className="monitor-count">
-              Persons: <strong className={personCount >= 2 ? 'danger' : ''}>{personCount}</strong>
+              检测人数: <strong className={personCount >= 2 ? 'danger' : ''}>{personCount}</strong>
             </span>
           )}
         </div>
         {!modelLoaded && isRunning && (
-          <div className="monitor-loading">Loading model...</div>
+          <div className="monitor-loading">正在加载模型...</div>
         )}
         {monitorCooldown && (
-          <div className="monitor-cooldown">Cooldown active...</div>
+          <div className="monitor-cooldown">冷却中...</div>
         )}
         <button className="monitor-btn" onClick={handleToggle}>
-          {monitorEnabled ? 'Stop Monitor' : 'Start Monitor'}
+          {monitorEnabled ? '停止监控' : '启动监控'}
         </button>
       </div>
 
       {/* Action Settings */}
       <div className="monitor-section">
-        <div className="monitor-section-title">Action on 2+ Persons</div>
+        <div className="monitor-section-title">检测到 2 人及以上时执行</div>
         <div className="monitor-radio-group">
           <label className="monitor-radio">
             <input
@@ -163,7 +158,7 @@ export default function MonitorPanel() {
               checked={monitorAction === 'minimize'}
               onChange={() => setMonitorAction('minimize')}
             />
-            <span>Minimize Window</span>
+            <span>最小化当前窗口</span>
           </label>
           <label className="monitor-radio">
             <input
@@ -173,7 +168,7 @@ export default function MonitorPanel() {
               checked={monitorAction === 'close'}
               onChange={() => setMonitorAction('close')}
             />
-            <span>Close App</span>
+            <span>关闭本应用</span>
           </label>
           <label className="monitor-radio">
             <input
@@ -183,7 +178,7 @@ export default function MonitorPanel() {
               checked={monitorAction === 'kill'}
               onChange={() => setMonitorAction('kill')}
             />
-            <span>Kill Processes + Minimize</span>
+            <span>结束指定进程 + 最小化</span>
           </label>
         </div>
       </div>
@@ -191,12 +186,12 @@ export default function MonitorPanel() {
       {/* Target Processes */}
       <div className="monitor-section">
         <div className="monitor-section-title">
-          Target Processes
+          目标进程
           <button
             className="monitor-refresh-btn"
             onClick={loadProcesses}
             disabled={loadingProcesses}
-            title="Refresh process list"
+            title="刷新进程列表"
           >
             {loadingProcesses ? '...' : '↻'}
           </button>
@@ -224,7 +219,7 @@ export default function MonitorPanel() {
           <>
             <input
               className="monitor-filter-input"
-              placeholder="Filter processes..."
+              placeholder="搜索进程..."
               value={processFilter}
               onChange={(e) => setProcessFilter(e.target.value)}
             />
@@ -250,7 +245,7 @@ export default function MonitorPanel() {
         )}
         {processes.length === 0 && (
           <div className="monitor-hint">
-            Click ↻ to load system processes
+            点击 ↻ 加载系统进程列表
           </div>
         )}
       </div>

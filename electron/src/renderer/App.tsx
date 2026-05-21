@@ -23,6 +23,16 @@ export default function App() {
       const isShakeSignal =
         message.type === 'chat' && message.content.trim() === '__VSCODEEN_SHAKE__';
       if (isShakeSignal) {
+        // Show who sent the shake in chat
+        const sender = message.sender === me ? 'You' : message.sender;
+        useChatStore.getState().addMessage({
+          id: `shake_${Date.now()}`,
+          room: message.room,
+          sender: '*',
+          content: `${sender} sent a room shake`,
+          timestamp: Date.now(),
+          type: 'system',
+        });
         window.api.shakeWindow();
         return;
       }
