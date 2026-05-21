@@ -20,6 +20,12 @@ export default function App() {
 
     const unsubMessage = window.api.onChatMessage((message) => {
       const { nickname: me, activeRoom: currentRoom } = useChatStore.getState();
+      const isShakeSignal =
+        message.type === 'chat' && message.content.trim() === '__VSCODEEN_SHAKE__';
+      if (isShakeSignal) {
+        window.api.shakeWindow();
+        return;
+      }
       useChatStore.getState().addMessage(message);
       const isPeerMessage = message.sender !== me && (message.type === 'chat' || message.type === 'pm' || message.type === 'game');
       const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());

@@ -9,9 +9,26 @@ function generateId(): string {
 export function parseServerLine(line: string, currentRoom: string): ChatMessage | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
+  const stripClockPrefix = (text: string): string =>
+    text.replace(/^\d{2}:\d{2}:\d{2}\s+/, '');
+  const withoutClock = stripClockPrefix(trimmed);
+
+  if (/^>>\s+/.test(withoutClock)) {
+    // Local input echo like ">> 1" should not be shown in chat timeline.
+    return null;
+  }
+
+  // Normalize prefixed prompt/echo time tokens, e.g.
+  // ">[09:02:49] [#default] [alice] hi" or "[09:02:49] [#default] [alice] hi".
+  let normalized = withoutClock;
+  while (true) {
+    const next = normalized.replace(/^>?\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+    if (next === normalized) break;
+    normalized = next;
+  }
 
   // Room chat: [#room] [name] text
-  const roomMatch = PATTERNS.ROOM_CHAT.exec(trimmed);
+  const roomMatch = PATTERNS.ROOM_CHAT.exec(normalized);
   if (roomMatch) {
     const room = roomMatch[1];
     const sender = roomMatch[2];
@@ -39,7 +56,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
   }
 
   // PM: [PM from name] text
-  const pmMatch = PATTERNS.PM.exec(trimmed);
+  const pmMatch = PATTERNS.PM.exec(normalized);
   if (pmMatch) {
     return {
       id: generateId(),
@@ -52,7 +69,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
   }
 
   // Join: [+] name joined #room
-  const joinMatch = PATTERNS.JOIN.exec(trimmed);
+  const joinMatch = PATTERNS.JOIN.exec(normalized);
   if (joinMatch) {
     return {
       id: generateId(),
@@ -65,7 +82,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
   }
 
   // Leave: [!] name left #room
-  const leaveMatch = PATTERNS.LEAVE.exec(trimmed);
+  const leaveMatch = PATTERNS.LEAVE.exec(normalized);
   if (leaveMatch) {
     return {
       id: generateId(),
@@ -78,7 +95,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
   }
 
   // System message: [*] text
-  const sysMatch = PATTERNS.SYSTEM.exec(trimmed);
+  const sysMatch = PATTERNS.SYSTEM.exec(normalized);
   if (sysMatch) {
     return {
       id: generateId(),
@@ -91,7 +108,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
   }
 
   // Plain chat: [name] text
-  const chatMatch = PATTERNS.CHAT.exec(trimmed);
+  const chatMatch = PATTERNS.CHAT.exec(normalized);
   if (chatMatch) {
     return {
       id: generateId(),
@@ -108,7 +125,7 @@ export function parseServerLine(line: string, currentRoom: string): ChatMessage 
     id: generateId(),
     room: currentRoom,
     sender: '*',
-    content: trimmed,
+    content: normalized,
     timestamp: Date.now(),
     type: 'system',
   };

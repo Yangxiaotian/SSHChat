@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../store/chatStore';
 import TabBar from './TabBar';
 import InputBar from './InputBar';
@@ -9,10 +9,15 @@ export default function ChatArea() {
   const { messages, activeRoom, nickname, status, privacyMode } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const roomMessages = messages.get(activeRoom) || [];
+  const visibleMessages = useMemo(() => {
+    return roomMessages.filter(
+      (msg) => msg.type === 'chat' || msg.type === 'pm' || msg.type === 'game',
+    );
+  }, [roomMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [roomMessages]);
+  }, [visibleMessages]);
 
   return (
     <div className="chat-container">
@@ -31,7 +36,7 @@ export default function ChatArea() {
       <GameWorkbench />
 
       <div className="chat-messages">
-        {roomMessages.length === 0 ? (
+        {visibleMessages.length === 0 ? (
           <div className="chat-empty">
             <div className="chat-empty-icon">{'</>'}</div>
             <div className="chat-empty-text">
@@ -41,7 +46,7 @@ export default function ChatArea() {
             </div>
           </div>
         ) : (
-          roomMessages.map((msg) => (
+          visibleMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} isMe={msg.sender === nickname} />
           ))
         )}

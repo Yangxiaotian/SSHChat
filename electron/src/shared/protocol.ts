@@ -28,6 +28,11 @@ export interface UserInfo {
   room: string;
 }
 
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+}
+
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 // IPC Channel names
@@ -49,8 +54,15 @@ export const IPC_CHANNELS = {
   REQUEST_USERS: 'chat:request-users',
   REQUEST_NEWS: 'chat:request-news',
   NOTIFY_ATTENTION: 'chat:notify-attention',
+  SHAKE_WINDOW: 'chat:shake-window',
   SAVE_CONFIG: 'config:save',
   LOAD_CONFIG: 'config:load',
+
+  // Monitor
+  GET_PROCESSES: 'monitor:get-processes',
+  KILL_PROCESS: 'monitor:kill-process',
+  MINIMIZE_WINDOW: 'monitor:minimize-window',
+  CLOSE_APP: 'monitor:close-app',
 } as const;
 
 // Message parsing patterns (from sshchat_gui.py)

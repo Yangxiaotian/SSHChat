@@ -13,6 +13,7 @@ export default function ActivityBar({ onToggleSidebar, sidebarVisible }: Activit
     { id: 'rooms' as const, icon: 'E', tooltip: 'Explorer' },
     { id: 'users' as const, icon: 'U', tooltip: 'Online Users' },
     { id: 'news' as const, icon: 'N', tooltip: 'News' },
+    { id: 'monitor' as const, icon: 'M', tooltip: 'Monitor' },
   ];
 
   const bottomItems = [
@@ -26,7 +27,7 @@ export default function ActivityBar({ onToggleSidebar, sidebarVisible }: Activit
     if (sidebarView === id && sidebarVisible) {
       onToggleSidebar();
     } else {
-      setSidebarView(id as 'rooms' | 'users' | 'news');
+      setSidebarView(id as 'rooms' | 'users' | 'news' | 'monitor');
       if (!sidebarVisible) onToggleSidebar();
     }
   };

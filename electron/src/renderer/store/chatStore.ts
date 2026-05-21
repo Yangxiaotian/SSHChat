@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ChatMessage, ConnectionConfig, ConnectionStatus, RoomInfo } from '../../shared/protocol';
+import { ChatMessage, ConnectionConfig, ConnectionStatus, ProcessInfo, RoomInfo } from '../../shared/protocol';
 
 declare global {
   interface Window {
@@ -15,6 +15,11 @@ declare global {
       requestUsers: () => Promise<boolean>;
       requestNews: (category?: string) => Promise<boolean>;
       notifyAttention: () => Promise<boolean>;
+      shakeWindow: () => Promise<boolean>;
+      getProcesses: () => Promise<ProcessInfo[]>;
+      killProcess: (processName: string) => Promise<boolean>;
+      minimizeWindow: () => Promise<boolean>;
+      closeApp: () => Promise<boolean>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;
@@ -43,10 +48,17 @@ interface ChatState {
 
   // UI State
   showLogin: boolean;
-  sidebarView: 'rooms' | 'users' | 'news';
+  sidebarView: 'rooms' | 'users' | 'news' | 'monitor';
   theme: 'dark' | 'light';
   privacyMode: boolean;
   composerText: string;
+
+  // Monitor
+  monitorEnabled: boolean;
+  monitorPersonCount: number;
+  monitorTargetProcesses: string[];
+  monitorAction: 'minimize' | 'close' | 'kill';
+  monitorCooldown: boolean;
 
   // Actions
   setStatus: (status: ConnectionStatus) => void;
@@ -61,13 +73,21 @@ interface ChatState {
   addMessage: (message: ChatMessage) => void;
   setUsers: (users: string[]) => void;
   setShowLogin: (show: boolean) => void;
-  setSidebarView: (view: 'rooms' | 'users' | 'news') => void;
+  setSidebarView: (view: 'rooms' | 'users' | 'news' | 'monitor') => void;
   setTheme: (theme: 'dark' | 'light') => void;
   toggleTheme: () => void;
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
   setComposerText: (value: string) => void;
   clearMessages: () => void;
+
+  // Monitor actions
+  setMonitorEnabled: (enabled: boolean) => void;
+  setMonitorPersonCount: (count: number) => void;
+  addMonitorTargetProcess: (name: string) => void;
+  removeMonitorTargetProcess: (name: string) => void;
+  setMonitorAction: (action: 'minimize' | 'close' | 'kill') => void;
+  setMonitorCooldown: (cooldown: boolean) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -85,6 +105,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   theme: 'dark',
   privacyMode: true,
   composerText: '',
+
+  // Monitor
+  monitorEnabled: false,
+  monitorPersonCount: 0,
+  monitorTargetProcesses: [],
+  monitorAction: 'minimize',
+  monitorCooldown: false,
 
   // Actions
   setStatus: (status) => set({ status }),
@@ -167,4 +194,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
   setComposerText: (value) => set({ composerText: value }),
   clearMessages: () => set({ messages: new Map() }),
+
+  // Monitor actions
+  setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
+  setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),
+  addMonitorTargetProcess: (name) => {
+    const { monitorTargetProcesses } = get();
+    if (!monitorTargetProcesses.includes(name)) {
+      set({ monitorTargetProcesses: [...monitorTargetProcesses, name] });
+    }
+  },
+  removeMonitorTargetProcess: (name) => {
+    const { monitorTargetProcesses } = get();
+    set({ monitorTargetProcesses: monitorTargetProcesses.filter((p) => p !== name) });
+  },
+  setMonitorAction: (action) => set({ monitorAction: action }),
+  setMonitorCooldown: (cooldown) => set({ monitorCooldown: cooldown }),
 }));

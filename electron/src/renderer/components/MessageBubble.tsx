@@ -32,12 +32,24 @@ export default function MessageBubble({ message, isMe }: MessageBubbleProps) {
         ? 'pm'
         : '';
 
+  const handleCopy = async () => {
+    try {
+      const text = showSender ? `${message.sender}: ${message.content}` : message.content;
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // no-op
+    }
+  };
+
   return (
     <div className="message">
       <span className="message-time">{formatTime(message.timestamp)}</span>
       <div className="message-content">
         {showSender && <span className={`message-sender ${senderClass}`}>{message.sender}</span>}
         <span className={`message-text ${textClass}`}>{message.content}</span>
+        <button className="message-copy" onClick={handleCopy} title="Copy">
+          Copy
+        </button>
       </div>
     </div>
   );

@@ -624,6 +624,7 @@ html, body, #root {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
+  gap: 6px;
 }
 
 .message-sender {
@@ -653,6 +654,7 @@ html, body, #root {
   word-break: break-word;
   flex: 1;
   min-width: 0;
+  user-select: text;
 }
 
 .message-text.system {
@@ -666,6 +668,27 @@ html, body, #root {
 
 .message-text.error {
   color: var(--vscode-error);
+}
+
+.message-copy {
+  opacity: 0;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-border);
+  background: var(--vscode-button-secondary);
+  color: var(--vscode-text-secondary);
+  font-size: 11px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.message:hover .message-copy {
+  opacity: 1;
+}
+
+.message-copy:hover {
+  color: var(--vscode-fg);
+  border-color: var(--vscode-focus);
 }
 
 /* ============================================================
@@ -1355,4 +1378,283 @@ html, body, #root {
 
 .cursor-pointer {
   cursor: pointer;
+}
+
+/* ============================================================
+   Monitor Panel
+   ============================================================ */
+
+.monitor-panel {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.monitor-section {
+  border-bottom: 1px solid var(--vscode-border-light);
+  padding-bottom: 10px;
+}
+
+.monitor-section:last-child {
+  border-bottom: none;
+}
+
+.monitor-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--vscode-sidebar-section-header);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.monitor-preview {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: 3px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+}
+
+.monitor-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.monitor-preview-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 120px;
+  color: var(--vscode-text-secondary);
+  font-size: 12px;
+}
+
+.monitor-error {
+  color: var(--vscode-error);
+  font-size: 11px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(244, 71, 71, 0.1);
+  border-radius: 3px;
+  border-left: 3px solid var(--vscode-error);
+}
+
+.monitor-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--vscode-text);
+  margin-bottom: 8px;
+}
+
+.monitor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-text-secondary);
+  flex-shrink: 0;
+}
+
+.monitor-dot.active {
+  background: var(--vscode-success);
+  box-shadow: 0 0 4px var(--vscode-success);
+}
+
+.monitor-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--vscode-text-secondary);
+}
+
+.monitor-count strong {
+  color: var(--vscode-success);
+}
+
+.monitor-count strong.danger {
+  color: var(--vscode-error);
+  animation: pulse 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+  from { opacity: 1; }
+  to { opacity: 0.5; }
+}
+
+.monitor-loading {
+  font-size: 11px;
+  color: var(--vscode-info);
+  margin-bottom: 8px;
+}
+
+.monitor-cooldown {
+  font-size: 11px;
+  color: var(--vscode-warning);
+  margin-bottom: 8px;
+}
+
+.monitor-btn {
+  width: 100%;
+  height: 28px;
+  background: var(--vscode-button);
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  border-radius: 2px;
+}
+
+.monitor-btn:hover {
+  background: var(--vscode-button-hover);
+}
+
+.monitor-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.monitor-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--vscode-fg);
+  cursor: pointer;
+}
+
+.monitor-radio input {
+  accent-color: var(--vscode-button);
+}
+
+.monitor-refresh-btn {
+  width: 20px;
+  height: 20px;
+  background: none;
+  border: none;
+  color: var(--vscode-text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+}
+
+.monitor-refresh-btn:hover {
+  background: var(--vscode-hover);
+  color: var(--vscode-fg);
+}
+
+.monitor-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.monitor-target-tag {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--vscode-badge);
+  color: var(--vscode-badge-fg);
+  font-size: 11px;
+  border-radius: 3px;
+}
+
+.monitor-target-remove {
+  background: none;
+  border: none;
+  color: var(--vscode-text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+
+.monitor-target-remove:hover {
+  color: var(--vscode-error);
+}
+
+.monitor-filter-input {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--vscode-input-bg);
+  border: 1px solid var(--vscode-input-border);
+  color: var(--vscode-fg);
+  font-size: 11px;
+  outline: none;
+  font-family: inherit;
+  border-radius: 2px;
+  margin-bottom: 6px;
+}
+
+.monitor-filter-input:focus {
+  border-color: var(--vscode-input-focus);
+}
+
+.monitor-filter-input::placeholder {
+  color: var(--vscode-input-placeholder);
+}
+
+.monitor-process-list {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--vscode-border-light);
+  border-radius: 2px;
+}
+
+.monitor-process-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--vscode-border-light);
+}
+
+.monitor-process-item:last-child {
+  border-bottom: none;
+}
+
+.monitor-process-item:hover {
+  background: var(--vscode-sidebar-hover);
+}
+
+.monitor-process-item.selected {
+  background: var(--vscode-selection);
+}
+
+.monitor-process-name {
+  color: var(--vscode-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.monitor-process-pid {
+  color: var(--vscode-text-secondary);
+  font-size: 10px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.monitor-hint {
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+  font-style: italic;
 }

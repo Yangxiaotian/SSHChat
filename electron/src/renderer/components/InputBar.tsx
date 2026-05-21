@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../store/chatStore';
 
 const COMMANDS = [
@@ -16,25 +16,67 @@ const COMMANDS = [
 ];
 
 export default function InputBar() {
-  const [suggestions, setSuggestions] = useState<typeof COMMANDS>([]);
+  type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' };
+  const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const { status, activeRoom, composerText, setComposerText } = useChatStore();
+  const HISTORY_KEY = 'sshchat:input-history:v1';
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setHistory(parsed.filter((item): item is string => typeof item === 'string').slice(0, 10));
+      }
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  const persistHistory = (next: string[]) => {
+    setHistory(next);
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+    } catch {
+      // no-op
+    }
+  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setComposerText(value);
-
-    // Show command suggestions
-    if (value.startsWith('/') && !value.includes(' ')) {
-      const filtered = COMMANDS.filter(cmd =>
-        cmd.name.startsWith(value.toLowerCase())
-      );
-      setSuggestions(filtered);
-      setShowSuggestions(filtered.length > 0 && value.length > 1);
-    } else {
-      setShowSuggestions(false);
+    const keyword = value.trim().toLowerCase();
+    const commandMatches =
+      value.startsWith('/') && !value.includes(' ')
+        ? COMMANDS.filter((cmd) => cmd.name.startsWith(value.toLowerCase())).map((cmd) => ({
+            value: cmd.name,
+            desc: cmd.desc,
+            source: 'command' as const,
+          }))
+        : [];
+    const historyMatches =
+      keyword.length > 0
+        ? history
+            .filter((item) => item.toLowerCase().includes(keyword))
+            .slice(0, 10)
+            .map((item) => ({
+              value: item,
+              desc: 'Recent input',
+              source: 'history' as const,
+            }))
+        : [];
+    const merged: SuggestionItem[] = [...commandMatches];
+    for (const item of historyMatches) {
+      if (!merged.find((v) => v.value === item.value)) {
+        merged.push(item);
+      }
     }
+    setSuggestions(merged.slice(0, 10));
+    setShowSuggestions(merged.length > 0 && keyword.length > 0);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -52,17 +94,24 @@ export default function InputBar() {
     if (!trimmed) return;
 
     await window.api.sendMessage(trimmed);
+    const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);
+    persistHistory(next);
     setComposerText('');
     setShowSuggestions(false);
   };
 
-  const handleSuggestionClick = (command: string) => {
-    setComposerText(command + ' ');
+  const handleSuggestionClick = (value: string, source: 'command' | 'history') => {
+    setComposerText(source === 'command' ? `${value} ` : value);
     setShowSuggestions(false);
     inputRef.current?.focus();
   };
 
   const isConnected = status === 'connected';
+  const triggerRoomShake = async () => {
+    if (!isConnected) return;
+    await window.api.shakeWindow();
+    await window.api.sendMessage('__VSCODEEN_SHAKE__');
+  };
 
   return (
     <div className="input-bar">
@@ -71,11 +120,11 @@ export default function InputBar() {
           <div className="command-suggestions">
             {suggestions.map((cmd) => (
               <div
-                key={cmd.name}
+                key={`${cmd.source}:${cmd.value}`}
                 className="command-item"
-                onClick={() => handleSuggestionClick(cmd.name)}
+                onClick={() => handleSuggestionClick(cmd.value, cmd.source)}
               >
-                <span className="command-name">{cmd.name}</span>
+                <span className="command-name">{cmd.value}</span>
                 <span className="command-desc">{cmd.desc}</span>
               </div>
             ))}
@@ -91,6 +140,14 @@ export default function InputBar() {
           placeholder={isConnected ? `Message #${activeRoom}...` : 'Not connected'}
           disabled={!isConnected}
         />
+        <button
+          className="send-button"
+          onClick={triggerRoomShake}
+          disabled={!isConnected}
+          title="Shake all clients in this room"
+        >
+          Shake
+        </button>
         <button
           className="send-button"
           onClick={handleSend}

@@ -2,6 +2,7 @@
 
 ## Update (2026-05)
 
+- **Monitor 功能（新增）**：左侧栏新增「M」图标，通过前置摄像头检测画面中的人数。当检测到 2 人及以上时，自动执行预设动作（最小化窗口 / 关闭应用 / 杀指定进程并最小化）。详见下方「Monitor 功能」章节。
 - Electron portable startup stability improved (runtime cache isolation, single-instance focus, preload diagnostics).
 - Room UX improved: join/remove in sidebar, keep room list unless manually removed, preserve per-room history when switching.
 - Game Workbench quick actions now fill command into the chat composer first, then send after manual confirm/edit.
@@ -111,8 +112,35 @@ cd electron
 npm run build:portable
 ```
 
-产物：`electron/release/VsCodeEn-portable.zip`  
+产物：`electron/release/VsCodeEn-portable.zip`
 解压后双击：`Start-VsCodeEn.cmd`
+
+### Monitor 功能
+
+左侧栏点击「M」图标打开监控面板。
+
+**使用方式：**
+
+1. 点击「Start Monitor」启动摄像头，首次启动会加载本地 AI 检测模型（约 5 秒）。
+2. 摄像头画面实时预览，系统自动检测画面中的人数并显示。
+3. 设置触发动作：
+   - **Minimize Window**：检测到 2 人及以上时，最小化当前窗口。
+   - **Close App**：检测到 2 人及以上时，直接退出应用。
+   - **Kill Processes + Minimize**：检测到 2 人及以上时，杀掉指定进程并最小化窗口。
+4. 如需杀指定进程，点击「↻」加载系统进程列表，点击选择目标进程。
+
+**安全与隐私：**
+
+- AI 模型（COCO-SSD）打包在本地，**不发起任何网络请求**，离线可用。
+- 摄像头画面仅在本地 `<video>` 元素中预览，**不写入磁盘、不上传、不缓存**。
+- 人数检测在内存中完成，仅保留数字结果，**不保存任何图像数据**。
+- 停止监控时，摄像头流、GPU 张量、模型资源全部释放。
+- 进程名经过正则校验（仅允许字母、数字、点、下划线、连字符），**防止命令注入**。
+
+**跨平台支持：**
+
+- Windows / macOS 均支持摄像头访问和进程管理。
+- macOS 首次使用时系统会弹出摄像头权限请求，需用户授权。
 
 ---
 

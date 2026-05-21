@@ -23,6 +23,7 @@ if (!(window as any).api) {
     requestUsers: async () => false,
     requestNews: async () => false,
     notifyAttention: async () => true,
+    shakeWindow: async () => true,
     onChatMessage: () => noopUnsub,
     onRoomUpdate: () => noopUnsub,
     onUserUpdate: () => noopUnsub,

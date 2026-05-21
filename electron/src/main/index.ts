@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
+import { exec } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
 import { parseServerLine, extractRoomsFromSystem, extractActiveRoom, extractUsersSnapshot, buildSendMessage } from './chat-protocol';
@@ -128,6 +129,25 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, ...args);
   }
+}
+
+function shakeMainWindow(): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  const base = mainWindow.getBounds();
+  const sequence = [-14, 14, -14, 14, -10, 10, 0];
+  sequence.forEach((offset, idx) => {
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.setBounds({ ...base, x: base.x + offset });
+      if (idx === sequence.length - 1) {
+        mainWindow.setBounds(base);
+      }
+    }, idx * 55);
+  });
+  return true;
 }
 
 function setupIPC(): void {
@@ -285,9 +305,92 @@ function setupIPC(): void {
     return true;
   });
 
+  ipcMain.handle(IPC_CHANNELS.SHAKE_WINDOW, () => {
+    return shakeMainWindow();
+  });
+
   // Get connection status
   ipcMain.handle('chat:is-connected', () => {
     return sshManager.isConnected();
+  });
+
+  // Monitor: get running processes
+  ipcMain.handle(IPC_CHANNELS.GET_PROCESSES, () => {
+    return new Promise<{ pid: number; name: string }[]>((resolve) => {
+      if (process.platform === 'win32') {
+        exec('tasklist /FO CSV /NH', (err, stdout) => {
+          if (err) { resolve([]); return; }
+          const processes: { pid: number; name: string }[] = [];
+          const seen = new Set<string>();
+          for (const line of stdout.split('\n')) {
+            const match = line.match(/^"([^"]+)","(\d+)"/);
+            if (match) {
+              const name = match[1];
+              const pid = parseInt(match[2], 10);
+              if (!seen.has(name)) {
+                seen.add(name);
+                processes.push({ pid, name });
+              }
+            }
+          }
+          processes.sort((a, b) => a.name.localeCompare(b.name));
+          resolve(processes);
+        });
+      } else {
+        // macOS/Linux: skip header line manually for portability
+        exec('ps -eo pid,comm', (err, stdout) => {
+          if (err) { resolve([]); return; }
+          const processes: { pid: number; name: string }[] = [];
+          const seen = new Set<string>();
+          const lines = stdout.split('\n');
+          for (let i = 1; i < lines.length; i++) {
+            const parts = lines[i].trim().split(/\s+/);
+            if (parts.length >= 2) {
+              const pid = parseInt(parts[0], 10);
+              const name = parts[1];
+              if (!isNaN(pid) && name && !seen.has(name)) {
+                seen.add(name);
+                processes.push({ pid, name });
+              }
+            }
+          }
+          processes.sort((a, b) => a.name.localeCompare(b.name));
+          resolve(processes);
+        });
+      }
+    });
+  });
+
+  // Monitor: kill process by name
+  ipcMain.handle(IPC_CHANNELS.KILL_PROCESS, (_event, processName: string) => {
+    return new Promise<boolean>((resolve) => {
+      // Validate process name: only allow alphanumeric, dots, underscores, hyphens
+      if (!/^[a-zA-Z0-9._-]+$/.test(processName)) {
+        resolve(false);
+        return;
+      }
+      const cmd = process.platform === 'win32'
+        ? `taskkill /F /IM "${processName}"`
+        : `pkill -f "${processName}"`;
+      exec(cmd, (err) => {
+        resolve(!err);
+      });
+    });
+  });
+
+  // Monitor: minimize current window
+  ipcMain.handle(IPC_CHANNELS.MINIMIZE_WINDOW, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.minimize();
+      return true;
+    }
+    return false;
+  });
+
+  // Monitor: close/quit app
+  ipcMain.handle(IPC_CHANNELS.CLOSE_APP, () => {
+    app.quit();
+    return true;
   });
 }
 

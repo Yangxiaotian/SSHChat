@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ConnectionConfig, ChatMessage, ConnectionStatus, IPC_CHANNELS } from '../shared/protocol';
+import { ConnectionConfig, ChatMessage, ConnectionStatus, ProcessInfo, IPC_CHANNELS } from '../shared/protocol';
 
 const api = {
   // Config
@@ -39,6 +39,23 @@ const api = {
   },
   notifyAttention: (): Promise<boolean> => {
     return ipcRenderer.invoke(IPC_CHANNELS.NOTIFY_ATTENTION);
+  },
+  shakeWindow: (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.SHAKE_WINDOW);
+  },
+
+  // Monitor
+  getProcesses: (): Promise<ProcessInfo[]> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_PROCESSES);
+  },
+  killProcess: (processName: string): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.KILL_PROCESS, processName);
+  },
+  minimizeWindow: (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.MINIMIZE_WINDOW);
+  },
+  closeApp: (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.CLOSE_APP);
   },
 
   // Event listeners

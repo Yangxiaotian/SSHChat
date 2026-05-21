@@ -59,3 +59,7 @@ mac:
   target:
     - dmg
     - zip
+  extendInfo:
+    NSCameraUsageDescription: "VsCodeEn needs camera access for monitor features."
+    NSMicrophoneUsageDescription: "VsCodeEn needs microphone access for communication."
+  entitlementsInherit: null

@@ -3,6 +3,7 @@ import { useChatStore } from '../store/chatStore';
 import RoomList from './RoomList';
 import UserList from './UserList';
 import NewsPanel from './NewsPanel';
+import MonitorPanel from './MonitorPanel';
 
 export default function Sidebar() {
   const { sidebarView, privacyMode } = useChatStore();
@@ -12,11 +13,13 @@ export default function Sidebar() {
         rooms: 'EXPLORER',
         users: 'TEAM',
         news: 'FEED',
+        monitor: 'WATCHER',
       }
     : {
         rooms: 'ROOMS',
         users: 'ONLINE USERS',
         news: 'NEWS',
+        monitor: 'MONITOR',
       };
 
   return (
@@ -26,6 +29,7 @@ export default function Sidebar() {
         {sidebarView === 'rooms' && <RoomList />}
         {sidebarView === 'users' && <UserList />}
         {sidebarView === 'news' && <NewsPanel />}
+        {sidebarView === 'monitor' && <MonitorPanel />}
       </div>
     </div>
   );
