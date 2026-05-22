@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -17,6 +17,7 @@ type Cell = {
 type Side = '#' | 'o';
 
 type StrategyId =
+  | 'auto'
   | 'master_balance'
   | 'killer_combo'
   | 'trap_double_three'
@@ -42,7 +43,8 @@ const SEARCH_DEPTH = 8;
 const TIME_LIMIT_MS = 2500;
 
 const STRATEGY_LABEL: Record<StrategyId, string> = {
-  master_balance: '大师均衡流（默认）',
+  auto: '智能自适应（推荐）',
+  master_balance: '大师均衡流',
   killer_combo: '必胜杀棋流（冲四做杀）',
   trap_double_three: '陷阱双三流（诱导反杀）',
   defense_counter: '铁壁反击流（先守后攻）',
@@ -60,6 +62,7 @@ const STRATEGY_LABEL: Record<StrategyId, string> = {
 // Standard openings for 15x15 Gomoku, 1-indexed [row, col]
 const OPENING_BOOK: Record<'#' | 'o', Record<StrategyId, Array<[number, number]>>> = {
   '#': {
+    auto: [[8, 8], [8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [6, 8], [10, 8]],
     master_balance: [[8, 8], [8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [6, 8], [10, 8]],
     killer_combo: [[8, 8], [8, 9], [9, 8], [7, 8], [8, 10], [10, 8], [9, 9], [6, 8], [7, 10], [10, 7]],
     trap_double_three: [[8, 8], [7, 8], [9, 8], [8, 7], [8, 9], [7, 9], [9, 7], [7, 7], [9, 9], [6, 8], [10, 8]],
@@ -74,6 +77,7 @@ const OPENING_BOOK: Record<'#' | 'o', Record<StrategyId, Array<[number, number]>
     opening_yuyue: [[8, 8], [7, 8], [8, 9], [9, 7], [7, 7], [8, 6], [9, 9], [10, 8], [6, 8], [7, 10]],
   },
   o: {
+    auto: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [9, 7], [7, 9], [10, 8], [6, 8]],
     master_balance: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [9, 7], [7, 9], [10, 8], [6, 8]],
     killer_combo: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [10, 8], [8, 10], [6, 8], [10, 7]],
     trap_double_three: [[7, 8], [9, 8], [8, 7], [8, 9], [7, 9], [9, 7], [7, 7], [9, 9], [10, 8], [6, 8]],
@@ -392,6 +396,7 @@ const STRATEGY_WEIGHTS: Record<StrategyId, {
   myFive: number; myLiveFour: number; myDeadFour: number; myLiveThree: number; myDeadThree: number; myLiveTwo: number;
   oppFive: number; oppLiveFour: number; oppDeadFour: number; oppLiveThree: number; center: number;
 }> = {
+  auto: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 8000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -30 },
   master_balance: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 8000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -30 },
   killer_combo: { myFive: 100000000, myLiveFour: 55000000, myDeadFour: 1000000, myLiveThree: 600000, myDeadThree: 60000, myLiveTwo: 7000, oppFive: 90000000, oppLiveFour: 40000000, oppDeadFour: 650000, oppLiveThree: 350000, center: -25 },
   trap_double_three: { myFive: 100000000, myLiveFour: 48000000, myDeadFour: 900000, myLiveThree: 700000, myDeadThree: 90000, myLiveTwo: 20000, oppFive: 88000000, oppLiveFour: 42000000, oppDeadFour: 700000, oppLiveThree: 380000, center: -28 },
@@ -748,30 +753,173 @@ function findBestMove(board: number[][], side: Side, strategy: StrategyId): Move
   return { row: bestMove[0] + 1, col: bestMove[1] + 1, score: bestScore, reasons };
 }
 
+// ── Dynamic Position Analysis ──────────────────────────────────────
+
+type GamePhase = 'opening' | 'early_mid' | 'middlegame' | 'late_mid' | 'endgame';
+
+type PositionAssessment = {
+  phase: GamePhase;
+  myThreatLevel: number;     // 0-10: how many threats I have
+  oppThreatLevel: number;    // 0-10: how many threats opponent has
+  advantage: number;         // negative = behind, 0 = even, positive = ahead
+  criticalDefense: boolean;  // opponent has imminent winning threat
+  hasAttackContinuation: boolean; // I have forcing sequence
+  recommendedStrategy: StrategyId;
+  situationDesc: string;
+};
+
+function assessPosition(board: number[][], mySide: Side): PositionAssessment {
+  const myVal = mySide === '#' ? 1 : -1;
+  const oppVal = -myVal;
+  const n = moveCount(board);
+  const myP = countPatterns(board, myVal);
+  const oppP = countPatterns(board, oppVal);
+
+  // Phase detection
+  let phase: GamePhase;
+  if (n <= 6) phase = 'opening';
+  else if (n <= 20) phase = 'early_mid';
+  else if (n <= 60) phase = 'middlegame';
+  else if (n <= 100) phase = 'late_mid';
+  else phase = 'endgame';
+
+  // Threat level (0-10)
+  let myThreat = 0;
+  myThreat += myP.five * 10;
+  myThreat += myP.liveFour * 8;
+  myThreat += myP.deadFour * 4;
+  myThreat += myP.liveThree * 3;
+  myThreat += myP.deadThree * 1;
+  myThreat = Math.min(10, myThreat);
+
+  let oppThreat = 0;
+  oppThreat += oppP.five * 10;
+  oppThreat += oppP.liveFour * 8;
+  oppThreat += oppP.deadFour * 4;
+  oppThreat += oppP.liveThree * 3;
+  oppThreat += oppP.deadThree * 1;
+  oppThreat = Math.min(10, oppThreat);
+
+  // Advantage assessment
+  const advantage = myThreat - oppThreat;
+
+  // Critical defense needed?
+  const criticalDefense = oppP.five > 0 || oppP.liveFour > 0 || oppP.deadFour >= 2 || (oppP.deadFour > 0 && oppP.liveThree > 0);
+
+  // Attack continuation available?
+  const hasAttackContinuation = myP.five > 0 || myP.liveFour > 0 || myP.deadFour >= 2 || (myP.deadFour > 0 && myP.liveThree > 0) || myP.liveThree >= 2;
+
+  // Auto strategy selection
+  let recommendedStrategy: StrategyId;
+  let situationDesc: string;
+
+  if (phase === 'opening') {
+    // Opening: use a standard opening
+    recommendedStrategy = 'master_balance';
+    situationDesc = '开局阶段，按套路抢占要点。';
+  } else if (criticalDefense && !hasAttackContinuation) {
+    // Must defend
+    recommendedStrategy = 'defense_counter';
+    situationDesc = '对手攻势凶猛，转入防守反击。';
+  } else if (criticalDefense && hasAttackContinuation) {
+    // Both sides have threats - who moves first matters
+    recommendedStrategy = 'sente_play';
+    situationDesc = '双方均有威胁，抢先手是关键。';
+  } else if (oppThreat >= 5 && !hasAttackContinuation) {
+    // Opponent has strong initiative
+    recommendedStrategy = 'defense_counter';
+    situationDesc = '对手掌握主动，先稳固防守再寻反击。';
+  } else if (hasAttackContinuation && oppThreat <= 2) {
+    // I have strong attack, opponent is weak
+    recommendedStrategy = 'attack_focus';
+    situationDesc = '我方攻势占优，连续进攻不给喘息。';
+  } else if (myP.liveThree >= 2 || (myP.liveThree > 0 && myP.deadThree > 0)) {
+    // Multiple threes - trap strategy
+    recommendedStrategy = 'trap_double_three';
+    situationDesc = '多路活三布局，设陷阱诱导对手犯错。';
+  } else if (myThreat >= 4 && oppThreat >= 3) {
+    // Both have moderate threats - need initiative
+    recommendedStrategy = 'sente_play';
+    situationDesc = '形势胶着，保持先手不脱先是关键。';
+  } else if (phase === 'middlegame' && advantage >= 1) {
+    // Slight advantage in middlegame - build influence
+    recommendedStrategy = 'influence_play';
+    situationDesc = '中盘略优，构建厚势压缩对手空间。';
+  } else if (phase === 'endgame') {
+    // Endgame: every move is critical
+    recommendedStrategy = 'master_balance';
+    situationDesc = '终盘阶段，精确计算每一步。';
+  } else {
+    // Default: balanced play
+    recommendedStrategy = 'master_balance';
+    situationDesc = '形势平稳，均衡发展。';
+  }
+
+  return {
+    phase,
+    myThreatLevel: myThreat,
+    oppThreatLevel: oppThreat,
+    advantage,
+    criticalDefense,
+    hasAttackContinuation,
+    recommendedStrategy,
+    situationDesc,
+  };
+}
+
+function phaseLabel(phase: GamePhase): string {
+  const labels: Record<GamePhase, string> = {
+    opening: '开局',
+    early_mid: '序盘',
+    middlegame: '中盘',
+    late_mid: '中后盘',
+    endgame: '终盘',
+  };
+  return labels[phase];
+}
+
 // ── Strategy Suggestion (wraps the engine) ─────────────────────────
 
-function suggestMoves(board: number[][], mySide: Side, strategy: StrategyId): MoveEval[] {
+function suggestMoves(board: number[][], mySide: Side, strategy: StrategyId): { moves: MoveEval[]; assessment?: PositionAssessment } {
   const myVal = mySide === '#' ? 1 : -1;
+
+  // Auto mode: analyze position and pick best strategy
+  let effectiveStrategy = strategy;
+  let assessment: PositionAssessment | undefined;
+  if (strategy === 'auto') {
+    assessment = assessPosition(board, mySide);
+    effectiveStrategy = assessment.recommendedStrategy;
+  }
 
   // Opening book
   const n = moveCount(board);
   if (n <= 8) {
-    const plan = OPENING_BOOK[mySide][strategy] || OPENING_BOOK[mySide].master_balance;
+    const plan = OPENING_BOOK[mySide][effectiveStrategy] || OPENING_BOOK[mySide].master_balance;
     for (const [row, col] of plan) {
       const r = row - 1, c = col - 1;
       if (!inside(r, c) || board[r][c] !== 0) continue;
       if (n === 0 || hasNeighbor(board, r, c, 3)) {
-        return [{
-          row, col, score: 80000000,
-          reasons: ['按开局套路推进，抢占关键形点。'],
-        }];
+        return {
+          moves: [{
+            row, col, score: 80000000,
+            reasons: assessment
+              ? [assessment.situationDesc, '按开局套路推进，抢占关键形点。']
+              : ['按开局套路推进，抢占关键形点。'],
+          }],
+          assessment,
+        };
       }
     }
   }
 
   // Find the best move via search
-  const best = findBestMove(board, mySide, strategy);
-  if (!best) return [];
+  const best = findBestMove(board, mySide, effectiveStrategy);
+  if (!best) return { moves: [], assessment };
+
+  // Prepend situation analysis to first move reasons
+  if (assessment) {
+    best.reasons = [assessment.situationDesc, ...best.reasons];
+  }
 
   // Generate top-3 alternatives for display
   const results: MoveEval[] = [best];
@@ -781,7 +929,7 @@ function suggestMoves(board: number[][], mySide: Side, strategy: StrategyId): Mo
     if (r === best.row - 1 && c === best.col - 1) continue;
 
     board[r][c] = myVal;
-    const score = evaluateWithStrategy(board, strategy);
+    const score = evaluateWithStrategy(board, effectiveStrategy);
     board[r][c] = 0;
 
     const reasons: string[] = [];
@@ -796,14 +944,12 @@ function suggestMoves(board: number[][], mySide: Side, strategy: StrategyId): Mo
     results.push({ row: r + 1, col: c + 1, score, reasons });
   }
 
-  return results;
+  return { moves: results, assessment };
 }
 
 // ── Component ──────────────────────────────────────────────────────
 
 export default function GomokuPanel({ disabled, nickname, boardText, onPick }: Props) {
-  const [strategy, setStrategy] = useState<StrategyId>('master_balance');
-
   const cells = useMemo(() => {
     try {
       const parsed = parseBoard(boardText);
@@ -838,15 +984,15 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     }
   }, [cells]);
 
-  const moves = useMemo(() => {
-    if (!mySide) return [];
+  const { moves, assessment } = useMemo(() => {
+    if (!mySide) return { moves: [] as MoveEval[] };
     try {
-      return suggestMoves(board, mySide, strategy);
+      return suggestMoves(board, mySide, 'auto');
     } catch (e) {
       console.error('[GomokuPanel] suggestMoves failed:', e);
-      return [];
+      return { moves: [] as MoveEval[] };
     }
-  }, [board, mySide, strategy]);
+  }, [board, mySide]);
 
   const isHiddenMaster = nickname === 'zouyu';
 
@@ -863,29 +1009,20 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
         {mySide ? (
           <>
             <div className="game-advisor-detail">
-              你当前执{mySide === '#' ? '黑' : '白'}。当前落子方：{turnSide === '#' ? '黑' : turnSide === 'o' ? '白' : '未知'}。
+              执{mySide === '#' ? '黑' : '白'} · 当前落子方：{turnSide === '#' ? '黑' : turnSide === 'o' ? '白' : '未知'}
             </div>
-            <div className="game-chip-row" style={{ marginTop: 6 }}>
-              <select
-                className="monitor-input"
-                value={strategy}
-                onChange={(e) => setStrategy(e.target.value as StrategyId)}
-                disabled={disabled}
-              >
-                <option value="master_balance">{STRATEGY_LABEL.master_balance}</option>
-                <option value="killer_combo">{STRATEGY_LABEL.killer_combo}</option>
-                <option value="trap_double_three">{STRATEGY_LABEL.trap_double_three}</option>
-                <option value="defense_counter">{STRATEGY_LABEL.defense_counter}</option>
-                <option value="attack_focus">{STRATEGY_LABEL.attack_focus}</option>
-                <option value="sente_play">{STRATEGY_LABEL.sente_play}</option>
-                <option value="influence_play">{STRATEGY_LABEL.influence_play}</option>
-                <option value="opening_tianyuan">{STRATEGY_LABEL.opening_tianyuan}</option>
-                <option value="opening_star">{STRATEGY_LABEL.opening_star}</option>
-                <option value="opening_diagonal">{STRATEGY_LABEL.opening_diagonal}</option>
-                <option value="opening_huayue">{STRATEGY_LABEL.opening_huayue}</option>
-                <option value="opening_yuyue">{STRATEGY_LABEL.opening_yuyue}</option>
-              </select>
-            </div>
+            {assessment && (
+              <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(255,255,255,0.05)', borderRadius: 4, fontSize: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                  局势分析：{phaseLabel(assessment.phase)} · {assessment.situationDesc}
+                </div>
+                <div>
+                  我方威胁 {assessment.myThreatLevel}/10 · 对手威胁 {assessment.oppThreatLevel}/10 ·
+                  {assessment.advantage > 0 ? ' 优势' : assessment.advantage < 0 ? ' 劣势' : ' 均势'}
+                  {' → '}当前策略：<strong>{STRATEGY_LABEL[assessment.recommendedStrategy]}</strong>
+                </div>
+              </div>
+            )}
             {moves.length > 0 && (
               <div className="game-chip-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
                 {moves.map((m, idx) => (
@@ -896,14 +1033,16 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                     onClick={() => onPick(m.row, m.col)}
                     title={m.reasons.join('；')}
                   >
-                    建议{idx + 1}：{m.row},{m.col}
+                    {idx === 0 ? '首选' : `备选${idx}`}：({m.row},{m.col})
                   </button>
                 ))}
               </div>
             )}
             {moves[0] && (
-              <div className="game-workbench-hint" style={{ marginTop: 6 }}>
-                首选：第 {moves[0].row} 行，第 {moves[0].col} 列 — {moves[0].reasons.join('；')}
+              <div style={{ marginTop: 6, padding: '4px 8px', background: 'rgba(255,255,255,0.03)', borderRadius: 4, fontSize: 12 }}>
+                <strong>推荐落子：第 {moves[0].row} 行，第 {moves[0].col} 列</strong>
+                <br />
+                理由：{moves[0].reasons.join('；')}
               </div>
             )}
           </>
