@@ -1,10 +1,52 @@
-import React, { useEffect, useState } from 'react';
+import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { useChatStore } from './store/chatStore';
 import ActivityBar from './components/ActivityBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import StatusBar from './components/StatusBar';
 import LoginDialog from './components/LoginDialog';
+
+type BoundaryState = {
+  hasError: boolean;
+  message: string;
+};
+
+class RendererErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> {
+  state: BoundaryState = {
+    hasError: false,
+    message: '',
+  };
+
+  static getDerivedStateFromError(error: unknown): BoundaryState {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    // Keep details in terminal for troubleshooting white-screen issues.
+    console.error('[RendererErrorBoundary]', error, errorInfo.componentStack);
+  }
+
+  private onReload = () => {
+    window.location.reload();
+  };
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+    return (
+      <div style={{ padding: 20, color: '#ddd', background: '#1e1e1e', height: '100vh' }}>
+        <h3 style={{ marginTop: 0 }}>界面异常已拦截</h3>
+        <p>已避免白屏。请点击“重载界面”恢复。</p>
+        <pre style={{ whiteSpace: 'pre-wrap', color: '#f2c08a' }}>{this.state.message || '未知错误'}</pre>
+        <button className="mini-btn" onClick={this.onReload}>重载界面</button>
+      </div>
+    );
+  }
+}
 
 export default function App() {
   const { status, showLogin, theme, privacyMode, activeRoom } = useChatStore();
@@ -101,25 +143,27 @@ export default function App() {
   }, [theme, privacyMode]);
 
   return (
-    <div className="app-container">
-      <div className="titlebar">
-        <span className="titlebar-icon">{'</>'}</span>
-        <span className="titlebar-title">
-          {privacyMode ? 'VsCodeEn' : `SSHChat${status === 'connected' ? '' : ' (Offline)'}`}
-        </span>
-      </div>
+    <RendererErrorBoundary>
+      <div className="app-container">
+        <div className="titlebar">
+          <span className="titlebar-icon">{'</>'}</span>
+          <span className="titlebar-title">
+            {privacyMode ? 'VsCodeEn' : `SSHChat${status === 'connected' ? '' : ' (Offline)'}`}
+          </span>
+        </div>
 
-      <div className="main-content">
-        <ActivityBar
-          onToggleSidebar={() => setSidebarVisible(!sidebarVisible)}
-          sidebarVisible={sidebarVisible}
-        />
-        {sidebarVisible && <Sidebar />}
-        <ChatArea />
-      </div>
+        <div className="main-content">
+          <ActivityBar
+            onToggleSidebar={() => setSidebarVisible(!sidebarVisible)}
+            sidebarVisible={sidebarVisible}
+          />
+          {sidebarVisible && <Sidebar />}
+          <ChatArea />
+        </div>
 
-      <StatusBar />
-      {showLogin && <LoginDialog />}
-    </div>
+        <StatusBar />
+        {showLogin && <LoginDialog />}
+      </div>
+    </RendererErrorBoundary>
   );
 }

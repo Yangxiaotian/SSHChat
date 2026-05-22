@@ -2,6 +2,8 @@ node_modules/
 dist/
 release/
 *.log
+_dev_*.out
+_dev_*.err
 .DS_Store
 Thumbs.db
 .env

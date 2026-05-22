@@ -116,6 +116,22 @@ function inferOpenGame(lines: string[]): GameKind {
   return 'none';
 }
 
+function findLastIndex(lines: string[], predicate: (line: string) => boolean): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (predicate(lines[i])) return i;
+  }
+  return -1;
+}
+
+function hasFreshNoActiveGame(allLines: string[]): boolean {
+  const noGameIdx = findLastIndex(allLines, (l) => /本房没有进行中的对局/.test(l));
+  if (noGameIdx < 0) return false;
+  const activeSignalIdx = findLastIndex(allLines, (l) =>
+    /开了一局|当前房间正在进行|对局状态|状态[:：]\s*(进行中|等待开始|已结束)|state:\s*(playing|waiting|ended)/i.test(l),
+  );
+  return noGameIdx > activeSignalIdx;
+}
+
 function gameLabel(game: GameKind): string {
   const map: Record<GameKind, string> = {
     none: '游戏',
@@ -379,14 +395,21 @@ export default function GameWorkbench() {
     const allLines = roomMessages
       .filter((m) => m.type === 'system' || m.type === 'game')
       .map((m) => m.content);
-    const gameLines = allLines.filter(isLikelyGameLine);
+
+    if (hasFreshNoActiveGame(allLines)) {
+      return { board: '', game: 'none' as GameKind, systemLines: allLines };
+    }
+
+    const noGameIdx = findLastIndex(allLines, (l) => /本房没有进行中的对局/.test(l));
+    const scopedLines = noGameIdx >= 0 ? allLines.slice(noGameIdx + 1) : allLines;
+    const gameLines = scopedLines.filter(isLikelyGameLine);
     const parsed = extractBoardBlock(gameLines);
     if (parsed.game === 'none' && parsed.board) {
-      return { board: parsed.board, game: detectGameKind(parsed.board), systemLines: allLines };
+      return { board: parsed.board, game: detectGameKind(parsed.board), systemLines: scopedLines };
     }
-    if (parsed.game !== 'none') return { ...parsed, systemLines: allLines };
-    const openGame = inferOpenGame(allLines);
-    return { board: parsed.board, game: openGame, systemLines: allLines };
+    if (parsed.game !== 'none') return { ...parsed, systemLines: scopedLines };
+    const openGame = inferOpenGame(scopedLines);
+    return { board: parsed.board, game: openGame, systemLines: scopedLines };
   }, [roomMessages]);
   const advisor = useMemo(
     () => buildAdvisor(game, board, systemLines, nickname),
