@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore } from '../store/chatStore';
 import ChessPanel from './games/ChessPanel';
 import GomokuPanel from './games/GomokuPanel';
@@ -13,9 +13,9 @@ import { GameKind } from './games/types';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
-  if (t.includes('chess')) return 'chess';
-  if (t.includes('gomoku')) return 'gomoku';
-  if (t.includes('xiangqi') || t.includes('cchess')) return 'xiangqi';
+  if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
+  if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
+  if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
   if (t.includes('holdem') || t.includes('texas') || t.includes('poker') || t.includes('德州')) return 'holdem';
@@ -25,7 +25,7 @@ function detectGameKind(text: string): GameKind {
 }
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou'];
+  const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '中国象棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -53,6 +53,8 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
 }
 
 function isLikelyGameLine(line: string): boolean {
+  if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
+  if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)| [#.o] ){5,}/.test(line)) return true;
   const t = line.trim().toLowerCase();
   if (!t) return false;
   const keywords = [
@@ -65,16 +67,33 @@ function isLikelyGameLine(line: string): boolean {
     'sanguo',
     'werewolf',
     'state:',
+    '状态：',
     'turn:',
+    '轮到：',
     'street:',
+    '阶段：',
     'pot=',
+    '底池=',
+    '当前注=',
     'row1:',
     'row2:',
     'row3:',
     'row4:',
+    '第1行：',
+    '第2行：',
+    '第3行：',
+    '第4行：',
     'your hand',
     '你的手牌',
     '公共牌',
+    '国际象棋',
+    '五子棋',
+    '中国象棋',
+    '德州扑克',
+    '炸金花',
+    '牛头王',
+    '当前房间正在进行',
+    '可直接加入',
     '开了一局',
     '对局',
   ];
@@ -84,7 +103,11 @@ function isLikelyGameLine(line: string): boolean {
 function inferOpenGame(lines: string[]): GameKind {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (!line.includes('开了一局') && !line.includes(' state:') && !line.includes('对局')) {
+    const isOpenLine =
+      /开了一局/i.test(line) ||
+      /(对局状态|状态[:：])/.test(line) ||
+      /当前房间正在进行/.test(line);
+    if (!isOpenLine) {
       continue;
     }
     const kind = detectGameKind(line);
@@ -116,14 +139,14 @@ function parseTurnName(board: string): string {
 
 function inSeats(board: string, nickname: string): boolean {
   const esc = nickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`^#\\d+\\s+${esc}:`, 'm');
+  const re = new RegExp(`^#\\d+\\s+${esc}[:：]`, 'm');
   return re.test(board);
 }
 
 function hostName(board: string): string {
-  const line = board.split('\n').find((l) => /^#1\s+[^:]+:/.test(l.trim()));
+  const line = board.split('\n').find((l) => /^#1\s+[^:：]+[:：]/.test(l.trim()));
   if (!line) return '';
-  const m = line.trim().match(/^#1\s+([^:]+):/);
+  const m = line.trim().match(/^#1\s+([^:：]+)[:：]/);
   return m ? m[1].trim() : '';
 }
 
@@ -143,19 +166,49 @@ function gameMoveHint(game: GameKind): string {
 }
 
 function latestIssue(lines: string[]): string {
-  for (let i = lines.length - 1; i >= 0; i--) {
+  const tailStart = Math.max(0, lines.length - 80);
+  let seenFreshBoard = false;
+  for (let i = lines.length - 1; i >= tailStart; i--) {
     const l = lines[i];
+    if (
+      l.includes('状态：') ||
+      l.includes('轮到：') ||
+      l.includes('公共牌') ||
+      l.includes('底池=') ||
+      l.includes('第1行：') ||
+      l.includes('row1:')
+    ) {
+      seenFreshBoard = true;
+    }
     if (
       l.includes('执行失败') ||
       l.includes('未知游戏') ||
-      l.includes('not your turn') ||
+      l.includes('用法：') ||
+      l.includes('积分不足') ||
       l.includes('not enough') ||
       l.includes('usage:')
     ) {
-      return l;
+      if (!seenFreshBoard) return l;
+      return '';
     }
   }
   return '';
+}
+
+function extractPlayerStats(board: string): Array<{ name: string; label: string; value: number }> {
+  const out: Array<{ name: string; label: string; value: number }> = [];
+  for (const line of board.split('\n')) {
+    const score = line.match(/^#\d+\s+([^:：]+)[:：]\s+积分=(\d+)/);
+    if (score) {
+      out.push({ name: score[1].trim(), label: '积分', value: Number(score[2]) });
+      continue;
+    }
+    const bull = line.match(/^\-\s+([^:：]+)[:：]\s+牛头=(\d+)/);
+    if (bull) {
+      out.push({ name: bull[1].trim(), label: '牛头', value: Number(bull[2]) });
+    }
+  }
+  return out;
 }
 
 type Advisor = {
@@ -201,7 +254,7 @@ function buildAdvisor(game: GameKind, board: string, systemLines: string[], nick
       secondaryLabel: '显示局面',
     };
   }
-  const stateLine = board.split('\n').find((l) => l.includes('state:')) || '';
+  const stateLine = board.split('\n').find((l) => l.includes('state:') || l.includes('状态：')) || '';
   const turn = parseTurnName(board);
   const joined = inSeats(board, nickname);
   if (!joined) {
@@ -215,7 +268,7 @@ function buildAdvisor(game: GameKind, board: string, systemLines: string[], nick
       secondaryLabel: '查看席位',
     };
   }
-  if (stateLine.includes('waiting')) {
+  if (stateLine.includes('waiting') || stateLine.includes('等待开始')) {
     const host = hostName(board);
     if (host && host === nickname) {
       return {
@@ -231,6 +284,27 @@ function buildAdvisor(game: GameKind, board: string, systemLines: string[], nick
     return {
       title: '已加入，等待房主开始',
       detail: host ? `当前房主：${host}` : '可用“查看席位”确认房主。',
+      level: 'warn',
+      primaryCmd: '/game seats',
+      primaryLabel: '查看席位',
+    };
+  }
+  if (stateLine.includes('ended') || stateLine.includes('已结束')) {
+    const host = hostName(board);
+    if (host && host === nickname) {
+      return {
+        title: '本局已结束，可立即发牌开始下一局',
+        detail: '将沿用当前席位玩家进行新一局。',
+        level: 'info',
+        primaryCmd: '/game move start',
+        primaryLabel: '发牌开始',
+        secondaryCmd: '/game seats',
+        secondaryLabel: '查看席位',
+      };
+    }
+    return {
+      title: '本局已结束，等待房主发牌',
+      detail: host ? `当前房主：${host}` : '可先查看席位确认房主。',
       level: 'warn',
       primaryCmd: '/game seats',
       primaryLabel: '查看席位',
@@ -294,10 +368,11 @@ const gameTips: Record<GameKind, string> = {
 };
 
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode, status, setComposerText, users, nickname } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, users, nickname } = useChatStore();
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const syncRoomRef = useRef('');
 
   const roomMessages = messages.get(activeRoom) || [];
   const { board, game, systemLines } = useMemo(() => {
@@ -305,7 +380,7 @@ export default function GameWorkbench() {
       .filter((m) => m.type === 'system' || m.type === 'game')
       .map((m) => m.content);
     const gameLines = allLines.filter(isLikelyGameLine);
-    const parsed = extractBoardBlock(gameLines.length > 0 ? gameLines : allLines);
+    const parsed = extractBoardBlock(gameLines);
     if (parsed.game === 'none' && parsed.board) {
       return { board: parsed.board, game: detectGameKind(parsed.board), systemLines: allLines };
     }
@@ -319,20 +394,42 @@ export default function GameWorkbench() {
   );
   const cleanBoard = useMemo(() => sanitizeBoard(board), [board]);
   const hasBoard = cleanBoard.length > 0;
+  const playerStats = useMemo(() => extractPlayerStats(cleanBoard), [cleanBoard]);
 
   const send = async (cmd: string) => {
     if (status !== 'connected') return false;
     return window.api.sendMessage(cmd);
   };
 
+  const shouldRefreshAfter = (cmd: string): boolean => {
+    const t = cmd.trim().toLowerCase();
+    if (!t.startsWith('/game')) return false;
+    if (t === '/game show' || t === '/game help' || t === '/game list') return false;
+    return true;
+  };
+
+  useEffect(() => {
+    if (status !== 'connected') {
+      syncRoomRef.current = '';
+      return;
+    }
+    if (syncRoomRef.current === activeRoom) return;
+    syncRoomRef.current = activeRoom;
+    void send('/game show');
+    void send('/game list');
+  }, [activeRoom, status]);
+
   const sendMove = async (payload: string) => {
     const text = payload.trim();
     if (!text) return;
     if (text.startsWith('/')) {
       await send(text);
+      if (shouldRefreshAfter(text)) await send('/game show');
       return;
     }
-    await send(GameCommandFactory.move(text));
+    const cmd = GameCommandFactory.move(text);
+    await send(cmd);
+    if (shouldRefreshAfter(cmd)) await send('/game show');
   };
 
   const onMove = async () => {
@@ -340,10 +437,10 @@ export default function GameWorkbench() {
     if (!t) return;
     const cmd = t.startsWith('/') ? t : GameCommandFactory.move(t);
     await send(cmd);
+    if (shouldRefreshAfter(cmd)) await send('/game show');
     setMoveText('');
   };
 
-  const fillToComposer = (cmd: string) => setComposerText(`${cmd} `);
   const disabled = status !== 'connected';
 
   return (
@@ -351,18 +448,18 @@ export default function GameWorkbench() {
       <div className="game-workbench-header">
         <span>{privacyMode ? '诊断视图' : '游戏工作台'} · 当前：{gameLabel(game)}</span>
         <div className="game-workbench-actions">
-          <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game show')}>显示局面</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game help')}>玩法帮助</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game list')}>可玩列表</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => send('/game show')}>显示局面</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => send('/game help')}>玩法帮助</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => send('/game list')}>可玩列表</button>
           {game !== 'none' && (
-            <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer('/game end')}>结束对局</button>
+            <button className="mini-btn" disabled={disabled} onClick={() => send('/game end')}>结束对局</button>
           )}
         </div>
       </div>
 
       <div className="game-workbench-quick">
         {quickByGame[game].map((q) => (
-          <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => fillToComposer(q.cmd)}>
+          <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => send(q.cmd)}>
             {q.label}
           </button>
         ))}
@@ -373,12 +470,12 @@ export default function GameWorkbench() {
         <div className="game-advisor-detail">{advisor.detail}</div>
         <div className="game-advisor-actions">
           {advisor.primaryCmd && advisor.primaryLabel && (
-            <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer(advisor.primaryCmd)}>
+            <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.primaryCmd!)}>
               {advisor.primaryLabel}
             </button>
           )}
           {advisor.secondaryCmd && advisor.secondaryLabel && (
-            <button className="mini-btn" disabled={disabled} onClick={() => fillToComposer(advisor.secondaryCmd)}>
+            <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.secondaryCmd!)}>
               {advisor.secondaryLabel}
             </button>
           )}
@@ -386,15 +483,23 @@ export default function GameWorkbench() {
       </div>
 
       {game === 'chess' && <ChessPanel disabled={disabled} users={users} sendMove={sendMove} />}
-      {game === 'gomoku' && <GomokuPanel disabled={disabled} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
+      {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
       {game === 'xiangqi' && <XiangqiPanel disabled={disabled} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
 
       {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
       {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
 
-      {game === 'holdem' && <HoldemPanel disabled={disabled} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
-      {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} boardText={board} />} 
-      {game === 'niutou' && <NiuTouPanel disabled={disabled} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+      {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
+      {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />} 
+      {game === 'niutou' && <NiuTouPanel disabled={disabled} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+
+      {playerStats.length > 0 && (
+        <div className="game-chip-row">
+          {playerStats.map((s) => (
+            <span key={`${s.name}-${s.label}`} className="game-workbench-hint">{s.name}：{s.label} {s.value}</span>
+          ))}
+        </div>
+      )}
 
       <div className="game-workbench-toolbar">
         <span className="game-workbench-hint-inline">同一房间同一时刻仅允许一场进行中的对局</span>
