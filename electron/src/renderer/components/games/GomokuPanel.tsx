@@ -93,12 +93,12 @@ const OPENING_BOOK: Record<'#' | 'o', Record<StrategyId, Array<[number, number]>
   },
 };
 
-// ── Board Parsing (unchanged) ──────────────────────────────────────
+// ── Board Parsing ──────────────────────────────────────────────────
 
 function parseTurnName(boardText: string): string {
   for (const line of boardText.split('\n')) {
     const t = line.trim();
-    const m = t.match(/^轮到\s+(黑|白)方\s+(.+)\s+落子$/);
+    const m = t.match(/^轮到\s+(黑|白)方\s+(.+?)\s*落子/);
     if (m) return m[2].trim();
   }
   return '';
@@ -107,7 +107,7 @@ function parseTurnName(boardText: string): string {
 function parseTurnSide(boardText: string): Side | null {
   for (const line of boardText.split('\n')) {
     const t = line.trim();
-    const m = t.match(/^轮到\s+(黑|白)方\s+.+\s+落子$/);
+    const m = t.match(/^轮到\s+(黑|白)方/);
     if (m) return m[1] === '黑' ? '#' : 'o';
   }
   return null;
@@ -118,29 +118,31 @@ function parseSeatedSides(boardText: string): { blackName: string; whiteName: st
   let whiteName = '';
   for (const raw of boardText.split('\n')) {
     const line = raw.trim();
-    const m1 = line.match(/黑：(.+?)\s+白：(.+)$/);
-    if (m1) {
-      blackName = m1[1].trim();
-      whiteName = m1[2].trim();
-      break;
-    }
-    const m2 = line.match(/^黑方（先手）：(.+)$/);
-    const m3 = line.match(/^白方：(.+)$/);
-    if (m2) blackName = m2[1].trim();
-    if (m3) whiteName = m3[1].trim();
+    // Format 1: "黑（先手）：Alice    白：Bob"
+    // Format 2: "黑：Alice    白：Bob"
+    const mBlack = line.match(/黑(?:（先手）)?[：:]\s*(\S+)/);
+    const mWhite = line.match(/白[：:]\s*(\S+)/);
+    if (mBlack) blackName = mBlack[1].trim();
+    if (mWhite) whiteName = mWhite[1].trim();
+    if (blackName && whiteName) break;
   }
   return { blackName, whiteName };
 }
 
+// Parse board from server format. Each cell is 3 chars: " # ", " o ", " . ", "(#)", "(o)".
 function parseBoard(boardText: string): Cell[][] {
   const lines = boardText.split('\n');
-  const rowLines = lines.filter((l) => /^\s*\d+\s+.*[.#o(]/.test(l));
-  if (rowLines.length < BOARD_SIZE) return [];
 
-  const header = lines.find((l) => /^\s+\d+\s+\d+/.test(l));
-  const headerCols = (header?.match(/\d+/g) || []).map((n) => Number(n));
+  // Find header line with column numbers (e.g., "   15 14 13 ... 2  1")
+  const headerLine = lines.find((l) => /^\s+\d+\s+\d+/.test(l));
+  if (!headerLine) return [];
+  const headerCols = (headerLine.match(/\d+/g) || []).map((n) => Number(n));
   if (headerCols.length !== BOARD_SIZE) return [];
   const flipped = headerCols[0] > headerCols[headerCols.length - 1];
+
+  // Find row lines: start with a row number, then 15 cells of 3 chars each
+  const rowLines = lines.filter((l) => /^\s*\d+\s/.test(l) && l.length > 40);
+  if (rowLines.length < BOARD_SIZE) return [];
 
   const out: Cell[][] = [];
   for (const rowLine of rowLines.slice(0, BOARD_SIZE)) {
@@ -149,21 +151,22 @@ function parseBoard(boardText: string): Cell[][] {
     const rowNum = Number(rowMatch[1]);
     const mappedRow = flipped ? BOARD_SIZE + 1 - rowNum : rowNum;
     const payload = rowLine.slice(rowMatch[0].length);
-    const tokens = payload.match(/\(#\)|\(o\)|\(\.\)|[#.o]/g);
-    if (!tokens || tokens.length !== BOARD_SIZE) continue;
 
-    out.push(
-      tokens.map((token, idx) => {
-        const last = token.startsWith('(');
-        const plain = (last ? token[1] : token[0]) as '#' | 'o' | '.';
-        return {
-          stone: plain === '#' || plain === 'o' ? plain : '.',
-          last,
-          row: mappedRow,
-          col: headerCols[idx],
-        };
-      }),
-    );
+    // Each cell is exactly 3 characters: " # ", " o ", " . ", "(#)", "(o)", "(.)"
+    const cells: Cell[] = [];
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      const chunk = payload.slice(i * 3, i * 3 + 3);
+      if (chunk.length < 3) break;
+      const last = chunk[0] === '(';
+      const plain = chunk[1] as '#' | 'o' | '.';
+      cells.push({
+        stone: plain === '#' || plain === 'o' ? plain : '.',
+        last,
+        row: mappedRow,
+        col: headerCols[i],
+      });
+    }
+    if (cells.length === BOARD_SIZE) out.push(cells);
   }
   return out.length === BOARD_SIZE ? out : [];
 }
