@@ -491,7 +491,6 @@ function genCandidates(board: number[][], limit: number): Array<[number, number]
 // Searches for forced-win sequences using only threat moves (fours).
 
 function findWinFour(board: number[][], side: number): [number, number] | null {
-  const opp = -side;
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       if (board[r][c] !== 0) continue;
@@ -533,9 +532,7 @@ function findMyFours(board: number[][], side: number): Array<[number, number]> {
 }
 
 function findMyThreats(board: number[][], side: number): Array<[number, number]> {
-  // Threats: moves that create a dead four (forcing response)
   const threats: Array<[number, number]> = [];
-  const opp = -side;
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       if (board[r][c] !== 0) continue;
