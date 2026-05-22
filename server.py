@@ -197,7 +197,7 @@ def broadcast_game(room: str, lines) -> None:
 
 
 def send_oriented_boards(room: str, game) -> None:
-    """Send full board view; second seat sees flipped board (己方在下)."""
+    """Send full board view; chess/xiangqi second seat sees flipped board (己方在下)."""
     with lock:
         targets = [c for c in list(rooms.get(room, ())) if c in clients]
     for conn in targets:

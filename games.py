@@ -614,7 +614,7 @@ def _gomoku_render(
                 row_cells.append(f"({ch})")
             else:
                 row_cells.append(f" {ch} ")
-        label = (GOMOKU_SIZE - r) if flip else (r + 1)
+        label = r + 1  # global row; board may flip for 己方在下, coords stay 1,1 top-left
         lines.append(f"{label:>2} " + "".join(row_cells))
     lines.append(hdr)
     if last is not None:
@@ -698,7 +698,7 @@ class GomokuGame(BoardUndoMixin):
         return self.who_of(conn) is not None
 
     def _viewer_flip(self, conn) -> bool:
-        return conn is not None and conn is self.white_conn
+        return False
 
     def _board_render(self, conn=None) -> list[str]:
         return _gomoku_render(self.grid, last=self._last, flip=self._viewer_flip(conn))

@@ -31,14 +31,12 @@ function parseBoard(boardText: string): Cell[][] {
   const header = lines.find((l) => /^\s+\d+\s+\d+/.test(l));
   const headerCols = (header?.match(/\d+/g) || []).map((n) => Number(n));
   if (headerCols.length !== 15) return [];
-  const flipped = headerCols[0] > headerCols[headerCols.length - 1];
 
   const out: Cell[][] = [];
   for (const rowLine of rowLines.slice(0, 15)) {
     const rowMatch = rowLine.match(/^\s*(\d+)\s+/);
     if (!rowMatch) continue;
     const rowNum = Number(rowMatch[1]);
-    const mappedRow = flipped ? 16 - rowNum : rowNum;
     const payload = rowLine.slice(rowMatch[0].length);
     const tokens = payload.match(/\(#\)|\(o\)|\(\.\)|[#.o]/g);
     if (!tokens || tokens.length !== 15) continue;
@@ -50,7 +48,7 @@ function parseBoard(boardText: string): Cell[][] {
         return {
           stone: plain === '#' || plain === 'o' ? plain : '.',
           last,
-          row: mappedRow,
+          row: rowNum,
           col: headerCols[idx],
         };
       }),
