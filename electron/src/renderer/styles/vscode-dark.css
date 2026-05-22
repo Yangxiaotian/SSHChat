@@ -376,6 +376,17 @@ html, body, #root {
 .game-workbench {
   border-bottom: 1px solid var(--vscode-border);
   background: #1f2022;
+  flex-shrink: 1;
+}
+
+.game-workbench.expanded {
+  max-height: min(56vh, 520px);
+  overflow-y: auto;
+}
+
+.game-workbench.collapsed {
+  max-height: none;
+  overflow: hidden;
 }
 
 .game-workbench-header {
@@ -887,6 +898,7 @@ html, body, #root {
 
 .chat-messages {
   flex: 1;
+  min-height: 140px;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 8px 0;

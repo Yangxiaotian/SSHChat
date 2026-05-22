@@ -388,6 +388,7 @@ export default function GameWorkbench() {
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showWorkbenchContent, setShowWorkbenchContent] = useState(true);
   const syncRoomRef = useRef('');
 
   const roomMessages = messages.get(activeRoom) || [];
@@ -467,10 +468,13 @@ export default function GameWorkbench() {
   const disabled = status !== 'connected';
 
   return (
-    <div className="game-workbench">
+    <div className={`game-workbench ${showWorkbenchContent ? 'expanded' : 'collapsed'}`}>
       <div className="game-workbench-header">
         <span>{privacyMode ? '诊断视图' : '游戏工作台'} · 当前：{gameLabel(game)}</span>
         <div className="game-workbench-actions">
+          <button className="mini-btn" onClick={() => setShowWorkbenchContent((v) => !v)}>
+            {showWorkbenchContent ? '收起面板' : '展开面板'}
+          </button>
           <button className="mini-btn" disabled={disabled} onClick={() => send('/game show')}>显示局面</button>
           <button className="mini-btn" disabled={disabled} onClick={() => send('/game help')}>玩法帮助</button>
           <button className="mini-btn" disabled={disabled} onClick={() => send('/game list')}>可玩列表</button>
@@ -480,86 +484,93 @@ export default function GameWorkbench() {
         </div>
       </div>
 
-      <div className="game-workbench-quick">
-        {quickByGame[game].map((q) => (
-          <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => send(q.cmd)}>
-            {q.label}
-          </button>
-        ))}
-      </div>
-      <div className="game-workbench-hint">{gameTips[game]}</div>
-      <div className={`game-advisor game-advisor-${advisor.level}`}>
-        <div className="game-advisor-title">{advisor.title}</div>
-        <div className="game-advisor-detail">{advisor.detail}</div>
-        <div className="game-advisor-actions">
-          {advisor.primaryCmd && advisor.primaryLabel && (
-            <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.primaryCmd!)}>
-              {advisor.primaryLabel}
-            </button>
+      {showWorkbenchContent && (
+        <>
+          <div className="game-workbench-quick">
+            {quickByGame[game].map((q) => (
+              <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => send(q.cmd)}>
+                {q.label}
+              </button>
+            ))}
+          </div>
+          <div className="game-workbench-hint">{gameTips[game]}</div>
+          <div className={`game-advisor game-advisor-${advisor.level}`}>
+            <div className="game-advisor-title">{advisor.title}</div>
+            <div className="game-advisor-detail">{advisor.detail}</div>
+            <div className="game-advisor-actions">
+              {advisor.primaryCmd && advisor.primaryLabel && (
+                <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.primaryCmd!)}>
+                  {advisor.primaryLabel}
+                </button>
+              )}
+              {advisor.secondaryCmd && advisor.secondaryLabel && (
+                <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.secondaryCmd!)}>
+                  {advisor.secondaryLabel}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {game === 'chess' && <ChessPanel disabled={disabled} users={users} sendMove={sendMove} />}
+          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
+          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
+
+          {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
+
+          {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
+          {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
+          {game === 'niutou' && <NiuTouPanel disabled={disabled} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+
+          {playerStats.length > 0 && (
+            <div className="game-chip-row">
+              {playerStats.map((s) => (
+                <span key={`${s.name}-${s.label}`} className="game-workbench-hint">{s.name}：{s.label} {s.value}</span>
+              ))}
+            </div>
           )}
-          {advisor.secondaryCmd && advisor.secondaryLabel && (
-            <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.secondaryCmd!)}>
-              {advisor.secondaryLabel}
-            </button>
+
+          <div className="game-workbench-toolbar">
+            <span className="game-workbench-hint-inline">同一房间同一时刻仅允许一场进行中的对局</span>
+            <div className="game-workbench-toolbar-actions">
+              {hasBoard && (
+                <button className="mini-btn" disabled={disabled} onClick={() => setShowBoard((v) => !v)}>
+                  {showBoard ? '收起局面原文' : '展开局面原文'}
+                </button>
+              )}
+              <button className="mini-btn" disabled={disabled} onClick={() => setShowAdvanced((v) => !v)}>
+                {showAdvanced ? '收起高级命令' : '高级命令'}
+              </button>
+            </div>
+          </div>
+
+          {hasBoard && showBoard && <pre className="game-workbench-body">{cleanBoard}</pre>}
+          {!hasBoard && <div className="game-workbench-empty">当前房间暂无已展示的游戏局面。</div>}
+
+          {showAdvanced ? (
+            <div className="game-workbench-input">
+              <textarea
+                className="game-workbench-command"
+                value={moveText}
+                onChange={(e) => setMoveText(e.target.value)}
+                placeholder={privacyMode ? '输入命令...' : '输入走法或操作...'}
+                disabled={disabled}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    onMove();
+                  }
+                }}
+              />
+              <button className="send-button" onClick={onMove} disabled={disabled || !moveText.trim()}>发送</button>
+            </div>
+          ) : (
+            <div className="game-workbench-input-compact">优先使用上方交互按钮；需要手动命令时再展开“高级命令”。</div>
           )}
-        </div>
-      </div>
-
-      {game === 'chess' && <ChessPanel disabled={disabled} users={users} sendMove={sendMove} />}
-      {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
-      {game === 'xiangqi' && <XiangqiPanel disabled={disabled} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
-
-      {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
-      {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
-
-      {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
-      {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />} 
-      {game === 'niutou' && <NiuTouPanel disabled={disabled} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
-
-      {playerStats.length > 0 && (
-        <div className="game-chip-row">
-          {playerStats.map((s) => (
-            <span key={`${s.name}-${s.label}`} className="game-workbench-hint">{s.name}：{s.label} {s.value}</span>
-          ))}
-        </div>
+        </>
       )}
-
-      <div className="game-workbench-toolbar">
-        <span className="game-workbench-hint-inline">同一房间同一时刻仅允许一场进行中的对局</span>
-        <div className="game-workbench-toolbar-actions">
-          {hasBoard && (
-            <button className="mini-btn" disabled={disabled} onClick={() => setShowBoard((v) => !v)}>
-              {showBoard ? '收起局面原文' : '展开局面原文'}
-            </button>
-          )}
-          <button className="mini-btn" disabled={disabled} onClick={() => setShowAdvanced((v) => !v)}>
-            {showAdvanced ? '收起高级命令' : '高级命令'}
-          </button>
-        </div>
-      </div>
-
-      {hasBoard && showBoard && <pre className="game-workbench-body">{cleanBoard}</pre>}
-      {!hasBoard && <div className="game-workbench-empty">当前房间暂无已展示的游戏局面。</div>}
-
-      {showAdvanced ? (
-        <div className="game-workbench-input">
-          <textarea
-            className="game-workbench-command"
-            value={moveText}
-            onChange={(e) => setMoveText(e.target.value)}
-            placeholder={privacyMode ? '输入命令...' : '输入走法或操作...'}
-            disabled={disabled}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                onMove();
-              }
-            }}
-          />
-          <button className="send-button" onClick={onMove} disabled={disabled || !moveText.trim()}>发送</button>
-        </div>
-      ) : (
-        <div className="game-workbench-input-compact">优先使用上方交互按钮；需要手动命令时再展开“高级命令”。</div>
+      {!showWorkbenchContent && (
+        <div className="game-workbench-input-compact">游戏面板已收起，聊天区已为你腾出空间。</div>
       )}
     </div>
   );
