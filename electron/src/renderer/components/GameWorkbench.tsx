@@ -24,6 +24,17 @@ function detectGameKind(text: string): GameKind {
   return 'none';
 }
 
+const cnToGameKind: Record<string, GameKind> = {
+  '国际象棋': 'chess',
+  '五子棋': 'gomoku',
+  '中国象棋': 'xiangqi',
+  '三国杀': 'sanguo',
+  '狼人杀': 'werewolf',
+  '德州扑克': 'holdem',
+  '炸金花': 'zjh',
+  '牛头王': 'niutou',
+};
+
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
   const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '中国象棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
@@ -33,7 +44,7 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
     const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`));
     if (hit) {
       start = i;
-      game = hit as GameKind;
+      game = cnToGameKind[hit] || (hit as GameKind);
       break;
     }
   }
@@ -487,7 +498,7 @@ export default function GameWorkbench() {
       {showWorkbenchContent && (
         <>
           <div className="game-workbench-quick">
-            {quickByGame[game].map((q) => (
+            {(quickByGame[game] || quickByGame['none']).map((q) => (
               <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => send(q.cmd)}>
                 {q.label}
               </button>
