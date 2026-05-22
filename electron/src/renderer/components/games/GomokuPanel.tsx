@@ -632,12 +632,87 @@ function negamax(board: number[][], depth: number, alpha: number, beta: number, 
   return best;
 }
 
+// Find the single blocking point of a live four
+function findLiveFourBlock(board: number[][], oppColor: number): [number, number] | null {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] !== oppColor) continue;
+      const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
+      for (const [dr, dc] of dirs) {
+        const pr = r - dr, pc = c - dc;
+        if (inside(pr, pc) && board[pr][pc] === oppColor) continue;
+        // Count consecutive
+        let len = 0;
+        let rr = r, cc = c;
+        while (inside(rr, cc) && board[rr][cc] === oppColor) { len++; rr += dr; cc += dc; }
+        if (len !== 4) continue;
+        // Check both ends are open
+        const leftOpen = inside(pr, pc) && board[pr][pc] === 0;
+        const rightOpen = inside(rr, cc) && board[rr][cc] === 0;
+        if (leftOpen && rightOpen) {
+          // Live four! Return one of the blocking points
+          return leftOpen ? [pr, pc] : [rr, cc];
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// Find the best defensive move when opponent has composite threats
+function findDefensiveResponse(board: number[][], myColor: number, oppColor: number, reason: string): MoveEval {
+  const candidates = genCandidates(board, 25);
+  let bestMove = candidates[0];
+  let bestScore = -Infinity;
+
+  for (const [r, c] of candidates) {
+    // Score: reduce opponent threats + create my threats
+    board[r][c] = myColor;
+    const myP = countPatterns(board, myColor);
+    board[r][c] = 0;
+
+    board[r][c] = oppColor;
+    const oppAfter = countPatterns(board, oppColor);
+    board[r][c] = 0;
+
+    let score = 0;
+    // Reward moves that create my threats (counter-attack)
+    if (myP.liveFour > 0) score += 50000000;
+    if (myP.deadFour > 0) score += 800000;
+    if (myP.liveThree > 0) score += 500000;
+    if (myP.deadThree > 0) score += 50000;
+    // Penalize moves that leave opponent with strong threats
+    if (oppAfter.liveFour > 0) score -= 10000000;
+    if (oppAfter.deadFour > 0) score -= 500000;
+    if (oppAfter.liveThree > 0) score -= 200000;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMove = [r, c];
+    }
+  }
+
+  // Build reason
+  board[bestMove[0]][bestMove[1]] = myColor;
+  const myP = countPatterns(board, myColor);
+  board[bestMove[0]][bestMove[1]] = 0;
+
+  const reasons = [reason];
+  if (myP.liveFour > 0) reasons.push('此手同时形成活四，反击得手！');
+  else if (myP.deadFour > 0) reasons.push('此手制造冲四，化守为攻。');
+  else if (myP.liveThree > 0) reasons.push('此手形成活三，为后续反击铺路。');
+  else reasons.push('此手最大程度削弱对手威胁。');
+
+  return { row: bestMove[0] + 1, col: bestMove[1] + 1, score: 85000000, reasons };
+}
+
 function findBestMove(board: number[][], side: Side, strategy: StrategyId): MoveEval | null {
   const color = side === '#' ? 1 : -1;
+  const oppColor = -color;
   const candidates = genCandidates(board, 25);
   if (candidates.length === 0) return null;
 
-  // Quick win check
+  // ── 1. Can I win immediately? ──
   for (const [r, c] of candidates) {
     board[r][c] = color;
     if (hasFive(board, r, c, color)) {
@@ -647,8 +722,7 @@ function findBestMove(board: number[][], side: Side, strategy: StrategyId): Move
     board[r][c] = 0;
   }
 
-  // Quick block check - find all blocking moves
-  const oppColor = -color;
+  // ── 2. Opponent can win immediately → must block ──
   const blockMoves: Array<[number, number]> = [];
   for (const [r, c] of candidates) {
     board[r][c] = oppColor;
@@ -659,41 +733,78 @@ function findBestMove(board: number[][], side: Side, strategy: StrategyId): Move
   }
 
   if (blockMoves.length > 0) {
-    // Multiple blocking options: prefer the one that also creates counter-threats (化被动为主动)
+    // Prefer blocking move that also creates counter-threats (化被动为主动)
     let bestBlock = blockMoves[0];
     let bestBlockScore = -Infinity;
-
     for (const [r, c] of blockMoves) {
       board[r][c] = color;
       const myAfterBlock = countPatterns(board, color);
       board[r][c] = 0;
-
       let blockScore = 0;
       if (myAfterBlock.liveFour > 0) blockScore += 50000000;
       if (myAfterBlock.deadFour > 0) blockScore += 800000;
       if (myAfterBlock.liveThree > 0) blockScore += 500000;
       if (myAfterBlock.deadThree > 0) blockScore += 50000;
-
       if (blockScore > bestBlockScore) {
         bestBlockScore = blockScore;
         bestBlock = [r, c];
       }
     }
-
     const hasCounter = bestBlockScore > 100000;
-    const reason = hasCounter
-      ? '必须封堵对手成五，且此手同时制造反击威胁！'
-      : '对手即将成五，必须封堵！';
-    return { row: bestBlock[0] + 1, col: bestBlock[1] + 1, score: 95000000, reasons: [reason] };
+    return {
+      row: bestBlock[0] + 1, col: bestBlock[1] + 1, score: 95000000,
+      reasons: [hasCounter ? '必须封堵对手成五，且此手同时制造反击威胁！' : '对手即将成五，必须封堵！'],
+    };
   }
 
-  // VCF solver
+  // ── 3. Check opponent's composite threats (活四、双冲四、冲四+活三) ──
+  // These are positions where the opponent creates unstoppable threats.
+  // We must find the defensive move that prevents them.
+  for (const [r, c] of candidates) {
+    board[r][c] = oppColor;
+    const oppP = countPatterns(board, oppColor);
+    board[r][c] = 0;
+
+    // Opponent creates live four → I must block it (only one blocking point exists)
+    if (oppP.liveFour > 0) {
+      // Find the blocking point of the live four
+      const blockPoint = findLiveFourBlock(board, oppColor);
+      if (blockPoint) {
+        board[blockPoint[0]][blockPoint[1]] = color;
+        const myAfter = countPatterns(board, color);
+        board[blockPoint[0]][blockPoint[1]] = 0;
+        const reasons = ['对手即将形成活四，必须封堵！'];
+        if (myAfter.liveFour > 0) reasons.push('封堵同时形成活四，反击成功！');
+        else if (myAfter.deadFour > 0) reasons.push('封堵同时制造冲四威胁。');
+        else if (myAfter.liveThree > 0) reasons.push('封堵同时形成活三，化被动为主动。');
+        return { row: blockPoint[0] + 1, col: blockPoint[1] + 1, score: 90000000, reasons };
+      }
+    }
+
+    // Opponent creates double dead four → unblockable, I must prevent it
+    if (oppP.deadFour >= 2) {
+      // Find the best defensive move that reduces opponent's threats
+      return findDefensiveResponse(board, color, oppColor, '对手即将形成双冲四，必须提前破坏！');
+    }
+
+    // Opponent creates dead four + live three → unblockable combo
+    if (oppP.deadFour > 0 && oppP.liveThree > 0) {
+      return findDefensiveResponse(board, color, oppColor, '对手冲四+活三组合即将成型，必须破坏！');
+    }
+
+    // Opponent creates double live three → very dangerous
+    if (oppP.liveThree >= 2) {
+      return findDefensiveResponse(board, color, oppColor, '对手双活三即将成型，必须提前干预！');
+    }
+  }
+
+  // ── 4. VCF solver: can I win by continuous fours? ──
   const vcfMove = solveVCF(cloneBoard(board), color === 1 ? '#' : 'o', 0, 14);
   if (vcfMove) {
     return { row: vcfMove[0] + 1, col: vcfMove[1] + 1, score: 80000000, reasons: ['找到连续冲四必胜路线！'] };
   }
 
-  // Alpha-beta iterative deepening
+  // ── 5. Alpha-beta iterative deepening ──
   searchDeadline = Date.now() + TIME_LIMIT_MS;
   searchTimeUp = false;
 
