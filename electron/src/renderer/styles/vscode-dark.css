@@ -622,11 +622,26 @@ html, body, #root {
   height: 20px;
   border: 1px solid var(--vscode-border);
   background: #2c3036;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   color: #c8ced7;
   cursor: pointer;
   padding: 0;
+}
+
+.gomoku-cell.black {
+  color: #f2f4f8;
+  font-weight: 700;
+}
+
+.gomoku-cell.white {
+  color: #9fd2ff;
+  font-weight: 700;
+}
+
+.gomoku-cell.last {
+  outline: 1px solid #f1b45c;
+  outline-offset: -2px;
 }
 
 .xiangqi-grid {

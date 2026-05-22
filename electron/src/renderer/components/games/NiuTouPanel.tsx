@@ -2,6 +2,7 @@
 
 type Props = {
   disabled: boolean;
+  nickname: string;
   boardText: string;
   onCmd: (cmd: string) => void;
 };
@@ -17,9 +18,41 @@ function parseRows(boardText: string): string[] {
   return boardText.split('\n').filter((l) => l.toLowerCase().includes('row') || l.includes('行：'));
 }
 
-export default function NiuTouPanel({ disabled, boardText, onCmd }: Props) {
+function parseMeta(text: string): { state: string; host: string; awaitPlayer: string } {
+  let state = '';
+  let host = '';
+  let awaitPlayer = '';
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!state) {
+      const m = t.match(/状态[:：]\s*(.+)$/);
+      if (m) state = m[1].trim();
+    }
+    if (!host) {
+      const m = t.match(/^#1\s+([^:：]+)[:：]/);
+      if (m) host = m[1].trim();
+      const m2 = t.match(/^房主[:：]\s*(.+)$/);
+      if (!host && m2) host = m2[1].trim();
+    }
+    if (!awaitPlayer) {
+      const m1 = t.match(/^请等待\s+(\S+)\s+选择吃哪一行/);
+      const m2 = t.match(/^(\S+)\s+需要选行/);
+      if (m1) awaitPlayer = m1[1];
+      else if (m2) awaitPlayer = m2[1];
+    }
+  }
+  return { state, host, awaitPlayer };
+}
+
+export default function NiuTouPanel({ disabled, nickname, boardText, onCmd }: Props) {
   const hand = extractHand(boardText);
   const rows = parseRows(boardText);
+  const meta = parseMeta(boardText);
+  const isHost = !!meta.host && meta.host === nickname;
+  const canStart = isHost && (meta.state.includes('等待开始') || meta.state.includes('已结束'));
+  const canPick = meta.state.includes('进行中') && hand.length > 0;
+  const canChooseRow = boardText.includes('你必须选择一行') || (meta.state.includes('等待选行') && meta.awaitPlayer === nickname);
+  const canTuneBot = isHost;
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">谁是牛头王互动面板（新手引导）</div>
@@ -32,23 +65,23 @@ export default function NiuTouPanel({ disabled, boardText, onCmd }: Props) {
         </div>
       )}
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('start')}>开始</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 1')}>吃第1行</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 2')}>吃第2行</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 3')}>吃第3行</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('row 4')}>吃第4行</button>
+        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>发牌开始</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 1')}>吃第1行</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 2')}>吃第2行</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 3')}>吃第3行</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 4')}>吃第4行</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
       <div className="game-chip-row">
         {hand.map((n) => (
-          <button key={n} className="mini-btn" disabled={disabled} onClick={() => onCmd(`pick ${n}`)}>{n}</button>
+          <button key={n} className="mini-btn" disabled={disabled || !canPick} onClick={() => onCmd(`pick ${n}`)}>{n}</button>
         ))}
       </div>
       <div className="game-chip-row">
         <span className="game-workbench-hint">机器人难度</span>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('bot easy')}>Easy</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('bot hard')}>Hard</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('bot pro')}>Pro</button>
+        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
+        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
+        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>
       </div>
     </div>
   );
