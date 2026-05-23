@@ -73,3 +73,36 @@
   - `node electron/scripts/qa-game-panels-playwright.mjs` 验收通过：
     - `QA PASS: all game panels command interactions are functional.`
     - 重点确认炸金花 `compare R1` 指令可由按钮触发并发送。
+
+2026-05-23（现场截图问题定向修复）
+- 用户现场截图暴露：`#席位` 行格式为 `R1:积分=...`（冒号后无空格）时，前端解析失败，导致“可比牌目标为空”。
+- 修复内容：
+  1) `ZjhPanel` 与 `HoldemPanel` 对席位/积分行改为强容错正则：
+     - 支持 `R1:积分=993` / `R1: 积分=993` / `R1：积分=993` 等变体。
+  2) `GameWorkbench.extractPlayerStats` 同步放宽正则，防止统计区遗漏。
+  3) Playwright 脚本样本升级为“无空格格式”席位行，防回归。
+- 复验：
+  - `npx tsc -p tsconfig.json --noEmit` 通过
+  - `npx tsc -p tsconfig.node.json --noEmit` 通过
+  - `python -m pytest tests/test_poker_games_flow.py -q` 通过
+  - `qa-game-panels-playwright.mjs` 再次通过（日志见 `electron/release/qa/qa-zjh-fix2.log`）
+
+2026-05-23（德州/炸金花体验闭环增强）
+- 用户反馈：按钮“点了没反应”、公共牌“没数据”、不同阶段可点击性不清晰。
+- 本轮增强：
+  1) `HoldemPanel` 增加阶段显示与流程提示：
+     - 明确“翻牌前公共牌未发”为正常流程；
+     - 显示当前阶段（翻牌前/翻牌/转牌/河牌）并给出下一阶段提示；
+     - 显示“当前轮到你操作/当前轮到他人”提示。
+  2) `HoldemPanel` / `ZjhPanel` 按阶段驱动按钮可用性：
+     - 可操作按钮高亮 `ready`；
+     - 不可操作按钮置灰（disabled + not-allowed）；
+     - `发牌开始` 在进行中时明确禁用原因（title）。
+  3) 样式层补齐：
+     - `.mini-btn:disabled` 明确灰态；
+     - `.mini-btn.ready` 明确高亮，解决“像能点但实际不可点”的错觉。
+- 复验：
+  - `npx tsc -p tsconfig.json --noEmit` 通过
+  - `npx tsc -p tsconfig.node.json --noEmit` 通过
+  - `python -m pytest tests/test_poker_games_flow.py -q` 通过
+  - Playwright 面板验收通过（日志：`electron/release/qa/qa-holdem-ui.log`）

@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import PokerCardsView from './PokerCardsView';
 
 type Props = {
@@ -20,7 +20,7 @@ function extractCards(linePrefix: string, text: string): string[] {
 function extractScores(text: string): Array<{ name: string; score: number }> {
   const out: Array<{ name: string; score: number }> = [];
   for (const line of text.split('\n')) {
-    const m = line.match(/^#\d+\s+([^:：]+)[:：]\s+积分=(\d+)/);
+    const m = line.match(/^#\d+\s+([^:：]+)\s*[:：]\s*积分\s*=\s*(\d+)/);
     if (m) out.push({ name: m[1].trim(), score: Number(m[2]) });
   }
   return out;
@@ -29,20 +29,22 @@ function extractScores(text: string): Array<{ name: string; score: number }> {
 function extractSeats(text: string): Array<{ name: string; alive: boolean }> {
   const out: Array<{ name: string; alive: boolean }> = [];
   for (const line of text.split('\n')) {
-    const m = line.match(/^#\d+\s+([^:：]+)[:：]\s+积分=\d+\s+(.+)$/);
+    const m = line.match(/^#\d+\s+([^:：]+)\s*[:：]\s*积分\s*=\s*\d+\s*(.*)$/);
     if (!m) continue;
     const name = m[1].trim();
-    const status = m[2].trim();
+    const status = (m[2] || '').trim().toLowerCase();
     const alive = status.includes('存活') || status.includes('alive');
     out.push({ name, alive });
   }
   return out;
 }
 
-function parseMeta(text: string): { state: string; turn: string; host: string } {
+function parseMeta(text: string): { state: string; turn: string; host: string; pot: number; currentBet: number } {
   let state = '';
   let turn = '';
   let host = '';
+  let pot = 0;
+  let currentBet = 0;
   for (const line of text.split('\n')) {
     const t = line.trim();
     if (!state) {
@@ -56,11 +58,19 @@ function parseMeta(text: string): { state: string; turn: string; host: string } 
       if (m) turn = m[2].trim();
     }
     if (!host) {
-      const m = t.match(/^#1\s+([^:：]+)[:：]/);
+      const m = t.match(/^#1\s+([^:：]+)\s*[:：]/);
       if (m) host = m[1].trim();
     }
+    if (!pot) {
+      const m = t.match(/^底池\s*=\s*(\d+)/);
+      if (m) pot = Number(m[1]);
+    }
+    if (!currentBet) {
+      const m = t.match(/^当前注\s*=\s*(\d+)/);
+      if (m) currentBet = Number(m[1]);
+    }
   }
-  return { state, turn, host };
+  return { state, turn, host, pot, currentBet };
 }
 
 function includesAny(source: string, needles: string[]): boolean {
@@ -78,22 +88,38 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
   const allSeatNames = seats.map((s) => s.name);
   const candidates = (aliveSeatNames.length > 0 ? aliveSeatNames : (allSeatNames.length > 0 ? allSeatNames : users)).filter((u) => u && u !== nickname);
   const meta = parseMeta(boardText);
+
   const isHost = !!meta.host && meta.host === nickname;
   const isPlaying = includesAny(meta.state, ['进行中', 'playing']);
   const isWaiting = includesAny(meta.state, ['等待开始', 'waiting']);
   const isEnded = includesAny(meta.state, ['已结束', 'ended']);
   const myTurn = !!meta.turn && meta.turn === nickname;
+
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
   const canTuneBot = isHost;
 
+  const stateText = isPlaying ? '进行中' : isWaiting ? '等待开始' : isEnded ? '已结束' : (meta.state || '未知');
+  const startReason = !isHost
+    ? '仅房主可发牌开始。'
+    : isPlaying
+      ? '当前对局进行中，无法重复发牌。'
+      : '';
+
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">炸金花互动面板</div>
+      <div className="game-workbench-hint">状态：{stateText}，底池：{meta.pot}，当前注：{meta.currentBet}</div>
+
       {(isPlaying && meta.turn && !myTurn) && (
         <div className="game-workbench-hint">当前轮到：{meta.turn}，你的操作按钮已暂时禁用。</div>
       )}
+      {(isPlaying && myTurn) && (
+        <div className="game-workbench-hint">当前轮到你操作：建议先看牌，再跟注/加注/比牌。</div>
+      )}
+
       <PokerCardsView title="你的手牌" cards={handCards} />
+
       {scores.length > 0 && (
         <div className="game-chip-row">
           {scores.map((s) => (
@@ -101,31 +127,43 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
           ))}
         </div>
       )}
+
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>发牌开始</button>
-        <button className="mini-btn" disabled={disabled || !canAct} onClick={() => onCmd('look')}>看牌</button>
-        <button className="mini-btn" disabled={disabled || !canAct} onClick={() => onCmd('follow')}>跟注</button>
-        <button className="mini-btn" disabled={disabled || !canAct} onClick={() => onCmd('fold')}>弃牌</button>
+        <button
+          className={`mini-btn ${canStart ? 'ready' : ''}`}
+          disabled={disabled || !canStart}
+          title={startReason}
+          onClick={() => onCmd('start')}
+        >
+          发牌开始
+        </button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('look')}>看牌</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('follow')}>跟注</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')}>弃牌</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
+
       <div className="game-chip-row">
         <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
-        <button className="mini-btn" disabled={disabled || !canAct || !raiseAmount.trim()} onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}>加注</button>
+        <button className={`mini-btn ${canAct && !!raiseAmount.trim() ? 'ready' : ''}`} disabled={disabled || !canAct || !raiseAmount.trim()} onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}>加注</button>
       </div>
+
       <div className="game-chip-row">
         {candidates.map((u) => (
-          <button key={u} className={`mini-btn ${target === u ? 'active' : ''}`} onClick={() => setTarget(u)}>{u}</button>
+          <button key={u} className={`mini-btn ${target === u ? 'active ready' : ''}`} onClick={() => setTarget(u)}>{u}</button>
         ))}
-        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>比牌</button>
+        <button className={`mini-btn ${canAct && !!target ? 'ready' : ''}`} disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>比牌</button>
       </div>
+
       {candidates.length === 0 && (
         <div className="game-workbench-hint">当前没有可比牌目标，请先等待其他玩家/机器人入局并存活。</div>
       )}
+
       <div className="game-chip-row">
         <span className="game-workbench-hint">机器人难度</span>
-        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
-        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
-        <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>
+        <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
+        <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
+        <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>
       </div>
     </div>
   );

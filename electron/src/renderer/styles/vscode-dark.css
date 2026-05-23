@@ -745,6 +745,20 @@ html, body, #root {
   background: #363a41;
 }
 
+.mini-btn:disabled {
+  background: #262a30;
+  color: #6e7681;
+  border-color: #3a3f47;
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.mini-btn.ready:not(:disabled) {
+  border-color: #7a9fd4;
+  background: #354b66;
+  color: #e8f1ff;
+}
+
 .game-mini-input {
   height: 26px;
   min-width: 86px;

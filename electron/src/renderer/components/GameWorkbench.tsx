@@ -229,7 +229,7 @@ function latestIssue(lines: string[]): string {
 function extractPlayerStats(board: string): Array<{ name: string; label: string; value: number }> {
   const out: Array<{ name: string; label: string; value: number }> = [];
   for (const line of board.split('\n')) {
-    const score = line.match(/^#\d+\s+([^:：]+)[:：]\s+积分=(\d+)/);
+    const score = line.match(/^#\d+\s+([^:：]+)\s*[:：]\s*积分\s*=\s*(\d+)/);
     if (score) {
       out.push({ name: score[1].trim(), label: '积分', value: Number(score[2]) });
       continue;
