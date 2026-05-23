@@ -5822,23 +5822,102 @@ class ZhaJinHuaGame:
         return added
     def _bot_action(self, name: str) -> str:
         cat, tie = _zjh_eval3(self.cards[name])
-        score = cat * 100 + (tie[0] if tie else 0)
+        high = tie[0] if tie else 0
+        looked = name in self.looked
+        mult = 2 if looked else 1
+        stack = max(0, self.stacks.get(name, 0))
+        to_call = self.current_bet * mult
+        # 加注是“加到当前注 + add”，支付金额是 new_bet * mult。
+        max_add = max(0, (stack // mult) - self.current_bet)
+        can_raise = max_add > 0
+        can_call = stack >= to_call
+        can_compare = can_call and len([n for n in self._alive() if n != name]) > 0
+        if not can_call:
+            return "fold"
+
+        # 风险强度：需要支付的筹码占自己剩余积分的比例。
+        risk = to_call / max(1, stack)
+        targets = [n for n in self._alive() if n != name]
+
+        def _raise_cmd(base_add: int) -> str:
+            if not can_raise:
+                return "follow"
+            add = max(1, min(base_add, max_add))
+            return f"raise {add}"
+
+        # 牌型：6豹子 > 5同花顺 > 4同花 > 3顺子 > 2对子 > 1高牌
         if self.bot_level == "easy":
-            return self.rng.choice(["follow", "follow", "fold", "look"])
-        if self.bot_level == "pro":
-            if score >= 500:
-                return "raise 2"
-            if score < 220 and self.current_bet >= 3:
+            if cat >= 4 and can_raise and self.rng.random() < 0.35:
+                return _raise_cmd(1)
+            if cat == 1 and risk >= 0.18 and self.rng.random() < 0.55:
                 return "fold"
-            targets = [n for n in self._alive() if n != name]
-            if score >= 350 and len(targets) >= 1 and self.rng.random() < 0.35:
+            if not looked and self.rng.random() < 0.35:
+                return "look"
+            return self.rng.choice(["follow", "follow", "fold"])
+
+        if self.bot_level == "hard":
+            if cat >= 5:
+                if can_raise and self.rng.random() < 0.55:
+                    return _raise_cmd(2)
+                if can_compare and self.rng.random() < 0.20:
+                    return f"compare {self.rng.choice(targets)}"
+                return "follow"
+            if cat == 4:
+                if can_raise and self.rng.random() < 0.35:
+                    return _raise_cmd(1)
+                if can_compare and self.rng.random() < 0.15:
+                    return f"compare {self.rng.choice(targets)}"
+                return "follow"
+            if cat == 3:
+                if risk < 0.20:
+                    return "follow"
+                return "fold" if self.rng.random() < 0.35 else "follow"
+            if cat == 2:
+                # 对子不应被误判为“必弃牌”
+                if high >= 11 and can_raise and risk < 0.15 and self.rng.random() < 0.25:
+                    return _raise_cmd(1)
+                if risk < 0.22:
+                    return "follow"
+                return "fold" if self.rng.random() < 0.28 else "follow"
+            # 高牌
+            if high >= 13 and risk < 0.16:
+                return "follow"
+            if not looked and risk < 0.10 and self.rng.random() < 0.20:
+                return "look"
+            return "fold" if risk >= 0.14 else "follow"
+
+        # pro: 更激进且会控制风险；强牌更会主动制造压力。
+        if cat >= 5:
+            if can_raise and self.rng.random() < 0.70:
+                return _raise_cmd(3)
+            if can_compare and self.rng.random() < 0.35:
                 return f"compare {self.rng.choice(targets)}"
             return "follow"
-        if score >= 450:
-            return "raise 1"
-        if score < 220 and self.current_bet >= 4:
-            return "fold"
-        return self.rng.choice(["follow", "follow", "look"])
+        if cat == 4:
+            if can_raise and self.rng.random() < 0.50:
+                return _raise_cmd(2)
+            if can_compare and self.rng.random() < 0.22:
+                return f"compare {self.rng.choice(targets)}"
+            return "follow"
+        if cat == 3:
+            if can_raise and risk < 0.18 and self.rng.random() < 0.22:
+                return _raise_cmd(1)
+            return "follow" if risk < 0.28 else ("fold" if self.rng.random() < 0.20 else "follow")
+        if cat == 2:
+            # 对子在 pro 难度下通常会继续，尤其是高对子。
+            if high >= 12 and can_raise and risk < 0.20 and self.rng.random() < 0.30:
+                return _raise_cmd(2)
+            if risk < 0.30:
+                return "follow"
+            return "fold" if self.rng.random() < 0.18 else "follow"
+        # 高牌：根据 kicker 与风险决定，保留少量诈唬/探测。
+        if high >= 13 and risk < 0.24:
+            if can_raise and self.rng.random() < 0.10:
+                return _raise_cmd(1)
+            return "follow"
+        if not looked and risk < 0.12 and self.rng.random() < 0.25:
+            return "look"
+        return "fold" if risk >= 0.20 else ("follow" if self.rng.random() < 0.80 else "look")
     def _run_bots(self) -> list[str]:
         if self._bot_running:
             return []
@@ -5910,6 +5989,7 @@ class ZhaJinHuaGame:
         gain = self.pot
         self.stacks[w] += gain
         self.pot = 0
+        self.current_bet = 1
         self.state = "ended"
         return [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
     def _start(self) -> list[str]:
