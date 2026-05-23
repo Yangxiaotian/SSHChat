@@ -66,7 +66,8 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
 function isLikelyGameLine(line: string): boolean {
   if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
   if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])(?:\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])){4,}\s*$/.test(line)) return true;
-  if (/^#\d+\s*[：:]/.test(line.trim())) return true;
+  if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
+  if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
   if (/^(alive|players|votes)[:：]/i.test(line.trim())) return true;
   const t = line.trim().toLowerCase();

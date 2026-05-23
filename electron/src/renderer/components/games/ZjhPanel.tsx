@@ -26,11 +26,15 @@ function extractScores(text: string): Array<{ name: string; score: number }> {
   return out;
 }
 
-function extractSeatNames(text: string): string[] {
-  const out: string[] = [];
+function extractSeats(text: string): Array<{ name: string; alive: boolean }> {
+  const out: Array<{ name: string; alive: boolean }> = [];
   for (const line of text.split('\n')) {
-    const m = line.match(/^#\d+\s+([^:：]+)[:：]/);
-    if (m) out.push(m[1].trim());
+    const m = line.match(/^#\d+\s+([^:：]+)[:：]\s+积分=\d+\s+(.+)$/);
+    if (!m) continue;
+    const name = m[1].trim();
+    const status = m[2].trim();
+    const alive = status.includes('存活') || status.includes('alive');
+    out.push({ name, alive });
   }
   return out;
 }
@@ -69,8 +73,10 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
   const [target, setTarget] = useState('');
   const handCards = extractCards('你的手牌', boardText);
   const scores = extractScores(boardText);
-  const seatNames = extractSeatNames(boardText);
-  const candidates = (seatNames.length > 0 ? seatNames : users).filter((u) => u && u !== nickname);
+  const seats = extractSeats(boardText);
+  const aliveSeatNames = seats.filter((s) => s.alive).map((s) => s.name);
+  const allSeatNames = seats.map((s) => s.name);
+  const candidates = (aliveSeatNames.length > 0 ? aliveSeatNames : (allSeatNames.length > 0 ? allSeatNames : users)).filter((u) => u && u !== nickname);
   const meta = parseMeta(boardText);
   const isHost = !!meta.host && meta.host === nickname;
   const isPlaying = includesAny(meta.state, ['进行中', 'playing']);
@@ -112,6 +118,9 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
         ))}
         <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>比牌</button>
       </div>
+      {candidates.length === 0 && (
+        <div className="game-workbench-hint">当前没有可比牌目标，请先等待其他玩家/机器人入局并存活。</div>
+      )}
       <div className="game-chip-row">
         <span className="game-workbench-hint">机器人难度</span>
         <button className="mini-btn" disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>

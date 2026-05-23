@@ -322,8 +322,10 @@ try {
     // @ts-ignore
     window.__qa.clearSent();
   });
-  await page.locator('.game-interaction-panel .mini-btn:has-text("跟注")').first().click();
-  await assertSentIncludes('/game move follow');
+  await page.locator('.game-interaction-panel .mini-btn:has-text("R1")').first().click();
+  await page.waitForTimeout(100);
+  await page.locator('.game-interaction-panel .mini-btn:has-text("比牌")').first().click();
+  await assertSentIncludes('/game move compare R1');
 
   // 8) 牛头王
   await openByLines([

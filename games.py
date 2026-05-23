@@ -5849,6 +5849,9 @@ class ZhaJinHuaGame:
             while self.state == "playing" and guard < 32:
                 guard += 1
                 cur = self.players[self.turn_idx][1]
+                if cur not in self._alive():
+                    self._advance()
+                    continue
                 if cur not in self.bot_names:
                     break
                 bot_conn = self.bot_conns.get(cur)
@@ -5868,6 +5871,29 @@ class ZhaJinHuaGame:
         return None
     def _alive(self) -> list[str]:
         return [n for _c, n in self.players if n not in self.folded and self.stacks.get(n, 0) > 0]
+    def _pick_next_actor_from_start(self) -> bool:
+        alive = set(self._alive())
+        for i, (_c, n) in enumerate(self.players):
+            if n in alive:
+                self.turn_idx = i
+                return True
+        return False
+    def _resolve_target_name(self, token: str) -> Optional[str]:
+        t = token.strip()
+        if not t:
+            return None
+        if t.startswith("#") and t[1:].isdigit():
+            idx = int(t[1:]) - 1
+            if 0 <= idx < len(self.players):
+                return self.players[idx][1]
+            return None
+        for _c, n in self.players:
+            if n == t:
+                return n
+        for _c, n in self.players:
+            if n.lower() == t.lower():
+                return n
+        return None
     def _advance(self):
         alive = self._alive()
         if len(alive) <= 1:
@@ -5891,6 +5917,8 @@ class ZhaJinHuaGame:
             self._auto_add_bots()
         if len(self.players) < 2:
             return ["至少需要 2 名玩家才能开始。"]
+        if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
+            return ["有玩家积分已耗尽。请重开游戏重置为1000积分。"]
         self.state = "playing"
         self.folded.clear(); self.looked.clear(); self.cards.clear()
         self.turn_idx = 0; self.pot = 0; self.current_bet = 1
@@ -5901,6 +5929,7 @@ class ZhaJinHuaGame:
             self.stacks.setdefault(n, 1000)
             if self.stacks[n] > 0:
                 self.stacks[n] -= 1; self.pot += 1
+        self._pick_next_actor_from_start()
         out = ["炸金花已开始，可用 /game show 查看手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
         if self.bot_names:
             out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
@@ -5918,6 +5947,15 @@ class ZhaJinHuaGame:
         parts = raw.strip().split()
         if not parts: return (["用法：/game move <start/look/follow/raise/fold/compare>"], [], False)
         cmd = parts[0].lower()
+        cmd = {
+            "开始": "start",
+            "看牌": "look",
+            "跟注": "follow",
+            "加注": "raise",
+            "弃牌": "fold",
+            "比牌": "compare",
+            "机器人": "bot",
+        }.get(cmd, cmd)
         if cmd == "bot":
             if conn is not self.players[0][0]:
                 return (["只有房主可以设置机器人难度。"], [], False)
@@ -5931,6 +5969,7 @@ class ZhaJinHuaGame:
             return ([], self._start(), False)
         if self.state != "playing": return (["当前不是进行中状态。"], [], False)
         if actor in self.folded: return (["你已经弃牌。"], [], False)
+        if self.stacks.get(actor, 0) <= 0: return (["你已无可用积分，无法继续操作。"], [], False)
         current = self.players[self.turn_idx][1]
         if actor != current: return ([f"还没轮到你，当前轮到：{current}"], [], False)
         mult = 2 if actor in self.looked else 1; cost = self.current_bet * mult; bcast: list[str] = []
@@ -5948,7 +5987,8 @@ class ZhaJinHuaGame:
         elif cmd == "fold": self.folded.add(actor); bcast.append(f"{actor} 选择弃牌"); self._advance()
         elif cmd == "compare":
             if len(parts) < 2: return (["用法：/game move compare <name>"], [], False)
-            target = parts[1]
+            target = self._resolve_target_name(parts[1])
+            if not target: return (["目标不存在。"], [], False)
             if target == actor: return (["不能和自己比牌。"], [], False)
             if target not in self._alive(): return (["目标玩家当前不可比牌。"], [], False)
             if self.stacks[actor] < cost: return ([f"积分不足，需要 {cost}"], [], False)
@@ -6319,7 +6359,10 @@ class HoldemGame:
                 if not self.players:
                     break
                 cur = self.players[self.turn_idx][1]
-                if cur not in self.bot_names or not self._can_act(cur):
+                if not self._can_act(cur):
+                    self._advance()
+                    continue
+                if cur not in self.bot_names:
                     break
                 bot_conn = self.bot_conns.get(cur)
                 if bot_conn is None:
