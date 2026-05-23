@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
+﻿import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { useChatStore } from './store/chatStore';
 import ActivityBar from './components/ActivityBar';
 import Sidebar from './components/Sidebar';
@@ -95,7 +95,7 @@ export default function App() {
     });
 
     const unsubRoom = window.api.onRoomUpdate((rooms, activeRoom) => {
-      if (rooms) {
+      if (Array.isArray(rooms)) {
         const roomInfos = rooms.map((name) => ({
           name,
           isDefault: name === 'default',
@@ -104,7 +104,9 @@ export default function App() {
         }));
         useChatStore.getState().setRooms(roomInfos);
       }
-      useChatStore.getState().setActiveRoom(activeRoom);
+      if (typeof activeRoom === 'string' && activeRoom.trim()) {
+        useChatStore.getState().setActiveRoom(activeRoom);
+      }
     });
 
     const unsubStatus = window.api.onConnectionStatus((nextStatus) => {

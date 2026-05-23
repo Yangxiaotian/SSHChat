@@ -25,8 +25,8 @@ function parseMeta(text: string): { state: string; host: string; awaitPlayer: st
   for (const line of text.split('\n')) {
     const t = line.trim();
     if (!state) {
-      const m = t.match(/状态[:：]\s*(.+)$/);
-      if (m) state = m[1].trim();
+      const m = t.match(/(状态|state)[:：]\s*(.+)$/i);
+      if (m) state = m[2].trim();
     }
     if (!host) {
       const m = t.match(/^#1\s+([^:：]+)[:：]/);
@@ -44,15 +44,21 @@ function parseMeta(text: string): { state: string; host: string; awaitPlayer: st
   return { state, host, awaitPlayer };
 }
 
+function includesAny(source: string, needles: string[]): boolean {
+  const s = source.toLowerCase();
+  return needles.some((n) => s.includes(n.toLowerCase()));
+}
+
 export default function NiuTouPanel({ disabled, nickname, boardText, onCmd }: Props) {
   const hand = extractHand(boardText);
   const rows = parseRows(boardText);
   const meta = parseMeta(boardText);
   const isHost = !!meta.host && meta.host === nickname;
-  const canStart = isHost && (meta.state.includes('等待开始') || meta.state.includes('已结束'));
-  const canPick = meta.state.includes('进行中') && hand.length > 0;
-  const canChooseRow = boardText.includes('你必须选择一行') || (meta.state.includes('等待选行') && meta.awaitPlayer === nickname);
+  const canStart = isHost && (includesAny(meta.state, ['等待开始', 'waiting']) || includesAny(meta.state, ['已结束', 'ended']));
+  const canPick = includesAny(meta.state, ['进行中', 'playing']) && hand.length > 0;
+  const canChooseRow = boardText.includes('你必须选择一行') || (includesAny(meta.state, ['等待选行', 'await_row']) && meta.awaitPlayer === nickname);
   const canTuneBot = isHost;
+
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">谁是牛头王互动面板（新手引导）</div>

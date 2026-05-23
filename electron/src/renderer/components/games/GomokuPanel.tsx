@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -7,216 +7,173 @@ type Props = {
   onPick: (row: number, col: number) => void;
 };
 
+type Stone = '.' | '#' | 'o';
+type Side = '#' | 'o';
+
 type Cell = {
-  stone: '.' | '#' | 'o';
-  last: boolean;
   row: number;
   col: number;
+  stone: Stone;
+  last: boolean;
 };
-
-type Side = '#' | 'o';
 
 type StrategyId =
   | 'auto'
-  | 'master_balance'
-  | 'killer_combo'
-  | 'trap_double_three'
-  | 'defense_counter'
-  | 'attack_focus'
-  | 'sente_play'
-  | 'influence_play'
-  | 'opening_tianyuan'
-  | 'opening_star'
-  | 'opening_diagonal'
-  | 'opening_huayue'
-  | 'opening_yuyue';
+  | 'balance'
+  | 'attack'
+  | 'defense'
+  | 'trap'
+  | 'opening_center'
+  | 'opening_star';
 
-type MoveEval = {
+type StrategyOption = {
+  id: StrategyId;
+  label: string;
+};
+
+type Suggestion = {
   row: number;
   col: number;
   score: number;
-  reasons: string[];
+  reason: string;
 };
 
 const BOARD_SIZE = 15;
-const SEARCH_DEPTH = 8;
-const TIME_LIMIT_MS = 2500;
+const STRATEGIES: StrategyOption[] = [
+  { id: 'auto', label: '智能自适应（推荐）' },
+  { id: 'balance', label: '均衡控盘' },
+  { id: 'attack', label: '连续进攻' },
+  { id: 'defense', label: '稳健防反' },
+  { id: 'trap', label: '双三陷阱' },
+  { id: 'opening_center', label: '开局天元' },
+  { id: 'opening_star', label: '开局星位' },
+];
 
-const STRATEGY_LABEL: Record<StrategyId, string> = {
-  auto: '智能自适应（推荐）',
-  master_balance: '大师均衡流',
-  killer_combo: '必胜杀棋流（冲四做杀）',
-  trap_double_three: '陷阱双三流（诱导反杀）',
-  defense_counter: '铁壁反击流（先守后攻）',
-  attack_focus: '凌厉攻势流（连续做杀）',
-  sente_play: '先手掌控流（永不脱先）',
-  influence_play: '厚势压迫流（外势为王）',
-  opening_tianyuan: '开局·天元压制',
-  opening_star: '开局·星位牵制',
-  opening_diagonal: '开局·斜月穿心',
-  opening_huayue: '开局·花月经典',
-  opening_yuyue: '开局·雨月稳健',
-};
+const DIRS: Array<[number, number]> = [
+  [1, 0],
+  [0, 1],
+  [1, 1],
+  [1, -1],
+];
 
-// ── Professional Opening Book ──────────────────────────────────────
-// Standard openings for 15x15 Gomoku, 1-indexed [row, col]
-const OPENING_BOOK: Record<'#' | 'o', Record<StrategyId, Array<[number, number]>>> = {
-  '#': {
-    auto: [[8, 8], [8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [6, 8], [10, 8]],
-    master_balance: [[8, 8], [8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [6, 8], [10, 8]],
-    killer_combo: [[8, 8], [8, 9], [9, 8], [7, 8], [8, 10], [10, 8], [9, 9], [6, 8], [7, 10], [10, 7]],
-    trap_double_three: [[8, 8], [7, 8], [9, 8], [8, 7], [8, 9], [7, 9], [9, 7], [7, 7], [9, 9], [6, 8], [10, 8]],
-    defense_counter: [[8, 8], [8, 7], [8, 9], [7, 8], [9, 8], [7, 7], [9, 9], [7, 9], [9, 7], [6, 7], [10, 9]],
-    attack_focus: [[8, 8], [8, 9], [9, 9], [7, 7], [9, 8], [10, 7], [7, 10], [8, 10], [10, 8], [6, 8]],
-    sente_play: [[8, 8], [8, 9], [9, 8], [7, 8], [8, 7], [9, 9], [7, 7], [10, 8], [8, 10], [6, 8]],
-    influence_play: [[8, 8], [7, 7], [9, 9], [7, 9], [9, 7], [6, 6], [10, 10], [6, 10], [10, 6], [8, 6]],
-    opening_tianyuan: [[8, 8], [8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [6, 8], [10, 8]],
-    opening_star: [[8, 8], [7, 7], [9, 9], [7, 9], [9, 7], [6, 8], [10, 8], [8, 6], [8, 10], [5, 7]],
-    opening_diagonal: [[8, 8], [7, 9], [9, 7], [7, 7], [9, 9], [6, 10], [10, 6], [6, 6], [10, 10], [8, 6]],
-    opening_huayue: [[8, 8], [9, 8], [9, 9], [7, 7], [8, 7], [10, 8], [7, 8], [7, 9], [10, 10], [6, 6]],
-    opening_yuyue: [[8, 8], [7, 8], [8, 9], [9, 7], [7, 7], [8, 6], [9, 9], [10, 8], [6, 8], [7, 10]],
-  },
-  o: {
-    auto: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [9, 7], [7, 9], [10, 8], [6, 8]],
-    master_balance: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [9, 7], [7, 9], [10, 8], [6, 8]],
-    killer_combo: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [10, 8], [8, 10], [6, 8], [10, 7]],
-    trap_double_three: [[7, 8], [9, 8], [8, 7], [8, 9], [7, 9], [9, 7], [7, 7], [9, 9], [10, 8], [6, 8]],
-    defense_counter: [[8, 9], [8, 7], [7, 8], [9, 8], [7, 7], [9, 9], [7, 9], [9, 7], [6, 7], [10, 9]],
-    attack_focus: [[8, 9], [9, 9], [7, 7], [8, 7], [9, 8], [10, 7], [7, 10], [6, 8], [10, 8], [8, 10]],
-    sente_play: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [10, 8], [8, 10], [6, 8], [7, 10]],
-    influence_play: [[7, 7], [9, 9], [7, 9], [9, 7], [6, 6], [10, 10], [6, 10], [10, 6], [8, 6], [6, 8]],
-    opening_tianyuan: [[8, 9], [9, 8], [8, 7], [7, 8], [9, 9], [7, 7], [7, 9], [9, 7], [10, 8], [6, 8]],
-    opening_star: [[7, 7], [9, 9], [7, 9], [9, 7], [8, 6], [8, 10], [6, 8], [10, 8], [5, 7], [11, 9]],
-    opening_diagonal: [[7, 9], [9, 7], [7, 7], [9, 9], [6, 10], [10, 6], [6, 6], [10, 10], [8, 6], [6, 8]],
-    opening_huayue: [[8, 7], [7, 8], [9, 9], [7, 7], [10, 8], [6, 8], [8, 10], [7, 10], [9, 6], [10, 10]],
-    opening_yuyue: [[8, 9], [7, 8], [9, 7], [8, 7], [7, 7], [9, 9], [10, 8], [6, 8], [8, 6], [10, 6]],
-  },
-};
-
-// ── Board Parsing ──────────────────────────────────────────────────
-
-function parseTurnName(boardText: string): string {
-  for (const line of boardText.split('\n')) {
-    const t = line.trim();
-    const m = t.match(/^轮到\s+(黑|白)方\s+(.+?)\s*落子/);
-    if (m) return m[2].trim();
-  }
-  return '';
-}
-
-function parseTurnSide(boardText: string): Side | null {
-  for (const line of boardText.split('\n')) {
-    const t = line.trim();
-    const m = t.match(/^轮到\s+(黑|白)方/);
-    if (m) return m[1] === '黑' ? '#' : 'o';
-  }
-  return null;
-}
-
-function parseSeatedSides(boardText: string): { blackName: string; whiteName: string } {
-  let blackName = '';
-  let whiteName = '';
-  for (const raw of boardText.split('\n')) {
-    const line = raw.trim();
-    // Format 1: "黑（先手）：Alice    白：Bob"
-    // Format 2: "黑：Alice    白：Bob"
-    const mBlack = line.match(/黑(?:（先手）)?[：:]\s*(\S+)/);
-    const mWhite = line.match(/白[：:]\s*(\S+)/);
-    if (mBlack) blackName = mBlack[1].trim();
-    if (mWhite) whiteName = mWhite[1].trim();
-    if (blackName && whiteName) break;
-  }
-  return { blackName, whiteName };
-}
-
-// Parse board from server format. Each cell is 3 chars: " # ", " o ", " . ", "(#)", "(o)".
-function parseBoard(boardText: string): Cell[][] {
-  const lines = boardText.split('\n');
-
-  // Find header line with column numbers (e.g., "   15 14 13 ... 2  1")
-  const headerLine = lines.find((l) => /^\s+\d+\s+\d+/.test(l));
-  if (!headerLine) return [];
-  const headerCols = (headerLine.match(/\d+/g) || []).map((n) => Number(n));
-  if (headerCols.length !== BOARD_SIZE) return [];
-  const flipped = headerCols[0] > headerCols[headerCols.length - 1];
-
-  // Find row lines: start with a row number, then 15 cells of 3 chars each
-  const rowLines = lines.filter((l) => /^\s*\d+\s/.test(l) && l.length > 40);
-  if (rowLines.length < BOARD_SIZE) return [];
-
-  const out: Cell[][] = [];
-  for (const rowLine of rowLines.slice(0, BOARD_SIZE)) {
-    const rowMatch = rowLine.match(/^\s*(\d+)\s+/);
-    if (!rowMatch) continue;
-    const rowNum = Number(rowMatch[1]);
-    const mappedRow = flipped ? BOARD_SIZE + 1 - rowNum : rowNum;
-    const payload = rowLine.slice(rowMatch[0].length);
-
-    // Each cell is exactly 3 characters: " # ", " o ", " . ", "(#)", "(o)", "(.)"
-    const cells: Cell[] = [];
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      const chunk = payload.slice(i * 3, i * 3 + 3);
-      if (chunk.length < 3) break;
-      const last = chunk[0] === '(';
-      const plain = chunk[1] as '#' | 'o' | '.';
-      cells.push({
-        stone: plain === '#' || plain === 'o' ? plain : '.',
-        last,
-        row: mappedRow,
-        col: headerCols[i],
-      });
-    }
-    if (cells.length === BOARD_SIZE) out.push(cells);
-  }
-  return out.length === BOARD_SIZE ? out : [];
-}
-
-function defaultBoard(): Cell[][] {
+function createEmptyBoard(): Cell[][] {
   return Array.from({ length: BOARD_SIZE }, (_, rIx) =>
     Array.from({ length: BOARD_SIZE }, (_, cIx) => ({
-      stone: '.' as const,
-      last: false,
       row: rIx + 1,
       col: cIx + 1,
+      stone: '.',
+      last: false,
     })),
   );
 }
 
-function parseMatrix(cells: Cell[][]): number[][] {
-  const board = Array.from({ length: BOARD_SIZE }, () => Array.from({ length: BOARD_SIZE }, () => 0));
-  for (const row of cells) {
-    for (const cell of row) {
-      const r = cell.row - 1;
-      const c = cell.col - 1;
-      board[r][c] = cell.stone === '#' ? 1 : cell.stone === 'o' ? -1 : 0;
+function parseTurnInfo(boardText: string): { name: string; side: Side | null } {
+  for (const raw of boardText.split('\n')) {
+    const line = raw.trim();
+    const m = line.match(/^轮到\s*(黑|白)方\s*(.+?)\s*落子/);
+    if (m) {
+      return { name: m[2].trim(), side: m[1] === '黑' ? '#' : 'o' };
+    }
+    const m2 = line.match(/^(turn|轮到)[:：]\s*(.+)$/i);
+    if (m2) {
+      return { name: m2[2].trim(), side: null };
     }
   }
+  return { name: '', side: null };
+}
+
+function parseSeats(boardText: string): { blackName: string; whiteName: string } {
+  for (const raw of boardText.split('\n')) {
+    const line = raw.trim();
+    const m1 = line.match(/黑（先手）[:：]\s*([^\s]+)\s+白[:：]\s*([^\s]+)/);
+    if (m1) return { blackName: m1[1].trim(), whiteName: m1[2].trim() };
+    const m2 = line.match(/黑[:：]\s*([^\s]+)\s+白[:：]\s*([^\s]+)/);
+    if (m2) return { blackName: m2[1].trim(), whiteName: m2[2].trim() };
+  }
+  return { blackName: '', whiteName: '' };
+}
+
+function parseBoard(boardText: string): Cell[][] {
+  const board = createEmptyBoard();
+  if (!boardText.trim()) return board;
+
+  const lines = boardText.split('\n');
+  let headerCols: number[] = [];
+  let headerIdx = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const nums = (lines[i].match(/\d+/g) || []).map((n) => Number(n));
+    if (nums.length >= BOARD_SIZE && nums.every((n) => n >= 1 && n <= BOARD_SIZE)) {
+      headerCols = nums.slice(0, BOARD_SIZE);
+      headerIdx = i;
+      break;
+    }
+  }
+
+  if (headerIdx < 0 || headerCols.length !== BOARD_SIZE) return board;
+
+  let parsedRows = 0;
+  for (let i = headerIdx + 1; i < lines.length && parsedRows < BOARD_SIZE; i++) {
+    const rowMatch = lines[i].match(/^\s*(\d+)\s+(.+)$/);
+    if (!rowMatch) continue;
+    const rowLabel = Number(rowMatch[1]);
+    if (rowLabel < 1 || rowLabel > BOARD_SIZE) continue;
+    const payload = rowMatch[2];
+    const chunks = payload.match(/\(#\)|\(o\)|\(\.\)|#|o|\./g) || [];
+    if (chunks.length < BOARD_SIZE) continue;
+
+    for (let cIx = 0; cIx < BOARD_SIZE; cIx++) {
+      const colLabel = headerCols[cIx];
+      if (colLabel < 1 || colLabel > BOARD_SIZE) continue;
+      const chunk = chunks[cIx];
+      const cleaned = chunk.replace(/[()]/g, '');
+      const stone: Stone = cleaned === '#' ? '#' : cleaned === 'o' ? 'o' : '.';
+      board[rowLabel - 1][colLabel - 1] = {
+        row: rowLabel,
+        col: colLabel,
+        stone,
+        last: chunk.startsWith('('),
+      };
+    }
+    parsedRows += 1;
+  }
+
   return board;
 }
 
-// ── Core Engine ────────────────────────────────────────────────────
+function toMatrix(cells: Cell[][]): number[][] {
+  return cells.map((row) =>
+    row.map((cell) => (cell.stone === '#' ? 1 : cell.stone === 'o' ? -1 : 0)),
+  );
+}
 
-function inside(r: number, c: number): boolean {
+function inBounds(r: number, c: number): boolean {
   return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE;
 }
 
-function moveCount(board: number[][]): number {
+function countDir(board: number[][], r: number, c: number, dr: number, dc: number, side: number): number {
   let n = 0;
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) n += 1;
-    }
+  let rr = r + dr;
+  let cc = c + dc;
+  while (inBounds(rr, cc) && board[rr][cc] === side) {
+    n += 1;
+    rr += dr;
+    cc += dc;
   }
   return n;
 }
 
-function hasNeighbor(board: number[][], r: number, c: number, dist: number): boolean {
-  const rMin = Math.max(0, r - dist);
-  const rMax = Math.min(BOARD_SIZE - 1, r + dist);
-  const cMin = Math.max(0, c - dist);
-  const cMax = Math.min(BOARD_SIZE - 1, c + dist);
-  for (let rr = rMin; rr <= rMax; rr++) {
-    for (let cc = cMin; cc <= cMax; cc++) {
+function wouldWin(board: number[][], r: number, c: number, side: number): boolean {
+  for (const [dr, dc] of DIRS) {
+    const total = 1 + countDir(board, r, c, dr, dc, side) + countDir(board, r, c, -dr, -dc, side);
+    if (total >= 5) return true;
+  }
+  return false;
+}
+
+function hasNeighbor(board: number[][], r: number, c: number, dist = 2): boolean {
+  for (let rr = Math.max(0, r - dist); rr <= Math.min(BOARD_SIZE - 1, r + dist); rr++) {
+    for (let cc = Math.max(0, c - dist); cc <= Math.min(BOARD_SIZE - 1, c + dist); cc++) {
       if (rr === r && cc === c) continue;
       if (board[rr][cc] !== 0) return true;
     }
@@ -224,948 +181,202 @@ function hasNeighbor(board: number[][], r: number, c: number, dist: number): boo
   return false;
 }
 
-function cloneBoard(board: number[][]): number[][] {
-  return board.map((row) => row.slice());
-}
-
-function boardKey(board: number[][]): string {
-  let key = '';
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      key += board[r][c] === 1 ? '1' : board[r][c] === -1 ? '2' : '0';
-    }
-  }
-  return key;
-}
-
-function hasFive(board: number[][], r: number, c: number, side: number): boolean {
-  const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  for (const [dr, dc] of dirs) {
-    let count = 1;
-    let rr = r + dr, cc = c + dc;
-    while (inside(rr, cc) && board[rr][cc] === side) { count++; rr += dr; cc += dc; }
-    rr = r - dr; cc = c - dc;
-    while (inside(rr, cc) && board[rr][cc] === side) { count++; rr -= dr; cc -= dc; }
-    if (count >= 5) return true;
-  }
-  return false;
-}
-
-// ── Pattern Evaluation ─────────────────────────────────────────────
-
-type PatternCount = {
-  five: number;
-  liveFour: number;
-  deadFour: number;
-  liveThree: number;
-  deadThree: number;
-  liveTwo: number;
-};
-
-function countPatterns(board: number[][], side: number): PatternCount {
-  const result: PatternCount = { five: 0, liveFour: 0, deadFour: 0, liveThree: 0, deadThree: 0, liveTwo: 0 };
-  const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  const opp = -side;
-
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== side) continue;
-      for (const [dr, dc] of dirs) {
-        // Avoid double-counting: only count from the "start" of each line
-        const pr = r - dr, pc = c - dc;
-        if (inside(pr, pc) && board[pr][pc] === side) continue;
-
-        // Count consecutive stones
-        let len = 0;
-        let rr = r, cc = c;
-        while (inside(rr, cc) && board[rr][cc] === side) { len++; rr += dr; cc += dc; }
-
-        // Check openness on each end
-        const leftOpen = true; // we started from the edge of the group
-        const rightOpen = inside(rr, cc) && board[rr][cc] === 0;
-
-        // Scan further for gaps (broken patterns)
-        // Pattern: side*len + 0 + side (e.g., XX_X or XXX_X)
-        let gapLen = 0;
-        if (inside(rr, cc) && board[rr][cc] === 0) {
-          const gr = rr + dr, gc = cc + dc;
-          if (inside(gr, gc) && board[gr][gc] === side) {
-            let gr2 = gr, gc2 = gc;
-            while (inside(gr2, gc2) && board[gr2][gc2] === side) { gapLen++; gr2 += dr; gc2 += dc; }
-          }
-        }
-
-        const totalWithGap = len + gapLen;
-
-        if (len >= 5) {
-          result.five++;
-        } else if (len === 4) {
-          if (leftOpen && rightOpen) result.liveFour++;
-          else if (rightOpen) result.deadFour++;
-        } else if (len === 3) {
-          if (leftOpen && rightOpen) result.liveThree++;
-          else if (rightOpen) result.deadThree++;
-        } else if (len === 2) {
-          if (leftOpen && rightOpen) result.liveTwo++;
-        }
-
-        // Gap patterns: XX_X (broken four) or X_XX
-        if (totalWithGap === 4 && gapLen > 0) {
-          // This is a broken four / jump four
-          result.deadFour++;
-        }
-        if (totalWithGap === 3 && gapLen > 0 && rightOpen) {
-          result.deadThree++;
-        }
-      }
-    }
-  }
-  return result;
-}
-
-function evaluateBoard(board: number[][]): number {
-  const mine = countPatterns(board, 1);
-  const opp = countPatterns(board, -1);
-
-  // Five: instant win
-  if (mine.five > 0) return 100000000;
-  if (opp.five > 0) return -100000000;
-
-  // Live four: unstoppable
-  if (mine.liveFour > 0) return 50000000;
-  if (opp.liveFour > 0) return -50000000;
-
-  // Dead four + live three: forcing win
-  if (mine.deadFour >= 2 || (mine.deadFour >= 1 && mine.liveThree >= 1)) return 10000000;
-  if (opp.deadFour >= 2 || (opp.deadFour >= 1 && opp.liveThree >= 1)) return -10000000;
-
-  // Double live three: very strong
-  if (mine.liveThree >= 2) return 5000000;
-  if (opp.liveThree >= 2) return -5000000;
-
+function evaluateLine(board: number[][], r: number, c: number, side: number): number {
   let score = 0;
-  score += mine.deadFour * 800000;
-  score += mine.liveThree * 500000;
-  score += mine.deadThree * 50000;
-  score += mine.liveTwo * 8000;
-  score -= opp.deadFour * 800000;
-  score -= opp.liveThree * 500000;
-  score -= opp.deadThree * 50000;
-  score -= opp.liveTwo * 8000;
-
-  // Counter-attack potential: reward positions that create multi-directional threats
-  // This helps turn defense into offense (化被动为主动)
-  let myDirs = 0, oppDirs = 0;
-  const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] === 0) continue;
-      const side = board[r][c];
-      for (const [dr, dc] of dirs) {
-        const pr = r - dr, pc = c - dc;
-        if (inside(pr, pc) && board[pr][pc] === side) continue;
-        let len = 0;
-        let rr = r, cc = c;
-        while (inside(rr, cc) && board[rr][cc] === side) { len++; rr += dr; cc += dc; }
-        if (len >= 2) {
-          const endOpen = inside(rr, cc) && board[rr][cc] === 0;
-          if (endOpen) {
-            if (side === 1) myDirs++;
-            else oppDirs++;
-          }
-        }
-      }
-    }
-  }
-  // More directional threats = more counter-attack potential
-  score += (myDirs - oppDirs) * 3000;
-
-  // Center preference
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) {
-        const centerDist = Math.abs(r - 7) + Math.abs(c - 7);
-        score += board[r][c] * (14 - centerDist) * -30;
-      }
-    }
-  }
-
-  return score;
-}
-
-// ── Strategy-Weighted Evaluation ───────────────────────────────────
-
-const STRATEGY_WEIGHTS: Record<StrategyId, {
-  myFive: number; myLiveFour: number; myDeadFour: number; myLiveThree: number; myDeadThree: number; myLiveTwo: number;
-  oppFive: number; oppLiveFour: number; oppDeadFour: number; oppLiveThree: number; center: number;
-}> = {
-  auto: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 8000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -30 },
-  master_balance: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 8000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -30 },
-  killer_combo: { myFive: 100000000, myLiveFour: 55000000, myDeadFour: 1000000, myLiveThree: 600000, myDeadThree: 60000, myLiveTwo: 7000, oppFive: 90000000, oppLiveFour: 40000000, oppDeadFour: 650000, oppLiveThree: 350000, center: -25 },
-  trap_double_three: { myFive: 100000000, myLiveFour: 48000000, myDeadFour: 900000, myLiveThree: 700000, myDeadThree: 90000, myLiveTwo: 20000, oppFive: 88000000, oppLiveFour: 42000000, oppDeadFour: 700000, oppLiveThree: 380000, center: -28 },
-  defense_counter: { myFive: 100000000, myLiveFour: 45000000, myDeadFour: 700000, myLiveThree: 400000, myDeadThree: 40000, myLiveTwo: 6000, oppFive: 98000000, oppLiveFour: 48000000, oppDeadFour: 900000, oppLiveThree: 500000, center: -20 },
-  attack_focus: { myFive: 100000000, myLiveFour: 58000000, myDeadFour: 1200000, myLiveThree: 650000, myDeadThree: 70000, myLiveTwo: 10000, oppFive: 85000000, oppLiveFour: 38000000, oppDeadFour: 600000, oppLiveThree: 300000, center: -35 },
-  sente_play: { myFive: 100000000, myLiveFour: 52000000, myDeadFour: 850000, myLiveThree: 550000, myDeadThree: 55000, myLiveTwo: 9000, oppFive: 92000000, oppLiveFour: 44000000, oppDeadFour: 720000, oppLiveThree: 420000, center: -30 },
-  influence_play: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 750000, myLiveThree: 480000, myDeadThree: 45000, myLiveTwo: 12000, oppFive: 90000000, oppLiveFour: 42000000, oppDeadFour: 680000, oppLiveThree: 380000, center: -50 },
-  opening_tianyuan: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 8000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -40 },
-  opening_star: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 500000, myDeadThree: 50000, myLiveTwo: 10000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -35 },
-  opening_diagonal: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 800000, myLiveThree: 520000, myDeadThree: 55000, myLiveTwo: 12000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -30 },
-  opening_huayue: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 850000, myLiveThree: 550000, myDeadThree: 55000, myLiveTwo: 9000, oppFive: 95000000, oppLiveFour: 45000000, oppDeadFour: 750000, oppLiveThree: 400000, center: -32 },
-  opening_yuyue: { myFive: 100000000, myLiveFour: 50000000, myDeadFour: 780000, myLiveThree: 480000, myDeadThree: 48000, myLiveTwo: 7500, oppFive: 96000000, oppLiveFour: 46000000, oppDeadFour: 780000, oppLiveThree: 420000, center: -28 },
-};
-
-function evaluateWithStrategy(board: number[][], strategy: StrategyId): number {
-  const w = STRATEGY_WEIGHTS[strategy];
-  const mine = countPatterns(board, 1);
-  const opp = countPatterns(board, -1);
-
-  if (mine.five > 0) return w.myFive;
-  if (opp.five > 0) return -w.oppFive;
-  if (mine.liveFour > 0) return w.myLiveFour;
-  if (opp.liveFour > 0) return -w.oppLiveFour;
-
-  if (mine.deadFour >= 2 || (mine.deadFour >= 1 && mine.liveThree >= 1)) return w.myDeadFour * 12;
-  if (opp.deadFour >= 2 || (opp.deadFour >= 1 && opp.liveThree >= 1)) return -w.oppDeadFour * 12;
-
-  if (mine.liveThree >= 2) return w.myLiveThree * 10;
-  if (opp.liveThree >= 2) return -w.oppLiveThree * 10;
-
-  let score = 0;
-  score += mine.deadFour * w.myDeadFour;
-  score += mine.liveThree * w.myLiveThree;
-  score += mine.deadThree * (w.myDeadThree || 50000);
-  score += mine.liveTwo * (w.myLiveTwo || 8000);
-  score -= opp.deadFour * w.oppDeadFour;
-  score -= opp.liveThree * w.oppLiveThree;
-  score -= opp.deadThree * (w.myDeadThree || 50000);
-  score -= opp.liveTwo * (w.myLiveTwo || 8000);
-
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) {
-        const centerDist = Math.abs(r - 7) + Math.abs(c - 7);
-        score += board[r][c] * (14 - centerDist) * w.center;
-      }
-    }
+  for (const [dr, dc] of DIRS) {
+    const left = countDir(board, r, c, -dr, -dc, side);
+    const right = countDir(board, r, c, dr, dc, side);
+    const total = left + right + 1;
+    score += total * total * 15;
   }
   return score;
 }
 
-// ── Move Generation & Ordering ─────────────────────────────────────
-
-function genCandidates(board: number[][], limit: number): Array<[number, number]> {
-  const moves = moveCount(board);
-  const candidates: Array<[number, number, number]> = []; // [r, c, threatScore]
-
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) continue;
-      if (moves > 0 && !hasNeighbor(board, r, c, 2)) continue;
-
-      // Score this candidate by the patterns it creates/blocks
-      let threatScore = 0;
-
-      board[r][c] = 1;
-      const myP = countPatterns(board, 1);
-      if (myP.five > 0) threatScore += 100000000;
-      if (myP.liveFour > 0) threatScore += 5000000;
-      if (myP.deadFour > 0) threatScore += 800000;
-      if (myP.liveThree > 0) threatScore += 500000;
-      if (myP.deadThree > 0) threatScore += 50000;
-      board[r][c] = 0;
-
-      board[r][c] = -1;
-      const oppP = countPatterns(board, -1);
-      if (oppP.five > 0) threatScore += 95000000;
-      if (oppP.liveFour > 0) threatScore += 4500000;
-      if (oppP.deadFour > 0) threatScore += 750000;
-      if (oppP.liveThree > 0) threatScore += 400000;
-      board[r][c] = 0;
-
-      candidates.push([r, c, threatScore]);
-    }
+function openingBonus(strategy: StrategyId, row: number, col: number): number {
+  const center = 8;
+  const manhattan = Math.abs(row - center) + Math.abs(col - center);
+  if (strategy === 'opening_center') {
+    return Math.max(0, 200 - manhattan * 40);
   }
-
-  candidates.sort((a, b) => b[2] - a[2]);
-  return candidates.slice(0, limit).map(([r, c]) => [r, c]);
+  if (strategy === 'opening_star') {
+    const starPoints = new Set(['4,4', '4,12', '12,4', '12,12', '8,8']);
+    return starPoints.has(`${row},${col}`) ? 200 : 0;
+  }
+  return Math.max(0, 120 - manhattan * 18);
 }
 
-// ── VCF/VCT Solver (Threat-Space Search) ───────────────────────────
-// Searches for forced-win sequences using only threat moves (fours).
-
-function findWinFour(board: number[][], side: number): [number, number] | null {
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) continue;
-      board[r][c] = side;
-      const win = hasFive(board, r, c, side);
-      board[r][c] = 0;
-      if (win) return [r, c];
-    }
+function strategyWeight(strategy: StrategyId): { attack: number; defense: number; trap: number } {
+  switch (strategy) {
+    case 'attack':
+      return { attack: 1.2, defense: 0.9, trap: 1.0 };
+    case 'defense':
+      return { attack: 0.95, defense: 1.25, trap: 0.9 };
+    case 'trap':
+      return { attack: 1.05, defense: 1.0, trap: 1.35 };
+    case 'balance':
+    case 'opening_center':
+    case 'opening_star':
+    case 'auto':
+    default:
+      return { attack: 1.0, defense: 1.0, trap: 1.0 };
   }
-  return null;
 }
 
-function findBlockFour(board: number[][], side: number): [number, number] | null {
-  // Find a move that blocks the opponent's four
-  const opp = -side;
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) continue;
-      board[r][c] = opp;
-      const threat = hasFive(board, r, c, opp);
-      board[r][c] = 0;
-      if (threat) return [r, c];
-    }
-  }
-  return null;
-}
+function deriveStrategy(board: number[][], mySide: Side, selected: StrategyId): StrategyId {
+  if (selected !== 'auto') return selected;
+  const my = mySide === '#' ? 1 : -1;
+  const opp = -my;
 
-function findMyFours(board: number[][], side: number): Array<[number, number]> {
-  const fours: Array<[number, number]> = [];
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) continue;
-      board[r][c] = side;
-      if (hasFive(board, r, c, side)) fours.push([r, c]);
-      board[r][c] = 0;
-    }
-  }
-  return fours;
-}
-
-function findMyThreats(board: number[][], side: number): Array<[number, number]> {
-  const threats: Array<[number, number]> = [];
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== 0) continue;
-      board[r][c] = side;
-      // Check if this move creates a four (dead or live)
-      const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
-      let createsFour = false;
-      for (const [dr, dc] of dirs) {
-        let count = 1;
-        let rr = r + dr, cc = c + dc;
-        while (inside(rr, cc) && board[rr][cc] === side) { count++; rr += dr; cc += dc; }
-        rr = r - dr; cc = c - dc;
-        while (inside(rr, cc) && board[rr][cc] === side) { count++; rr -= dr; cc -= dc; }
-        if (count === 4) { createsFour = true; break; }
-      }
-      board[r][c] = 0;
-      if (createsFour) threats.push([r, c]);
-    }
-  }
-  return threats;
-}
-
-function solveVCF(board: number[][], side: Side, depth: number, maxDepth: number): [number, number] | null {
-  if (depth >= maxDepth) return null;
-  const s = side === '#' ? 1 : -1;
-
-  // 1. Can we win immediately?
-  const win = findWinFour(board, s);
-  if (win) return win;
-
-  // 2. Find all forcing moves (create a four)
-  const threats = findMyThreats(board, s);
-  if (threats.length === 0) return null;
-
-  for (const [tr, tc] of threats) {
-    board[tr][tc] = s;
-
-    // Opponent must block
-    const block = findBlockFour(board, s);
-    if (!block) {
-      board[tr][tc] = 0;
-      return [tr, tc];
-    }
-
-    // Opponent blocks
-    board[block[0]][block[1]] = -s;
-
-    // Recurse
-    const result = solveVCF(board, side, depth + 2, maxDepth);
-    if (result) {
-      board[block[0]][block[1]] = 0;
-      board[tr][tc] = 0;
-      return [tr, tc];
-    }
-
-    board[block[0]][block[1]] = 0;
-    board[tr][tc] = 0;
-  }
-
-  return null;
-}
-
-// ── Alpha-Beta Search with Iterative Deepening ─────────────────────
-
-let searchNodeCount = 0;
-let searchDeadline = 0;
-let searchTimeUp = false;
-
-function negamax(board: number[][], depth: number, alpha: number, beta: number, color: number): number {
-  searchNodeCount++;
-  if (searchNodeCount % 1024 === 0 && Date.now() > searchDeadline) {
-    searchTimeUp = true;
-    return 0;
-  }
-
-  // Terminal check: does the previous move win?
-  const eval0 = evaluateBoard(board);
-  if (Math.abs(eval0) >= 100000000) return eval0 * color;
-
-  if (depth <= 0) return eval0 * color;
-
-  const candidates = genCandidates(board, 20);
-  if (candidates.length === 0) return eval0 * color;
-
-  let best = -Infinity;
-  for (const [r, c] of candidates) {
-    board[r][c] = color;
-    const score = -negamax(board, depth - 1, -beta, -alpha, -color);
-    board[r][c] = 0;
-
-    if (searchTimeUp) return best === -Infinity ? 0 : best;
-
-    if (score > best) best = score;
-    if (best > alpha) alpha = best;
-    if (alpha >= beta) break;
-  }
-  return best;
-}
-
-// Find the single blocking point of a live four
-function findLiveFourBlock(board: number[][], oppColor: number): [number, number] | null {
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== oppColor) continue;
-      const dirs: Array<[number, number]> = [[1, 0], [0, 1], [1, 1], [1, -1]];
-      for (const [dr, dc] of dirs) {
-        const pr = r - dr, pc = c - dc;
-        if (inside(pr, pc) && board[pr][pc] === oppColor) continue;
-        // Count consecutive
-        let len = 0;
-        let rr = r, cc = c;
-        while (inside(rr, cc) && board[rr][cc] === oppColor) { len++; rr += dr; cc += dc; }
-        if (len !== 4) continue;
-        // Check both ends are open
-        const leftOpen = inside(pr, pc) && board[pr][pc] === 0;
-        const rightOpen = inside(rr, cc) && board[rr][cc] === 0;
-        if (leftOpen && rightOpen) {
-          // Live four! Return one of the blocking points
-          return leftOpen ? [pr, pc] : [rr, cc];
-        }
-      }
-    }
-  }
-  return null;
-}
-
-// Find the best defensive move when opponent has composite threats
-function findDefensiveResponse(board: number[][], myColor: number, oppColor: number, reason: string): MoveEval {
-  const candidates = genCandidates(board, 25);
-  let bestMove = candidates[0];
-  let bestScore = -Infinity;
-
-  for (const [r, c] of candidates) {
-    // Score: reduce opponent threats + create my threats
-    board[r][c] = myColor;
-    const myP = countPatterns(board, myColor);
-    board[r][c] = 0;
-
-    board[r][c] = oppColor;
-    const oppAfter = countPatterns(board, oppColor);
-    board[r][c] = 0;
-
-    let score = 0;
-    // Reward moves that create my threats (counter-attack)
-    if (myP.liveFour > 0) score += 50000000;
-    if (myP.deadFour > 0) score += 800000;
-    if (myP.liveThree > 0) score += 500000;
-    if (myP.deadThree > 0) score += 50000;
-    // Penalize moves that leave opponent with strong threats
-    if (oppAfter.liveFour > 0) score -= 10000000;
-    if (oppAfter.deadFour > 0) score -= 500000;
-    if (oppAfter.liveThree > 0) score -= 200000;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestMove = [r, c];
-    }
-  }
-
-  // Build reason
-  board[bestMove[0]][bestMove[1]] = myColor;
-  const myP = countPatterns(board, myColor);
-  board[bestMove[0]][bestMove[1]] = 0;
-
-  const reasons = [reason];
-  if (myP.liveFour > 0) reasons.push('此手同时形成活四，反击得手！');
-  else if (myP.deadFour > 0) reasons.push('此手制造冲四，化守为攻。');
-  else if (myP.liveThree > 0) reasons.push('此手形成活三，为后续反击铺路。');
-  else reasons.push('此手最大程度削弱对手威胁。');
-
-  return { row: bestMove[0] + 1, col: bestMove[1] + 1, score: 85000000, reasons };
-}
-
-function findBestMove(board: number[][], side: Side, strategy: StrategyId): MoveEval | null {
-  const color = side === '#' ? 1 : -1;
-  const oppColor = -color;
-  const candidates = genCandidates(board, 25);
-  if (candidates.length === 0) return null;
-
-  // ── 1. Can I win immediately? ──
-  for (const [r, c] of candidates) {
-    board[r][c] = color;
-    if (hasFive(board, r, c, color)) {
-      board[r][c] = 0;
-      return { row: r + 1, col: c + 1, score: 100000000, reasons: ['此手可直接连五终结！'] };
-    }
-    board[r][c] = 0;
-  }
-
-  // ── 2. Opponent can win immediately → must block ──
-  const blockMoves: Array<[number, number]> = [];
-  for (const [r, c] of candidates) {
-    board[r][c] = oppColor;
-    if (hasFive(board, r, c, oppColor)) {
-      blockMoves.push([r, c]);
-    }
-    board[r][c] = 0;
-  }
-
-  if (blockMoves.length > 0) {
-    // Prefer blocking move that also creates counter-threats (化被动为主动)
-    let bestBlock = blockMoves[0];
-    let bestBlockScore = -Infinity;
-    for (const [r, c] of blockMoves) {
-      board[r][c] = color;
-      const myAfterBlock = countPatterns(board, color);
-      board[r][c] = 0;
-      let blockScore = 0;
-      if (myAfterBlock.liveFour > 0) blockScore += 50000000;
-      if (myAfterBlock.deadFour > 0) blockScore += 800000;
-      if (myAfterBlock.liveThree > 0) blockScore += 500000;
-      if (myAfterBlock.deadThree > 0) blockScore += 50000;
-      if (blockScore > bestBlockScore) {
-        bestBlockScore = blockScore;
-        bestBlock = [r, c];
-      }
-    }
-    const hasCounter = bestBlockScore > 100000;
-    return {
-      row: bestBlock[0] + 1, col: bestBlock[1] + 1, score: 95000000,
-      reasons: [hasCounter ? '必须封堵对手成五，且此手同时制造反击威胁！' : '对手即将成五，必须封堵！'],
-    };
-  }
-
-  // ── 3. Check opponent's composite threats (活四、双冲四、冲四+活三) ──
-  // These are positions where the opponent creates unstoppable threats.
-  // We must find the defensive move that prevents them.
-  for (const [r, c] of candidates) {
-    board[r][c] = oppColor;
-    const oppP = countPatterns(board, oppColor);
-    board[r][c] = 0;
-
-    // Opponent creates live four → I must block it (only one blocking point exists)
-    if (oppP.liveFour > 0) {
-      // Find the blocking point of the live four
-      const blockPoint = findLiveFourBlock(board, oppColor);
-      if (blockPoint) {
-        board[blockPoint[0]][blockPoint[1]] = color;
-        const myAfter = countPatterns(board, color);
-        board[blockPoint[0]][blockPoint[1]] = 0;
-        const reasons = ['对手即将形成活四，必须封堵！'];
-        if (myAfter.liveFour > 0) reasons.push('封堵同时形成活四，反击成功！');
-        else if (myAfter.deadFour > 0) reasons.push('封堵同时制造冲四威胁。');
-        else if (myAfter.liveThree > 0) reasons.push('封堵同时形成活三，化被动为主动。');
-        return { row: blockPoint[0] + 1, col: blockPoint[1] + 1, score: 90000000, reasons };
-      }
-    }
-
-    // Opponent creates double dead four → unblockable, I must prevent it
-    if (oppP.deadFour >= 2) {
-      // Find the best defensive move that reduces opponent's threats
-      return findDefensiveResponse(board, color, oppColor, '对手即将形成双冲四，必须提前破坏！');
-    }
-
-    // Opponent creates dead four + live three → unblockable combo
-    if (oppP.deadFour > 0 && oppP.liveThree > 0) {
-      return findDefensiveResponse(board, color, oppColor, '对手冲四+活三组合即将成型，必须破坏！');
-    }
-
-    // Opponent creates double live three → very dangerous
-    if (oppP.liveThree >= 2) {
-      return findDefensiveResponse(board, color, oppColor, '对手双活三即将成型，必须提前干预！');
-    }
-  }
-
-  // ── 4. VCF solver: can I win by continuous fours? ──
-  const vcfMove = solveVCF(cloneBoard(board), color === 1 ? '#' : 'o', 0, 14);
-  if (vcfMove) {
-    return { row: vcfMove[0] + 1, col: vcfMove[1] + 1, score: 80000000, reasons: ['找到连续冲四必胜路线！'] };
-  }
-
-  // ── 5. Alpha-beta iterative deepening ──
-  searchDeadline = Date.now() + TIME_LIMIT_MS;
-  searchTimeUp = false;
-
-  let bestMove: [number, number] = candidates[0];
-  let bestScore = -Infinity;
-
-  for (let depth = 2; depth <= SEARCH_DEPTH; depth += 2) {
-    searchNodeCount = 0;
-    searchTimeUp = false;
-    searchDeadline = Date.now() + TIME_LIMIT_MS;
-
-    let depthBest = -Infinity;
-    let depthBestMove = candidates[0];
-
-    for (const [r, c] of candidates) {
-      if (searchTimeUp) break;
-
-      board[r][c] = color;
-      const score = -negamax(board, depth - 1, -Infinity, -depthBest, -color);
-      board[r][c] = 0;
-
-      if (!searchTimeUp && score > depthBest) {
-        depthBest = score;
-        depthBestMove = [r, c];
-      }
-    }
-
-    if (!searchTimeUp) {
-      bestMove = depthBestMove;
-      bestScore = depthBest;
-    }
-  }
-
-  // Build reasons with counter-attack awareness
-  const reasons: string[] = [];
-  board[bestMove[0]][bestMove[1]] = color;
-  const myP = countPatterns(board, color);
-  const oppP = countPatterns(board, -color);
-  board[bestMove[0]][bestMove[1]] = 0;
-
-  if (myP.liveFour > 0) reasons.push('形成活四，必胜之势。');
-  else if (myP.deadFour >= 2) reasons.push('形成双冲四，强制取胜。');
-  else if (myP.deadFour > 0 && myP.liveThree > 0) reasons.push('冲四+活三连续进攻，化守为攻。');
-  else if (myP.liveThree >= 2) reasons.push('双活三，复合进攻。');
-  else if (myP.liveThree > 0) reasons.push('形成活三，制造威胁。');
-  else if (myP.deadFour > 0) reasons.push('冲四施压，迫对手防守。');
-
-  if (oppP.liveFour > 0) reasons.push('封堵对手活四。');
-  else if (oppP.liveThree >= 2) reasons.push('破坏对手双活三。');
-  else if (oppP.liveThree > 0) reasons.push('限制对手活三发展。');
-
-  if (reasons.length === 0) reasons.push('兼顾攻守，占据要点，为后续反击铺路。');
-
-  return { row: bestMove[0] + 1, col: bestMove[1] + 1, score: bestScore, reasons };
-}
-
-// ── Dynamic Position Analysis ──────────────────────────────────────
-
-type GamePhase = 'opening' | 'early_mid' | 'middlegame' | 'late_mid' | 'endgame';
-
-type PositionAssessment = {
-  phase: GamePhase;
-  myThreatLevel: number;     // 0-10: how many threats I have
-  oppThreatLevel: number;    // 0-10: how many threats opponent has
-  advantage: number;         // negative = behind, 0 = even, positive = ahead
-  criticalDefense: boolean;  // opponent has imminent winning threat
-  hasAttackContinuation: boolean; // I have forcing sequence
-  recommendedStrategy: StrategyId;
-  situationDesc: string;
-};
-
-function assessPosition(board: number[][], mySide: Side): PositionAssessment {
-  const myVal = mySide === '#' ? 1 : -1;
-  const oppVal = -myVal;
-  const n = moveCount(board);
-  const myP = countPatterns(board, myVal);
-  const oppP = countPatterns(board, oppVal);
-
-  // Phase detection
-  let phase: GamePhase;
-  if (n <= 6) phase = 'opening';
-  else if (n <= 20) phase = 'early_mid';
-  else if (n <= 60) phase = 'middlegame';
-  else if (n <= 100) phase = 'late_mid';
-  else phase = 'endgame';
-
-  // Threat level (0-10)
   let myThreat = 0;
-  myThreat += myP.five * 10;
-  myThreat += myP.liveFour * 8;
-  myThreat += myP.deadFour * 4;
-  myThreat += myP.liveThree * 3;
-  myThreat += myP.deadThree * 1;
-  myThreat = Math.min(10, myThreat);
-
   let oppThreat = 0;
-  oppThreat += oppP.five * 10;
-  oppThreat += oppP.liveFour * 8;
-  oppThreat += oppP.deadFour * 4;
-  oppThreat += oppP.liveThree * 3;
-  oppThreat += oppP.deadThree * 1;
-  oppThreat = Math.min(10, oppThreat);
-
-  // Advantage assessment
-  const advantage = myThreat - oppThreat;
-
-  // Critical defense needed?
-  const criticalDefense = oppP.five > 0 || oppP.liveFour > 0 || oppP.deadFour >= 2 || (oppP.deadFour > 0 && oppP.liveThree > 0);
-
-  // Attack continuation available?
-  const hasAttackContinuation = myP.five > 0 || myP.liveFour > 0 || myP.deadFour >= 2 || (myP.deadFour > 0 && myP.liveThree > 0) || myP.liveThree >= 2;
-
-  // Auto strategy selection
-  let recommendedStrategy: StrategyId;
-  let situationDesc: string;
-
-  if (phase === 'opening') {
-    // Opening: use a standard opening
-    recommendedStrategy = 'master_balance';
-    situationDesc = '开局阶段，按套路抢占要点。';
-  } else if (criticalDefense && !hasAttackContinuation) {
-    // Must defend
-    recommendedStrategy = 'defense_counter';
-    situationDesc = '对手攻势凶猛，转入防守反击。';
-  } else if (criticalDefense && hasAttackContinuation) {
-    // Both sides have threats - who moves first matters
-    recommendedStrategy = 'sente_play';
-    situationDesc = '双方均有威胁，抢先手是关键。';
-  } else if (oppThreat >= 5 && !hasAttackContinuation) {
-    // Opponent has strong initiative
-    recommendedStrategy = 'defense_counter';
-    situationDesc = '对手掌握主动，先稳固防守再寻反击。';
-  } else if (hasAttackContinuation && oppThreat <= 2) {
-    // I have strong attack, opponent is weak
-    recommendedStrategy = 'attack_focus';
-    situationDesc = '我方攻势占优，连续进攻不给喘息。';
-  } else if (myP.liveThree >= 2 || (myP.liveThree > 0 && myP.deadThree > 0)) {
-    // Multiple threes - trap strategy
-    recommendedStrategy = 'trap_double_three';
-    situationDesc = '多路活三布局，设陷阱诱导对手犯错。';
-  } else if (myThreat >= 4 && oppThreat >= 3) {
-    // Both have moderate threats - need initiative
-    recommendedStrategy = 'sente_play';
-    situationDesc = '形势胶着，保持先手不脱先是关键。';
-  } else if (phase === 'middlegame' && advantage >= 1) {
-    // Slight advantage in middlegame - build influence
-    recommendedStrategy = 'influence_play';
-    situationDesc = '中盘略优，构建厚势压缩对手空间。';
-  } else if (phase === 'endgame') {
-    // Endgame: every move is critical
-    recommendedStrategy = 'master_balance';
-    situationDesc = '终盘阶段，精确计算每一步。';
-  } else {
-    // Default: balanced play
-    recommendedStrategy = 'master_balance';
-    situationDesc = '形势平稳，均衡发展。';
+  let stones = 0;
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] !== 0) stones += 1;
+      if (board[r][c] === my) myThreat += evaluateLine(board, r, c, my);
+      if (board[r][c] === opp) oppThreat += evaluateLine(board, r, c, opp);
+    }
   }
-
-  return {
-    phase,
-    myThreatLevel: myThreat,
-    oppThreatLevel: oppThreat,
-    advantage,
-    criticalDefense,
-    hasAttackContinuation,
-    recommendedStrategy,
-    situationDesc,
-  };
+  if (stones <= 6) return 'opening_center';
+  if (oppThreat > myThreat * 1.15) return 'defense';
+  if (myThreat > oppThreat * 1.2) return 'attack';
+  return 'balance';
 }
 
-function phaseLabel(phase: GamePhase): string {
-  const labels: Record<GamePhase, string> = {
-    opening: '开局',
-    early_mid: '序盘',
-    middlegame: '中盘',
-    late_mid: '中后盘',
-    endgame: '终盘',
-  };
-  return labels[phase];
-}
+function computeSuggestions(board: number[][], mySide: Side, selected: StrategyId): Suggestion[] {
+  const my = mySide === '#' ? 1 : -1;
+  const opp = -my;
+  const effectiveStrategy = deriveStrategy(board, mySide, selected);
+  const weight = strategyWeight(effectiveStrategy);
 
-// ── Strategy Suggestion (wraps the engine) ─────────────────────────
-
-function suggestMoves(board: number[][], mySide: Side, strategy: StrategyId): { moves: MoveEval[]; assessment?: PositionAssessment } {
-  const myVal = mySide === '#' ? 1 : -1;
-
-  // Auto mode: analyze position and pick best strategy
-  let effectiveStrategy = strategy;
-  let assessment: PositionAssessment | undefined;
-  if (strategy === 'auto') {
-    assessment = assessPosition(board, mySide);
-    effectiveStrategy = assessment.recommendedStrategy;
-  }
-
-  // Opening book
-  const n = moveCount(board);
-  if (n <= 8) {
-    const plan = OPENING_BOOK[mySide][effectiveStrategy] || OPENING_BOOK[mySide].master_balance;
-    for (const [row, col] of plan) {
-      const r = row - 1, c = col - 1;
-      if (!inside(r, c) || board[r][c] !== 0) continue;
-      if (n === 0 || hasNeighbor(board, r, c, 3)) {
-        return {
-          moves: [{
-            row, col, score: 80000000,
-            reasons: assessment
-              ? [assessment.situationDesc, '按开局套路推进，抢占关键形点。']
-              : ['按开局套路推进，抢占关键形点。'],
-          }],
-          assessment,
-        };
-      }
+  const candidates: Suggestion[] = [];
+  let stones = 0;
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] !== 0) stones += 1;
     }
   }
 
-  // Find the best move via search
-  const best = findBestMove(board, mySide, effectiveStrategy);
-  if (!best) return { moves: [], assessment };
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] !== 0) continue;
+      if (stones > 0 && !hasNeighbor(board, r, c, 2)) continue;
 
-  // Prepend situation analysis to first move reasons
-  if (assessment) {
-    best.reasons = [assessment.situationDesc, ...best.reasons];
+      board[r][c] = my;
+      const meWin = wouldWin(board, r, c, my);
+      const attackScore = evaluateLine(board, r, c, my);
+      board[r][c] = 0;
+
+      board[r][c] = opp;
+      const blockWin = wouldWin(board, r, c, opp);
+      const defenseScore = evaluateLine(board, r, c, opp);
+      board[r][c] = 0;
+
+      let score = 0;
+      let reason = '均衡推进，保持先手压力。';
+      if (meWin) {
+        score = 1_000_000;
+        reason = '此手可直接连五取胜。';
+      } else if (blockWin) {
+        score = 950_000;
+        reason = '此手可封堵对手的立即胜点。';
+      } else {
+        score += attackScore * weight.attack;
+        score += defenseScore * 0.85 * weight.defense;
+        score += openingBonus(effectiveStrategy, r + 1, c + 1);
+        if (effectiveStrategy === 'trap') {
+          score += (attackScore + defenseScore) * 0.2 * weight.trap;
+          reason = '构造双向威胁，诱导对手防守失衡。';
+        } else if (effectiveStrategy === 'defense') {
+          reason = '优先压制对手连线，稳健反击。';
+        } else if (effectiveStrategy === 'attack') {
+          reason = '扩大主动进攻线，争取连续先手。';
+        } else if (effectiveStrategy === 'opening_center' || effectiveStrategy === 'opening_star') {
+          reason = '按开局定式占位，后续更易成形。';
+        }
+      }
+
+      candidates.push({
+        row: r + 1,
+        col: c + 1,
+        score: Math.round(score),
+        reason,
+      });
+    }
   }
 
-  // Generate top-3 alternatives for display
-  const results: MoveEval[] = [best];
-  const candidates = genCandidates(board, 15);
-  for (const [r, c] of candidates) {
-    if (results.length >= 3) break;
-    if (r === best.row - 1 && c === best.col - 1) continue;
-
-    board[r][c] = myVal;
-    const score = evaluateWithStrategy(board, effectiveStrategy);
-    board[r][c] = 0;
-
-    const reasons: string[] = [];
-    board[r][c] = myVal;
-    const myP = countPatterns(board, myVal);
-    board[r][c] = 0;
-    if (myP.liveFour > 0) reasons.push('可形成活四。');
-    if (myP.deadFour > 0) reasons.push('可冲四进攻。');
-    if (myP.liveThree > 0) reasons.push('可形成活三。');
-    if (reasons.length === 0) reasons.push('备选落子点。');
-
-    results.push({ row: r + 1, col: c + 1, score, reasons });
-  }
-
-  return { moves: results, assessment };
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.slice(0, 3);
 }
-
-// ── Component ──────────────────────────────────────────────────────
 
 export default function GomokuPanel({ disabled, nickname, boardText, onPick }: Props) {
-  const cells = useMemo(() => {
-    try {
-      const parsed = parseBoard(boardText);
-      return parsed.length === BOARD_SIZE ? parsed : defaultBoard();
-    } catch (e) {
-      console.error('[GomokuPanel] parseBoard failed:', e);
-      return defaultBoard();
-    }
-  }, [boardText]);
+  const [strategy, setStrategy] = useState<StrategyId>('auto');
+  const cells = useMemo(() => parseBoard(boardText), [boardText]);
+  const turnInfo = useMemo(() => parseTurnInfo(boardText), [boardText]);
+  const seats = useMemo(() => parseSeats(boardText), [boardText]);
+  const matrix = useMemo(() => toMatrix(cells), [cells]);
 
-  const turnName = parseTurnName(boardText);
-  const myTurn = !!turnName && turnName === nickname;
-  const canPlay = !disabled && (!turnName || myTurn);
-
-  const { blackName, whiteName } = useMemo(() => {
-    try {
-      return parseSeatedSides(boardText);
-    } catch (e) {
-      console.error('[GomokuPanel] parseSeatedSides failed:', e);
-      return { blackName: '', whiteName: '' };
-    }
-  }, [boardText]);
-  const mySide: Side | null = nickname === blackName ? '#' : nickname === whiteName ? 'o' : null;
-  const turnSide = useMemo(() => parseTurnSide(boardText), [boardText]);
-
-  const board = useMemo(() => {
-    try {
-      return parseMatrix(cells);
-    } catch (e) {
-      console.error('[GomokuPanel] parseMatrix failed:', e);
-      return Array.from({ length: BOARD_SIZE }, () => Array.from({ length: BOARD_SIZE }, () => 0));
-    }
-  }, [cells]);
-
-  const { moves, assessment } = useMemo(() => {
-    if (!mySide) return { moves: [] as MoveEval[] };
-    try {
-      return suggestMoves(board, mySide, 'auto');
-    } catch (e) {
-      console.error('[GomokuPanel] suggestMoves failed:', e);
-      return { moves: [] as MoveEval[] };
-    }
-  }, [board, mySide]);
-
+  const mySide: Side | null = nickname === seats.blackName ? '#' : nickname === seats.whiteName ? 'o' : null;
+  const myTurn = !!turnInfo.name && turnInfo.name === nickname;
+  const canPlay = !disabled && (!turnInfo.name || myTurn);
   const isHiddenMaster = nickname === 'zouyu';
+
+  const suggestions = useMemo(() => {
+    if (!mySide) return [];
+    return computeSuggestions(matrix.map((row) => row.slice()), mySide, strategy);
+  }, [matrix, mySide, strategy]);
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">五子棋棋盘（点击落子）</div>
-      {turnName && !myTurn && (
-        <div className="game-workbench-hint">当前轮到：{turnName}，你的落子按钮已暂时禁用。</div>
+      <div className="game-interaction-title">五子棋棋盘（点击直接落子）</div>
+      {turnInfo.name && !myTurn && (
+        <div className="game-workbench-hint">当前轮到：{turnInfo.name}，你的落子按钮已暂时禁用。</div>
       )}
 
       {isHiddenMaster && (
-      <div className="game-advisor game-advisor-info" style={{ marginBottom: 8 }}>
-        <div className="game-advisor-title">大师级五子棋助手</div>
-        {mySide ? (
-          <>
-            <div className="game-advisor-detail">
-              执{mySide === '#' ? '黑' : '白'} · 当前落子方：{turnSide === '#' ? '黑' : turnSide === 'o' ? '白' : '未知'}
-            </div>
-            {assessment && (
-              <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(255,255,255,0.05)', borderRadius: 4, fontSize: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 2 }}>
-                  局势分析：{phaseLabel(assessment.phase)} · {assessment.situationDesc}
-                </div>
-                <div>
-                  我方威胁 {assessment.myThreatLevel}/10 · 对手威胁 {assessment.oppThreatLevel}/10 ·
-                  {assessment.advantage > 0 ? ' 优势' : assessment.advantage < 0 ? ' 劣势' : ' 均势'}
-                  {' → '}当前策略：<strong>{STRATEGY_LABEL[assessment.recommendedStrategy]}</strong>
-                </div>
+        <div className="game-advisor game-advisor-info" style={{ marginBottom: 8 }}>
+          <div className="game-advisor-title">隐藏功能：大师级五子棋助手</div>
+          {mySide ? (
+            <>
+              <div className="game-advisor-detail">
+                你当前执子：{mySide === '#' ? '黑子' : '白子'}
+                {turnInfo.side ? `，当前落子方：${turnInfo.side === '#' ? '黑子' : '白子'}` : ''}
               </div>
-            )}
-            {moves.length > 0 && (
+              <div className="game-chip-row">
+                <select className="game-select" value={strategy} onChange={(e) => setStrategy(e.target.value as StrategyId)}>
+                  {STRATEGIES.map((s) => (
+                    <option key={s.id} value={s.id}>{s.label}</option>
+                  ))}
+                </select>
+              </div>
               <div className="game-chip-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                {moves.map((m, idx) => (
+                {suggestions.map((s, idx) => (
                   <button
-                    key={`${m.row}-${m.col}-${idx}`}
+                    key={`${s.row}-${s.col}-${idx}`}
                     className="mini-btn"
                     disabled={!canPlay}
-                    onClick={() => onPick(m.row, m.col)}
-                    title={m.reasons.join('；')}
+                    onClick={() => onPick(s.row, s.col)}
+                    title={s.reason}
                   >
-                    {idx === 0 ? '首选' : `备选${idx}`}：({m.row},{m.col})
+                    建议{idx + 1}：{s.row},{s.col}
                   </button>
                 ))}
               </div>
-            )}
-            {moves[0] && (
-              <div style={{ marginTop: 6, padding: '4px 8px', background: 'rgba(255,255,255,0.03)', borderRadius: 4, fontSize: 12 }}>
-                <strong>推荐落子：第 {moves[0].row} 行，第 {moves[0].col} 列</strong>
-                <br />
-                理由：{moves[0].reasons.join('；')}
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="game-advisor-detail">未识别到你在本局的黑白席位，请先加入当前五子棋对局。</div>
-        )}
-      </div>
+              {suggestions[0] && (
+                <div className="game-advisor-detail" style={{ marginTop: 6 }}>
+                  当前首选：第 {suggestions[0].row} 行，第 {suggestions[0].col} 列。理由：{suggestions[0].reason}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="game-advisor-detail">未识别到你的黑白席位，请先加入当前五子棋对局。</div>
+          )}
+        </div>
       )}
 
       <div className="gomoku-grid">
-        {cells.map((rowCells, rIx) =>
-          rowCells.map((cell, cIx) => {
+        {cells.map((row) =>
+          row.map((cell) => {
             const text = cell.stone === '#' ? '●' : cell.stone === 'o' ? '○' : '·';
             const cls = [
               'gomoku-cell',
@@ -1177,7 +388,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
               .join(' ');
             return (
               <button
-                key={`${rIx + 1}-${cIx + 1}`}
+                key={`${cell.row}-${cell.col}`}
                 className={cls}
                 onClick={() => onPick(cell.row, cell.col)}
                 disabled={!canPlay}

@@ -66,6 +66,9 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
 function isLikelyGameLine(line: string): boolean {
   if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
   if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])(?:\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])){4,}\s*$/.test(line)) return true;
+  if (/^#\d+\s*[：:]/.test(line.trim())) return true;
+  if (/^轮到\s+/.test(line.trim())) return true;
+  if (/^(alive|players|votes)[:：]/i.test(line.trim())) return true;
   const t = line.trim().toLowerCase();
   if (!t) return false;
   const keywords = [
@@ -522,12 +525,12 @@ export default function GameWorkbench() {
             </div>
           </div>
 
-          {game === 'chess' && <ChessPanel disabled={disabled} users={users} sendMove={sendMove} />}
+          {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
           {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
-          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
+          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
 
-          {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
-          {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
 
           {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
           {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}

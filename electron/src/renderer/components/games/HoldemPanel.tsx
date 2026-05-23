@@ -14,7 +14,7 @@ function extractCards(linePrefix: string, text: string): string[] {
   const idx = Math.max(line.indexOf('：'), line.indexOf(':'));
   if (idx < 0) return [];
   const cards = line.slice(idx + 1).trim().split(/\s+/).filter(Boolean);
-  if (cards.length === 1 && (cards[0] === '未发' || cards[0] === '无')) return [];
+  if (cards.length === 1 && (cards[0] === '未发' || cards[0].toLowerCase() === 'none' || cards[0] === '无')) return [];
   return cards;
 }
 
@@ -48,9 +48,16 @@ function parseMeta(text: string): { state: string; turn: string; host: string } 
     if (!host) {
       const m = t.match(/^#1\s+([^:：]+)[:：]/);
       if (m) host = m[1].trim();
+      const m2 = t.match(/^房主[:：]\s*(.+)$/);
+      if (!host && m2) host = m2[1].trim();
     }
   }
   return { state, turn, host };
+}
+
+function includesAny(source: string, needles: string[]): boolean {
+  const s = source.toLowerCase();
+  return needles.some((n) => s.includes(n.toLowerCase()));
 }
 
 export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Props) {
@@ -60,13 +67,14 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
   const scores = extractScores(boardText);
   const meta = parseMeta(boardText);
   const isHost = !!meta.host && meta.host === nickname;
-  const isPlaying = meta.state.includes('进行中');
-  const isWaiting = meta.state.includes('等待开始');
-  const isEnded = meta.state.includes('已结束');
+  const isPlaying = includesAny(meta.state, ['进行中', 'playing']);
+  const isWaiting = includesAny(meta.state, ['等待开始', 'waiting']);
+  const isEnded = includesAny(meta.state, ['已结束', 'ended']);
   const myTurn = !!meta.turn && meta.turn === nickname;
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
   const canTuneBot = isHost;
+
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">德州扑克互动面板</div>
@@ -91,7 +99,7 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
       <div className="game-chip-row">
-        <input className="monitor-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
+        <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
         <button className="mini-btn" disabled={disabled || !canAct || !raiseAmount.trim()} onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}>加注</button>
       </div>
       <div className="game-chip-row">

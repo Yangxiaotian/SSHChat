@@ -107,6 +107,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setConfig: (config) => set({ config }),
   setNickname: (nickname) => set({ nickname }),
   setRooms: (rooms) => {
+    if (!Array.isArray(rooms)) {
+      return;
+    }
     const { rooms: prevRooms } = get();
     const byName = new Map(prevRooms.map((r) => [r.name, r]));
     const merged = rooms.map((next) => {

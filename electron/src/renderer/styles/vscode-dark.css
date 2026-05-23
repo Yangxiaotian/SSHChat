@@ -371,6 +371,61 @@ html, body, #root {
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
+    var(--vscode-bg);
+}
+
+.chat-main-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.game-pane {
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--vscode-border-light);
+}
+
+.chat-splitter {
+  height: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.03),
+    rgba(255, 255, 255, 0.01)
+  );
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.4);
+  user-select: none;
+}
+
+.chat-splitter:hover,
+.chat-splitter.active {
+  background: linear-gradient(
+    180deg,
+    rgba(55, 148, 255, 0.22),
+    rgba(55, 148, 255, 0.10)
+  );
+}
+
+.chat-splitter-grip {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: #7d8ca3;
+  transform: translateY(-1px);
+}
+
+.chat-messages-surface {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .game-workbench {
@@ -690,6 +745,20 @@ html, body, #root {
   background: #363a41;
 }
 
+.game-mini-input {
+  height: 26px;
+  min-width: 86px;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-border);
+  background: var(--vscode-input-bg);
+  color: var(--vscode-fg);
+  border-radius: 4px;
+}
+
+.game-mini-input:focus {
+  outline: 1px solid var(--vscode-input-focus);
+}
+
 .game-workbench-body {
   max-height: 180px;
   overflow: auto;
@@ -901,10 +970,11 @@ html, body, #root {
   min-height: 140px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 8px 0;
+  padding: 10px 0 8px;
   font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.6;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 30%);
 }
 
 .chat-empty {
@@ -1029,8 +1099,20 @@ html, body, #root {
 .input-bar {
   padding: 8px 16px 12px;
   border-top: 1px solid var(--vscode-border);
-  background-color: var(--vscode-bg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 35%),
+    var(--vscode-bg);
   flex-shrink: 0;
+}
+
+@media (max-height: 760px) {
+  .chat-splitter {
+    height: 6px;
+  }
+
+  .game-workbench.expanded {
+    max-height: min(48vh, 420px);
+  }
 }
 
 .input-wrapper {

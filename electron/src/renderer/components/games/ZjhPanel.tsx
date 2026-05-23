@@ -12,7 +12,7 @@ type Props = {
 function extractCards(linePrefix: string, text: string): string[] {
   const line = text.split('\n').find((l) => l.includes(linePrefix));
   if (!line) return [];
-  const idx = line.indexOf('：');
+  const idx = Math.max(line.indexOf('：'), line.indexOf(':'));
   if (idx < 0) return [];
   return line.slice(idx + 1).trim().split(/\s+/).filter(Boolean);
 }
@@ -42,8 +42,10 @@ function parseMeta(text: string): { state: string; turn: string; host: string } 
   for (const line of text.split('\n')) {
     const t = line.trim();
     if (!state) {
-      const m = t.match(/状态[:：]\s*(.+)$/);
-      if (m) state = m[1].trim();
+      const m = t.match(/(状态|state)[:：]\s*(.+)$/i);
+      if (m) state = m[2].trim();
+      const m2 = t.match(/炸金花\s+状态[:：]\s*(.+)$/);
+      if (!state && m2) state = m2[1].trim();
     }
     if (!turn) {
       const m = t.match(/^(turn|轮到)[:：]\s*(.+)$/i);
@@ -57,6 +59,11 @@ function parseMeta(text: string): { state: string; turn: string; host: string } 
   return { state, turn, host };
 }
 
+function includesAny(source: string, needles: string[]): boolean {
+  const s = source.toLowerCase();
+  return needles.some((n) => s.includes(n.toLowerCase()));
+}
+
 export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }: Props) {
   const [raiseAmount, setRaiseAmount] = useState('1');
   const [target, setTarget] = useState('');
@@ -66,13 +73,14 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
   const candidates = (seatNames.length > 0 ? seatNames : users).filter((u) => u && u !== nickname);
   const meta = parseMeta(boardText);
   const isHost = !!meta.host && meta.host === nickname;
-  const isPlaying = meta.state.includes('进行中');
-  const isWaiting = meta.state.includes('等待开始');
-  const isEnded = meta.state.includes('已结束');
+  const isPlaying = includesAny(meta.state, ['进行中', 'playing']);
+  const isWaiting = includesAny(meta.state, ['等待开始', 'waiting']);
+  const isEnded = includesAny(meta.state, ['已结束', 'ended']);
   const myTurn = !!meta.turn && meta.turn === nickname;
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
   const canTuneBot = isHost;
+
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">炸金花互动面板</div>
@@ -95,7 +103,7 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
       </div>
       <div className="game-chip-row">
-        <input className="monitor-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
+        <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
         <button className="mini-btn" disabled={disabled || !canAct || !raiseAmount.trim()} onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}>加注</button>
       </div>
       <div className="game-chip-row">
