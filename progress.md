@@ -106,3 +106,22 @@
   - `npx tsc -p tsconfig.node.json --noEmit` 通过
   - `python -m pytest tests/test_poker_games_flow.py -q` 通过
   - Playwright 面板验收通过（日志：`electron/release/qa/qa-holdem-ui.log`）
+
+2026-05-25（五子棋助手策略升级）
+- 需求：五子棋助手不只看一步，需具备多步预判、攻防平衡、套路化决策。
+- 已完成：`electron/src/renderer/components/games/GomokuPanel.tsx`
+  1) 重写策略引擎：
+     - 从单步打分升级为“威胁识别 + 多步博弈搜索（alpha-beta 剪枝）”。
+     - 引入动态前瞻深度：开局 2 层、中盘 3 层、后盘可 4 层。
+  2) 威胁模型增强：
+     - 识别连五、活四、冲四、眠三/活三、双威胁（双三/双四）并量化评分。
+     - 同时评估“本手进攻价值 + 封堵价值 + 对手后续反击价值”。
+  3) 套路策略增强（仅 `zouyu` 可见）：
+     - 智能博弈、均衡控局、先手压迫、铁壁反击、双三诱杀、四三做杀、连环冲四、中腹运营。
+     - `auto` 会按局势自动切换实战策略。
+  4) 交互说明增强：
+     - 显示“本手采用策略”和“前瞻预测层数”。
+- 验证：
+  - `npx tsc -p tsconfig.json --noEmit` 通过
+  - `npx tsc -p tsconfig.node.json --noEmit` 通过
+  - `node electron/scripts/qa-game-panels-playwright.mjs` 通过（见 `electron/release/qa/qa-latest.log`）
