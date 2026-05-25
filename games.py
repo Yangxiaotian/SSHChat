@@ -31,6 +31,8 @@ from sgs_data import (
     is_black,
     is_diamond,
     is_red,
+    is_red_sha,
+    card_pin_rank,
     general_gender,
     SGS_GENERAL_BY_NAME,
     weapon_range,
@@ -1825,6 +1827,8 @@ _SGS_MOVE_ALIASES: dict[str, str] = {
     "qixi": "qixi",
     "武将": "generals",
     "generals": "generals",
+    "天妒": "tiandu",
+    "tiandu": "tiandu",
     "雷击": "leiji",
     "leiji": "leiji",
     "天香": "tianxiang",
@@ -1833,6 +1837,14 @@ _SGS_MOVE_ALIASES: dict[str, str] = {
     "xiangle": "xiangle",
     "英魂": "yinghun",
     "yinghun": "yinghun",
+    "激昂": "jiang",
+    "jiang": "jiang",
+    "魂姿": "hunzi",
+    "hunzi": "hunzi",
+    "制霸": "zhiba",
+    "zhiba": "zhiba",
+    "拒制霸": "拒制霸",
+    "拼点": "拼点",
     "反间": "fanjian",
     "fanjian": "fanjian",
     "乱击": "luanji",
@@ -1983,6 +1995,8 @@ class _SgsPlayer:
         "fanjian_used",
         "shuangxiong_color",
         "zaoxian_awakened",
+        "hunzi_awakened",
+        "zhiba_used",
         "shuangxiong_duel_used",
         "weapon",
         "armor",
@@ -2014,6 +2028,8 @@ class _SgsPlayer:
         self.fanjian_used = False
         self.shuangxiong_color: Optional[str] = None
         self.zaoxian_awakened = False
+        self.hunzi_awakened = False
+        self.zhiba_used = False
         self.shuangxiong_duel_used = False
         self.weapon: Optional[str] = None
         self.armor: Optional[str] = None
@@ -2040,6 +2056,7 @@ class SanguoshaGame:
         self._turn_idx = 0
         self._deck: list[str] = []
         self._discard: list[str] = []
+        self._tiandu_offer: dict[int, str] = {}
         self._pending: Optional[dict] = None
         self._extra_privates: list[tuple[object, list[str]]] = []
         self._rng = random.Random()
@@ -2113,6 +2130,196 @@ class SanguoshaGame:
 
     def _has_skill(self, player: _SgsPlayer, skill: str) -> bool:
         return skill in player.skill_ids
+
+    def _grant_skills(self, player: _SgsPlayer, *skills: str) -> None:
+        merged = list(player.skill_ids)
+        for s in skills:
+            if s not in merged:
+                merged.append(s)
+        player.skill_ids = tuple(merged)
+
+    def _jiang_try_draw(self, player: _SgsPlayer, msgs: list[str]) -> None:
+        if not self._has_skill(player, "jiang"):
+            return
+        n = self._draw_cards(player, 1)
+        if n:
+            msgs.append(f"{player.name}（激昂）摸 1 张")
+
+    def _offer_tiandu(self, who_idx: int, card: str, msgs: list[str]) -> None:
+        """判定牌进入弃牌堆后，郭嘉可择机领取。"""
+        p = self.players[who_idx]
+        if not self._has_skill(p, "tiandu"):
+            return
+        self._tiandu_offer[who_idx] = card
+        msgs.append(
+            f"{p.name} 可 /game move 天妒 获得判定牌【{card_label(card)}】"
+        )
+        self._queue_private(
+            who_idx,
+            [f"天妒：/game move 天妒 获得【{card_label(card)}】"],
+        )
+
+    def _do_tiandu_take(self, who: int) -> GameResult:
+        player = self.players[who]
+        if not self._has_skill(player, "tiandu"):
+            return (["你没有天妒技能。"], [], False)
+        card = self._tiandu_offer.pop(who, None)
+        if card is None:
+            return (["当前没有可天妒的判定牌。"], [], False)
+        if card not in self._discard:
+            return (["该判定牌已不可取。"], [], False)
+        self._discard.remove(card)
+        player.hand.append(card)
+        return (
+            [],
+            [f"{player.name}（天妒）获得【{card_label(card)}】"],
+            False,
+        )
+
+    def _yinghun_loss(self, player: _SgsPlayer) -> int:
+        return max(0, player.max_hp - player.hp)
+
+    def _prepare_phase(self, who_idx: int) -> list[str]:
+        """准备阶段：魂姿觉醒、英魂（手动在当回合 /game move 英魂）。"""
+        p = self.players[who_idx]
+        msgs: list[str] = []
+        if (
+            self._has_skill(p, "hunzi")
+            and not p.hunzi_awakened
+            and p.hp == 1
+        ):
+            p.hunzi_awakened = True
+            if p.max_hp > 1:
+                p.max_hp -= 1
+                if p.hp > p.max_hp:
+                    p.hp = p.max_hp
+            self._grant_skills(p, "yingzi", "yinghun")
+            msgs.append(
+                f"{p.name}（魂姿）觉醒，体力上限 {p.max_hp}，"
+                f"获得【英姿】【英魂】"
+            )
+        return msgs
+
+    def _lord_for_zhiba(self) -> Optional[int]:
+        lord_i = self._lord_index()
+        lord = self.players[lord_i]
+        if lord.dead or not self._has_skill(lord, "zhiba"):
+            return None
+        return lord_i
+
+    def _do_yinghun(
+        self, who: int, mode: str, target_idx: int
+    ) -> GameResult:
+        player = self.players[who]
+        if not self._has_skill(player, "yinghun"):
+            return (["你没有英魂技能。"], [], False)
+        loss = self._yinghun_loss(player)
+        if loss <= 0:
+            return (["英魂：你未受伤，无法发动。"], [], False)
+        if who != self._turn_idx:
+            return (["英魂：仅可在你的回合发动。"], [], False)
+        tgt_p = self.players[target_idx]
+        if tgt_p.dead:
+            return (["目标已阵亡。"], [], False)
+        if mode == "1":
+            drew = self._draw_cards(tgt_p, loss)
+            if drew <= 0:
+                return (["牌堆已空。"], [], False)
+            msgs = [
+                f"{player.name}（英魂）令 {tgt_p.name} 摸 {drew} 张"
+            ]
+            if tgt_p.hand:
+                card = tgt_p.hand.pop()
+                self._discard.append(card)
+                msgs.append(f"{tgt_p.name} 弃【{card_label(card)}】")
+            else:
+                msgs.append(f"{tgt_p.name} 无手牌可弃")
+            return ([], msgs, False)
+        if mode == "2":
+            drew = self._draw_cards(tgt_p, 1)
+            if drew <= 0:
+                return (["牌堆已空。"], [], False)
+            msgs = [f"{player.name}（英魂）令 {tgt_p.name} 摸 1 张"]
+            drop = min(loss, len(tgt_p.hand))
+            for _ in range(drop):
+                card = tgt_p.hand.pop()
+                self._discard.append(card)
+            if drop:
+                msgs.append(f"{tgt_p.name} 弃 {drop} 张")
+            else:
+                msgs.append(f"{tgt_p.name} 无手牌可弃")
+            return ([], msgs, False)
+        return (
+            ["用法：/game move 英魂 1|2 <目标>（1摸X弃1，2摸1弃X）"],
+            [],
+            False,
+        )
+
+    def _resolve_zhiba_pin(
+        self, initiator_idx: int, lord_idx: int, init_card: str, lord_card: str
+    ) -> list[str]:
+        init_p = self.players[initiator_idx]
+        lord_p = self.players[lord_idx]
+        lord_p.hand.remove(lord_card)
+        r_init = card_pin_rank(init_card)
+        r_lord = card_pin_rank(lord_card)
+        msgs = [
+            f"{init_p.name}（制霸）拼【{card_label(init_card)}】"
+            f" vs {lord_p.name}【{card_label(lord_card)}】"
+        ]
+        if r_init > r_lord:
+            init_p.hand.append(init_card)
+            init_p.hand.append(lord_card)
+            msgs.append(f"{init_p.name} 拼点赢，收回两张牌")
+        else:
+            lord_p.hand.append(init_card)
+            lord_p.hand.append(lord_card)
+            msgs.append(f"{lord_p.name} 拼点赢，获得两张牌")
+        return msgs
+
+    def _resolve_zhiba_pending(
+        self, who: int, verb: str, args: list[str]
+    ) -> GameResult:
+        pend = self._pending
+        if not pend or pend.get("kind") != "zhiba":
+            return (["当前没有制霸拼点待处理。"], [], False)
+        lord_i = int(pend["lord"])
+        if who != lord_i:
+            lord = self.players[lord_i]
+            return (
+                [f"请等待主公 {lord.name} 响应制霸拼点。"],
+                [],
+                False,
+            )
+        lord = self.players[lord_i]
+        init_i = int(pend["initiator"])
+        init_card = pend["init_card"]
+        if verb in ("拒制霸", "拒", "拒绝"):
+            if not lord.hunzi_awakened:
+                return (["主公未觉醒，不能拒绝制霸拼点。"], [], False)
+            self._pending = None
+            self.players[init_i].hand.append(init_card)
+            return (
+                [],
+                [
+                    f"{lord.name} 拒绝与 {self.players[init_i].name} 制霸拼点，"
+                    f"【{card_label(init_card)}】退回"
+                ],
+                False,
+            )
+        if verb in ("拼点", "应", "制霸"):
+            if not args:
+                return (["用法：/game move 拼点 <手牌>"], [], False)
+            found = find_card_in_hand(lord.hand, args[0])
+            if found is None:
+                return ([f"你没有【{args[0]}】。"], [], False)
+            self._pending = None
+            msgs = self._resolve_zhiba_pin(init_i, lord_i, init_card, found)
+            return ([], msgs, False)
+        hint = "请 /game move 拼点 <牌>"
+        if lord.hunzi_awakened:
+            hint += " 或 /game move 拒制霸"
+        return ([hint], [], False)
 
     def _seat_distance(self, a: int, b: int) -> int:
         """固定座次上的最短步数（含阵亡位，与存活环距离可能不同）。"""
@@ -2261,6 +2468,8 @@ class SanguoshaGame:
                 add(int(pend["source"]))
             elif kind == "cixiong":
                 add(int(pend["target"]))
+            elif kind == "zhiba":
+                add(int(pend["lord"]))
             return out
 
         who = self._turn_idx
@@ -2312,8 +2521,10 @@ class SanguoshaGame:
         )
         if is_red(card):
             lines.append(f"  → 红色，视为出【闪】")
+            self._offer_tiandu(target_idx, card, lines)
             return True, lines
         lines.append(f"  → 非红色，仍需【闪】或受击")
+        self._offer_tiandu(target_idx, card, lines)
         return False, lines
 
     def _bagua_try_for_need(
@@ -2720,6 +2931,18 @@ class SanguoshaGame:
         if kind == "duel":
             who = self.players[self._pending["turn"]]
             return f"  【决斗】轮到 {who.name} 出【杀】或 /game move 受击"
+        if kind == "zhiba":
+            lord = self.players[self._pending["lord"]]
+            init = self.players[self._pending["initiator"]]
+            extra = (
+                " 或 /game move 拒制霸"
+                if lord.hunzi_awakened
+                else ""
+            )
+            return (
+                f"  【制霸】{init.name} 向主公 {lord.name} 拼点："
+                f"/game move 拼点 <牌>{extra}"
+            )
         if kind in ("nanman", "wanjian"):
             who = self.players[self._pending["turn"]]
             label = self._pending.get("label", "")
@@ -2942,6 +3165,7 @@ class SanguoshaGame:
         self._deck = build_junzheng_deck()
         self._rng.shuffle(self._deck)
         self._discard = []
+        self._tiandu_offer = {}
         lines = [f"三国杀·军争开始！玩家：{self._roster_names()}"]
         for i, p in enumerate(self.players):
             p.role = roles[i]
@@ -2969,6 +3193,8 @@ class SanguoshaGame:
             p.fanjian_used = False
             p.shuangxiong_color = None
             p.zaoxian_awakened = False
+            p.hunzi_awakened = False
+            p.zhiba_used = False
             p.shuangxiong_duel_used = False
             p.weapon = None
             p.armor = None
@@ -3025,8 +3251,10 @@ class SanguoshaGame:
         )
         if suit == escape_suit:
             lines.append(f"  → 判定为{escape_suit}，【{label}】无效并弃置")
+            self._offer_tiandu(who_idx, card, lines)
             return False, lines
         lines.append(f"  → 【{label}】生效")
+        self._offer_tiandu(who_idx, card, lines)
         return True, lines
 
     def _judge_phase(self, who_idx: int) -> list[str]:
@@ -3086,8 +3314,10 @@ class SanguoshaGame:
         actor.luoyi_buff = False
         actor.fanjian_used = False
         actor.shuangxiong_duel_used = False
+        actor.zhiba_used = False
         actor.drew_this_turn = False
         msgs: list[str] = []
+        msgs.extend(self._prepare_phase(who))
         msgs.extend(self._judge_phase(who))
         if actor.skip_draw:
             actor.skip_draw = False
@@ -3523,6 +3753,9 @@ class SanguoshaGame:
         bcast = [f"{actor.name}{sha_label}→{target.name}{tag_s}"]
         if bagua_prefix:
             bcast = bagua_prefix + bcast
+        if is_red_sha(card):
+            self._jiang_try_draw(actor, bcast)
+            self._jiang_try_draw(target, bcast)
         if need_shan == 0 and not self._pending["xiangle"]:
             dmg = self._pending["damage"]
             card_used = self._pending["sha_card"]
@@ -4234,7 +4467,10 @@ class SanguoshaGame:
         }
         tgt_name = self.players[target_idx].name
         extra = f"（需{need}杀）" if need > 1 else f"（{tgt_name}出杀或受击）"
-        return ([], [f"{actor.name}【决斗】→{tgt_name}{extra}"], False)
+        bcast = [f"{actor.name}【决斗】→{tgt_name}{extra}"]
+        self._jiang_try_draw(actor, bcast)
+        self._jiang_try_draw(self.players[target_idx], bcast)
+        return ([], bcast, False)
 
     def _resolve_duel_step(self, who: int, verb: str) -> GameResult:
         pend = self._pending
@@ -4603,6 +4839,9 @@ class SanguoshaGame:
 
         verb, args, sha_kind = _sgs_parse_action(raw)
 
+        if verb == "tiandu":
+            return self._do_tiandu_take(who)
+
         if self._pending and self._pending.get("kind") == "guanxing":
             if who != self._pending["who"]:
                 return (["等待观星结算。"], [], False)
@@ -4617,6 +4856,8 @@ class SanguoshaGame:
 
         if self._pending:
             kind = self._pending["kind"]
+            if kind == "zhiba":
+                return self._resolve_zhiba_pending(who, verb, args)
             if kind == "cixiong":
                 return self._resolve_cixiong(who, verb, args)
             if kind in ("shunshou", "dismantle"):
@@ -5275,31 +5516,60 @@ class SanguoshaGame:
             return self._do_guhuo(who, args)
 
         if verb == "yinghun":
-            if not self._has_skill(player, "yinghun"):
-                return (["你没有英魂技能。"], [], False)
-            if not args:
+            if not args or len(args) < 2:
                 return (
-                    ["用法：/game move 英魂 己 | 英魂 他 <目标>"],
+                    ["用法：/game move 英魂 1|2 <目标>（1摸X弃1，2摸1弃X）"],
                     [],
                     False,
                 )
             mode = args[0]
-            if mode in ("己", "自己"):
-                if self._draw_cards(player, 1):
-                    return ([], [f"{player.name}（英魂）摸 1 张"], False)
-                return (["牌堆已空。"], [], False)
-            if mode in ("他",) and len(args) >= 2:
-                tgt = self._resolve_target(who, args[1:])
-                if tgt is None:
-                    return (["无效目标。"], [], False)
-                if self._draw_cards(self.players[tgt], 1):
-                    return (
-                        [],
-                        [f"{player.name}（英魂）令 {self.players[tgt].name} 摸 1 张"],
-                        False,
-                    )
-                return (["牌堆已空。"], [], False)
-            return (["用法：/game move 英魂 己 | 英魂 他 <目标>"], [], False)
+            if mode not in ("1", "2"):
+                return (
+                    ["用法：/game move 英魂 1|2 <目标>（1摸X弃1，2摸1弃X）"],
+                    [],
+                    False,
+                )
+            tgt = self._resolve_target(who, args[1:], allow_self=True)
+            if tgt is None:
+                return (["无效目标。"], [], False)
+            return self._do_yinghun(who, mode, tgt)
+
+        if verb == "zhiba":
+            lord_i = self._lord_for_zhiba()
+            if lord_i is None:
+                return (["场上没有拥有【制霸】的主公。"], [], False)
+            if who == lord_i:
+                return (["主公不能对自己发动制霸。"], [], False)
+            if player.kingdom != "吴":
+                return (["制霸：仅吴势力角色可发动。"], [], False)
+            if player.zhiba_used:
+                return (["本回合已发动过制霸。"], [], False)
+            if not args:
+                return (["用法：/game move 制霸 <拼点牌>"], [], False)
+            found = find_card_in_hand(player.hand, args[0])
+            if found is None:
+                return ([f"你没有【{args[0]}】。"], [], False)
+            player.hand.remove(found)
+            player.zhiba_used = True
+            lord = self.players[lord_i]
+            self._pending = {
+                "kind": "zhiba",
+                "initiator": who,
+                "lord": lord_i,
+                "init_card": found,
+            }
+            priv = [
+                f"{lord.name}：{player.name} 向你发起制霸拼点，"
+                "请 /game move 拼点 <牌>"
+            ]
+            if lord.hunzi_awakened:
+                priv.append("（已觉醒可 /game move 拒制霸）")
+            self._queue_private(lord_i, priv)
+            bcast = [
+                f"{player.name}（制霸）向主公 {lord.name} 发起拼点"
+                f"【{card_label(found)}】"
+            ]
+            return ([], bcast, False)
 
         head_tok = raw.strip().split()[0] if raw.strip() else verb
         hint = "输入 /game show 帮助 查看可用命令。"

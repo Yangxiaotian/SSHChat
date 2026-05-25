@@ -12,7 +12,7 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("夏侯惇", 4, "魏", ("ganglie",), "刚烈：受伤后对来源造成1点伤害"),
     ("张辽", 4, "魏", ("tuxi",), "突袭：/game move 突袭 <目标>"),
     ("许褚", 4, "魏", ("luoyi",), "裸衣：/game move 裸衣 后下一张【杀】+1伤"),
-    ("郭嘉", 3, "魏", ("yiji",), "遗计：受伤后摸2张"),
+    ("郭嘉", 3, "魏", ("tiandu", "yiji"), "天妒：判定牌生效后可 /game move 天妒 获得该牌；遗计：受伤后摸2张"),
     ("甄姬", 3, "魏", ("luoshen",), "洛神：摸牌阶段连续翻黑色牌入手"),
     ("曹丕", 3, "魏", ("fangzhu",), "放逐：造成伤害令目标弃1张手牌"),
     ("张郃", 4, "魏", ("qiaobian",), "巧变：/game move 巧变 <牌>"),
@@ -60,8 +60,16 @@ _SGS_GENERAL_ROWS: list[tuple[str, int, str, tuple[str, ...], str]] = [
     ("太史慈", 4, "吴", ("tianyi",), "天义：每回合2张【杀】"),
     ("周泰", 4, "吴", ("buqu",), "不屈：+1体力上限"),
     ("鲁肃", 3, "吴", ("haoshi",), "好施：多摸2张并分给手牌最少者"),
-    ("孙坚", 4, "吴", ("yinghun",), "英魂：/game move 英魂 己|他 <目标>"),
-    ("孙策", 4, "吴", ("paoxiao", "yingzi"), "霸王：咆哮+英姿"),
+    ("孙坚", 4, "吴", ("yinghun",), "英魂：/game move 英魂 1|2 <目标>（已受伤；1摸X弃1，2摸1弃X）"),
+    (
+        "孙策",
+        4,
+        "吴",
+        ("jiang", "hunzi", "zhiba"),
+        "激昂：【决斗】/红色【杀】指定目标后或成为其目标后可摸1张；"
+        "魂姿：准备阶段体力为1时觉醒-1上限并获得英姿、英魂；"
+        "制霸：吴势力出牌阶段限一次 /game move 制霸 <牌> 与主公拼点",
+    ),
     ("甘宁", 4, "吴", ("qixi",), "奇袭：黑色牌当【过河拆桥】/game move 奇袭"),
     # —— 群 ——
     ("吕布", 4, "群", ("wushuang",), "无双：对你【杀】/【决斗】需连续2张【闪】/【杀】"),
@@ -116,6 +124,7 @@ SGS_SKILL_LABELS: dict[str, str] = {
     "ganglie": "刚烈",
     "tuxi": "突袭",
     "luoyi": "裸衣",
+    "tiandu": "天妒",
     "yiji": "遗计",
     "luoshen": "洛神",
     "fangzhu": "放逐",
@@ -149,6 +158,9 @@ SGS_SKILL_LABELS: dict[str, str] = {
     "buqu": "不屈",
     "haoshi": "好施",
     "yinghun": "英魂",
+    "jiang": "激昂",
+    "hunzi": "魂姿",
+    "zhiba": "制霸",
     "qixi": "奇袭",
     "wushuang": "无双",
     "biyue": "闭月",
@@ -214,6 +226,33 @@ def is_black(card: str) -> bool:
 
 def is_diamond(card: str) -> bool:
     return card_suit(card) == "方块"
+
+
+def is_red_sha(card: str) -> bool:
+    """红色【杀】：牌名为杀且花色为红桃/方块（不含火杀、雷杀）。"""
+    return card_base(card) == "杀" and is_red(card)
+
+
+def card_pin_rank(card: str) -> int:
+    """拼点用牌力（越大越强）。"""
+    base = card_base(card)
+    if base in SHA_CARDS:
+        power = 50
+    elif base in SHAN_CARDS:
+        power = 45
+    elif base in TAO_CARDS:
+        power = 55
+    elif base == "酒":
+        power = 40
+    elif base in TRICK_NAMES:
+        power = 35
+    elif is_equipment(card):
+        power = 30
+    else:
+        power = 20
+    suit = card_suit(card)
+    suit_bonus = {"红桃": 4, "方块": 3, "黑桃": 2, "梅花": 1}.get(suit, 0)
+    return power + suit_bonus
 
 
 def card_label(card: str) -> str:
