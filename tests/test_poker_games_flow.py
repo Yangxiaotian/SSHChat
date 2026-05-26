@@ -63,6 +63,40 @@ class PokerGamesFlowTests(unittest.TestCase):
         self.assertEqual(len(game.board), 5)
         self.assertEqual(sum(game.stacks.values()), 2000)
 
+    def test_holdem_accepts_chinese_move_aliases(self):
+        host_conn = object()
+        game = HoldemGame(host_conn, "房主")
+        game.rng.seed(11)
+        err_start, b_start, _ = game.try_move(host_conn, "开始")
+        self.assertEqual(err_start, [])
+        self.assertTrue(any("德州扑克开始" in line for line in b_start))
+        self.assertEqual(game.state, "playing")
+        self.assertEqual(game.players[game.turn_idx][1], "房主")
+
+        err_check, b_check, _ = game.try_move(host_conn, "过牌")
+        self.assertEqual(err_check, [])
+        self.assertTrue(any("过牌" in line for line in b_check))
+
+        game2 = HoldemGame(host_conn, "房主")
+        game2.rng.seed(11)
+        game2.try_move(host_conn, "start")
+        err_call, b_call, _ = game2.try_move(host_conn, "跟注")
+        self.assertEqual(err_call, [])
+        self.assertTrue(any("过牌" in line for line in b_call))
+
+        game3 = HoldemGame(host_conn, "房主")
+        game3.rng.seed(11)
+        game3.try_move(host_conn, "start")
+        err_raise, _, _ = game3.try_move(host_conn, "加注 5")
+        self.assertEqual(err_raise, [])
+
+        game4 = HoldemGame(host_conn, "房主")
+        game4.rng.seed(11)
+        game4.try_move(host_conn, "start")
+        err_allin, b_allin, _ = game4.try_move(host_conn, "全下")
+        self.assertEqual(err_allin, [])
+        self.assertTrue(any("全下" in line for line in b_allin))
+
 
 if __name__ == "__main__":
     unittest.main()

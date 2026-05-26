@@ -6396,7 +6396,7 @@ class ZhaJinHuaGame:
 class HoldemGame:
     name = "holdem"
     first_seat_desc = "房主"
-    join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始"
+    join_blurb = "其他玩家 /game join 加入，房主 /game move 开始 开局（也支持 start）"
 
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
@@ -6731,8 +6731,25 @@ class HoldemGame:
             return (["你不在本局中。"], [], False)
         parts = raw.strip().split()
         if not parts:
-            return (["用法：/game move <start/check/call/raise/fold/allin>"], [], False)
-        cmd = parts[0].lower()
+            return (
+                [
+                    "用法：/game move <开始|过牌|跟注|加注 <额>|弃牌|全下>",
+                    "（英文 start/check/call/raise/fold/allin 同样有效）",
+                ],
+                [],
+                False,
+            )
+        cmd = {
+            "开始": "start",
+            "过牌": "check",
+            "过": "check",
+            "跟注": "call",
+            "跟": "call",
+            "加注": "raise",
+            "弃牌": "fold",
+            "全下": "allin",
+            "机器人": "bot",
+        }.get(parts[0], parts[0].lower())
 
         if cmd == "bot":
             if conn is not self.players[0][0]:
@@ -6791,7 +6808,7 @@ class HoldemGame:
 
         elif cmd == "raise":
             if len(parts) < 2 or not parts[1].isdigit():
-                return (["用法：/game move raise <amount>"], [], False)
+                return (["用法：/game move 加注 <金额>（或 raise <amount>）"], [], False)
             add = int(parts[1])
             if add <= 0:
                 return (["加注金额必须大于 0。"], [], False)
@@ -6883,6 +6900,16 @@ class HoldemGame:
         me = self._name_of(conn) if conn is not None else None
         if me and me in self.hands:
             lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
+        if full:
+            lines.extend(
+                [
+                    "指令：/game move 开始 | 过牌 | 跟注 | 加注 <额> | 弃牌 | 全下",
+                    "房主可：/game move 机器人 <easy|hard|pro>",
+                    "（英文 start/check/call/raise/fold/allin 与面板按钮等价）",
+                ]
+            )
+        elif self.state == "waiting":
+            lines.append("房主 /game move 开始 发牌；人数不足会自动补机器人")
         return lines
 
     def on_player_leave(self, conn, name: str) -> GameResult:
@@ -7304,4 +7331,7 @@ HELP_LINES = (
     "[*] /game end              房主可强制结束当前对局。",
     "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
     "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
+    "[*] holdem（德州扑克）：房主 /game move 开始；行牌用过牌/跟注/加注/弃牌/全下"
+    "（英文 call/raise 等与中文等价；/game show 帮助 可看本局指令）。",
+    "[*] zjh（炸金花）：房主 /game move 开始；看牌/跟注/加注/比牌/弃牌（英文 look/follow 等同样有效）。",
 )
