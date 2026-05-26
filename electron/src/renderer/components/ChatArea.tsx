@@ -10,10 +10,60 @@ const WORKBENCH_MIN_HEIGHT = 96;
 const CHAT_MIN_HEIGHT = 180;
 const DEFAULT_WORKBENCH_HEIGHT = 340;
 
+function isGameFloodMessage(content: string): boolean {
+  const raw = content.trim();
+  const t = raw.toLowerCase();
+  if (!t) return false;
+
+  if (
+    /^\d+\s*,\s*\d+$/.test(t) ||
+    /^\d{1,2}\s+(?:[.#o●○·]\s+){8,}[.#o●○·]\s*$/i.test(raw) ||
+    /^(?:\d{1,2}\s+){8,}\d{1,2}\s*$/.test(raw) ||
+    /^((row|turn|state|pot|street|current_bet)\s*[:=])/.test(t) ||
+    /^#\d+\s+[^:：]+[:：]/.test(raw) ||
+    /^-\s+\S+\s+\((alive|out)\)/i.test(raw)
+  ) {
+    return true;
+  }
+
+  const keywords = [
+    '当前房间正在进行',
+    '可直接加入',
+    '同一房间同一时刻仅允许一场进行中的对局',
+    '可玩游戏',
+    '国际象棋',
+    '五子棋',
+    '中国象棋',
+    '三国杀',
+    '狼人杀',
+    '德州扑克',
+    '炸金花',
+    '牛头王',
+    '你的手牌',
+    '公共牌',
+    '落子',
+    '底池',
+    '当前注',
+    '轮到',
+    'gomoku',
+    'chess',
+    'xiangqi',
+    'holdem',
+    'zjh',
+    'niutou',
+    'sanguo',
+    'werewolf',
+  ];
+
+  return keywords.some((k) => t.includes(k.toLowerCase()));
+}
+
 export default function ChatArea() {
   const { messages, activeRoom, nickname, status, privacyMode, clearMessages } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
+  const [stickToBottom, setStickToBottom] = useState(true);
   const [workbenchHeight, setWorkbenchHeight] = useState<number>(() => {
     try {
       const raw = localStorage.getItem(WORKBENCH_HEIGHT_KEY);
@@ -28,14 +78,22 @@ export default function ChatArea() {
 
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
-    return roomMessages.filter(
-      (msg) => msg.type === 'chat' || msg.type === 'pm' || msg.type === 'game' || msg.type === 'system',
-    );
+    return roomMessages.filter((msg) => {
+      if (msg.type === 'chat' || msg.type === 'pm') return true;
+      if (msg.type === 'game') return false;
+      if (msg.type === 'system') return !isGameFloodMessage(msg.content);
+      return false;
+    });
   }, [roomMessages]);
 
   useEffect(() => {
+    if (!stickToBottom) return;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages]);
+  }, [visibleMessages, stickToBottom]);
+
+  useEffect(() => {
+    setStickToBottom(true);
+  }, [activeRoom]);
 
   useEffect(() => {
     try {
@@ -64,6 +122,15 @@ export default function ChatArea() {
       window.removeEventListener('mouseup', onUp);
     };
   }, [isResizing]);
+
+  const onChatScroll = () => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 36;
+    if (nearBottom !== stickToBottom) {
+      setStickToBottom(nearBottom);
+    }
+  };
 
   return (
     <div className="chat-container">
@@ -105,7 +172,7 @@ export default function ChatArea() {
         </div>
 
         <div className="chat-messages-surface">
-          <div className="chat-messages">
+          <div ref={chatScrollRef} className="chat-messages" onScroll={onChatScroll}>
             {visibleMessages.length === 0 ? (
               <div className="chat-empty">
                 <div className="chat-empty-icon">{'</>'}</div>
