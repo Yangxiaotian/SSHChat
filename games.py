@@ -6393,10 +6393,26 @@ class ZhaJinHuaGame:
         return ([], [f"{name} 离开了炸金花对局"], False)
 
 
+_HOLDEM_MOVE_HELP = (
+    "德州扑克 /game move 指令（中文与英文等价，任选一种）：",
+    "  开始 start                 房主开局",
+    "  过牌 check                 当前无需跟注时过牌",
+    "  跟注 call                  跟平当前注（无需跟注时等同过牌）",
+    "  加注 <额> raise <额>       在现有注额上再加",
+    "  弃牌 fold",
+    "  全下 allin",
+    "  机器人 <难度> bot <easy|hard|pro>   房主设置机器人",
+    "示例：/game move 跟注  或  /game move call  ；/game move 加注 10  或  raise 10",
+)
+
+
 class HoldemGame:
     name = "holdem"
     first_seat_desc = "房主"
-    join_blurb = "其他玩家 /game join 加入，房主 /game move 开始 开局（也支持 start）"
+    join_blurb = (
+        "其他玩家 /game join；房主 /game move 开始（或 start）开局；"
+        "/game show 帮助 查看完整中英指令"
+    )
 
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
@@ -6731,14 +6747,7 @@ class HoldemGame:
             return (["你不在本局中。"], [], False)
         parts = raw.strip().split()
         if not parts:
-            return (
-                [
-                    "用法：/game move <开始|过牌|跟注|加注 <额>|弃牌|全下>",
-                    "（英文 start/check/call/raise/fold/allin 同样有效）",
-                ],
-                [],
-                False,
-            )
+            return (list(_HOLDEM_MOVE_HELP), [], False)
         cmd = {
             "开始": "start",
             "过牌": "check",
@@ -6755,7 +6764,11 @@ class HoldemGame:
             if conn is not self.players[0][0]:
                 return (["只有房主可以设置机器人难度。"], [], False)
             if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
-                return (["用法：/game move bot <easy|hard|pro>"], [], False)
+                return (
+                    ["用法：/game move 机器人 <easy|hard|pro>  或  bot <easy|hard|pro>"],
+                    [],
+                    False,
+                )
             self.bot_level = parts[1].lower()
             return ([], [f"机器人难度已设为：{_bot_level_zh(self.bot_level)}"], False)
 
@@ -6808,7 +6821,11 @@ class HoldemGame:
 
         elif cmd == "raise":
             if len(parts) < 2 or not parts[1].isdigit():
-                return (["用法：/game move 加注 <金额>（或 raise <amount>）"], [], False)
+                return (
+                    ["用法：/game move 加注 <金额>  或  /game move raise <amount>"],
+                    [],
+                    False,
+                )
             add = int(parts[1])
             if add <= 0:
                 return (["加注金额必须大于 0。"], [], False)
@@ -6841,7 +6858,7 @@ class HoldemGame:
                 b.append(f"{name} 全下 {pay}")
 
         else:
-            return (["可用操作：过牌、跟注、加注、弃牌、全下。"], [], False)
+            return (["未知指令。"] + list(_HOLDEM_MOVE_HELP), [], False)
 
         done = self._finish_if_one()
         if done:
@@ -6901,15 +6918,15 @@ class HoldemGame:
         if me and me in self.hands:
             lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
         if full:
-            lines.extend(
-                [
-                    "指令：/game move 开始 | 过牌 | 跟注 | 加注 <额> | 弃牌 | 全下",
-                    "房主可：/game move 机器人 <easy|hard|pro>",
-                    "（英文 start/check/call/raise/fold/allin 与面板按钮等价）",
-                ]
+            lines.extend(_HOLDEM_MOVE_HELP)
+        else:
+            lines.append(
+                "行牌（中英均可）：开始 start | 过牌 check | 跟注 call | "
+                "加注 raise <额> | 弃牌 fold | 全下 allin"
             )
-        elif self.state == "waiting":
-            lines.append("房主 /game move 开始 发牌；人数不足会自动补机器人")
+            if self.state == "waiting":
+                lines.append("房主 /game move 开始 发牌；人数不足会自动补机器人")
+            lines.append("完整对照：/game show 帮助")
         return lines
 
     def on_player_leave(self, conn, name: str) -> GameResult:
@@ -7331,7 +7348,9 @@ HELP_LINES = (
     "[*] /game end              房主可强制结束当前对局。",
     "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
     "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
-    "[*] holdem（德州扑克）：房主 /game move 开始；行牌用过牌/跟注/加注/弃牌/全下"
-    "（英文 call/raise 等与中文等价；/game show 帮助 可看本局指令）。",
-    "[*] zjh（炸金花）：房主 /game move 开始；看牌/跟注/加注/比牌/弃牌（英文 look/follow 等同样有效）。",
+    "[*] holdem（德州扑克）中英指令对照：",
+    "[*]   开始 start | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
+    "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
+    "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
+    "比牌 compare <昵称> | 弃牌 fold。",
 )

@@ -189,7 +189,7 @@ function gameMoveHint(game: GameKind): string {
     xiangqi: '先点棋子，再点目标位置。',
     sanguo: '按按钮出牌或“过”，必要时先看武将池。',
     werewolf: '先选目标玩家，再点对应技能。',
-    holdem: '优先使用过牌/跟注/加注/全下/弃牌按钮。',
+    holdem: '按钮与手敲命令均可用；中英文等价（如 跟注/call、加注/raise 10）。/game show 帮助 看对照表。',
     zjh: '建议先看牌，再决定跟注、加注或比牌。',
     niutou: '先选手牌；若提示吃行，再选第1~4行。',
   };

@@ -173,6 +173,11 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
         <div className="game-workbench-hint">当前轮到你操作：可过牌/跟注/加注/全下/弃牌。</div>
       )}
 
+      <div className="game-workbench-hint">
+        命令（中英文等价）：开始 start · 过牌 check · 跟注 call · 加注 raise N · 弃牌 fold · 全下 allin
+      </div>
+      <div className="game-workbench-hint">手敲示例：/game move 跟注 或 /game move call；/game show 帮助 看完整对照</div>
+
       <PokerCardsView title="你的手牌" cards={handCards} />
       <PokerCardsView title="公共牌" cards={boardCards} />
 
