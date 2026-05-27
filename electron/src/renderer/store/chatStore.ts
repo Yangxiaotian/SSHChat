@@ -1,5 +1,13 @@
 ﻿import { create } from 'zustand';
-import { ChatMessage, ConnectionConfig, ConnectionStatus, ProcessInfo, RoomInfo } from '../../shared/protocol';
+import {
+  ChatMessage,
+  ConnectionConfig,
+  ConnectionStatus,
+  GomokuRapfiAnalyzeRequest,
+  GomokuRapfiAnalyzeResponse,
+  ProcessInfo,
+  RoomInfo,
+} from '../../shared/protocol';
 
 declare global {
   interface Window {
@@ -20,6 +28,7 @@ declare global {
       killProcess: (processName: string) => Promise<boolean>;
       minimizeWindow: () => Promise<boolean>;
       closeApp: () => Promise<boolean>;
+      analyzeGomokuRapfi: (payload: GomokuRapfiAnalyzeRequest) => Promise<GomokuRapfiAnalyzeResponse>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;

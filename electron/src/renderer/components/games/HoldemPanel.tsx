@@ -134,6 +134,7 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
 
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
+  const canLook = isPlaying && handCards.length === 0;
   const canTuneBot = isHost;
 
   const amountNum = Number(raiseAmount.trim());
@@ -172,9 +173,12 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
       {isPlaying && myTurn && (
         <div className="game-workbench-hint">当前轮到你操作：可过牌/跟注/加注/全下/弃牌。</div>
       )}
+      {isPlaying && handCards.length === 0 && (
+        <div className="game-workbench-hint">当前为闷牌状态，先点“看牌”显示你的底牌。</div>
+      )}
 
       <div className="game-workbench-hint">
-        命令（中英文等价）：开始 start · 过牌 check · 跟注 call · 加注 raise N · 弃牌 fold · 全下 allin
+        命令（中英文等价）：开始 start · 看牌 look · 过牌 check · 跟注 call · 加注 raise N · 弃牌 fold · 全下 allin
       </div>
       <div className="game-workbench-hint">手敲示例：/game move 跟注 或 /game move call；/game show 帮助 看完整对照</div>
 
@@ -198,6 +202,7 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
         >
           发牌开始
         </button>
+        <button className={`mini-btn ${canLook ? 'ready' : ''}`} disabled={disabled || !canLook} onClick={() => onCmd('look')}>看牌</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('check')} title={actionBlockReason}>过牌</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('call')} title={actionBlockReason}>跟注</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('allin')} title={actionBlockReason}>全下</button>

@@ -6072,10 +6072,12 @@ class ZhaJinHuaGame:
     def _is_bot(self, name: str) -> bool:
         return name in self.bot_names
     def _auto_add_bots(self) -> list[str]:
-        human = sum(1 for c, _n in self.players if c is not None)
-        if human >= 2:
-            return []
-        add_n = min(5, max(3, self.rng.randint(3, 5)), 6 - len(self.players))
+        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
+        # 目标：尽量保证至少 3 个机器人（受 6 人总席位限制）。
+        # 例如：2真人 -> 3机器人；4真人 -> 2机器人（已满 6 人上限）。
+        target_bots = min(3, max(0, 6 - human))
+        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
+        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
         added: list[str] = []
         for _ in range(add_n):
             idx = len(self.bot_names) + 1
@@ -6263,8 +6265,7 @@ class ZhaJinHuaGame:
         self.state = "ended"
         return [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
     def _start(self) -> list[str]:
-        if len(self.players) < 2:
-            self._auto_add_bots()
+        self._auto_add_bots()
         if len(self.players) < 2:
             return ["至少需要 2 名玩家才能开始。"]
         if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
@@ -6280,7 +6281,7 @@ class ZhaJinHuaGame:
             if self.stacks[n] > 0:
                 self.stacks[n] -= 1; self.pot += 1
         self._pick_next_actor_from_start()
-        out = ["炸金花已开始，可用 /game show 查看手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
+        out = ["炸金花已开始，默认闷牌；先看牌后可见手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
         if self.bot_names:
             out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
         out.extend(self._run_bots())
@@ -6367,7 +6368,11 @@ class ZhaJinHuaGame:
         return lines
     def show(self, conn=None, full: bool = False) -> list[str]:
         lines = self.seats(); me = self._name_of(conn) if conn is not None else None
-        if me and me in self.cards: lines.append(f"你的手牌：{_fmt_poker_cards(self.cards[me])}")
+        if me and me in self.cards:
+            if me in self.looked:
+                lines.append(f"你的手牌：{_fmt_poker_cards(self.cards[me])}")
+            else:
+                lines.append("你当前闷牌中（先看牌后可见）")
         return lines
     def on_player_leave(self, conn, name: str) -> GameResult:
         removed_idx = None
@@ -6396,6 +6401,7 @@ class ZhaJinHuaGame:
 _HOLDEM_MOVE_HELP = (
     "德州扑克 /game move 指令（中文与英文等价，任选一种）：",
     "  开始 start                 房主开局",
+    "  看牌 look                  查看自己的底牌（仅自己可见，不占行动轮次）",
     "  过牌 check                 当前无需跟注时过牌",
     "  跟注 call                  跟平当前注（无需跟注时等同过牌）",
     "  加注 <额> raise <额>       在现有注额上再加",
@@ -6423,6 +6429,7 @@ class HoldemGame:
 
         self.state = "waiting"
         self.folded: set[str] = set()
+        self.looked: set[str] = set()
         self.hands: dict[str, list[str]] = {}
         self.stacks: dict[str, int] = {host_name: 1000}
 
@@ -6457,10 +6464,12 @@ class HoldemGame:
         return [n for _c, n in self.players if self._can_act(n)]
 
     def _auto_add_bots(self) -> list[str]:
-        human = sum(1 for c, _n in self.players if c is not None)
-        if human >= 2:
-            return []
-        add_n = min(5, max(3, self.rng.randint(3, 5)), 6 - len(self.players))
+        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
+        # 目标：尽量保证至少 3 个机器人（受 6 人总席位限制）。
+        # 例如：2真人 -> 3机器人；4真人 -> 2机器人（已满 6 人上限）。
+        target_bots = min(3, max(0, 6 - human))
+        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
+        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
         added: list[str] = []
         for _ in range(add_n):
             idx = len(self.bot_names) + 1
@@ -6615,8 +6624,7 @@ class HoldemGame:
         return out
 
     def _start(self) -> list[str]:
-        if len(self.players) < 2:
-            self._auto_add_bots()
+        self._auto_add_bots()
         if len(self.players) < 2:
             return ["至少需要 2 名玩家才能开始。"]
         if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
@@ -6624,6 +6632,7 @@ class HoldemGame:
 
         self.state = "playing"
         self.folded.clear()
+        self.looked.clear()
         self.hands.clear()
         self.board = []
         self.pot = 0
@@ -6750,6 +6759,7 @@ class HoldemGame:
             return (list(_HOLDEM_MOVE_HELP), [], False)
         cmd = {
             "开始": "start",
+            "看牌": "look",
             "过牌": "check",
             "过": "check",
             "跟注": "call",
@@ -6785,6 +6795,11 @@ class HoldemGame:
             return (["你已经弃牌。"], [], False)
         if self.stacks.get(name, 0) <= 0:
             return (["你已全下，等待本轮结算。"], [], False)
+        if cmd == "look":
+            if name in self.looked:
+                return ([], [f"{name} 已经看过牌。"], False)
+            self.looked.add(name)
+            return ([], [f"{name} 选择了看牌"], False)
 
         cur = self.players[self.turn_idx][1]
         if name != cur:
@@ -6909,19 +6924,23 @@ class HoldemGame:
             else:
                 tag = "存活"
             mark = "（行动中）" if self.state == "playing" and n == current and self._can_act(n) else ""
-            lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{mark}")
+            looked = "，已看牌" if n in self.looked else ""
+            lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{looked}{mark}")
         return lines
 
     def show(self, conn=None, full: bool = False) -> list[str]:
         lines = self.seats()
         me = self._name_of(conn) if conn is not None else None
         if me and me in self.hands:
-            lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
+            if me in self.looked:
+                lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
+            else:
+                lines.append("你当前闷牌中（先看牌后可见）")
         if full:
             lines.extend(_HOLDEM_MOVE_HELP)
         else:
             lines.append(
-                "行牌（中英均可）：开始 start | 过牌 check | 跟注 call | "
+                "行牌（中英均可）：开始 start | 看牌 look | 过牌 check | 跟注 call | "
                 "加注 raise <额> | 弃牌 fold | 全下 allin"
             )
             if self.state == "waiting":
@@ -7349,7 +7368,7 @@ HELP_LINES = (
     "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
     "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
     "[*] holdem（德州扑克）中英指令对照：",
-    "[*]   开始 start | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
+    "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
     "比牌 compare <昵称> | 弃牌 fold。",

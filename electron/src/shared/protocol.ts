@@ -33,6 +33,21 @@ export interface ProcessInfo {
   name: string;
 }
 
+export interface GomokuRapfiAnalyzeRequest {
+  board: number[][];
+  mySide: 1 | -1;
+  timeoutMs?: number;
+}
+
+export interface GomokuRapfiAnalyzeResponse {
+  ok: boolean;
+  row?: number;
+  col?: number;
+  ms: number;
+  enginePath?: string;
+  error?: string;
+}
+
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 // IPC Channel names
@@ -63,6 +78,9 @@ export const IPC_CHANNELS = {
   KILL_PROCESS: 'monitor:kill-process',
   MINIMIZE_WINDOW: 'monitor:minimize-window',
   CLOSE_APP: 'monitor:close-app',
+
+  // Gomoku external engine
+  GOMOKU_RAPFI_ANALYZE: 'gomoku:rapfi-analyze',
 } as const;
 
 // Message parsing patterns (from sshchat_gui.py)

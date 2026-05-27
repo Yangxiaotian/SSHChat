@@ -61,7 +61,7 @@ class PokerGamesFlowTests(unittest.TestCase):
 
         self.assertEqual(game.state, "ended")
         self.assertEqual(len(game.board), 5)
-        self.assertEqual(sum(game.stacks.values()), 2000)
+        self.assertEqual(sum(game.stacks.values()), len(game.players) * 1000)
 
     def test_holdem_accepts_chinese_move_aliases(self):
         host_conn = object()
@@ -96,6 +96,56 @@ class PokerGamesFlowTests(unittest.TestCase):
         err_allin, b_allin, _ = game4.try_move(host_conn, "全下")
         self.assertEqual(err_allin, [])
         self.assertTrue(any("全下" in line for line in b_allin))
+
+    def test_holdem_start_auto_fills_at_least_three_bots(self):
+        host_conn = object()
+        peer_conn = object()
+        game = HoldemGame(host_conn, "host")
+        game.rng.seed(23)
+
+        err_join, _b_join, _ = game.try_join(peer_conn, "peer")
+        self.assertEqual(err_join, [])
+
+        err_start, b_start, _ = game.try_move(host_conn, "start")
+        self.assertEqual(err_start, [])
+        self.assertEqual(game.state, "playing")
+
+        bot_count = sum(1 for _c, n in game.players if n in game.bot_names)
+        self.assertGreaterEqual(bot_count, 3)
+        self.assertEqual(len(game.players), 5)
+        self.assertTrue(any("机器人：" in line for line in b_start))
+
+    def test_zjh_starts_blind_and_reveals_after_look(self):
+        host_conn = object()
+        game = ZhaJinHuaGame(host_conn, "host")
+        game.rng.seed(5)
+
+        err_start, _b_start, _ = game.try_move(host_conn, "start")
+        self.assertEqual(err_start, [])
+        lines = game.show(host_conn)
+        self.assertTrue(any("闷牌中" in line for line in lines))
+
+        err_look, _b_look, _ = game.try_move(host_conn, "look")
+        self.assertEqual(err_look, [])
+        lines2 = game.show(host_conn)
+        self.assertTrue(any(line.startswith("你的手牌：") and "闷牌中" not in line for line in lines2))
+
+    def test_holdem_starts_blind_and_reveals_after_look(self):
+        host_conn = object()
+        peer_conn = object()
+        game = HoldemGame(host_conn, "host")
+        game.rng.seed(9)
+        game.try_join(peer_conn, "peer")
+
+        err_start, _b_start, _ = game.try_move(host_conn, "start")
+        self.assertEqual(err_start, [])
+        lines = game.show(host_conn)
+        self.assertTrue(any("闷牌中" in line for line in lines))
+
+        err_look, _b_look, _ = game.try_move(host_conn, "look")
+        self.assertEqual(err_look, [])
+        lines2 = game.show(host_conn)
+        self.assertTrue(any(line.startswith("你的手牌：") and "闷牌中" not in line for line in lines2))
 
 
 if __name__ == "__main__":

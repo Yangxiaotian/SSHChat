@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ConnectionConfig, ChatMessage, ConnectionStatus, ProcessInfo, IPC_CHANNELS } from '../shared/protocol';
+import {
+  ConnectionConfig,
+  ChatMessage,
+  ConnectionStatus,
+  ProcessInfo,
+  IPC_CHANNELS,
+  GomokuRapfiAnalyzeRequest,
+  GomokuRapfiAnalyzeResponse,
+} from '../shared/protocol';
 
 const api = {
   // Config
@@ -56,6 +64,9 @@ const api = {
   },
   closeApp: (): Promise<boolean> => {
     return ipcRenderer.invoke(IPC_CHANNELS.CLOSE_APP);
+  },
+  analyzeGomokuRapfi: (payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, payload);
   },
 
   // Event listeners
