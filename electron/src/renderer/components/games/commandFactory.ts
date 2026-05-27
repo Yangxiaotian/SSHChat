@@ -3,16 +3,21 @@
 export const quickByGame: Record<GameKind, QuickAction[]> = {
   none: [
     { label: '新开国际象棋', cmd: '/game new chess' },
+    { label: '国际象棋 AI', cmd: '/game new chess ai normal' },
     { label: '新开五子棋', cmd: '/game new gomoku' },
+    { label: '五子棋 AI', cmd: '/game new gomoku ai normal' },
     { label: '新开象棋', cmd: '/game new xiangqi' },
+    { label: '象棋 AI', cmd: '/game new xiangqi ai normal' },
     { label: '新开三国杀', cmd: '/game new sanguo' },
     { label: '新开狼人杀', cmd: '/game new werewolf' },
     { label: '新开德州', cmd: '/game new holdem' },
     { label: '新开炸金花', cmd: '/game new zjh' },
     { label: '新开牛头王', cmd: '/game new niutou' },
+    { label: '我的棋类积分', cmd: '/game rating' },
   ],
   chess: [
     { label: '显示棋盘', cmd: '/game show' },
+    { label: '查看积分', cmd: '/game rating chess' },
     { label: '加入对局', cmd: '/game join' },
     { label: '查看席位', cmd: '/game seats' },
     { label: '申请悔棋', cmd: '/game undo' },
@@ -23,6 +28,7 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
   ],
   gomoku: [
     { label: '显示棋盘', cmd: '/game show' },
+    { label: '查看积分', cmd: '/game rating gomoku' },
     { label: '加入对局', cmd: '/game join' },
     { label: '查看席位', cmd: '/game seats' },
     { label: '申请悔棋', cmd: '/game undo' },
@@ -33,6 +39,7 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
   ],
   xiangqi: [
     { label: '显示棋盘', cmd: '/game show' },
+    { label: '查看积分', cmd: '/game rating xiangqi' },
     { label: '加入对局', cmd: '/game join' },
     { label: '查看席位', cmd: '/game seats' },
     { label: '申请悔棋', cmd: '/game undo' },

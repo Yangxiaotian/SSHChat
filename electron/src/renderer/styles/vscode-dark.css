@@ -660,8 +660,12 @@ html, body, #root {
 .chess-cell {
   height: 34px;
   border: 1px solid var(--vscode-border);
-  font-size: 10px;
+  font-size: 22px;
   cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .chess-cell.light {
@@ -676,6 +680,15 @@ html, body, #root {
 
 .chess-cell.selected {
   outline: 2px solid #6f7885;
+}
+
+.chess-cell.last {
+  box-shadow: inset 0 0 0 2px #7c8696;
+}
+
+.chess-piece {
+  line-height: 1;
+  font-size: 22px;
 }
 
 .gomoku-grid {

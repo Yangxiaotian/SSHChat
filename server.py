@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import socket
@@ -16,9 +17,20 @@ from html import unescape
 from typing import Optional
 
 import games
+from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
 
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
+
+
+def _rating_store_path() -> str:
+    raw = os.environ.get("SSHCHAT_RATING_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "game_ratings.json")
+
+
+rating_store = GameRatingStore(_rating_store_path())
 
 # conn -> {"name", "rooms", "current_room"}
 clients = {}
@@ -223,6 +235,36 @@ def send_sanguo_hand_views(room: str, game) -> None:
         return
     for conn, lines in pairs:
         send_game_private(conn, room, lines)
+
+
+def _rating_profile_line(game_name: str, profile: dict[str, object], rank: int | None = None) -> str:
+    prefix = f"#{rank} " if rank is not None else ""
+    return (
+        f"{prefix}{profile['name']}: 积分={profile['rating']} 等级={profile['level']} "
+        f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+        f"局数={profile['games']}"
+    )
+
+
+def _rating_summary_lines(target_name: str, game_name: Optional[str] = None) -> list[str]:
+    if game_name:
+        profile = rating_store.profile(game_name, target_name)
+        lines = [f"{game_name} 积分（{profile['scheme']}）"]
+        lines.append(_rating_profile_line(game_name, profile))
+        top = rating_store.top(game_name, limit=5)
+        if top:
+            lines.append("榜单 Top 5：")
+            lines.extend(_rating_profile_line(game_name, item, idx) for idx, item in enumerate(top, start=1))
+        return lines
+    lines = [f"{target_name} 的棋类积分总览（跨房间共享）"]
+    for rated_game in sorted(GAME_CONFIGS):
+        profile = rating_store.profile(rated_game, target_name)
+        lines.append(
+            f"{rated_game}: 积分={profile['rating']} 等级={profile['level']} "
+            f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+            f"局数={profile['games']} 体系={profile['scheme']}"
+        )
+    return lines
 
 
 def _default_enabled_games() -> set[str]:
@@ -1370,6 +1412,28 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_line(conn, line)
         return
 
+    if sub in ("rating", "ratings", "score", "scores"):
+        parts = rest.split()
+        game_name: Optional[str] = None
+        target_name = name
+        if parts:
+            maybe_game = games.resolve_game_name(parts[0].lower())
+            if is_rated_game(maybe_game):
+                game_name = maybe_game
+                if len(parts) >= 2:
+                    target_name = parts[1]
+            else:
+                target_name = parts[0]
+                if len(parts) >= 2:
+                    maybe_game = games.resolve_game_name(parts[1].lower())
+                    if is_rated_game(maybe_game):
+                        game_name = maybe_game
+        if game_name is not None and not is_rated_game(game_name):
+            send_line(conn, f"[*] {game_name} 当前没有持久化棋类积分。\n")
+            return
+        send_game_private(conn, room, _rating_summary_lines(target_name, game_name))
+        return
+
     if sub in ("on", "off", "上线", "下线"):
         enable = sub in ("on", "上线")
         if not rest:
@@ -1424,7 +1488,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub == "new":
-        game_arg = (rest.strip().split()[0] if rest.strip() else "chess")
+        parts = rest.strip().split()
+        game_arg = parts[0] if parts else "chess"
         game_name = games.resolve_game_name(game_arg.lower())
         cls = games.GAMES.get(game_name)
         if cls is None:
@@ -1451,7 +1516,13 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 )
                 return
             try:
-                new_game = cls(conn, name)
+                new_game = games.create_game(
+                    game_name,
+                    conn,
+                    name,
+                    options=parts[1:],
+                    rating_store=rating_store,
+                )
             except RuntimeError as e:
                 send_line(conn, f"[*] 无法开局：{e}\n")
                 return
@@ -1537,7 +1608,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             for peer_conn, extra in drain():
                 send_game_private(peer_conn, room, extra)
         broadcast_game(room, bcast)
-        if getattr(game, "send_view_on_move", True):
+        if ended or getattr(game, "send_view_on_move", True):
             send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
         return
@@ -1763,7 +1834,7 @@ def handle_client(conn, addr) -> None:
         remove_client(conn)
 
 
-def main():
+def run_server() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PORT))
@@ -1779,5 +1850,51 @@ def main():
         ).start()
 
 
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="SSHChat server")
+    parser.add_argument(
+        "--reset-ratings-all",
+        action="store_true",
+        help="Reset all persisted board-game ratings and exit.",
+    )
+    parser.add_argument(
+        "--reset-ratings-game",
+        metavar="GAME",
+        help="Reset one game's persisted ratings and exit.",
+    )
+    parser.add_argument(
+        "--reset-ratings-user-game",
+        nargs=2,
+        metavar=("USER", "GAME"),
+        help="Reset one user's persisted rating for one game and exit.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.reset_ratings_all:
+        rating_store.reset_all()
+        print(f"reset all ratings in {rating_store.path}")
+        return 0
+    if args.reset_ratings_game:
+        game_name = games.resolve_game_name(args.reset_ratings_game.lower())
+        if not is_rated_game(game_name):
+            parser.error(f"{game_name!r} is not a rated board game")
+        rating_store.reset_game(game_name)
+        print(f"reset ratings for game {game_name} in {rating_store.path}")
+        return 0
+    if args.reset_ratings_user_game:
+        user_name, raw_game = args.reset_ratings_user_game
+        game_name = games.resolve_game_name(raw_game.lower())
+        if not is_rated_game(game_name):
+            parser.error(f"{game_name!r} is not a rated board game")
+        removed = rating_store.reset_user_game(user_name, game_name)
+        status = "removed" if removed else "not-found"
+        print(
+            f"reset rating for user {user_name} game {game_name}: {status} "
+            f"({rating_store.path})"
+        )
+        return 0
+    return run_server()
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

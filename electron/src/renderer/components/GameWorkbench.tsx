@@ -66,9 +66,12 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
 function isLikelyGameLine(line: string): boolean {
   if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
   if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])(?:\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])){4,}\s*$/.test(line)) return true;
+  if (/^\s*[1-8]\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])(?:\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])){7}\s*$/.test(line)) return true;
+  if (/^\s+[a-h](?:\s+[a-h]){7}\s*$/.test(line.trim().toLowerCase())) return true;
   if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
+  if (/^上一步[:：]/.test(line.trim())) return true;
   if (/^(alive|players|votes)[:：]/i.test(line.trim())) return true;
   const t = line.trim().toLowerCase();
   if (!t) return false;
@@ -443,7 +446,7 @@ export default function GameWorkbench() {
   const shouldRefreshAfter = (cmd: string): boolean => {
     const t = cmd.trim().toLowerCase();
     if (!t.startsWith('/game')) return false;
-    if (t === '/game show' || t === '/game help' || t === '/game list') return false;
+    if (t === '/game show' || t === '/game help' || t === '/game list' || t.startsWith('/game rating')) return false;
     return true;
   };
 
@@ -527,8 +530,8 @@ export default function GameWorkbench() {
           </div>
 
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
-          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => send(GameCommandFactory.gomokuMove(r, c))} />}
-          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(fr, fc, tr, tc) => send(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
+          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c))} />}
+          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}

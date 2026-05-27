@@ -8,4 +8,4 @@ if [[ -f "$DIR/sshchat.env" ]]; then
 fi
 PY="$DIR/venv/bin/python"
 [[ -x "$PY" ]] || PY=python3
-exec "$PY" "$DIR/server.py"
+exec "$PY" "$DIR/server.py" "$@"

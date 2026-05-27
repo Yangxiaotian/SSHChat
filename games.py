@@ -14,6 +14,8 @@ import itertools
 import unicodedata
 from typing import Optional, TYPE_CHECKING
 
+from ratings import GameRatingStore, game_scheme_label, is_rated_game
+
 from sgs_data import (
     ALL_SUITS,
     SHA_CARDS,
@@ -64,6 +66,487 @@ def chess_import_error() -> Optional[str]:
 GameResult = tuple[list[str], list[str], bool]
 
 GOMOKU_SIZE = 15
+_AI_LEVEL_LABELS = {
+    "easy": "简单",
+    "normal": "普通",
+    "hard": "困难",
+}
+_AI_LEVEL_ALIASES = {
+    "ai": "normal",
+    "bot": "normal",
+    "computer": "normal",
+    "电脑": "normal",
+    "机器人": "normal",
+    "easy": "easy",
+    "normal": "normal",
+    "hard": "hard",
+    "简单": "easy",
+    "普通": "normal",
+    "困难": "hard",
+}
+
+
+def _parse_ai_level(tokens: list[str]) -> Optional[str]:
+    level: Optional[str] = None
+    for raw in tokens:
+        key = raw.strip().lower()
+        if not key:
+            continue
+        mapped = _AI_LEVEL_ALIASES.get(key)
+        if mapped is None:
+            raise RuntimeError(
+                f"未知开局参数 {raw!r}；棋类 AI 用法：/game new chess ai [easy|normal|hard]"
+            )
+        level = mapped
+    return level
+
+
+def _board_ai_name(level: str) -> str:
+    return f"AI-{_AI_LEVEL_LABELS.get(level, level)}"
+
+
+def _format_rating_profile_line(
+    store: Optional[GameRatingStore],
+    game: str,
+    seat_no: int,
+    player_name: str,
+) -> str:
+    if store is None or not is_rated_game(game):
+        return f"#{seat_no} {player_name}"
+    profile = store.profile(game, player_name)
+    return (
+        f"#{seat_no} {profile['name']}: 积分={profile['rating']} "
+        f"等级={profile['level']} 战绩={profile['wins']}/{profile['losses']}/{profile['draws']}"
+    )
+
+
+def _format_rating_lines(
+    store: Optional[GameRatingStore],
+    game: str,
+    player_names: list[Optional[str]],
+    *,
+    ai_name: Optional[str] = None,
+) -> list[str]:
+    if store is None or not is_rated_game(game):
+        return []
+    scheme = game_scheme_label(game)
+    if ai_name:
+        lines = [
+            f"积分体系：{scheme}；AI 练习局不计入持久化积分，人人对局跨房间共享。"
+        ]
+    else:
+        lines = [f"积分体系：{scheme}；积分跨房间共享。"]
+    for seat_no, name in enumerate(player_names, start=1):
+        if name:
+            lines.append(_format_rating_profile_line(store, game, seat_no, name))
+        else:
+            lines.append(f"#{seat_no} 空席：加入后开始计分")
+    if ai_name:
+        lines[-1] = f"#{len(player_names)} {ai_name}: 练习对手（不计入持久化积分）"
+    return lines
+
+
+def _format_rating_result_lines(
+    store: Optional[GameRatingStore],
+    game: str,
+    player_a: str,
+    player_b: str,
+    score_a: float,
+    *,
+    ranked: bool,
+) -> list[str]:
+    if not ranked:
+        return ["练习局：本局不计入持久化积分。"]
+    if store is None or not is_rated_game(game):
+        return []
+    prof_a, prof_b = store.record_result(game, player_a, player_b, score_a)
+    return [
+        "积分结算："
+        f"{prof_a['name']} {prof_a['delta']:+d} -> {prof_a['rating']}（{prof_a['level']}）；"
+        f"{prof_b['name']} {prof_b['delta']:+d} -> {prof_b['rating']}（{prof_b['level']}）"
+    ]
+
+
+_CHESS_AI_DEPTH = {"easy": 1, "normal": 2, "hard": 3}
+_CHESS_PIECE_VALUES = {
+    1: 100,
+    2: 320,
+    3: 330,
+    4: 500,
+    5: 900,
+    6: 20000,
+}
+
+
+def _chess_evaluate(board) -> int:
+    outcome = board.outcome(claim_draw=True)
+    if outcome is not None:
+        if outcome.winner is True:
+            return 200000
+        if outcome.winner is False:
+            return -200000
+        return 0
+    score = 0
+    for piece_type, value in _CHESS_PIECE_VALUES.items():
+        score += len(board.pieces(piece_type, True)) * value
+        score -= len(board.pieces(piece_type, False)) * value
+    score += len(list(board.legal_moves)) * (6 if board.turn else -6)
+    return score
+
+
+def _chess_order_moves(board) -> list:
+    moves = list(board.legal_moves)
+
+    def move_key(move) -> tuple[int, int]:
+        score = 0
+        if board.is_capture(move):
+            victim = board.piece_at(move.to_square)
+            attacker = board.piece_at(move.from_square)
+            victim_val = _CHESS_PIECE_VALUES.get(victim.piece_type, 0) if victim else 0
+            attacker_val = _CHESS_PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
+            score += 1000 + victim_val - attacker_val
+        if move.promotion:
+            score += 800 + _CHESS_PIECE_VALUES.get(move.promotion, 0)
+        if board.gives_check(move):
+            score += 120
+        return (score, -move.from_square)
+
+    moves.sort(key=move_key, reverse=True)
+    return moves
+
+
+def _chess_negamax(board, depth: int, alpha: int, beta: int, root_white: bool) -> int:
+    if depth <= 0 or board.is_game_over(claim_draw=True):
+        score = _chess_evaluate(board)
+        return score if root_white else -score
+    best = -10**9
+    for move in _chess_order_moves(board):
+        board.push(move)
+        score = -_chess_negamax(board, depth - 1, -beta, -alpha, root_white)
+        board.pop()
+        if score > best:
+            best = score
+        if best > alpha:
+            alpha = best
+        if alpha >= beta:
+            break
+    return best
+
+
+def _choose_chess_ai_move(board, level: str):
+    if _chess is None:
+        return None
+    depth = _CHESS_AI_DEPTH.get(level, 2)
+    root_white = board.turn == _chess.WHITE
+    best_move = None
+    best_score = -10**9
+    for move in _chess_order_moves(board):
+        board.push(move)
+        score = -_chess_negamax(board, depth - 1, -10**9, 10**9, root_white)
+        board.pop()
+        if score > best_score:
+            best_score = score
+            best_move = move
+    return best_move
+
+
+_XQ_AI_DEPTH = {"easy": 1, "normal": 2, "hard": 2}
+_XQ_AI_WIDTH = {"easy": 6, "normal": 10, "hard": 14}
+
+
+def _xq_piece_value(cell: int, row: int) -> int:
+    pt = _xq_piece_type(cell)
+    base = {
+        _XQ_K: 20000,
+        _XQ_R: 900,
+        _XQ_N: 430,
+        _XQ_C: 450,
+        _XQ_B: 220,
+        _XQ_A: 220,
+        _XQ_P: 120,
+    }.get(pt, 0)
+    side = _xq_piece_side(cell)
+    if pt == _XQ_P and side is not None:
+        crossed = row >= 5 if side == _XQ_RED else row <= 4
+        if crossed:
+            base += 40
+    return base
+
+
+def _xq_evaluate(board: list[list[int]]) -> int:
+    score = 0
+    for row_idx, row in enumerate(board):
+        for cell in row:
+            if cell == 0:
+                continue
+            side = _xq_piece_side(cell)
+            value = _xq_piece_value(cell, row_idx)
+            score += value if side == _XQ_RED else -value
+    return score
+
+
+def _xq_terminal_score(board: list[list[int]], side: int, root_side: int) -> Optional[int]:
+    legal = _xq_legal_moves(board, side)
+    if legal:
+        return None
+    king = _xq_king_pos(board, side)
+    in_check = king is not None and _xq_is_attacked(board, king[0], king[1], -side)
+    if in_check:
+        return -200000 if side == root_side else 200000
+    return 0
+
+
+def _xq_order_moves(board: list[list[int]], moves: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    def key(move: tuple[int, int, int, int]) -> tuple[int, int]:
+        fr, fc, tr, tc = move
+        attacker = board[fr][fc]
+        captured = board[tr][tc]
+        score = 0
+        if captured != 0:
+            score += 1000 + _xq_piece_value(captured, tr) - _xq_piece_value(attacker, fr)
+        return (score, -fr)
+
+    return sorted(moves, key=key, reverse=True)
+
+
+def _xq_apply_copy(
+    board: list[list[int]],
+    move: tuple[int, int, int, int],
+) -> list[list[int]]:
+    clone = [row[:] for row in board]
+    _xq_apply(clone, *move)
+    return clone
+
+
+def _xq_negamax(
+    board: list[list[int]],
+    side: int,
+    depth: int,
+    alpha: int,
+    beta: int,
+    root_side: int,
+    width: int,
+) -> int:
+    terminal = _xq_terminal_score(board, side, root_side)
+    if terminal is not None:
+        return terminal
+    if depth <= 0:
+        score = _xq_evaluate(board)
+        return score if root_side == _XQ_RED else -score
+    best = -10**9
+    legal = _xq_order_moves(board, _xq_legal_moves(board, side))[:width]
+    for move in legal:
+        score = -_xq_negamax(
+            _xq_apply_copy(board, move),
+            -side,
+            depth - 1,
+            -beta,
+            -alpha,
+            root_side,
+            width,
+        )
+        if score > best:
+            best = score
+        if best > alpha:
+            alpha = best
+        if alpha >= beta:
+            break
+    return best
+
+
+def _choose_xq_ai_move(board: list[list[int]], side: int, level: str):
+    depth = _XQ_AI_DEPTH.get(level, 2)
+    width = _XQ_AI_WIDTH.get(level, 10)
+    legal = _xq_order_moves(board, _xq_legal_moves(board, side))[:width]
+    best_move = None
+    best_score = -10**9
+    for move in legal:
+        score = -_xq_negamax(
+            _xq_apply_copy(board, move),
+            -side,
+            depth - 1,
+            -10**9,
+            10**9,
+            side,
+            width,
+        )
+        if score > best_score:
+            best_score = score
+            best_move = move
+    return best_move
+
+
+_GOMOKU_AI_DEPTH = {"easy": 1, "normal": 2, "hard": 3}
+_GOMOKU_AI_WIDTH = {"easy": 6, "normal": 8, "hard": 10}
+
+
+def _gomoku_center_bias(row: int, col: int) -> int:
+    center = GOMOKU_SIZE // 2
+    return 20 - (abs(row - center) + abs(col - center))
+
+
+def _gomoku_candidate_cells(grid: list[list[int]]) -> list[tuple[int, int]]:
+    occupied = [
+        (r, c)
+        for r in range(GOMOKU_SIZE)
+        for c in range(GOMOKU_SIZE)
+        if grid[r][c] != 0
+    ]
+    if not occupied:
+        center = GOMOKU_SIZE // 2
+        return [(center, center)]
+    cand: set[tuple[int, int]] = set()
+    for r, c in occupied:
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr = r + dr
+                nc = c + dc
+                if (
+                    0 <= nr < GOMOKU_SIZE
+                    and 0 <= nc < GOMOKU_SIZE
+                    and grid[nr][nc] == 0
+                ):
+                    cand.add((nr, nc))
+    return sorted(
+        cand,
+        key=lambda pos: (-_gomoku_center_bias(pos[0], pos[1]), pos[0], pos[1]),
+    )
+
+
+def _gomoku_pattern_score(length: int, open_ends: int) -> int:
+    if length >= 5:
+        return 1_000_000
+    if length == 4 and open_ends == 2:
+        return 120_000
+    if length == 4 and open_ends == 1:
+        return 20_000
+    if length == 3 and open_ends == 2:
+        return 8_000
+    if length == 3 and open_ends == 1:
+        return 1_500
+    if length == 2 and open_ends == 2:
+        return 500
+    if length == 2 and open_ends == 1:
+        return 120
+    return 20 if open_ends == 2 else 0
+
+
+def _gomoku_move_score(
+    grid: list[list[int]],
+    row: int,
+    col: int,
+    who: int,
+) -> int:
+    if grid[row][col] != 0:
+        return -10**9
+    total = 0
+    for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        length = 1
+        open_ends = 0
+        for sign in (-1, 1):
+            step = 1
+            while True:
+                nr = row + dr * step * sign
+                nc = col + dc * step * sign
+                if not (0 <= nr < GOMOKU_SIZE and 0 <= nc < GOMOKU_SIZE):
+                    break
+                if grid[nr][nc] == who:
+                    length += 1
+                    step += 1
+                    continue
+                if grid[nr][nc] == 0:
+                    open_ends += 1
+                break
+        total += _gomoku_pattern_score(length, open_ends)
+    return total + _gomoku_center_bias(row, col)
+
+
+def _gomoku_eval(grid: list[list[int]], root: int) -> int:
+    cand = _gomoku_candidate_cells(grid)
+    best_root = max((_gomoku_move_score(grid, r, c, root) for r, c in cand), default=0)
+    opp = 3 - root
+    best_opp = max((_gomoku_move_score(grid, r, c, opp) for r, c in cand), default=0)
+    score = best_root - int(best_opp * 0.92)
+    return score if root == 1 else -score
+
+
+def _gomoku_sorted_candidates(
+    grid: list[list[int]],
+    who: int,
+    width: int,
+) -> list[tuple[int, int]]:
+    opp = 3 - who
+    ranked = []
+    for r, c in _gomoku_candidate_cells(grid):
+        attack = _gomoku_move_score(grid, r, c, who)
+        defend = _gomoku_move_score(grid, r, c, opp)
+        ranked.append((attack * 2 + int(defend * 1.7), r, c))
+    ranked.sort(reverse=True)
+    return [(r, c) for _score, r, c in ranked[:width]]
+
+
+def _gomoku_negamax(
+    grid: list[list[int]],
+    who: int,
+    depth: int,
+    alpha: int,
+    beta: int,
+    root: int,
+    width: int,
+    last: Optional[tuple[int, int]] = None,
+) -> int:
+    if last is not None and _gomoku_winner_at(grid, last[0], last[1], 3 - who):
+        return -1_000_000 if root == who else 1_000_000
+    if depth <= 0:
+        return _gomoku_eval(grid, root)
+    best = -10**9
+    for row, col in _gomoku_sorted_candidates(grid, who, width):
+        grid[row][col] = who
+        score = -_gomoku_negamax(
+            grid,
+            3 - who,
+            depth - 1,
+            -beta,
+            -alpha,
+            root,
+            width,
+            (row, col),
+        )
+        grid[row][col] = 0
+        if score > best:
+            best = score
+        if best > alpha:
+            alpha = best
+        if alpha >= beta:
+            break
+    return best
+
+
+def _choose_gomoku_ai_move(grid: list[list[int]], who: int, level: str) -> tuple[int, int]:
+    depth = _GOMOKU_AI_DEPTH.get(level, 2)
+    width = _GOMOKU_AI_WIDTH.get(level, 8)
+    best_move = None
+    best_score = -10**9
+    for row, col in _gomoku_sorted_candidates(grid, who, width):
+        grid[row][col] = who
+        if _gomoku_winner_at(grid, row, col, who):
+            grid[row][col] = 0
+            return (row, col)
+        score = -_gomoku_negamax(
+            grid,
+            3 - who,
+            depth - 1,
+            -10**9,
+            10**9,
+            who,
+            width,
+            (row, col),
+        )
+        grid[row][col] = 0
+        if score > best_score:
+            best_score = score
+            best_move = (row, col)
+    return best_move or (GOMOKU_SIZE // 2, GOMOKU_SIZE // 2)
 
 
 class BoardUndoMixin:
@@ -270,8 +753,17 @@ class ChessGame(BoardUndoMixin):
     name = "chess"
     first_seat_desc = "白方"
     second_seat_desc = "黑方"
+    # Chess boards are compact enough to refresh every move in terminal clients.
+    send_view_on_move = True
 
-    def __init__(self, white_conn, white_name: str) -> None:
+    def __init__(
+        self,
+        white_conn,
+        white_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+        ai_level: Optional[str] = None,
+    ) -> None:
         if _chess is None:
             raise RuntimeError(
                 "python-chess 未安装。请在服务端 venv 内 "
@@ -280,11 +772,19 @@ class ChessGame(BoardUndoMixin):
         self.board = _chess.Board()
         self.white_conn = white_conn
         self.white_name = white_name
-        self.black_conn = None
-        self.black_name: Optional[str] = None
-        self.state = "waiting"
+        self.rating_store = rating_store
+        self.ai_level = ai_level
+        self.ai_name = _board_ai_name(ai_level) if ai_level else None
+        self.black_conn = object() if ai_level else None
+        self.black_name: Optional[str] = self.ai_name if ai_level else None
+        self.state = "playing" if ai_level else "waiting"
         self._last_move = None
         self._result_header: Optional[str] = None  # PGN Result when not from board.outcome()
+        self.join_blurb = (
+            f"{self.ai_name} 执黑，练习局立即开始；本局不计入持久化积分。"
+            if ai_level
+            else "等另一位玩家用 /game join 加入。"
+        )
         self._undo_clear_pending()
 
     def _undo_has_moves(self) -> bool:
@@ -347,6 +847,62 @@ class ChessGame(BoardUndoMixin):
             self.board, last_move=self._last_move, flip=self._viewer_flip(conn)
         )
 
+    def _is_ai_game(self) -> bool:
+        return self.ai_level is not None
+
+    def _is_ai_turn(self) -> bool:
+        return self._is_ai_game() and self.board.turn == _chess.BLACK
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store,
+            self.name,
+            [self.white_name, self.black_name],
+            ai_name=self.ai_name,
+        )
+
+    def _settle_ratings(self, score_white: float) -> list[str]:
+        if not self.black_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.white_name,
+            self.black_name,
+            score_white,
+            ranked=not self._is_ai_game(),
+        )
+
+    def _finish_outcome(self, outcome) -> list[str]:
+        if outcome.winner is True:
+            self._result_header = "1-0"
+            return self._settle_ratings(1.0)
+        if outcome.winner is False:
+            self._result_header = "0-1"
+            return self._settle_ratings(0.0)
+        self._result_header = "1/2-1/2"
+        return self._settle_ratings(0.5)
+
+    def _run_ai_turn(self) -> list[str]:
+        move = _choose_chess_ai_move(self.board, self.ai_level or "normal")
+        if move is None:
+            self.state = "ended"
+            self._result_header = "1/2-1/2"
+            return ["对局结束：AI 无合法着法。", *self._settle_ratings(0.5)]
+        san = self.board.san(move)
+        self.board.push(move)
+        self._last_move = move
+        bcast = [f"黑方 {self.black_name} 走 {san}"]
+        outcome = self.board.outcome()
+        if outcome is not None:
+            self.state = "ended"
+            bcast.append(_format_outcome(outcome))
+            bcast.extend(self._finish_outcome(outcome))
+            return bcast
+        suffix = "（将军）" if self.board.is_check() else ""
+        bcast.append(f"轮到 白方 {self.white_name}（第 {self.board.fullmove_number} 手）{suffix}")
+        return bcast
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -356,6 +912,8 @@ class ChessGame(BoardUndoMixin):
             )
         if conn is self.white_conn:
             return (["你已经是白方。"], [], False)
+        if self._is_ai_game():
+            return (["当前为 AI 练习局，不能加入执黑；可 /game show 围观。"], [], False)
         if self.black_conn is not None:
             return (
                 [f"黑方席位已被 {self.black_name} 占。"],
@@ -409,14 +967,13 @@ class ChessGame(BoardUndoMixin):
         outcome = self.board.outcome()
         if outcome is not None:
             self.state = "ended"
-            if outcome.winner is True:
-                self._result_header = "1-0"
-            elif outcome.winner is False:
-                self._result_header = "0-1"
-            else:
-                self._result_header = "1/2-1/2"
             bcast.append(_format_outcome(outcome))
+            bcast.extend(self._finish_outcome(outcome))
             return ([], bcast, True)
+
+        if self._is_ai_turn():
+            bcast.extend(self._run_ai_turn())
+            return ([], bcast, self.state == "ended")
 
         next_color = self.board.turn
         next_name = (
@@ -457,9 +1014,9 @@ class ChessGame(BoardUndoMixin):
         self.state = "ended"
         if side == _chess.WHITE:
             self._result_header = "0-1"
-            return ([], [f"白方 {name} 认负 — 黑胜 0-1"], True)
+            return ([], [f"白方 {name} 认负 — 黑胜 0-1", *self._settle_ratings(0.0)], True)
         self._result_header = "1-0"
-        return ([], [f"黑方 {name} 认负 — 白胜 1-0"], True)
+        return ([], [f"黑方 {name} 认负 — 白胜 1-0", *self._settle_ratings(1.0)], True)
 
     def abort(self, conn, name: str) -> GameResult:
         if self.state == "ended":
@@ -476,17 +1033,20 @@ class ChessGame(BoardUndoMixin):
         return ([], [f"{name} 终止了对局（未开始）。"], True)
 
     def seats(self) -> list[str]:
-        return [
+        lines = [
             f"chess 对局状态：{self.state}",
             f"  白方：{self.white_name}",
             f"  黑方：{self.black_name or '(空席, 可 /game join)'}",
         ]
+        lines.extend(self._rating_lines())
+        return lines
 
     def show(self, conn=None) -> list[str]:
         lines = [
             f"chess 对局（{self.state}）  白：{self.white_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
+        lines.extend(self._rating_lines())
         lines.extend(self._board_render(conn))
         if self.state == "playing":
             color = self.board.turn
@@ -542,9 +1102,9 @@ class ChessGame(BoardUndoMixin):
             self.state = "ended"
             if side == _chess.WHITE:
                 self._result_header = "0-1"
-                return ([], [f"白方 {name} 离开 — 黑胜 0-1"], True)
+                return ([], [f"白方 {name} 离开 — 黑胜 0-1", *self._settle_ratings(0.0)], True)
             self._result_header = "1-0"
-            return ([], [f"黑方 {name} 离开 — 白胜 1-0"], True)
+            return ([], [f"黑方 {name} 离开 — 白胜 1-0", *self._settle_ratings(1.0)], True)
         return ([], [], False)
 
 
@@ -630,19 +1190,35 @@ class GomokuGame(BoardUndoMixin):
     name = "gomoku"
     first_seat_desc = "黑方（先手）"
     second_seat_desc = "白方"
+    send_view_on_move = False
 
-    def __init__(self, black_conn, black_name: str) -> None:
+    def __init__(
+        self,
+        black_conn,
+        black_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+        ai_level: Optional[str] = None,
+    ) -> None:
         self.grid: list[list[int]] = [
             [0 for _ in range(GOMOKU_SIZE)] for _ in range(GOMOKU_SIZE)
         ]
         self.black_conn = black_conn
         self.black_name = black_name
-        self.white_conn = None
-        self.white_name: Optional[str] = None
-        self.state = "waiting"
+        self.rating_store = rating_store
+        self.ai_level = ai_level
+        self.ai_name = _board_ai_name(ai_level) if ai_level else None
+        self.white_conn = object() if ai_level else None
+        self.white_name: Optional[str] = self.ai_name if ai_level else None
+        self.state = "playing" if ai_level else "waiting"
         self._turn = 1  # 1=black, 2=white
         self._last: Optional[tuple[int, int]] = None
         self._history: list[tuple[int, int, int]] = []  # row, col, player
+        self.join_blurb = (
+            f"{self.ai_name} 执白，练习局立即开始；本局不计入持久化积分。"
+            if ai_level
+            else "等另一位玩家用 /game join 加入。"
+        )
         self._undo_clear_pending()
 
     def _undo_has_moves(self) -> bool:
@@ -705,6 +1281,52 @@ class GomokuGame(BoardUndoMixin):
     def _board_render(self, conn=None) -> list[str]:
         return _gomoku_render(self.grid, last=self._last, flip=self._viewer_flip(conn))
 
+    def _is_ai_game(self) -> bool:
+        return self.ai_level is not None
+
+    def _is_ai_turn(self) -> bool:
+        return self._is_ai_game() and self._turn == 2
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store,
+            self.name,
+            [self.black_name, self.white_name],
+            ai_name=self.ai_name,
+        )
+
+    def _settle_ratings(self, score_black: float) -> list[str]:
+        if not self.white_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.black_name,
+            self.white_name,
+            score_black,
+            ranked=not self._is_ai_game(),
+        )
+
+    def _run_ai_turn(self) -> list[str]:
+        row, col = _choose_gomoku_ai_move(self.grid, 2, self.ai_level or "normal")
+        self.grid[row][col] = 2
+        self._last = (row, col)
+        self._history.append((row, col, 2))
+        bcast = [f"白方 {self.white_name} 落子 ({row + 1}, {col + 1})"]
+        if _gomoku_winner_at(self.grid, row, col, 2):
+            self.state = "ended"
+            bcast.append(f"对局结束：白方 {self.white_name} 连五获胜！")
+            bcast.extend(self._settle_ratings(0.0))
+            return bcast
+        if all(self.grid[r][c] != 0 for r in range(GOMOKU_SIZE) for c in range(GOMOKU_SIZE)):
+            self.state = "ended"
+            bcast.append("对局结束：棋盘已满，和棋。")
+            bcast.extend(self._settle_ratings(0.5))
+            return bcast
+        self._turn = 1
+        bcast.append(f"轮到 黑方 {self.black_name} 落子")
+        return bcast
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -714,6 +1336,8 @@ class GomokuGame(BoardUndoMixin):
             )
         if conn is self.black_conn:
             return (["你已经是黑方。"], [], False)
+        if self._is_ai_game():
+            return (["当前为 AI 练习局，不能加入执白；可 /game show 围观。"], [], False)
         if self.white_conn is not None:
             return (
                 [f"白方席位已被 {self.white_name} 占。"],
@@ -768,14 +1392,19 @@ class GomokuGame(BoardUndoMixin):
         if _gomoku_winner_at(self.grid, row, col, player):
             self.state = "ended"
             bcast.append(f"对局结束：{stone}方 {bname} 连五获胜！")
+            bcast.extend(self._settle_ratings(1.0 if player == 1 else 0.0))
             return ([], bcast, True)
 
         if all(self.grid[r][c] != 0 for r in range(GOMOKU_SIZE) for c in range(GOMOKU_SIZE)):
             self.state = "ended"
             bcast.append("对局结束：棋盘已满，和棋。")
+            bcast.extend(self._settle_ratings(0.5))
             return ([], bcast, True)
 
         self._turn = 3 - player
+        if self._is_ai_turn():
+            bcast.extend(self._run_ai_turn())
+            return ([], bcast, self.state == "ended")
         next_is_black = self._turn == 1
         next_name = self.black_name if next_is_black else self.white_name
         bcast.append(f"轮到 {'黑' if next_is_black else '白'}方 {next_name} 落子")
@@ -789,8 +1418,8 @@ class GomokuGame(BoardUndoMixin):
             return (["你不是对局双方。"], [], False)
         self.state = "ended"
         if player == 1:
-            return ([], [f"黑方 {name} 认负 — 白胜"], True)
-        return ([], [f"白方 {name} 认负 — 黑胜"], True)
+            return ([], [f"黑方 {name} 认负 — 白胜", *self._settle_ratings(0.0)], True)
+        return ([], [f"白方 {name} 认负 — 黑胜", *self._settle_ratings(1.0)], True)
 
     def abort(self, conn, name: str) -> GameResult:
         if self.state == "ended":
@@ -807,17 +1436,20 @@ class GomokuGame(BoardUndoMixin):
         return ([], [f"{name} 终止了对局（未开始）。"], True)
 
     def seats(self) -> list[str]:
-        return [
+        lines = [
             f"gomoku 对局状态：{self.state}",
             f"  黑方（先手）：{self.black_name}",
             f"  白方：{self.white_name or '(空席, 可 /game join)'}",
         ]
+        lines.extend(self._rating_lines())
+        return lines
 
     def show(self, conn=None) -> list[str]:
         lines = [
             f"gomoku 对局（{self.state}）  黑：{self.black_name}   "
             f"白：{self.white_name or '空席'}"
         ]
+        lines.extend(self._rating_lines())
         lines.extend(self._board_render(conn))
         if self.state == "playing":
             next_is_black = self._turn == 1
@@ -839,8 +1471,8 @@ class GomokuGame(BoardUndoMixin):
         if self.state == "playing":
             self.state = "ended"
             if player == 1:
-                return ([], [f"黑方 {name} 离开 — 白胜"], True)
-            return ([], [f"白方 {name} 离开 — 黑胜"], True)
+                return ([], [f"黑方 {name} 离开 — 白胜", *self._settle_ratings(0.0)], True)
+            return ([], [f"白方 {name} 离开 — 黑胜", *self._settle_ratings(1.0)], True)
         return ([], [], False)
 
 
@@ -1451,14 +2083,25 @@ class XiangqiGame(BoardUndoMixin):
     name = "xiangqi"
     first_seat_desc = "红方（先手）"
     second_seat_desc = "黑方"
+    send_view_on_move = False
 
-    def __init__(self, red_conn, red_name: str) -> None:
+    def __init__(
+        self,
+        red_conn,
+        red_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+        ai_level: Optional[str] = None,
+    ) -> None:
         self.board = _xq_initial_board()
         self.red_conn = red_conn
         self.red_name = red_name
-        self.black_conn = None
-        self.black_name: Optional[str] = None
-        self.state = "waiting"
+        self.rating_store = rating_store
+        self.ai_level = ai_level
+        self.ai_name = _board_ai_name(ai_level) if ai_level else None
+        self.black_conn = object() if ai_level else None
+        self.black_name: Optional[str] = self.ai_name if ai_level else None
+        self.state = "playing" if ai_level else "waiting"
         self._turn = _XQ_RED
         self._last_from: Optional[tuple[int, int]] = None
         self._last_to: Optional[tuple[int, int]] = None
@@ -1474,6 +2117,11 @@ class XiangqiGame(BoardUndoMixin):
                 Optional[str],
             ]
         ] = []
+        self.join_blurb = (
+            f"{self.ai_name} 执黑，练习局立即开始；本局不计入持久化积分。"
+            if ai_level
+            else "等另一位玩家用 /game join 加入。"
+        )
         self._undo_clear_pending()
 
     def _undo_has_moves(self) -> bool:
@@ -1562,6 +2210,72 @@ class XiangqiGame(BoardUndoMixin):
             flip=self._viewer_flip(conn),
         )
 
+    def _is_ai_game(self) -> bool:
+        return self.ai_level is not None
+
+    def _is_ai_turn(self) -> bool:
+        return self._is_ai_game() and self._turn == _XQ_BLACK
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store,
+            self.name,
+            [self.red_name, self.black_name],
+            ai_name=self.ai_name,
+        )
+
+    def _settle_ratings(self, score_red: float) -> list[str]:
+        if not self.black_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.red_name,
+            self.black_name,
+            score_red,
+            ranked=not self._is_ai_game(),
+        )
+
+    def _run_ai_turn(self) -> list[str]:
+        move = _choose_xq_ai_move(self.board, _XQ_BLACK, self.ai_level or "normal")
+        if move is None:
+            self.state = "ended"
+            return ["对局结束：AI 无合法着法。", *self._settle_ratings(0.5)]
+        fr, fc, tr, tc = move
+        label = _xq_move_label(self.board, fr, fc, tr, tc, _XQ_BLACK)
+        captured = self.board[tr][tc]
+        _xq_apply(self.board, fr, fc, tr, tc)
+        self._last_from = (fr, fc)
+        self._last_to = (tr, tc)
+        self._last_mover_side = _XQ_BLACK
+        self._last_notation = label
+        self._history.append(self._xq_snapshot())
+        bcast = [f"黑方 {self.black_name} 走 {label}"]
+        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
+            self.state = "ended"
+            bcast.append(f"对局结束：黑方 {self.black_name} 获胜（将死）！")
+            bcast.extend(self._settle_ratings(0.0))
+            return bcast
+        self._turn = _XQ_RED
+        opp_moves = _xq_legal_moves(self.board, self._turn)
+        opp_k = _xq_king_pos(self.board, self._turn)
+        in_check = (
+            opp_k is not None
+            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], _XQ_BLACK)
+        )
+        if not opp_moves:
+            self.state = "ended"
+            if in_check:
+                bcast.append(f"对局结束：黑方 {self.black_name} 将死获胜！")
+                bcast.extend(self._settle_ratings(0.0))
+            else:
+                bcast.append("对局结束：双方无合法着法，和棋。")
+                bcast.extend(self._settle_ratings(0.5))
+            return bcast
+        suffix = "（被将军）" if in_check else ""
+        bcast.append(f"轮到 红方 {self.red_name} 走子{suffix}")
+        return bcast
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -1571,6 +2285,8 @@ class XiangqiGame(BoardUndoMixin):
             )
         if conn is self.red_conn:
             return (["你已经是红方。"], [], False)
+        if self._is_ai_game():
+            return (["当前为 AI 练习局，不能加入执黑；可 /game show 围观。"], [], False)
         if self.black_conn is not None:
             return (
                 [f"黑方席位已被 {self.black_name} 占。"],
@@ -1642,6 +2358,7 @@ class XiangqiGame(BoardUndoMixin):
         if captured != 0 and _xq_piece_type(captured) == _XQ_K:
             self.state = "ended"
             bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
+            bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
             return ([], bcast, True)
 
         self._turn = -side
@@ -1655,9 +2372,15 @@ class XiangqiGame(BoardUndoMixin):
             self.state = "ended"
             if in_check:
                 bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
             else:
                 bcast.append("对局结束：双方无合法着法，和棋。")
+                bcast.extend(self._settle_ratings(0.5))
             return ([], bcast, True)
+
+        if self._is_ai_turn():
+            bcast.extend(self._run_ai_turn())
+            return ([], bcast, self.state == "ended")
 
         next_name = self.red_name if self._turn == _XQ_RED else self.black_name
         next_color = "红" if self._turn == _XQ_RED else "黑"
@@ -1673,8 +2396,8 @@ class XiangqiGame(BoardUndoMixin):
             return (["你不是对局双方。"], [], False)
         self.state = "ended"
         if side == _XQ_RED:
-            return ([], [f"红方 {name} 认负 — 黑胜"], True)
-        return ([], [f"黑方 {name} 认负 — 红胜"], True)
+            return ([], [f"红方 {name} 认负 — 黑胜", *self._settle_ratings(0.0)], True)
+        return ([], [f"黑方 {name} 认负 — 红胜", *self._settle_ratings(1.0)], True)
 
     def abort(self, conn, name: str) -> GameResult:
         if self.state == "ended":
@@ -1691,17 +2414,20 @@ class XiangqiGame(BoardUndoMixin):
         return ([], [f"{name} 终止了对局（未开始）。"], True)
 
     def seats(self) -> list[str]:
-        return [
+        lines = [
             f"xiangqi 对局状态：{self.state}",
             f"  红方（先手）：{self.red_name}",
             f"  黑方：{self.black_name or '(空席, 可 /game join)'}",
         ]
+        lines.extend(self._rating_lines())
+        return lines
 
     def show(self, conn=None) -> list[str]:
         lines = [
             f"xiangqi 对局（{self.state}）  红：{self.red_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
+        lines.extend(self._rating_lines())
         lines.extend(self._board_render(conn))
         if self.state == "playing":
             nm = self.red_name if self._turn == _XQ_RED else self.black_name
@@ -1729,8 +2455,8 @@ class XiangqiGame(BoardUndoMixin):
         if self.state == "playing":
             self.state = "ended"
             if side == _XQ_RED:
-                return ([], [f"红方 {name} 离开 — 黑胜"], True)
-            return ([], [f"黑方 {name} 离开 — 红胜"], True)
+                return ([], [f"红方 {name} 离开 — 黑胜", *self._settle_ratings(0.0)], True)
+            return ([], [f"黑方 {name} 离开 — 红胜", *self._settle_ratings(1.0)], True)
         return ([], [], False)
 
 
@@ -7292,6 +8018,45 @@ class NiuTouWangGame:
         return ([], [f"{name} 离开了牛头王对局"], False)
 
 
+def create_game(
+    game_name: str,
+    creator_conn,
+    creator_name: str,
+    *,
+    options: Optional[list[str]] = None,
+    rating_store: Optional[GameRatingStore] = None,
+):
+    options = options or []
+    ai_level = _parse_ai_level(options) if game_name in {"chess", "gomoku", "xiangqi"} else None
+    if options and game_name not in {"chess", "gomoku", "xiangqi"}:
+        raise RuntimeError(f"{game_name} 暂不支持额外开局参数。")
+    if game_name == ChessGame.name:
+        return ChessGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+            ai_level=ai_level,
+        )
+    if game_name == GomokuGame.name:
+        return GomokuGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+            ai_level=ai_level,
+        )
+    if game_name == XiangqiGame.name:
+        return XiangqiGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+            ai_level=ai_level,
+        )
+    cls = GAMES.get(game_name)
+    if cls is None:
+        raise RuntimeError(f"未知游戏：{game_name}")
+    return cls(creator_conn, creator_name)
+
+
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
@@ -7347,10 +8112,13 @@ HELP_LINES = (
     "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
     "（chess: 白；gomoku/xiangqi: 黑/红先手；sanguo: 房主）。",
+    "[*] /game new <名称> ai [easy|normal|hard]  棋类开启 AI 练习局（仅 chess/gomoku/xiangqi）；"
+    "练习局不计入持久化积分。",
     "[*] /game join             加入对局（chess/gomoku/xiangqi 为第二席；"
     "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
+    "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
     "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
     "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
     "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"

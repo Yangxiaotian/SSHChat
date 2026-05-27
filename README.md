@@ -115,6 +115,26 @@ sudo /opt/sshchat/admin-add-user.sh 用户名 ssh-ed25519 AAAA... 备注可选
 sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 ```
 
+**重置棋类积分（管理员部署参数）：**
+
+- 重置全部棋类持久化积分：
+
+  ```bash
+  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-all-ratings
+  ```
+
+- 只重置单个游戏（如国际象棋）：
+
+  ```bash
+  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-game-ratings chess
+  ```
+
+- 只重置单个用户的单个游戏积分：
+
+  ```bash
+  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-user-game-rating alice gomoku
+  ```
+
 ---
 
 ## 可选：图形客户端（维护者打包）
@@ -217,15 +237,24 @@ npm run build:portable
 - `/game new chess`：开国际象棋；发起人执白，另一人用 `/game join` 加入后执黑。棋盘用 Unicode 棋子（♔♕♖♗♘♙ / ♚♛♜♝♞♟），空位为 `·`。走法支持 SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。
 - `/game new gomoku`：开 15×15 五子棋；发起人执黑先手。走法是 `/game move 行 列`，例如 `/game move 8 8` 或 `/game move 8,8`。
 - `/game new xiangqi`：开中国象棋；发起人执红先手。推荐 **棋谱记法**：`/game move 炮二平五`、`/game move 马2进3`（黑方纵线可用 1～9）；同线双子加 **前/后**（如 `前马进七`）。也可用坐标 `/game move 8 二 8 五`（行 1～10；红列 九…一，黑列 1…9）。棋盘用 **`+` 红子**、**`-` 黑子**、**`!` 上一步**（等宽字体下对齐）；底行纵线为红方 **九…一**（汉字），顶行为黑方 **1…9**。**第二席（对手）** 看到的棋盘会自动 **翻转**，己方始终在下方。
+- `/game new chess ai [easy|normal|hard]`、`/game new gomoku ai [easy|normal|hard]`、`/game new xiangqi ai [easy|normal|hard]`：开 AI 练习局。AI 局**不会计入持久化积分**，用于练手防刷分。
 - `/game join`：加入空席位。
 - `/game seats`：查看双方与对局状态。
 - `/game show`：重新显示棋盘。
 - `/game move ...`：走子。
+- `/game rating [游戏] [昵称]`：查看棋类持久化积分/等级。积分按**用户 + 游戏**维度保存，**跨房间共享**，重新登录不会重置。
 - `/game undo`：悔棋（仅 `chess` / `gomoku` / `xiangqi`）。**上一步的走子方**发起请求，对方执行 `/game undo accept`（或 `同意`）后撤销一步；对方可用 `/game undo reject` 拒绝，请求方可用 `/game undo cancel` 取消。
 - `/game pgn`：导出国际象棋 PGN（仅 `chess`）。
 - `/game resign`：认负。
 - `/game abort`：终止尚未开始的对局。
 - `/game end`：房主强制结束当前房间对局。
+
+棋类积分说明：
+
+- `chess` 使用 **FIDE Elo** 风格积分与等级线（GM/IM/FM/CM 线等）。
+- `gomoku`、`xiangqi` 使用统一 Elo 积分并映射到业余级位。
+- 只有**真人对真人**对局会写入持久化积分；AI 练习局、观战不会写入。
+- terminal 端不再在每步自动整页刷棋盘，避免五子棋把聊天内容快速顶出可视区；需要时可手动 `/game show` 刷新局面。
 
 `gomoku` 与 `xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。如果没装，服务端仍能启动，但 `/game new chess` 会提示缺依赖。
 

@@ -25,6 +25,10 @@ RUN_USER=sshchat
 CREATE_RUN_USER=1
 KEEP_ENV=0
 MIGRATE_KEYS=1
+RESET_ALL_RATINGS=0
+RESET_GAME_RATINGS=""
+RESET_USER_RATING_USER=""
+RESET_USER_RATING_GAME=""
 # Mirror / network knobs for pip. Default index left empty (pip uses pypi).
 # sudo strips env by default — also exposed as --pip-index-url.
 PIP_INDEX_URL_ARG="${SSHCHAT_PIP_INDEX_URL:-${PIP_INDEX_URL:-}}"
@@ -83,6 +87,11 @@ Options:
   --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
   --client-ssh-port PORT  sshd port embedded in client-bundle.json (default: $CLIENT_SSH_PORT)
   --build-gui-packages    After install, run scripts/build-gui-packages.sh if present (needs tkinter + PyInstaller)
+  --reset-all-ratings     Reset all persisted chess/gomoku/xiangqi ratings before restart
+  --reset-game-ratings GAME
+                         Reset one game's persisted ratings before restart
+  --reset-user-game-rating USER GAME
+                         Reset one user's persisted rating for one game before restart
   --pip-index-url URL  Override pip index (e.g. https://pypi.tuna.tsinghua.edu.cn/simple); also reads
                        \$SSHCHAT_PIP_INDEX_URL / \$PIP_INDEX_URL (sudo strips env unless -E)
   -h, --help         This help
@@ -185,9 +194,13 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py"
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py"
   chmod 700 "$PREFIX/server.sh"
+  if [[ -f "$PREFIX/game_ratings.json" ]]; then
+    chown "$u:$u" "$PREFIX/game_ratings.json"
+    chmod 660 "$PREFIX/game_ratings.json"
+  fi
 
   chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh"
   chmod 700 "$PREFIX/admin-add-user.sh"
@@ -208,9 +221,13 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  if [[ -f "$PREFIX/game_ratings.json" ]]; then
+    chown "$ROOT_OWN" "$PREFIX/game_ratings.json"
+    chmod 660 "$PREFIX/game_ratings.json"
+  fi
 
   chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
@@ -361,6 +378,19 @@ while [[ $# -gt 0 ]]; do
       BUILD_GUI_PACKAGES=1
       shift
       ;;
+    --reset-all-ratings)
+      RESET_ALL_RATINGS=1
+      shift
+      ;;
+    --reset-game-ratings)
+      RESET_GAME_RATINGS=${2:?}
+      shift 2
+      ;;
+    --reset-user-game-rating)
+      RESET_USER_RATING_USER=${2:?}
+      RESET_USER_RATING_GAME=${3:?}
+      shift 3
+      ;;
     --pip-index-url)
       PIP_INDEX_URL_ARG="$2"
       shift 2
@@ -377,6 +407,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+reset_count=0
+[[ "$RESET_ALL_RATINGS" -eq 1 ]] && reset_count=$((reset_count + 1))
+[[ -n "$RESET_GAME_RATINGS" ]] && reset_count=$((reset_count + 1))
+[[ -n "$RESET_USER_RATING_USER" ]] && reset_count=$((reset_count + 1))
+if [[ "$reset_count" -gt 1 ]]; then
+  echo "error: choose only one rating reset option per deploy run" >&2
+  exit 1
+fi
+
 if is_darwin && [[ "${SSHCHAT_NO_MAC_ADAPT:-}" != "1" ]]; then
   if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
     echo "info: macOS: local-dev install (no Linux service user/systemd; uses group $CLIENT_GROUP for chat access)" >&2
@@ -388,7 +427,7 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py sgs_data.py chat.sh server.sh admin-add-user.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py chat.sh server.sh admin-add-user.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 
@@ -459,7 +498,7 @@ fi
 install -m 0755 -d "$PREFIX"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/sgs_data.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -505,6 +544,17 @@ SSHCHAT_ALERT_SOUND=auto
 EOF
 fi
 
+if [[ "$RESET_ALL_RATINGS" -eq 1 ]]; then
+  echo "info: resetting all persisted board-game ratings"
+  "$PREFIX/server.sh" --reset-ratings-all
+elif [[ -n "$RESET_GAME_RATINGS" ]]; then
+  echo "info: resetting persisted ratings for game $RESET_GAME_RATINGS"
+  "$PREFIX/server.sh" --reset-ratings-game "$RESET_GAME_RATINGS"
+elif [[ -n "$RESET_USER_RATING_USER" ]]; then
+  echo "info: resetting persisted rating for user $RESET_USER_RATING_USER game $RESET_USER_RATING_GAME"
+  "$PREFIX/server.sh" --reset-ratings-user-game "$RESET_USER_RATING_USER" "$RESET_USER_RATING_GAME"
+fi
+
 CLIENT_BUNDLE_JSON="$PREFIX/client-bundle.json"
 SSHCHAT__H="$CLIENT_SSH_HOST" SSHCHAT__P="$CLIENT_SSH_PORT" SSHCHAT__OUT="$CLIENT_BUNDLE_JSON" python3 - <<'PY'
 import json, os, pathlib
@@ -536,7 +586,7 @@ else
   chown -R "$ROOT_OWN" "$PREFIX"
   chmod 755 "$PREFIX"
   chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/sgs_data.py" "$PREFIX/client.py"
+  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
 fi
 
