@@ -112,66 +112,56 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
   let rowNum = 1;
   const lastMoverSide = turnSide ? ((-turnSide) as Side) : null;
 
+  // 只取“棋盘行”：每行应有 9 个格子 token（+车 / -马 / !炮 / · / *）
+  const boardRows: string[][] = [];
+  const tokenRe = /(?:[+\-!][^\s]{1,2}|[·*])/g;
   for (const rawLine of boardText.split('\n')) {
-    const trimmed = rawLine.trim();
+    const line = rawLine.trim();
+    if (!line) continue;
+    const tokens = line.match(tokenRe);
+    if (!tokens || tokens.length < COLS) continue;
+    const rowTokens = tokens.slice(0, COLS);
+    const allCellLike = rowTokens.every((t) => t === '·' || t === '*' || /^[+\-!]/.test(t));
+    if (!allCellLike) continue;
+    boardRows.push(rowTokens);
+    if (boardRows.length >= ROWS) break;
+  }
 
-    if (
-      !trimmed ||
-      trimmed.includes('←') ||
-      trimmed.includes('图例') ||
-      trimmed.includes('楚河汉界') ||
-      trimmed.includes('上一步') ||
-      trimmed.includes('己方在下方')
-    ) {
-      continue;
-    }
+  for (const rowTokens of boardRows) {
+    if (rowNum > ROWS) break;
+    for (let c = 0; c < COLS; c += 1) {
+      const cell = rowTokens[c];
+      if (cell === '·' || cell === '*') continue;
+      const match = cell.match(/^([+\-!])(.*)$/);
+      if (!match) continue;
 
-    if (/^\s+\d+|^\s+[一二三四五六七八九]/.test(trimmed)) {
-      continue;
-    }
+      const marker = match[1];
+      const symbol = match[2];
+      if (!symbol || symbol === '·' || symbol === '*') continue;
 
-    if (rowNum > ROWS) continue;
-
-    const lineContent = trimmed.replace(/^\s*\d+\s*/, '');
-    let colNum = 1;
-    let pos = 0;
-
-    while (pos < lineContent.length && colNum <= COLS) {
-      const cell = lineContent.substring(pos, pos + 4).trim();
-      if (cell && cell !== '·' && cell !== '*') {
-        const match = cell.match(/^([+\-!])(.*)$/);
-        if (match) {
-          const marker = match[1];
-          const symbol = match[2];
-          if (symbol && symbol !== '·' && symbol !== '*') {
-            let isRed = marker === '+';
-            if (marker === '-') {
-              isRed = false;
-            } else if (marker === '!') {
-              if (RED_UNIQUE.has(symbol)) isRed = true;
-              else if (BLACK_UNIQUE.has(symbol)) isRed = false;
-              else if (lastMoverSide) isRed = lastMoverSide === RED;
-              else isRed = rowNum >= 6;
-            }
-
-            pieces.set(`${rowNum}-${colNum}`, {
-              row: rowNum,
-              col: colNum,
-              symbol,
-              isRed,
-            });
-
-            const pt = pieceTypeFromSymbol(symbol);
-            if (pt) {
-              board[rowNum - 1][colNum - 1] = (isRed ? RED : BLACK) * pt;
-            }
-          }
-        }
+      let isRed = marker === '+';
+      if (marker === '-') {
+        isRed = false;
+      } else if (marker === '!') {
+        if (RED_UNIQUE.has(symbol)) isRed = true;
+        else if (BLACK_UNIQUE.has(symbol)) isRed = false;
+        else if (lastMoverSide) isRed = lastMoverSide === RED;
+        else isRed = rowNum >= 6;
       }
-      pos += 4;
-      colNum += 1;
-    }
 
+      const colNum = c + 1;
+      pieces.set(`${rowNum}-${colNum}`, {
+        row: rowNum,
+        col: colNum,
+        symbol,
+        isRed,
+      });
+
+      const pt = pieceTypeFromSymbol(symbol);
+      if (pt) {
+        board[rowNum - 1][colNum - 1] = (isRed ? RED : BLACK) * pt;
+      }
+    }
     rowNum += 1;
   }
 
