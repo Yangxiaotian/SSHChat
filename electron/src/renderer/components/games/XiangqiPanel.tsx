@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 
 type Props = {
   disabled: boolean;
@@ -135,8 +135,8 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
       const match = cell.match(/^([+\-!])(.*)$/);
       if (!match) continue;
 
-      const marker = match[1];
-      const symbol = match[2];
+            const marker = match[1];
+            const symbol = match[2];
       if (!symbol || symbol === '·' || symbol === '*') continue;
 
       let isRed = marker === '+';
@@ -150,10 +150,10 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
       }
 
       const colNum = c + 1;
-      pieces.set(`${rowNum}-${colNum}`, {
-        row: rowNum,
-        col: colNum,
-        symbol,
+              pieces.set(`${rowNum}-${colNum}`, {
+                row: rowNum,
+                col: colNum,
+                symbol,
         isRed,
       });
 
