@@ -123,6 +123,7 @@ NEWS_ALIASES = {
 }
 news_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 news_cache_lock = threading.Lock()
+news_fetching: set[str] = set()  # categories currently being fetched
 article_fetch_cache: dict[str, tuple[float, str]] = {}
 article_fetch_lock = threading.Lock()
 _ARTICLE_CACHE_MAX = 200
@@ -470,12 +471,12 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
         send_line(peer_conn, f"[PM from {sender_name}] {text}\n")
     if len(targets) == 1:
         only = targets[0][1]
-        send_line(conn, f"[*] PM → {only}: {text}\n")
+        send_line(conn, f"[*] PM → {only}\n")
     else:
         n = len(targets)
         send_line(
             conn,
-            f"[*] PM sent to {n} users matching {target_nick!r}: {text}\n",
+            f"[*] PM sent to {n} users matching {target_nick!r}\n",
         )
 
 
@@ -867,36 +868,54 @@ def _get_news_items(category: str) -> list[dict[str, str]]:
         cached = news_cache.get(category)
         if cached and now - cached[0] < NEWS_CACHE_TTL:
             return list(cached[1])
+        if category in news_fetching:
+            # Another thread is already fetching this category; wait and return cached
+            pass
+        else:
+            news_fetching.add(category)
+
+    # If we're not the fetcher, wait briefly and return whatever is cached
+    if category not in news_fetching:
+        time.sleep(0.5)
+        with news_cache_lock:
+            cached = news_cache.get(category)
+            if cached:
+                return list(cached[1])
+        return []
 
     feeds = NEWS_CATEGORIES[category]["feeds"]
-    by_source: dict[str, list[dict[str, str]]] = {}
-    with ThreadPoolExecutor(max_workers=min(5, len(feeds))) as executor:
-        futures = {
-            executor.submit(_fetch_feed, source, url): source
-            for source, url in feeds
-        }
-        for future in as_completed(futures):
-            try:
-                by_source[futures[future]] = future.result()
-            except Exception as e:
-                print(f"news feed error ({futures[future]}): {e!r}")
+    try:
+        by_source: dict[str, list[dict[str, str]]] = {}
+        with ThreadPoolExecutor(max_workers=min(5, len(feeds))) as executor:
+            futures = {
+                executor.submit(_fetch_feed, source, url): source
+                for source, url in feeds
+            }
+            for future in as_completed(futures):
+                try:
+                    by_source[futures[future]] = future.result()
+                except Exception as e:
+                    print(f"news feed error ({futures[future]}): {e!r}")
 
-    fetched: list[dict[str, str]] = []
-    for source, _url in feeds:
-        fetched.extend(by_source.get(source, ()))
+        fetched: list[dict[str, str]] = []
+        for source, _url in feeds:
+            fetched.extend(by_source.get(source, ()))
 
-    seen_titles: set[str] = set()
-    deduped: list[dict[str, str]] = []
-    for item in fetched:
-        key = item["title"].lower()
-        if key in seen_titles:
-            continue
-        seen_titles.add(key)
-        deduped.append(item)
+        seen_titles: set[str] = set()
+        deduped: list[dict[str, str]] = []
+        for item in fetched:
+            key = item["title"].lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            deduped.append(item)
 
-    with news_cache_lock:
-        news_cache[category] = (time.monotonic(), list(deduped))
-    return deduped
+        with news_cache_lock:
+            news_cache[category] = (time.monotonic(), list(deduped))
+        return deduped
+    finally:
+        with news_cache_lock:
+            news_fetching.discard(category)
 
 
 def _parse_news_limit(raw: str, default: int) -> int:

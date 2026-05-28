@@ -39,6 +39,11 @@ const sshManager = new SSHManager();
 const configManager = new ConfigManager();
 let currentRoom = 'default';
 let currentNickname = '';
+let lastConfig: ConnectionConfig | null = null;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_BASE_DELAY_MS = 3000;
 const singleInstanceLock = app.requestSingleInstanceLock();
 const RAPFI_ANALYZE_DEFAULT_TIMEOUT_MS = 3200;
 const RAPFI_ANALYZE_MAX_TIMEOUT_MS = 12000;
@@ -464,6 +469,62 @@ async function analyzeGomokuByRapfi(payload: GomokuRapfiAnalyzeRequest): Promise
   return rapfiService.analyze(payload);
 }
 
+function attemptReconnect(): void {
+  if (!lastConfig || !currentNickname) return;
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    sendToRenderer(IPC_CHANNELS.CONNECTION_ERROR, `Reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    reconnectAttempts = 0;
+    return;
+  }
+  reconnectAttempts++;
+  const delay = RECONNECT_BASE_DELAY_MS * reconnectAttempts;
+  sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'connecting' as ConnectionStatus);
+  reconnectTimer = setTimeout(async () => {
+    try {
+      await sshManager.connect(
+        lastConfig!,
+        currentNickname,
+        (status: string) => {
+          sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, status as ConnectionStatus);
+        },
+        (error: string) => {
+          sendToRenderer(IPC_CHANNELS.CONNECTION_ERROR, error);
+        },
+        (data: Buffer) => {
+          const line = data.toString('utf-8').trim();
+          if (!line) return;
+          const message = parseServerLine(line, currentRoom);
+          if (message) {
+            if (message.type === 'system') {
+              const rooms = extractRoomsFromSystem(message.content);
+              if (rooms) {
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rooms, currentRoom);
+              }
+              const usersSnapshot = extractUsersSnapshot(message.content);
+              if (usersSnapshot) {
+                sendToRenderer(IPC_CHANNELS.USER_UPDATE, usersSnapshot);
+              }
+              const activeRoom = extractActiveRoom(message.content);
+              if (activeRoom) {
+                currentRoom = activeRoom;
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, null, currentRoom);
+              }
+            }
+            sendToRenderer(IPC_CHANNELS.CHAT_MESSAGE, message);
+          }
+        },
+        () => {
+          sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
+          attemptReconnect();
+        },
+      );
+      reconnectAttempts = 0;
+    } catch {
+      attemptReconnect();
+    }
+  }, delay);
+}
+
 if (!singleInstanceLock) {
   app.quit();
 }
@@ -623,6 +684,12 @@ function setupIPC(): void {
   ipcMain.handle(IPC_CHANNELS.CONNECT, async (_event, config: ConnectionConfig, nickname: string) => {
     currentNickname = nickname;
     currentRoom = 'default';
+    lastConfig = config;
+    reconnectAttempts = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
 
     try {
       await sshManager.connect(
@@ -661,6 +728,7 @@ function setupIPC(): void {
         },
         () => {
           sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
+          attemptReconnect();
         },
       );
 
@@ -673,6 +741,12 @@ function setupIPC(): void {
 
   // Disconnect
   ipcMain.handle(IPC_CHANNELS.DISCONNECT, () => {
+    lastConfig = null;
+    reconnectAttempts = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     sshManager.disconnect();
     sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
     return true;

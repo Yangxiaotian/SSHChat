@@ -31,20 +31,20 @@ function isGameFloodMessage(content: string): boolean {
     '可直接加入',
     '同一房间同一时刻仅允许一场进行中的对局',
     '可玩游戏',
-    '国际象棋',
-    '五子棋',
-    '中国象棋',
-    '三国杀',
-    '狼人杀',
-    '德州扑克',
-    '炸金花',
-    '牛头王',
     '你的手牌',
     '公共牌',
-    '落子',
-    '底池',
-    '当前注',
-    '轮到',
+    '底池=',
+    '当前注=',
+    '当前注：',
+    '落子：',
+    '走子：',
+    '轮到：',
+    '轮到 黑',
+    '轮到 白',
+    '轮到 红',
+    '轮到 黑方',
+    '轮到 白方',
+    '轮到 红方',
     'gomoku',
     'chess',
     'xiangqi',
@@ -184,7 +184,7 @@ export default function ChatArea() {
               </div>
             ) : (
               visibleMessages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} isMe={msg.sender === nickname} />
+                <MessageBubble key={msg.id} message={msg} isMe={msg.sender === nickname} currentNickname={nickname} />
               ))
             )}
             <div ref={messagesEndRef} />

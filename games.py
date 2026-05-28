@@ -6610,6 +6610,8 @@ class WerewolfGame:
                     return (["No kill target yet."], [], False)
                 if self.pending_kill == actor:
                     return (["Witch cannot save herself."], [], False)
+                if self.pending_poison is not None:
+                    return (["Already poisoned this night."], [], False)
                 self.witch_saved = True
                 self.witch_save_available = False
                 priv.append(f"Saved: {self.pending_kill}")
@@ -6618,6 +6620,8 @@ class WerewolfGame:
                     return (["Only witch can poison."], [], False)
                 if not self.witch_poison_available:
                     return (["Poison already used."], [], False)
+                if self.witch_saved:
+                    return (["Already saved this night."], [], False)
                 target = self._find_player(arg, alive_only=True) if arg else None
                 if not target or target == actor:
                     return (["Invalid target."], [], False)
@@ -7079,7 +7083,7 @@ class ZhaJinHuaGame:
             if self.stacks[actor] < cost: return ([f"积分不足，需要 {cost}"], [], False)
             self.stacks[actor] -= cost; self.pot += cost
             me = _zjh_eval3(self.cards[actor]); tg = _zjh_eval3(self.cards[target])
-            loser = target if me >= tg else actor; winner = actor if me >= tg else target
+            loser = target if me > tg else actor; winner = actor if me > tg else target
             self.folded.add(loser); bcast.append(f"{actor} 与 {target} 比牌：{winner} 胜出，{loser} 弃牌"); self._advance()
         else: return (["可用操作：开始、看牌、跟注、加注、弃牌、比牌。"], [], False)
         done = self._finish_if_one()
@@ -7116,6 +7120,7 @@ class ZhaJinHuaGame:
                 self.players.pop(i)
                 self.folded.add(n)
                 self.cards.pop(n, None)
+                self.stacks.pop(n, None)
                 break
         if not self.players: self.state = "ended"; return ([], [f"{name} 离开，炸金花对局已结束"], True)
         if removed_idx is not None:
@@ -7315,15 +7320,21 @@ class HoldemGame:
             key=lambda kv: kv[1],
             reverse=True,
         )
-        winner = scored[0][0]
-        gain = self.pot
-        self.stacks[winner] += gain
+        best_score = scored[0][1]
+        winners = [n for n, sc in scored if sc == best_score]
+        share = self.pot // len(winners)
+        remainder = self.pot % len(winners)
+        for i, w in enumerate(winners):
+            self.stacks[w] += share + (1 if i < remainder else 0)
         self.pot = 0
         self.state = "ended"
         lines = ["摊牌：", f"公共牌：{self._fmt(self.board)}"]
         for n, _sc in scored:
             lines.append(f"- {n}: {self._fmt(self.hands[n])}")
-        lines.append(f"获胜者：{winner}，底池 +{gain}")
+        if len(winners) == 1:
+            lines.append(f"获胜者：{winners[0]}，底池 +{share}")
+        else:
+            lines.append(f"平局：{'、'.join(winners)}，各 +{share}")
         return lines
 
     def _next_street(self) -> list[str]:
@@ -7696,6 +7707,7 @@ class HoldemGame:
         self.hands.pop(pname, None)
         self.round_bet.pop(pname, None)
         self.acted.discard(pname)
+        self.stacks.pop(pname, None)
 
         if not self.players:
             self.state = "ended"
@@ -7857,7 +7869,7 @@ class NiuTouWangGame:
             self.await_card = card
             b.append(f"{name} 需要选行：/game move row 1~4")
             return (b, True)
-        best_idx = max([i for i, row in enumerate(self.rows) if row[-1] < card], key=lambda i: self.rows[i][-1])
+        best_idx = max([i for i, row in enumerate(self.rows) if row[-1] <= card], key=lambda i: self.rows[i][-1])
         row = self.rows[best_idx]
         row.append(card)
         if len(row) > 5:

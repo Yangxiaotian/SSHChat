@@ -4,9 +4,21 @@ import { ChatMessage } from '../../shared/protocol';
 interface MessageBubbleProps {
   message: ChatMessage;
   isMe: boolean;
+  currentNickname?: string;
 }
 
-export default function MessageBubble({ message, isMe }: MessageBubbleProps) {
+function highlightMentions(text: string, currentNickname: string): React.ReactNode[] {
+  if (!currentNickname) return [text];
+  const parts = text.split(/(@\w+)/g);
+  return parts.map((part, i) => {
+    if (part === `@${currentNickname}` || part === `@${currentNickname.toLowerCase()}`) {
+      return <span key={i} className="mention-highlight">{part}</span>;
+    }
+    return part;
+  });
+}
+
+export default function MessageBubble({ message, isMe, currentNickname }: MessageBubbleProps) {
   const formatTime = (timestamp: number): string =>
     new Date(timestamp).toLocaleTimeString('zh-CN', {
       hour: '2-digit',
@@ -41,12 +53,19 @@ export default function MessageBubble({ message, isMe }: MessageBubbleProps) {
     }
   };
 
+  const renderContent = () => {
+    if (message.type === 'chat' && currentNickname) {
+      return highlightMentions(message.content, currentNickname);
+    }
+    return message.content;
+  };
+
   return (
     <div className="message">
       <span className="message-time">{formatTime(message.timestamp)}</span>
       <div className="message-content">
         {showSender && <span className={`message-sender ${senderClass}`}>{message.sender}</span>}
-        <span className={`message-text ${textClass}`}>{message.content}</span>
+        <span className={`message-text ${textClass}`}>{renderContent()}</span>
         <button className="message-copy" onClick={handleCopy} title="Copy">
           Copy
         </button>

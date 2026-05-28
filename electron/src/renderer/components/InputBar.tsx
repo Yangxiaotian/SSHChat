@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../store/chatStore';
+import { SHAKE_TOKEN } from '../../shared/protocol';
 
 const COMMANDS = [
   { name: '/help', desc: 'Show help' },
@@ -118,7 +119,7 @@ export default function InputBar() {
   const triggerRoomShake = async () => {
     if (!isConnected) return;
     // Send shake signal to server; all clients (including sender via echo) will shake
-    await window.api.sendMessage('__VSCODEEN_SHAKE__');
+    await window.api.sendMessage(SHAKE_TOKEN);
   };
 
   return (

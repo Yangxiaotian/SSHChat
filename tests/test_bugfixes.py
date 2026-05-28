@@ -6,6 +6,9 @@ from games import (
     SanguoshaGame,
     WerewolfGame,
     GomokuGame,
+    HoldemGame,
+    ZhaJinHuaGame,
+    NiuTouWangGame,
     _SgsPlayer,
 )
 
@@ -204,6 +207,148 @@ class TestGomokuUndoWorks(unittest.TestCase):
         self.assertTrue(any("悔棋" in line for line in bcast2 + priv2))
         # After undo, B's move at (8,8) should be removed (0-based: grid[7][7])
         self.assertEqual(game.grid[7][7], 0)  # 0 = empty cell
+
+
+class TestZhaJinHuaCompareTie(unittest.TestCase):
+    """Compare tie should go to defender (target), not attacker."""
+
+    def test_tie_goes_to_defender(self):
+        """When attacker and defender have equal hand strength, defender wins."""
+        c1 = object()
+        c2 = object()
+        game = ZhaJinHuaGame(c1, "A")
+        game.try_join(c2, "B")
+        game.try_move(c1, "start")
+
+        # Set up identical hands for both players
+        game.cards["A"] = ["A♠", "A♥", "A♦"]
+        game.cards["B"] = ["A♣", "A♠", "A♥"]
+        game.looked.add("A")
+        game.looked.add("B")
+        game.stacks["A"] = 100
+        game.stacks["B"] = 100
+
+        # A attacks B - with equal hands, B (defender) should win
+        priv, bcast, _ = game.try_move(c1, "compare B")
+        # B should be the winner (tie goes to defender)
+        self.assertTrue(any("B" in line and "胜出" in line for line in bcast))
+
+
+class TestWerewolfWitchMutualExclusion(unittest.TestCase):
+    """Witch should not be able to both save and poison in the same night."""
+
+    def test_cannot_poison_after_save(self):
+        game = WerewolfGame.__new__(WerewolfGame)
+        game.state = "night"
+        game.round = 1
+        game.alive = {"witch_p", "wolf_p", "villager_p", "seer_p", "villager2_p"}
+        game.roles = {"witch_p": "witch", "wolf_p": "wolf", "villager_p": "villager",
+                      "seer_p": "seer", "villager2_p": "villager"}
+        game.wolf_target = "villager_p"
+        game.pending_kill = "villager_p"
+        game.seer_target = None
+        game.witch_saved = False
+        game.witch_save_available = True
+        game.witch_poison_available = True
+        game.pending_poison = None
+        game.day_votes = {}
+        game.players = [(object(), "witch_p"), (object(), "wolf_p"),
+                        (object(), "villager_p"), (object(), "seer_p"),
+                        (object(), "villager2_p")]
+        game._extra_privates = []
+        game._queue_private = lambda conn, msgs: game._extra_privates.append((conn, msgs))
+
+        witch_conn = game.players[0][0]
+
+        # Save the villager
+        priv, bcast, _ = game.try_move(witch_conn, "save")
+        self.assertTrue(game.witch_saved)
+
+        # Try to poison someone - should be rejected
+        priv2, bcast2, _ = game.try_move(witch_conn, "poison wolf_p")
+        self.assertTrue(any("Already saved" in msg for msg in priv2))
+        self.assertIsNone(game.pending_poison)
+
+    def test_cannot_save_after_poison(self):
+        game = WerewolfGame.__new__(WerewolfGame)
+        game.state = "night"
+        game.round = 1
+        game.alive = {"witch_p", "wolf_p", "villager_p", "seer_p", "villager2_p"}
+        game.roles = {"witch_p": "witch", "wolf_p": "wolf", "villager_p": "villager",
+                      "seer_p": "seer", "villager2_p": "villager"}
+        game.wolf_target = "villager_p"
+        game.pending_kill = "villager_p"
+        game.seer_target = None
+        game.witch_saved = False
+        game.witch_save_available = True
+        game.witch_poison_available = True
+        game.pending_poison = None
+        game.day_votes = {}
+        game.players = [(object(), "witch_p"), (object(), "wolf_p"),
+                        (object(), "villager_p"), (object(), "seer_p"),
+                        (object(), "villager2_p")]
+        game._extra_privates = []
+        game._queue_private = lambda conn, msgs: game._extra_privates.append((conn, msgs))
+
+        witch_conn = game.players[0][0]
+
+        # Poison wolf
+        priv, bcast, _ = game.try_move(witch_conn, "poison wolf_p")
+        self.assertEqual(game.pending_poison, "wolf_p")
+
+        # Try to save - should be rejected
+        priv2, bcast2, _ = game.try_move(witch_conn, "save")
+        self.assertTrue(any("Already poisoned" in msg for msg in priv2))
+        self.assertFalse(game.witch_saved)
+
+
+class TestHoldemShowdownTieSplit(unittest.TestCase):
+    """Holdem showdown should split pot when players tie."""
+
+    def test_showdown_splits_pot_on_tie(self):
+        c1 = object()
+        c2 = object()
+        game = HoldemGame(c1, "A")
+        game.try_join(c2, "B")
+        game.try_move(c1, "start")
+
+        # Set identical hands for both players
+        game.hands["A"] = ["A♠", "A♥"]
+        game.hands["B"] = ["A♣", "A♦"]
+        game.board = ["K♠", "K♥", "K♦", "Q♠", "Q♥"]
+        game.pot = 100
+        game.stacks["A"] = 50
+        game.stacks["B"] = 50
+
+        # Both players should get equal share
+        result = game._showdown()
+        self.assertTrue(any("平局" in line for line in result))
+        # Each should get 50 (100/2)
+        self.assertEqual(game.stacks["A"], 100)
+        self.assertEqual(game.stacks["B"], 100)
+
+
+class TestNiuTouWangCardEqualRowEnd(unittest.TestCase):
+    """NiuTouWang should not crash when card equals smallest row end."""
+
+    def test_card_equal_to_row_end_does_not_crash(self):
+        c1 = object()
+        c2 = object()
+        game = NiuTouWangGame(c1, "A")
+        game.try_join(c2, "B")
+        game._start()
+
+        # Set up rows where one row ends with a specific value
+        game.rows = [[5, 10], [15, 20], [25, 30], [35, 40]]
+        game.hands["A"] = [10]  # Card equals row end of first row
+        game.hands["B"] = [50]
+        game.state = "playing"
+
+        # This should not crash
+        b, paused = game._apply_card("A", 10)
+        self.assertFalse(paused)
+        # Card should be placed in the row with end <= card
+        self.assertIn(10, game.rows[0])
 
 
 if __name__ == "__main__":

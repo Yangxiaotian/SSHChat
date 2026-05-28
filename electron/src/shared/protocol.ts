@@ -83,6 +83,9 @@ export const IPC_CHANNELS = {
   GOMOKU_RAPFI_ANALYZE: 'gomoku:rapfi-analyze',
 } as const;
 
+// Special message tokens
+export const SHAKE_TOKEN = '__VSCODEEN_SHAKE__';
+
 // Message parsing patterns (from sshchat_gui.py)
 export const PATTERNS = {
   ROOM_CHAT: /^\[#([^\]]+)\]\s+\[([^\]]+)\] (.*)$/,

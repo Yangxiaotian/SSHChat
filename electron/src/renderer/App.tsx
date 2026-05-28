@@ -1,10 +1,29 @@
 ﻿import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { useChatStore } from './store/chatStore';
+import { SHAKE_TOKEN } from '../shared/protocol';
 import ActivityBar from './components/ActivityBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import StatusBar from './components/StatusBar';
 import LoginDialog from './components/LoginDialog';
+
+let audioCtx: AudioContext | null = null;
+function playNotificationSound(): void {
+  try {
+    if (!audioCtx) audioCtx = new AudioContext();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = 800;
+    gain.gain.value = 0.1;
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.stop(audioCtx.currentTime + 0.15);
+  } catch {
+    // ignore audio errors
+  }
+}
 
 type BoundaryState = {
   hasError: boolean;
@@ -62,7 +81,7 @@ export default function App() {
 
     const unsubMessage = window.api.onChatMessage((message) => {
       const { nickname: me, activeRoom: currentRoom } = useChatStore.getState();
-      const isShakeSignal = message.content.trim() === '__VSCODEEN_SHAKE__';
+      const isShakeSignal = message.content.trim() === SHAKE_TOKEN;
       if (isShakeSignal) {
         // Show who sent the shake in chat
         const sender = message.sender === me ? 'You' : message.sender;
@@ -82,6 +101,7 @@ export default function App() {
       const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());
       if (needAttention) {
         window.api.notifyAttention();
+        playNotificationSound();
       }
       if (message.type === 'join' || message.type === 'leave') {
         window.api.requestUsers();

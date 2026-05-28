@@ -1159,6 +1159,14 @@ html, body, #root {
   color: var(--vscode-error);
 }
 
+.mention-highlight {
+  background: rgba(255, 200, 0, 0.2);
+  color: #ffc800;
+  font-weight: 600;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
 .message-copy {
   opacity: 0;
   height: 20px;
