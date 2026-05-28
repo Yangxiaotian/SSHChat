@@ -5,7 +5,7 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: '新开国际象棋', cmd: '/game new chess' },
     { label: '国际象棋 AI', cmd: '/game new chess ai normal' },
     { label: '新开五子棋', cmd: '/game new gomoku' },
-    { label: '五子棋 AI', cmd: '/game new gomoku ai normal' },
+    { label: '五子棋 AI（人机）', cmd: '/game new gomoku ai normal' },
     { label: '新开象棋', cmd: '/game new xiangqi' },
     { label: '象棋 AI', cmd: '/game new xiangqi ai normal' },
     { label: '新开三国杀', cmd: '/game new sanguo' },

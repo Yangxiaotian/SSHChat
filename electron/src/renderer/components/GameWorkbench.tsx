@@ -407,6 +407,7 @@ export default function GameWorkbench() {
   const [showBoard, setShowBoard] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showWorkbenchContent, setShowWorkbenchContent] = useState(true);
+  const [actionHint, setActionHint] = useState('');
   const syncRoomRef = useRef('');
 
   const roomMessages = messages.get(activeRoom) || [];
@@ -443,6 +444,19 @@ export default function GameWorkbench() {
     return window.api.sendMessage(cmd);
   };
 
+  const runAction = async (cmd: string) => {
+    const ok = await send(cmd);
+    if (!ok) {
+      setActionHint(`发送失败：${cmd}`);
+      return false;
+    }
+    setActionHint(`已发送：${cmd}`);
+    if (shouldRefreshAfter(cmd)) {
+      await send('/game show');
+    }
+    return true;
+  };
+
   const shouldRefreshAfter = (cmd: string): boolean => {
     const t = cmd.trim().toLowerCase();
     if (!t.startsWith('/game')) return false;
@@ -465,21 +479,18 @@ export default function GameWorkbench() {
     const text = payload.trim();
     if (!text) return;
     if (text.startsWith('/')) {
-      await send(text);
-      if (shouldRefreshAfter(text)) await send('/game show');
+      await runAction(text);
       return;
     }
     const cmd = GameCommandFactory.move(text);
-    await send(cmd);
-    if (shouldRefreshAfter(cmd)) await send('/game show');
+    await runAction(cmd);
   };
 
   const onMove = async () => {
     const t = moveText.trim();
     if (!t) return;
     const cmd = t.startsWith('/') ? t : GameCommandFactory.move(t);
-    await send(cmd);
-    if (shouldRefreshAfter(cmd)) await send('/game show');
+    await runAction(cmd);
     setMoveText('');
   };
 
@@ -493,11 +504,11 @@ export default function GameWorkbench() {
           <button className="mini-btn" onClick={() => setShowWorkbenchContent((v) => !v)}>
             {showWorkbenchContent ? '收起面板' : '展开面板'}
           </button>
-          <button className="mini-btn" disabled={disabled} onClick={() => send('/game show')}>显示局面</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => send('/game help')}>玩法帮助</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => send('/game list')}>可玩列表</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game show')}>显示局面</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game help')}>玩法帮助</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game list')}>可玩列表</button>
           {game !== 'none' && (
-            <button className="mini-btn" disabled={disabled} onClick={() => send('/game end')}>结束对局</button>
+            <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game end')}>结束对局</button>
           )}
         </div>
       </div>
@@ -506,23 +517,24 @@ export default function GameWorkbench() {
         <>
           <div className="game-workbench-quick">
             {(quickByGame[game] || quickByGame['none']).map((q) => (
-              <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => send(q.cmd)}>
+              <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => runAction(q.cmd)}>
                 {q.label}
               </button>
             ))}
           </div>
+          {actionHint && <div className="game-workbench-hint">{actionHint}</div>}
           <div className="game-workbench-hint">{gameTips[game]}</div>
           <div className={`game-advisor game-advisor-${advisor.level}`}>
             <div className="game-advisor-title">{advisor.title}</div>
             <div className="game-advisor-detail">{advisor.detail}</div>
             <div className="game-advisor-actions">
               {advisor.primaryCmd && advisor.primaryLabel && (
-                <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.primaryCmd!)}>
+                <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.primaryCmd!)}>
                   {advisor.primaryLabel}
                 </button>
               )}
               {advisor.secondaryCmd && advisor.secondaryLabel && (
-                <button className="mini-btn" disabled={disabled} onClick={() => send(advisor.secondaryCmd!)}>
+                <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.secondaryCmd!)}>
                   {advisor.secondaryLabel}
                 </button>
               )}
