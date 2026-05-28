@@ -125,6 +125,7 @@ news_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 news_cache_lock = threading.Lock()
 article_fetch_cache: dict[str, tuple[float, str]] = {}
 article_fetch_lock = threading.Lock()
+_ARTICLE_CACHE_MAX = 200
 
 HELP_LINES = (
     "[*] ---------- SSHChat 命令说明 ----------\n",
@@ -784,6 +785,9 @@ def _fetch_article_plain(url: str) -> str:
     text = _html_to_plain_text(html)
     with article_fetch_lock:
         article_fetch_cache[url] = (time.monotonic(), text)
+        if len(article_fetch_cache) > _ARTICLE_CACHE_MAX:
+            oldest_key = min(article_fetch_cache, key=lambda k: article_fetch_cache[k][0])
+            del article_fetch_cache[oldest_key]
     return text
 
 
@@ -1148,6 +1152,14 @@ def handle_command(conn, payload: str) -> None:
                 f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
             )
             send_room_announcement_preview(conn, new_room)
+            with lock:
+                active_game = room_games.get(new_room)
+                if active_game is not None:
+                    game_label = getattr(active_game, "name", "游戏")
+                    seats_info = active_game.seats() if hasattr(active_game, "seats") else []
+                    send_line(conn, f"[*] 本房正在进行一局 {game_label}，用 /game show 查看。\n")
+                    if seats_info:
+                        send_line(conn, "\n".join(seats_info) + "\n")
         elif new_room == current_room:
             send_line(conn, f"[*] Already active in #{new_room}\n")
         else:
@@ -1613,25 +1625,6 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_sanguo_hand_views(room, game)
         return
 
-    if sub == "undo":
-        with lock:
-            game = room_games.get(room)
-            if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局。\n")
-                return
-            resumed = _resume_same_account_seat_locked(room, game, conn, name)
-            fn = getattr(game, "try_undo", None)
-            if fn is None:
-                send_line(conn, "[*] 当前游戏不支持悔棋。\n")
-                return
-            priv, bcast, _ = fn(conn, name)
-        if resumed:
-            priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
-        send_game_private(conn, room, priv)
-        broadcast_game(room, bcast)
-        send_oriented_boards(room, game)
-        return
-
     if sub == "resign":
         with lock:
             game = room_games.get(room)
@@ -1764,6 +1757,8 @@ def handle_client(conn, addr) -> None:
             if not chunk:
                 return
             buffer += chunk
+            if len(buffer) > 65536:
+                return
         first, buffer = buffer.split(b"\n", 1)
         name = _parse_handshake_line(first.decode("utf-8", errors="replace"))
 
@@ -1826,6 +1821,9 @@ def handle_client(conn, addr) -> None:
                 line, buffer = buffer.split(b"\n", 1)
                 if line:
                     process_client_line(conn, line)
+            if len(buffer) > 65536:
+                send_line(conn, "[*] 消息过长。\n")
+                buffer = b""
 
     except Exception as e:
         print("connection error:", e)

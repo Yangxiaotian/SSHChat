@@ -100,13 +100,14 @@ export class SSHManager {
         reject(err);
       });
 
-      this.ssh.on('end', () => {
+      let ended = false;
+      const guardedEnd = () => {
+        if (ended) return;
+        ended = true;
         onEndCallback();
-      });
-
-      this.ssh.on('close', () => {
-        onEndCallback();
-      });
+      };
+      this.ssh.on('end', guardedEnd);
+      this.ssh.on('close', guardedEnd);
 
       this.ssh.connect(connectConfig);
     });

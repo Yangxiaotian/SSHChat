@@ -4121,9 +4121,14 @@ class SanguoshaGame:
                 p.hp = 0
                 if not p.niepan_used and self._has_skill(p, "niepan"):
                     p.niepan_used = True
-                    p.hp = 1
+                    p.hand.clear()
+                    p.weapon = None
+                    p.armor = None
+                    p.horse_plus = None
+                    p.horse_minus = None
+                    p.hp = 3
                     p.dead = False
-                    notes.append(f"{p.name}涅槃至1体力")
+                    notes.append(f"{p.name}涅槃弃全部牌至3体力")
                 else:
                     p.dead = True
                     notes.append(f"{p.name}阵亡（{p.role}）")
@@ -4174,13 +4179,13 @@ class SanguoshaGame:
                 notes.append(
                     f"{p.name}反馈得【{card_label(stolen)}】"
                 )
-            if self._has_skill(src, "fangzhu") and p.hand:
-                c = p.hand.pop()
+            if self._has_skill(p, "fangzhu") and src.hand:
+                c = src.hand.pop()
                 self._discard.append(c)
-                notes.append(f"{p.name}放逐弃【{card_label(c)}】")
+                notes.append(f"{src.name}被放逐弃【{card_label(c)}】")
         if reactions:
             self._kuanggu_check(target_idx, notes)
-            self._chain_spread_damage(target_idx, notes)
+            self._chain_spread_damage(target_idx, element, notes)
         if notes:
             lines.append("  " + "；".join(notes))
         return lines
@@ -4194,19 +4199,20 @@ class SanguoshaGame:
         p.chained = True
         return f"{p.name} 进入连环"
 
-    def _chain_spread_damage(self, origin: int, notes: list[str]) -> None:
+    def _chain_spread_damage(self, origin: int, element: str, notes: list[str]) -> None:
         if not self.players[origin].chained:
             return
+        if element not in ("fire", "thunder"):
+            return
+        self.players[origin].chained = False
         hit: list[str] = []
         for i, other in enumerate(self.players):
             if i != origin and other.chained and not other.dead:
-                other.hp -= 1
+                other.chained = False
                 hit.append(other.name)
-                if other.hp <= 0:
-                    other.dead = True
-                    notes.append(f"{other.name}阵亡（{other.role}）")
+                self._damage(i, None, 1, reactions=True)
         if hit:
-            notes.append(f"铁索：{'、'.join(hit)}各-1")
+            notes.append(f"铁索连环传导：{'、'.join(hit)}各受1点伤害")
 
     def _check_win(self) -> Optional[str]:
         alive = self._alive_indices()
@@ -5694,7 +5700,7 @@ class SanguoshaGame:
             turn_p = self.players[self._turn_idx]
             if (
                 self._has_skill(turn_p, "wansha")
-                and target.hp <= 1
+                and target.hp <= 0
                 and who != target
                 and who != self._turn_idx
             ):
@@ -6114,11 +6120,11 @@ class SanguoshaGame:
             found = find_card_in_hand(player.hand, card_tok)
             if found is None or not is_diamond(found):
                 return (["国色须使用【方块】花色的牌。"], [], False)
-            player.hand.remove(found)
-            self._discard.append(found)
             victim = self.players[tgt]
             if victim.judge_lebu:
                 return ([f"{victim.name} 判定区已有【乐不思蜀】。"], [], False)
+            player.hand.remove(found)
+            self._discard.append(found)
             victim.judge_lebu = True
             return (
                 [],
@@ -6602,6 +6608,8 @@ class WerewolfGame:
                     return (["Save potion already used."], [], False)
                 if not self.pending_kill:
                     return (["No kill target yet."], [], False)
+                if self.pending_kill == actor:
+                    return (["Witch cannot save herself."], [], False)
                 self.witch_saved = True
                 self.witch_save_available = False
                 priv.append(f"Saved: {self.pending_kill}")

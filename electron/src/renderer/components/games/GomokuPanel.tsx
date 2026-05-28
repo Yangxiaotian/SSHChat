@@ -1809,9 +1809,10 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     const next = computeSuggestions(analysisMatrix, mySide, strategy, variationSeed, analysisMyTurn);
     const cache = analysisCacheRef.current;
     cache.set(cacheKey, next);
-    if (cache.size > ANALYSIS_CACHE_LIMIT) {
+    while (cache.size > ANALYSIS_CACHE_LIMIT) {
       const first = cache.keys().next();
-      if (!first.done) cache.delete(first.value);
+      if (first.done) break;
+      cache.delete(first.value);
     }
     return next;
   }, [analysisSignature, analysisMatrix, mySide, strategy, variationSeed, isHiddenMaster, analysisMyTurn]);

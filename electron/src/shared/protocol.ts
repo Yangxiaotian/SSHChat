@@ -89,7 +89,7 @@ export const PATTERNS = {
   CHAT: /^\[([^\]]+)\] (.*)$/,
   SYSTEM: /^\[\*\]\s*(.*)$/,
   PM: /^\[PM from ([^\]]+)\] (.*)$/,
-  JOIN: /^\[+\]\s*(.+?)\s+joined\s+#(\S+)/,
+  JOIN: /^\[\+\]\s*(.+?)\s+joined\s+#(\S+)/,
   LEAVE: /^\[!\]\s*(.+?)\s+left\s+#(\S+)/,
   ROOMS: /^Rooms:\s*(.*)$/,
   ROOM_SWITCH: /to\s+#([a-zA-Z0-9_-]{1,32})/,

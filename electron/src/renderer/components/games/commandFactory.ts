@@ -103,12 +103,12 @@ export const GameCommandFactory = {
     return `/game move ${payload.trim()}`;
   },
   chessMove(from: string, to: string): string {
-    return this.move(`${from}${to}`);
+    return GameCommandFactory.move(`${from}${to}`);
   },
   gomokuMove(row: number, col: number): string {
-    return this.move(`${row} ${col}`);
+    return GameCommandFactory.move(`${row} ${col}`);
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number): string {
-    return this.move(`${fr} ${fc} ${tr} ${tc}`);
+    return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`);
   },
 };

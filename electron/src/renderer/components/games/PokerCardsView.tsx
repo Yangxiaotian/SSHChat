@@ -6,7 +6,7 @@ type Props = {
 };
 
 function suitStyle(card: string): 'red' | 'black' {
-  if (card.includes('ºìÌÒ') || card.includes('·½¿é') || card.includes('?') || card.includes('?')) return 'red';
+  if (card.includes('çº¢æ¡ƒ') || card.includes('æ–¹å—') || card.includes('â™¥') || card.includes('â™¦')) return 'red';
   return 'black';
 }
 

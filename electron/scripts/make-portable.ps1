@@ -32,6 +32,14 @@ New-Item -ItemType Directory -Path $appDir | Out-Null
 
 Copy-Item -Path (Join-Path $sourceDir "*") -Destination $appDir -Recurse -Force
 
+# Optional external Gomoku engine bundle (Rapfi).
+$repoRapfiDir = Join-Path $PSScriptRoot "..\engines\rapfi"
+$portableRapfiDir = Join-Path $appDir "engines\rapfi"
+if (Test-Path $repoRapfiDir) {
+  New-Item -ItemType Directory -Path $portableRapfiDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $repoRapfiDir "*") -Destination $portableRapfiDir -Recurse -Force
+}
+
 $psLauncher = @'
 $ErrorActionPreference = "Stop"
 

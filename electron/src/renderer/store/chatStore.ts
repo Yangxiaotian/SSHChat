@@ -171,8 +171,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addMessage: (message) => {
     const { messages, activeRoom, rooms } = get();
     const roomMessages = messages.get(message.room) || [];
+    const MAX_MESSAGES = 500;
+    const trimmed = roomMessages.length >= MAX_MESSAGES ? roomMessages.slice(-MAX_MESSAGES + 1) : roomMessages;
     const newMessages = new Map(messages);
-    newMessages.set(message.room, [...roomMessages, message]);
+    newMessages.set(message.room, [...trimmed, message]);
 
     let newRooms = rooms;
     if (message.room !== activeRoom && message.type !== 'system') {
