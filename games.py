@@ -1190,7 +1190,8 @@ class GomokuGame(BoardUndoMixin):
     name = "gomoku"
     first_seat_desc = "黑方（先手）"
     second_seat_desc = "白方"
-    send_view_on_move = False
+    # 每步都向房间广播最新棋盘，保证前端棋盘与原始局面文本实时同步。
+    send_view_on_move = True
 
     def __init__(
         self,
