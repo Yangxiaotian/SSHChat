@@ -63,7 +63,19 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
   return { board: out.join('\n'), game };
 }
 
+function isXiangqiBoardLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (/^图例：[+\-!·*]/.test(trimmed)) return true;
+  if (trimmed.includes('楚河汉界')) return true;
+  if (/←\s*(黑方|红方)/.test(line)) return true;
+  const tokenRe = /(?:[+\-!][^\s]{1,2}|[·*])/g;
+  const tokens = trimmed.match(tokenRe);
+  if (!tokens || tokens.length < 5) return false;
+  return tokens.slice(0, 9).every((t) => t === '·' || t === '*' || /^[+\-!]/.test(t));
+}
+
 function isLikelyGameLine(line: string): boolean {
+  if (isXiangqiBoardLine(line)) return true;
   if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
   if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])(?:\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])){4,}\s*$/.test(line)) return true;
   if (/^\s*[1-8]\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])(?:\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])){7}\s*$/.test(line)) return true;

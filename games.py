@@ -2084,7 +2084,8 @@ class XiangqiGame(BoardUndoMixin):
     name = "xiangqi"
     first_seat_desc = "红方（先手）"
     second_seat_desc = "黑方"
-    send_view_on_move = False
+    # 每步向双方私信最新棋盘，保证 Electron 工作台与终端局面同步。
+    send_view_on_move = True
 
     def __init__(
         self,
