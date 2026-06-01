@@ -158,7 +158,7 @@ function buildRapfiBoardCommands(
   const lines: string[] = [];
   lines.push(`INFO timeout_turn ${timeoutMs}`);
   lines.push(inited ? 'RESTART' : 'START 15');
-  lines.push('INFO rule 0');
+  lines.push('INFO rule 4');
   lines.push('BOARD');
   for (let r = 0; r < 15; r++) {
     for (let c = 0; c < 15; c++) {

@@ -1124,29 +1124,158 @@ def _gomoku_parse_move(raw: str) -> Optional[tuple[int, int]]:
     return (r - 1, c - 1)
 
 
+def _gomoku_line_length(
+    grid: list[list[int]], row: int, col: int, who: int, dr: int, dc: int
+) -> int:
+    cnt = 1
+    for sign in (-1, 1):
+        r, c = row, col
+        while True:
+            r += dr * sign
+            c += dc * sign
+            if (
+                r < 0
+                or r >= GOMOKU_SIZE
+                or c < 0
+                or c >= GOMOKU_SIZE
+                or grid[r][c] != who
+            ):
+                break
+            cnt += 1
+    return cnt
+
+
 def _gomoku_winner_at(
     grid: list[list[int]], row: int, col: int, who: int
 ) -> bool:
+    """Black (Renju): exactly five; white: five or more."""
+    need_exact = who == 1
     dirs = ((1, 0), (0, 1), (1, 1), (1, -1))
     for dr, dc in dirs:
-        cnt = 1
-        for sign in (-1, 1):
-            r, c = row, col
-            while True:
-                r += dr * sign
-                c += dc * sign
-                if (
-                    r < 0
-                    or r >= GOMOKU_SIZE
-                    or c < 0
-                    or c >= GOMOKU_SIZE
-                    or grid[r][c] != who
-                ):
-                    break
-                cnt += 1
-        if cnt >= 5:
+        cnt = _gomoku_line_length(grid, row, col, who, dr, dc)
+        if need_exact:
+            if cnt == 5:
+                return True
+        elif cnt >= 5:
             return True
     return False
+
+
+def _gomoku_axis_line(
+    grid: list[list[int]], row: int, col: int, dr: int, dc: int
+) -> str:
+    """9-cell line through (row,col); center index 4 is the last move."""
+    out: list[str] = []
+    for i in range(-4, 5):
+        r, c = row + dr * i, col + dc * i
+        if r < 0 or r >= GOMOKU_SIZE or c < 0 or c >= GOMOKU_SIZE:
+            out.append("#")
+        elif grid[r][c] == 1:
+            out.append("X")
+        elif grid[r][c] == 2:
+            out.append("O")
+        else:
+            out.append(".")
+    return "".join(out)
+
+
+def _gomoku_axis_has_four(line: str) -> bool:
+    """One four-threat on an axis through center X (活四/冲四, not dead four)."""
+    if line[4] != "X":
+        return False
+    s = line
+
+    def four_at(a: int, b: int, c: int, d: int) -> bool:
+        if not (s[a] == s[b] == s[c] == s[d] == "X"):
+            return False
+        wins: list[int] = []
+        if a > 0 and s[a - 1] == ".":
+            wins.append(a - 1)
+        if d < 8 and s[d + 1] == ".":
+            wins.append(d + 1)
+        return bool(wins)
+
+    groups = (
+        (1, 2, 3, 4),
+        (2, 3, 4, 5),
+        (3, 4, 5, 6),
+        (2, 3, 4, 6),
+        (2, 4, 5, 6),
+        (3, 4, 5, 7),
+    )
+    return any(four_at(*g) for g in groups)
+
+
+def _gomoku_axis_open_three(line: str) -> bool:
+    """One open-three (活三) on an axis through center X."""
+    if line[4] != "X":
+        return False
+    s = line
+
+    # Straight open three
+    if (
+        s[2] == "X"
+        and s[3] == "X"
+        and s[4] == "X"
+        and s[1] == "."
+        and s[5] == "."
+        and s[6] != "X"
+    ):
+        return True
+    if (
+        s[3] == "X"
+        and s[4] == "X"
+        and s[5] == "X"
+        and s[2] == "."
+        and s[6] == "."
+        and s[1] != "X"
+    ):
+        return True
+    # Jump open three
+    if (
+        s[2] == "X"
+        and s[4] == "X"
+        and s[5] == "X"
+        and s[3] == "."
+        and s[1] in ".#"
+        and s[6] == "."
+    ):
+        return True
+    if (
+        s[3] == "X"
+        and s[4] == "X"
+        and s[6] == "X"
+        and s[5] == "."
+        and s[2] == "."
+        and s[7] in ".#"
+    ):
+        return True
+    return False
+
+
+def _gomoku_renju_forbidden(
+    grid: list[list[int]], row: int, col: int
+) -> list[str]:
+    """Renju forbidden moves for black at (row,col). Stone must already be placed."""
+    reasons: list[str] = []
+    dirs = ((1, 0), (0, 1), (1, 1), (1, -1))
+    if any(
+        _gomoku_line_length(grid, row, col, 1, dr, dc) >= 6 for dr, dc in dirs
+    ):
+        reasons.append("长连")
+    open_threes = 0
+    fours = 0
+    for dr, dc in dirs:
+        line = _gomoku_axis_line(grid, row, col, dr, dc)
+        if _gomoku_axis_has_four(line):
+            fours += 1
+        elif _gomoku_axis_open_three(line):
+            open_threes += 1
+    if open_threes >= 2:
+        reasons.append("三三")
+    if fours >= 2:
+        reasons.append("四四")
+    return reasons
 
 
 def _gomoku_render(
@@ -1185,7 +1314,10 @@ def _gomoku_render(
 
 
 class GomokuGame(BoardUndoMixin):
-    """15×15 gomoku. Creator = black (先手); joiner = white."""
+    """15×15 Renju-style gomoku. Creator = black (先手); joiner = white.
+
+    Black: 长连 / 四四 / 三三 禁手，且仅「恰好五连」取胜；白方无禁手。
+    """
 
     name = "gomoku"
     first_seat_desc = "黑方（先手）"
@@ -1352,6 +1484,7 @@ class GomokuGame(BoardUndoMixin):
             f"{name} 加入为白方，对局开始！",
             f"黑（先手）：{self.black_name}    白：{self.white_name}",
             "落子：/game move <行> <列>  例：8 8  或  8,8  （1～15，左上为 1,1）",
+            "规则：连珠禁手 — 黑方禁 长连、四四、三三；黑仅恰好五连胜，白五连及以上胜。",
             f"轮到 黑方 {self.black_name} 落子",
         ]
         return ([], bcast, False)
@@ -1383,6 +1516,20 @@ class GomokuGame(BoardUndoMixin):
             return (["该点已有子，请换位置。"], [], False)
 
         self.grid[row][col] = player
+        if player == 1:
+            forbidden = _gomoku_renju_forbidden(self.grid, row, col)
+            if forbidden:
+                self.grid[row][col] = 0
+                kinds = "、".join(forbidden)
+                return (
+                    [
+                        f"黑方禁手（{kinds}），此着无效，请改下他处。",
+                        "黑方仅可「恰好五连」取胜；长连、双四、双活三为禁手。",
+                    ],
+                    [],
+                    False,
+                )
+
         self._last = (row, col)
         self._history.append((row, col, player))
 

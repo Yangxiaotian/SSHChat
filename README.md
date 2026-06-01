@@ -235,7 +235,7 @@ npm run build:portable
 
 - `/game list`：列出可玩游戏，目前有 `chess`、`gomoku`、`xiangqi`（别名 `cchess`）。
 - `/game new chess`：开国际象棋；发起人执白，另一人用 `/game join` 加入后执黑。棋盘用 Unicode 棋子（♔♕♖♗♘♙ / ♚♛♜♝♞♟），空位为 `·`。走法支持 SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。
-- `/game new gomoku`：开 15×15 五子棋；发起人执黑先手。走法是 `/game move 行 列`，例如 `/game move 8 8` 或 `/game move 8,8`。
+- `/game new gomoku`：开 15×15 五子棋（连珠规则）；发起人执黑先手。黑方禁手：长连、四四、三三；黑方仅「恰好五连」取胜，白方五连及以上胜。走法是 `/game move 行 列`，例如 `/game move 8 8` 或 `/game move 8,8`。
 - `/game new xiangqi`：开中国象棋；发起人执红先手。推荐 **棋谱记法**：`/game move 炮二平五`、`/game move 马2进3`（黑方纵线可用 1～9）；同线双子加 **前/后**（如 `前马进七`）。也可用坐标 `/game move 8 二 8 五`（行 1～10；红列 九…一，黑列 1…9）。棋盘用 **`+` 红子**、**`-` 黑子**、**`!` 上一步**（等宽字体下对齐）；底行纵线为红方 **九…一**（汉字），顶行为黑方 **1…9**。**第二席（对手）** 看到的棋盘会自动 **翻转**，己方始终在下方。
 - `/game new chess ai [easy|normal|hard]`、`/game new gomoku ai [easy|normal|hard]`、`/game new xiangqi ai [easy|normal|hard]`：开 AI 练习局。AI 局**不会计入持久化积分**，用于练手防刷分。
 - `/game join`：加入空席位。
