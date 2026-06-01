@@ -1195,15 +1195,20 @@ def _gomoku_axis_has_four(line: str) -> bool:
             wins.append(d + 1)
         return bool(wins)
 
-    groups = (
-        (1, 2, 3, 4),
-        (2, 3, 4, 5),
-        (3, 4, 5, 6),
+    for start in range(0, 6):
+        group = (start, start + 1, start + 2, start + 3)
+        if 4 in group and four_at(*group):
+            return True
+    jump_groups = (
+        (1, 2, 4, 5),
+        (1, 3, 4, 5),
         (2, 3, 4, 6),
         (2, 4, 5, 6),
         (3, 4, 5, 7),
+        (4, 5, 7, 8),
+        (4, 6, 7, 8),
     )
-    return any(four_at(*g) for g in groups)
+    return any(four_at(*g) for g in jump_groups)
 
 
 def _gomoku_axis_open_three(line: str) -> bool:
@@ -1229,6 +1234,15 @@ def _gomoku_axis_open_three(line: str) -> bool:
         and s[2] == "."
         and s[6] == "."
         and s[1] != "X"
+    ):
+        return True
+    if (
+        s[4] == "X"
+        and s[5] == "X"
+        and s[6] == "X"
+        and s[3] == "."
+        and s[7] == "."
+        and s[8] != "X"
     ):
         return True
     # Jump open three

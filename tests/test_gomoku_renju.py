@@ -22,6 +22,9 @@ class TestGomokuRenjuAxisPatterns(unittest.TestCase):
     def test_four_rush(self) -> None:
         self.assertTrue(_gomoku_axis_has_four(".XXXX...."))
 
+    def test_four_rush_right_of_center(self) -> None:
+        self.assertTrue(_gomoku_axis_has_four("##..XXXXO"))
+
     def test_four_open(self) -> None:
         self.assertTrue(_gomoku_axis_has_four("..XXXX..."))
 
@@ -58,6 +61,39 @@ class TestGomokuRenjuForbidden(unittest.TestCase):
         for c in range(6):
             g[7][c] = 2
         self.assertTrue(_gomoku_winner_at(g, 7, 5, 2))
+
+
+class TestGomokuRenjuReportedPosition(unittest.TestCase):
+    """Regression: diagonal XXXX through last move must count toward 四四."""
+
+    def test_double_four_on_user_diagonal(self) -> None:
+        g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
+        rows = [
+            "...............",
+            "........o......",
+            "........##oo...",
+            ".......#o###o..",
+            "....o##.#o##...",
+            ".....#oooo##...",
+            "....o.#o##oo...",
+            "....#.#oo##oo..",
+            ".....o#ooo###o.",
+            "....#ooo#o#....",
+            "....o##o.......",
+            "....#oooo#.....",
+            "......##o#.....",
+            "...............",
+            "...............",
+        ]
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    g[r][c] = 1
+                elif ch == "o":
+                    g[r][c] = 2
+        last = (2, 8)
+        g[last[0]][last[1]] = 1
+        self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
 
 
 class TestGomokuRenjuTryMove(unittest.TestCase):
