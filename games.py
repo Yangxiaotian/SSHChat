@@ -557,6 +557,18 @@ class BoardUndoMixin:
     def _undo_clear_pending(self) -> None:
         self._undo_requester_conn = None
 
+    def _undo_queue_private(self, conn, lines: list[str]) -> None:
+        if conn is None or not lines:
+            return
+        if not hasattr(self, "_extra_privates"):
+            self._extra_privates = []
+        self._extra_privates.append((conn, lines))
+
+    def drain_extra_privates(self):
+        out = getattr(self, "_extra_privates", [])
+        self._extra_privates = []
+        return out
+
     def _undo_last_mover_conn(self):
         raise NotImplementedError
 
@@ -600,6 +612,14 @@ class BoardUndoMixin:
         opp = self._undo_opponent_conn(conn)
         opp_name = self._undo_player_name(opp) if opp else "对方"
         req_name = self._undo_player_name(conn)
+        if opp is not None:
+            self._undo_queue_private(
+                opp,
+                [
+                    f"{req_name} 请求悔棋（撤销上一步）。",
+                    "请用 /game undo accept 同意，或 /game undo reject 拒绝。",
+                ],
+            )
         return (
             [f"已向 {opp_name} 发起悔棋请求，等对方同意或拒绝。"],
             [
@@ -633,6 +653,7 @@ class BoardUndoMixin:
             self._undo_clear_pending()
             return (["无法撤销（棋盘状态异常）。"], [], False)
         self._undo_clear_pending()
+        self._undo_queue_private(requester, [f"{ac_name} 已同意悔棋，已撤销你的上一步。"])
         bcast = [
             f"{ac_name} 同意悔棋，已撤销 {req_name} 的上一步。",
             self._undo_turn_line(),
@@ -652,6 +673,7 @@ class BoardUndoMixin:
             )
         req_name = self._undo_player_name(self._undo_requester_conn)
         ac_name = self._undo_player_name(conn)
+        self._undo_queue_private(self._undo_requester_conn, [f"{ac_name} 已拒绝你的悔棋请求。"])
         self._undo_clear_pending()
         return (
             [],
@@ -665,6 +687,9 @@ class BoardUndoMixin:
         if conn is not self._undo_requester_conn:
             return (["只有悔棋请求方可以 /game undo cancel 取消。"], [], False)
         name = self._undo_player_name(conn)
+        opp = self._undo_opponent_conn(conn)
+        if opp is not None:
+            self._undo_queue_private(opp, [f"{name} 已取消悔棋请求。"])
         self._undo_clear_pending()
         return ([], [f"{name} 取消了悔棋请求。"], False)
 
@@ -1630,6 +1655,435 @@ class GomokuGame(BoardUndoMixin):
         if self.state == "waiting":
             self.state = "ended"
             return ([], [f"{name} 离开，对局取消。"], True)
+        if self.state == "playing":
+            self.state = "ended"
+            if player == 1:
+                return ([], [f"黑方 {name} 离开 — 白胜", *self._settle_ratings(0.0)], True)
+            return ([], [f"白方 {name} 离开 — 黑胜", *self._settle_ratings(1.0)], True)
+        return ([], [], False)
+
+
+GO_SIZE = 19
+GO_KOMI = 6.5
+
+
+def _go_parse_move(raw: str) -> Optional[tuple[int, int]]:
+    """Return 0-based (row, col). Accepts '4 4', '4,4', '4-4'."""
+    t = raw.strip().replace(",", " ").replace("-", " ")
+    parts = t.split()
+    if len(parts) != 2:
+        return None
+    try:
+        r = int(parts[0])
+        c = int(parts[1])
+    except ValueError:
+        return None
+    if not (1 <= r <= GO_SIZE and 1 <= c <= GO_SIZE):
+        return None
+    return (r - 1, c - 1)
+
+
+def _go_neighbors(row: int, col: int):
+    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nr, nc = row + dr, col + dc
+        if 0 <= nr < GO_SIZE and 0 <= nc < GO_SIZE:
+            yield nr, nc
+
+
+def _go_group_and_liberties(
+    grid: list[list[int]], row: int, col: int
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+    color = grid[row][col]
+    if color == 0:
+        return set(), {(row, col)}
+    group: set[tuple[int, int]] = set()
+    liberties: set[tuple[int, int]] = set()
+    stack = [(row, col)]
+    while stack:
+        cur = stack.pop()
+        if cur in group:
+            continue
+        group.add(cur)
+        for nr, nc in _go_neighbors(cur[0], cur[1]):
+            v = grid[nr][nc]
+            if v == 0:
+                liberties.add((nr, nc))
+            elif v == color and (nr, nc) not in group:
+                stack.append((nr, nc))
+    return group, liberties
+
+
+def _go_try_play(
+    grid: list[list[int]],
+    row: int,
+    col: int,
+    player: int,
+    ko_point: Optional[tuple[int, int]],
+) -> tuple[bool, str, list[tuple[int, int]], Optional[tuple[int, int]]]:
+    if grid[row][col] != 0:
+        return False, "该点已有棋子，请换位置。", [], ko_point
+    if ko_point is not None and (row, col) == ko_point:
+        return False, "此处为劫点，不能立刻回提。", [], ko_point
+
+    opp = 3 - player
+    grid[row][col] = player
+    captured: list[tuple[int, int]] = []
+    seen_groups: set[frozenset[tuple[int, int]]] = set()
+    for nr, nc in _go_neighbors(row, col):
+        if grid[nr][nc] != opp:
+            continue
+        group, libs = _go_group_and_liberties(grid, nr, nc)
+        key = frozenset(group)
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        if not libs:
+            for gr, gc in group:
+                grid[gr][gc] = 0
+            captured.extend(sorted(group))
+
+    own_group, own_libs = _go_group_and_liberties(grid, row, col)
+    if not own_libs:
+        grid[row][col] = 0
+        for cr, cc in captured:
+            grid[cr][cc] = opp
+        return False, "禁入点：该手为自杀手。", [], ko_point
+
+    next_ko = captured[0] if len(captured) == 1 and len(own_group) == 1 else None
+    return True, "", captured, next_ko
+
+
+def _go_score(grid: list[list[int]]) -> tuple[float, float, int, int]:
+    visited: set[tuple[int, int]] = set()
+    black_stones = 0
+    white_stones = 0
+    black_territory = 0
+    white_territory = 0
+    for r in range(GO_SIZE):
+        for c in range(GO_SIZE):
+            v = grid[r][c]
+            if v == 1:
+                black_stones += 1
+                continue
+            if v == 2:
+                white_stones += 1
+                continue
+            if (r, c) in visited:
+                continue
+            region: set[tuple[int, int]] = set()
+            borders: set[int] = set()
+            stack = [(r, c)]
+            while stack:
+                cur = stack.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                region.add(cur)
+                for nr, nc in _go_neighbors(cur[0], cur[1]):
+                    nv = grid[nr][nc]
+                    if nv == 0 and (nr, nc) not in visited:
+                        stack.append((nr, nc))
+                    elif nv in (1, 2):
+                        borders.add(nv)
+            if borders == {1}:
+                black_territory += len(region)
+            elif borders == {2}:
+                white_territory += len(region)
+    return (
+        float(black_stones + black_territory),
+        float(white_stones + white_territory) + GO_KOMI,
+        black_territory,
+        white_territory,
+    )
+
+
+def _go_render(
+    grid: list[list[int]],
+    *,
+    last: Optional[tuple[int, int]] = None,
+) -> list[str]:
+    hdr = "   " + "".join(f"{i:>2} " for i in range(1, GO_SIZE + 1))
+    lines = [hdr]
+    sym = {0: ".", 1: "#", 2: "o"}
+    for r in range(GO_SIZE):
+        row_cells = []
+        for c in range(GO_SIZE):
+            ch = sym[grid[r][c]]
+            if last is not None and (r, c) == last:
+                row_cells.append(f"({ch})")
+            else:
+                row_cells.append(f" {ch} ")
+        lines.append(f"{r + 1:>2} " + "".join(row_cells))
+    lines.append(hdr)
+    if last is not None:
+        lines.append(f"  上一步：({last[0] + 1}, {last[1] + 1})  （行 列，1 起算，左上为 1,1）")
+    lines.append("  图例：# 黑棋  o 白棋  . 空点；连续两次停一手自动数子。")
+    return lines
+
+
+class GoGame(BoardUndoMixin):
+    """19×19 Go. Creator = black; joiner = white."""
+
+    name = "go"
+    first_seat_desc = "黑方（先手）"
+    second_seat_desc = "白方"
+    send_view_on_move = True
+
+    def __init__(
+        self,
+        black_conn,
+        black_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
+        self.grid: list[list[int]] = [[0 for _ in range(GO_SIZE)] for _ in range(GO_SIZE)]
+        self.black_conn = black_conn
+        self.black_name = black_name
+        self.white_conn = None
+        self.white_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self._turn = 1
+        self._last: Optional[tuple[int, int]] = None
+        self._ko_point: Optional[tuple[int, int]] = None
+        self._passes = 0
+        self._captures = {1: 0, 2: 0}
+        self._history: list[dict] = []
+        self.join_blurb = "等另一位玩家用 /game join 加入。"
+        self._undo_clear_pending()
+
+    def _snapshot(self, player: int, action: str) -> dict:
+        return {
+            "player": player,
+            "action": action,
+            "grid": [row[:] for row in self.grid],
+            "turn": self._turn,
+            "last": self._last,
+            "ko": self._ko_point,
+            "passes": self._passes,
+            "captures": dict(self._captures),
+        }
+
+    def _undo_has_moves(self) -> bool:
+        return bool(self._history)
+
+    def _undo_last_mover_conn(self):
+        if not self._history:
+            return None
+        return self._seat_conn(self._history[-1]["player"])
+
+    def _undo_opponent_conn(self, conn):
+        who = self.who_of(conn)
+        if who is None:
+            return None
+        return self._seat_conn(3 - who)
+
+    def _undo_player_name(self, conn) -> str:
+        who = self.who_of(conn)
+        if who == 1:
+            return self.black_name
+        if who == 2:
+            return self.white_name or "白方"
+        return "?"
+
+    def _undo_pop_last_move(self) -> bool:
+        if not self._history:
+            return False
+        snap = self._history.pop()
+        self.grid = [row[:] for row in snap["grid"]]
+        self._turn = snap["turn"]
+        self._last = snap["last"]
+        self._ko_point = snap["ko"]
+        self._passes = snap["passes"]
+        self._captures = dict(snap["captures"])
+        return True
+
+    def _undo_turn_line(self) -> str:
+        return self._turn_line()
+
+    def _seat_conn(self, who: int):
+        return self.black_conn if who == 1 else self.white_conn
+
+    def who_of(self, conn) -> Optional[int]:
+        if conn is self.black_conn:
+            return 1
+        if conn is self.white_conn:
+            return 2
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(self.rating_store, self.name, [self.black_name, self.white_name])
+
+    def _settle_ratings(self, score_black: float) -> list[str]:
+        if not self.white_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.black_name,
+            self.white_name,
+            score_black,
+            ranked=True,
+        )
+
+    def _turn_line(self) -> str:
+        next_is_black = self._turn == 1
+        nm = self.black_name if next_is_black else self.white_name
+        return f"轮到 {'黑' if next_is_black else '白'}方 {nm} 落子"
+
+    def _finish_by_score(self) -> list[str]:
+        self.state = "ended"
+        black_score, white_score, black_territory, white_territory = _go_score(self.grid)
+        diff = abs(black_score - white_score)
+        bcast = [
+            "双方连续停一手，对局结束，开始数子。",
+            f"黑方：{black_score:g}（含空 {black_territory}）  白方：{white_score:g}（含贴目 {GO_KOMI:g}，空 {white_territory}）",
+        ]
+        if black_score > white_score:
+            bcast.append(f"结果：黑方 {self.black_name} 胜 {diff:g} 子。")
+            bcast.extend(self._settle_ratings(1.0))
+        elif white_score > black_score:
+            bcast.append(f"结果：白方 {self.white_name} 胜 {diff:g} 子。")
+            bcast.extend(self._settle_ratings(0.0))
+        else:
+            bcast.append("结果：和棋。")
+            bcast.extend(self._settle_ratings(0.5))
+        return bcast
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return ([f"对局已结束，请先 /game new {self.name} 开新局。"], [], False)
+        if conn is self.black_conn:
+            return (["你已经是黑方。"], [], False)
+        if self.white_conn is not None:
+            return ([f"白方席位已被 {self.white_name} 占。"], [], False)
+        self.white_conn = conn
+        self.white_name = name
+        self.state = "playing"
+        bcast = [
+            f"{name} 加入为白方，围棋对局开始！",
+            f"黑（先手）：{self.black_name}    白：{self.white_name}",
+            "落子：/game move <行> <列>；停一手：/game move pass；连续两次停一手终局数子。",
+            self._turn_line(),
+        ]
+        return ([], bcast, False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["对局尚未开始，等白方 /game join。"], [], False)
+        if self.state != "playing":
+            return (["对局已结束。"], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["你不是对局双方。"], [], False)
+        if player != self._turn:
+            return (["不是你的回合。"], [], False)
+
+        t = raw.strip().lower()
+        if t in ("pass", "停", "停一手", "跳过", "过"):
+            self._undo_clear_pending()
+            self._history.append(self._snapshot(player, "pass"))
+            self._passes += 1
+            self._ko_point = None
+            name = self.black_name if player == 1 else self.white_name
+            stone = "黑" if player == 1 else "白"
+            bcast = [f"{stone}方 {name} 停一手。"]
+            if self._passes >= 2:
+                bcast.extend(self._finish_by_score())
+                return ([], bcast, True)
+            self._turn = 3 - player
+            bcast.append(self._turn_line())
+            return ([], bcast, False)
+
+        pos = _go_parse_move(raw)
+        if pos is None:
+            return (
+                [
+                    "用法：/game move <行> <列> 例：4 4；停一手：/game move pass"
+                    f"（1～{GO_SIZE}）"
+                ],
+                [],
+                False,
+            )
+        row, col = pos
+        snap = self._snapshot(player, "move")
+        ok, err, captured, next_ko = _go_try_play(self.grid, row, col, player, self._ko_point)
+        if not ok:
+            return ([err], [], False)
+
+        self._undo_clear_pending()
+        self._history.append(snap)
+        self._last = (row, col)
+        self._ko_point = next_ko
+        self._passes = 0
+        self._captures[player] += len(captured)
+        name = self.black_name if player == 1 else self.white_name
+        stone = "黑" if player == 1 else "白"
+        bcast = [f"{stone}方 {name} 落子 ({row + 1}, {col + 1})"]
+        if captured:
+            bcast.append(f"{stone}方提子 {len(captured)} 枚。")
+        self._turn = 3 - player
+        bcast.append(self._turn_line())
+        return ([], bcast, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["对局尚未开始或已结束，无需认负。"], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["你不是对局双方。"], [], False)
+        self.state = "ended"
+        if player == 1:
+            return ([], [f"黑方 {name} 认负 — 白胜", *self._settle_ratings(0.0)], True)
+        return ([], [f"白方 {name} 认负 — 黑胜", *self._settle_ratings(1.0)], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+        if self.who_of(conn) is None:
+            return (["你不是对局双方，无法终止。"], [], False)
+        if self.state == "playing":
+            return (["已开始的对局请用 /game resign 认负，不能 /game abort。"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} 终止了围棋对局（未开始）。"], True)
+
+    def seats(self) -> list[str]:
+        lines = [
+            f"go 对局状态：{self.state}",
+            f"  黑方（先手）：{self.black_name}",
+            f"  白方：{self.white_name or '(空席, 可 /game join)'}",
+            f"  提子：黑 {self._captures[1]}，白 {self._captures[2]}",
+        ]
+        lines.extend(self._rating_lines())
+        return lines
+
+    def show(self, conn=None) -> list[str]:
+        lines = [
+            f"go 对局（{self.state}）  黑：{self.black_name}   白：{self.white_name or '空席'}",
+            f"贴目：白 {GO_KOMI:g}；提子：黑 {self._captures[1]}，白 {self._captures[2]}",
+        ]
+        lines.extend(self._rating_lines())
+        lines.extend(_go_render(self.grid, last=self._last))
+        if self.state == "playing":
+            lines.append(self._turn_line())
+        elif self.state == "waiting":
+            lines.append("等待白方 /game join 加入。")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        player = self.who_of(conn)
+        if player is None:
+            return ([], [], False)
+        if conn is self.black_conn:
+            self.black_conn = None
+        if conn is self.white_conn:
+            self.white_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} 离开，围棋对局取消。"], True)
         if self.state == "playing":
             self.state = "ended"
             if player == 1:
@@ -8227,6 +8681,14 @@ def create_game(
             rating_store=rating_store,
             ai_level=ai_level,
         )
+    if game_name == GoGame.name:
+        if options:
+            raise RuntimeError("go 暂不支持 AI 或额外开局参数。")
+        return GoGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
     if game_name == XiangqiGame.name:
         return XiangqiGame(
             creator_conn,
@@ -8243,6 +8705,7 @@ def create_game(
 GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
+    GoGame.name: GoGame,
     XiangqiGame.name: XiangqiGame,
     SanguoshaGame.name: SanguoshaGame,
     WerewolfGame.name: WerewolfGame,
@@ -8252,6 +8715,9 @@ GAMES = {
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
+    "weiqi": GoGame.name,
+    "baduk": GoGame.name,
+    "围棋": GoGame.name,
     "sgs": SanguoshaGame.name,
     "langrensha": WerewolfGame.name,
     "were-wolf": WerewolfGame.name,
@@ -8294,17 +8760,17 @@ def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
 HELP_LINES = (
     "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
-    "（chess: 白；gomoku/xiangqi: 黑/红先手；sanguo: 房主）。",
+    "（chess: 白；gomoku/go/xiangqi: 黑/黑/红先手；sanguo: 房主）。",
     "[*] /game new <名称> ai [easy|normal|hard]  棋类开启 AI 练习局（仅 chess/gomoku/xiangqi）；"
     "练习局不计入持久化积分。",
-    "[*] /game join             加入对局（chess/gomoku/xiangqi 为第二席；"
+    "[*] /game join             加入对局（chess/gomoku/go/xiangqi 为第二席；"
     "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
     "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
     "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
-    "[*] /game move …           chess: SAN/UCI；gomoku: 行 列；"
+    "[*] /game move …           chess: SAN/UCI；gomoku/go: 行 列；go 可 pass 停一手；"
     "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组；"
     "sanguo: 军争版；等待时房主 开始；/game move 武将 查武将池；"
     "观星/蛊惑/断粮等技能见 /game show（别名 sgs/三国杀）。",
@@ -8312,7 +8778,7 @@ HELP_LINES = (
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
-    "（chess/gomoku/xiangqi；reject 拒绝，cancel 取消请求）。",
+    "（chess/gomoku/go/xiangqi；reject 拒绝，cancel 取消请求）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",

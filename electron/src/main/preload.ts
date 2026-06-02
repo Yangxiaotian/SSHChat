@@ -7,6 +7,8 @@ import {
   IPC_CHANNELS,
   GomokuRapfiAnalyzeRequest,
   GomokuRapfiAnalyzeResponse,
+  GoKataGoAnalyzeRequest,
+  GoKataGoAnalyzeResponse,
 } from '../shared/protocol';
 
 const api = {
@@ -67,6 +69,9 @@ const api = {
   },
   analyzeGomokuRapfi: (payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> => {
     return ipcRenderer.invoke(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, payload);
+  },
+  analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GO_KATAGO_ANALYZE, payload);
   },
 
   // Event listeners

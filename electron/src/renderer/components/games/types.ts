@@ -2,6 +2,7 @@ export type GameKind =
   | 'none'
   | 'chess'
   | 'gomoku'
+  | 'go'
   | 'xiangqi'
   | 'sanguo'
   | 'werewolf'

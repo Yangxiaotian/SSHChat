@@ -6,6 +6,7 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: '国际象棋 AI', cmd: '/game new chess ai normal' },
     { label: '新开五子棋', cmd: '/game new gomoku' },
     { label: '五子棋 AI（人机）', cmd: '/game new gomoku ai normal' },
+    { label: '新开围棋', cmd: '/game new go' },
     { label: '新开象棋', cmd: '/game new xiangqi' },
     { label: '象棋 AI', cmd: '/game new xiangqi ai normal' },
     { label: '新开三国杀', cmd: '/game new sanguo' },
@@ -31,6 +32,18 @@ export const quickByGame: Record<GameKind, QuickAction[]> = {
     { label: '查看积分', cmd: '/game rating gomoku' },
     { label: '加入对局', cmd: '/game join' },
     { label: '查看席位', cmd: '/game seats' },
+    { label: '申请悔棋', cmd: '/game undo' },
+    { label: '同意悔棋', cmd: '/game undo accept' },
+    { label: '认输', cmd: '/game resign' },
+    { label: '终止对局', cmd: '/game abort' },
+    { label: '结束对局', cmd: '/game end' },
+  ],
+  go: [
+    { label: '显示棋盘', cmd: '/game show' },
+    { label: '查看积分', cmd: '/game rating go' },
+    { label: '加入对局', cmd: '/game join' },
+    { label: '查看席位', cmd: '/game seats' },
+    { label: '停一手', cmd: '/game move pass' },
     { label: '申请悔棋', cmd: '/game undo' },
     { label: '同意悔棋', cmd: '/game undo accept' },
     { label: '认输', cmd: '/game resign' },
@@ -106,6 +119,9 @@ export const GameCommandFactory = {
     return GameCommandFactory.move(`${from}${to}`);
   },
   gomokuMove(row: number, col: number): string {
+    return GameCommandFactory.move(`${row} ${col}`);
+  },
+  goMove(row: number, col: number): string {
     return GameCommandFactory.move(`${row} ${col}`);
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number): string {

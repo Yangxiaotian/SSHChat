@@ -93,6 +93,13 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "level_of": _dan_level,
         "k_factor": _elo_k,
     },
+    "go": {
+        "scheme": "Elo",
+        "initial": 1200,
+        "floor": 1000,
+        "level_of": _dan_level,
+        "k_factor": _elo_k,
+    },
     "xiangqi": {
         "scheme": "Elo",
         "initial": 1200,

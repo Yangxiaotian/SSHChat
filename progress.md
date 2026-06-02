@@ -125,3 +125,18 @@
   - `npx tsc -p tsconfig.json --noEmit` 通过
   - `npx tsc -p tsconfig.node.json --noEmit` 通过
   - `node electron/scripts/qa-game-panels-playwright.mjs` 通过（见 `electron/release/qa/qa-latest.log`）
+
+2026-06-02（新增围棋）
+- 新增 `GoGame` 服务端规则：19路、黑先、白贴目6.5、提子、禁自杀、简单劫、连续两次 pass 终局数子、认输、悔棋、席位与动态棋盘广播。
+- 新增围棋积分接入：`ratings.GAME_CONFIGS['go']`，支持 `/game rating go` 和终局 Elo 结算。
+- 新增 Electron 围棋面板：`GoPanel.tsx`，支持可视19路棋盘、点击落子、停一手、加入/席位/认输按钮。
+- 工作台接入：识别 `go/weiqi/baduk/围棋`，快捷按钮、帮助提示、面板渲染、命令工厂均已补齐。
+- 验证：`python -m unittest discover -s tests -p test_go_game.py` 通过；牌类/多端/悔棋关键子集通过；`npm run build:win` 通过。
+- 已知环境/历史测试说明：全量 unittest 仍受本机未安装 `python-chess` 和旧的“五子棋不广播棋盘”断言影响，非本次围棋回归。
+
+2026-06-02（围棋 KataGo 助手接入层）
+- 新增 KataGo IPC 协议与 preload/window API：`GO_KATAGO_ANALYZE` / `analyzeGoKataGo`。
+- 主进程新增 `KataGoAnalysisService`：自动发现 `katago.exe`、模型文件、analysis/gtp cfg；支持 `KATAGO_PATH`、`KATAGO_MODEL`、`KATAGO_CONFIG` 环境变量；退出时清理进程。
+- 围棋面板新增隐藏助手（仅 `zouyu`）：KataGo 可用时展示前3个推荐点、胜率、目差、访问数；不可用时回退内置轻量建议并明确提示原因。
+- 新增 `electron/engines/katago/README.txt` 与打包资源规则，后续把 KataGo 文件放入该目录会随免安装包带出。
+- 验证：`npm run build:win` 通过；`python -m unittest discover -s tests -p test_go_game.py` 通过。

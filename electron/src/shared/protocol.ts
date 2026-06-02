@@ -37,6 +37,7 @@ export interface GomokuRapfiAnalyzeRequest {
   board: number[][];
   mySide: 1 | -1;
   timeoutMs?: number;
+  mode?: 'move' | 'ponder';
 }
 
 export interface GomokuRapfiAnalyzeResponse {
@@ -45,6 +46,33 @@ export interface GomokuRapfiAnalyzeResponse {
   col?: number;
   ms: number;
   enginePath?: string;
+  error?: string;
+}
+
+export interface GoKataGoAnalyzeRequest {
+  board: number[][];
+  mySide: 1 | 2;
+  komi?: number;
+  maxVisits?: number;
+  timeoutMs?: number;
+}
+
+export type GoKataGoSuggestion = {
+  row: number;
+  col: number;
+  winrate?: number;
+  scoreLead?: number;
+  visits?: number;
+  order: number;
+};
+
+export interface GoKataGoAnalyzeResponse {
+  ok: boolean;
+  ms: number;
+  suggestions?: GoKataGoSuggestion[];
+  enginePath?: string;
+  modelPath?: string;
+  configPath?: string;
   error?: string;
 }
 
@@ -81,6 +109,9 @@ export const IPC_CHANNELS = {
 
   // Gomoku external engine
   GOMOKU_RAPFI_ANALYZE: 'gomoku:rapfi-analyze',
+
+  // Go external engine
+  GO_KATAGO_ANALYZE: 'go:katago-analyze',
 } as const;
 
 // Special message tokens

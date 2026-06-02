@@ -2,6 +2,7 @@
 import { useChatStore } from '../store/chatStore';
 import ChessPanel from './games/ChessPanel';
 import GomokuPanel from './games/GomokuPanel';
+import GoPanel from './games/GoPanel';
 import XiangqiPanel from './games/XiangqiPanel';
 import HoldemPanel from './games/HoldemPanel';
 import ZjhPanel from './games/ZjhPanel';
@@ -15,6 +16,7 @@ function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
   if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
+  if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
   if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
@@ -27,6 +29,7 @@ function detectGameKind(text: string): GameKind {
 const cnToGameKind: Record<string, GameKind> = {
   '国际象棋': 'chess',
   '五子棋': 'gomoku',
+  '围棋': 'go',
   '中国象棋': 'xiangqi',
   '三国杀': 'sanguo',
   '狼人杀': 'werewolf',
@@ -36,7 +39,7 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['chess', 'gomoku', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '中国象棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['chess', 'gomoku', 'go', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '围棋', '中国象棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -90,6 +93,7 @@ function isLikelyGameLine(line: string): boolean {
   const keywords = [
     'chess',
     'gomoku',
+    'go',
     'xiangqi',
     'holdem',
     'zjh',
@@ -118,6 +122,7 @@ function isLikelyGameLine(line: string): boolean {
     '公共牌',
     '国际象棋',
     '五子棋',
+    '围棋',
     '中国象棋',
     '德州扑克',
     '炸金花',
@@ -167,6 +172,7 @@ function gameLabel(game: GameKind): string {
     none: '游戏',
     chess: '国际象棋',
     gomoku: '五子棋',
+    go: '围棋',
     xiangqi: '中国象棋',
     sanguo: '三国杀',
     werewolf: '狼人杀',
@@ -179,19 +185,28 @@ function gameLabel(game: GameKind): string {
 
 function parseTurnName(board: string): string {
   const line = board.split('\n').find((l) => /^(turn|轮到)[:：]/i.test(l.trim()));
-  if (!line) return '';
+  if (!line) {
+    const cnLine = board.split('\n').find((l) => /^轮到\s+(黑|白|红)方\s+.+/.test(l.trim()));
+    const m = cnLine?.trim().match(/^轮到\s+(?:黑|白|红)方\s+(.+?)\s+(?:落子|走棋)/);
+    return m ? m[1].trim() : '';
+  }
   return line.replace(/^(turn|轮到)[:：]\s*/i, '').trim();
 }
 
 function inSeats(board: string, nickname: string): boolean {
   const esc = nickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`^#\\d+\\s+${esc}[:：]`, 'm');
-  return re.test(board);
+  if (re.test(board)) return true;
+  return new RegExp(`(?:黑|白|红)方(?:（[^）]+）)?[:：]\\s*${esc}(?:\\s|$)`, 'm').test(board) ||
+    new RegExp(`(?:黑|白|红)[:：]\\s*${esc}(?:\\s|$)`, 'm').test(board);
 }
 
 function hostName(board: string): string {
   const line = board.split('\n').find((l) => /^#1\s+[^:：]+[:：]/.test(l.trim()));
-  if (!line) return '';
+  if (!line) {
+    const black = board.match(/黑方(?:（[^）]+）)?[:：]\s*([^\s]+)/) || board.match(/黑[:：]\s*([^\s]+)/);
+    return black ? black[1].trim() : '';
+  }
   const m = line.trim().match(/^#1\s+([^:：]+)[:：]/);
   return m ? m[1].trim() : '';
 }
@@ -201,6 +216,7 @@ function gameMoveHint(game: GameKind): string {
     none: '可先点“可玩列表”或新开一局。',
     chess: '在棋盘上点起点和终点，或输入 UCI/SAN。',
     gomoku: '直接点棋盘落子点。',
+    go: '直接点19路棋盘交叉点落子；也可以点“停一手”。',
     xiangqi: '先点棋子，再点目标位置。',
     sanguo: '按按钮出牌或“过”，必要时先看武将池。',
     werewolf: '先选目标玩家，再点对应技能。',
@@ -405,6 +421,7 @@ const gameTips: Record<GameKind, string> = {
   none: '先用上方快捷按钮创建游戏，优先使用点击交互，不必手敲命令。',
   chess: '点击棋盘两次完成走子（起点 -> 终点）。',
   gomoku: '直接点击落子点即可发送坐标。',
+  go: '直接点击交叉点落子；需要收官时可点“停一手”。',
   xiangqi: '点击棋子起点后再点终点完成走子。',
   sanguo: '先选目标玩家，再点技能按钮执行。',
   werewolf: '先选目标玩家，再点投票/刀人/查验/毒人。',
@@ -555,6 +572,7 @@ export default function GameWorkbench() {
 
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
           {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c))} />}
+          {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c))} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}

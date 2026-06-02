@@ -415,6 +415,36 @@ function isWinByPlaced(board: number[][], r: number, c: number, side: number): b
   return false;
 }
 
+/** 检测对手在指定位置附近是否有活三/冲四等威胁 */
+function detectOpponentThreat(board: number[][], row: number, col: number, mySide: number): 'defend' | null {
+  const opp = -mySide;
+  // 模拟对手在此落子，检查是否形成活三或冲四
+  const sim = board.map((r) => r.slice());
+  const r0 = row - 1, c0 = col - 1;
+  if (!inBounds(r0, c0)) return null;
+  sim[r0][c0] = opp;
+  for (const [dr, dc] of DIRS) {
+    const cnt = 1 + countDir(sim, r0, c0, dr, dc, opp) + countDir(sim, r0, c0, -dr, -dc, opp);
+    if (cnt >= 4) return 'defend'; // 对手能成四或更多，必须堵
+  }
+  // 检查对手在此位置周围是否有活三（未落子时已有3连且两端空）
+  for (const [dr, dc] of DIRS) {
+    const cnt = countDir(board, r0, c0, dr, dc, opp) + countDir(board, r0, c0, -dr, -dc, opp);
+    if (cnt >= 3) {
+      // 检查两端是否空
+      const end1r = r0 + (cnt > countDir(board, r0, c0, dr, dc, opp) ? -dr : dr) * (countDir(board, r0, c0, dr, dc, opp) + 1);
+      const end1c = c0 + (cnt > countDir(board, r0, c0, dr, dc, opp) ? -dc : dc) * (countDir(board, r0, c0, dr, dc, opp) + 1);
+      const end2r = r0 + dr * (countDir(board, r0, c0, dr, dc, opp) + 1);
+      const end2c = c0 + dc * (countDir(board, r0, c0, dr, dc, opp) + 1);
+      if (inBounds(end1r, end1c) && board[end1r][end1c] === 0 &&
+          inBounds(end2r, end2c) && board[end2r][end2c] === 0) {
+        return 'defend'; // 对手有活三，必须堵
+      }
+    }
+  }
+  return null;
+}
+
 function lineString(board: number[][], r: number, c: number, dr: number, dc: number, side: number): string {
   let s = '';
   for (let k = -4; k <= 4; k++) {
@@ -1700,18 +1730,50 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+function signatureOfMatrix(board: number[][]): string {
+  return board.map((row) => row.map((v) => (v === 1 ? '1' : v === -1 ? '2' : '0')).join('')).join('|');
+}
+
+function cloneMatrix(board: number[][]): number[][] {
+  return board.map((row) => row.slice());
+}
+
+function matrixWithMove(board: number[][], row: number, col: number, side: 1 | -1): number[][] | null {
+  const r = row - 1;
+  const c = col - 1;
+  if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return null;
+  if (board[r]?.[c] !== 0) return null;
+  const next = cloneMatrix(board);
+  next[r][c] = side;
+  return next;
+}
+
+function rememberLimited<K, V>(cache: Map<K, V>, key: K, value: V, limit: number): void {
+  cache.set(key, value);
+  while (cache.size > limit) {
+    const first = cache.keys().next();
+    if (first.done) break;
+    cache.delete(first.value);
+  }
+}
+
 export default function GomokuPanel({ disabled, nickname, boardText, onPick }: Props) {
   const [strategy, setStrategy] = useState<StrategyId>('auto');
   const [variationSeed, setVariationSeed] = useState<number>(() => Math.floor(Math.random() * 1_000_000));
   const [rapfiSuggestion, setRapfiSuggestion] = useState<{ row: number; col: number; ms: number; error?: string } | null>(null);
   const [rapfiPending, setRapfiPending] = useState<boolean>(false);
+  const [rapfiPonderPending, setRapfiPonderPending] = useState<boolean>(false);
   const [optimisticPick, setOptimisticPick] = useState<{ row: number; col: number; side: Side; token: number } | null>(null);
   const rapfiReqSeqRef = useRef<number>(0);
+  const rapfiPonderSeqRef = useRef<number>(0);
   const rapfiLastKeyRef = useRef<string>('');
   const rapfiOkKeyRef = useRef<string>('');
   const rapfiInFlightKeyRef = useRef<string>('');
   const rapfiFailCooldownRef = useRef<{ key: string; until: number }>({ key: '', until: 0 });
   const rapfiWantedKeyRef = useRef<string>('');
+  const rapfiPonderKeyRef = useRef<string>('');
+  const rapfiPonderDoneKeyRef = useRef<string>('');
+  const rapfiPonderCacheRef = useRef<Map<string, { row: number; col: number; ms: number }>>(new Map());
   const optimisticTimerRef = useRef<number | null>(null);
   const prevStoneCountRef = useRef<number>(0);
   const analysisCacheRef = useRef<Map<string, EngineResult>>(new Map());
@@ -1724,10 +1786,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
   const turnInfo = useMemo(() => parseTurnInfo(boardText), [boardText]);
   const seats = useMemo(() => parseSeats(boardText), [boardText]);
   const matrix = useMemo(() => toMatrix(cells), [cells]);
-  const boardSignature = useMemo(
-    () => matrix.map((row) => row.map((v) => (v === 1 ? '1' : v === -1 ? '2' : '0')).join('')).join('|'),
-    [matrix],
-  );
+  const boardSignature = useMemo(() => signatureOfMatrix(matrix), [matrix]);
   const stoneN = useMemo(() => stonesOnBoard(matrix), [matrix]);
 
   const mySide: Side | null = nickname === seats.blackName ? '#' : nickname === seats.whiteName ? 'o' : null;
@@ -1750,23 +1809,23 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       ? Math.max(2, Math.floor(navigator.hardwareConcurrency))
       : 4;
   const rapfiTimeoutMs = useMemo(() => {
-    let base = 3600;
-    if (hwThreads <= 4) base = 3000;
-    else if (hwThreads <= 6) base = 4200;
-    else if (hwThreads <= 8) base = 5200;
-    else if (hwThreads <= 12) base = 6800;
-    else base = 8200;
+    let base = 8500;
+    if (hwThreads <= 4) base = 6500;
+    else if (hwThreads <= 6) base = 9000;
+    else if (hwThreads <= 8) base = 13000;
+    else if (hwThreads <= 12) base = 18000;
+    else base = 22000;
 
-    if (stoneN <= 16) base = Math.round(base * 1.25);
-    else if (stoneN <= 36) base = Math.round(base * 1.1);
-    if (!myTurn) base = Math.round(base * 0.75);
+    if (stoneN <= 10) base = Math.round(base * 1.55);
+    else if (stoneN <= 30) base = Math.round(base * 1.35);
+    else base = Math.round(base * 1.75);
+    if (!myTurn) base = Math.round(base * 0.9);
 
-    return clamp(base, 2200, 10000);
+    return clamp(base, 6000, 38000);
   }, [hwThreads, stoneN, myTurn]);
   const rapfiGuardTimeoutMs = useMemo(() => {
-    const slack = hwThreads <= 4 ? 8000 : 6000;
-    return clamp(rapfiTimeoutMs + slack, 9000, 16000);
-  }, [hwThreads, rapfiTimeoutMs]);
+    return clamp(rapfiTimeoutMs + 8000, 15000, 52000);
+  }, [rapfiTimeoutMs]);
 
   useEffect(() => {
     if (!optimisticPick) return;
@@ -1819,8 +1878,10 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
 
   useEffect(() => {
     if (!isHiddenMaster || strategy !== 'rapfi_external' || !mySide || !canPlay) {
+      rapfiReqSeqRef.current += 1;
       setRapfiPending(false);
       setRapfiSuggestion(null);
+      setRapfiPonderPending(false);
       rapfiLastKeyRef.current = '';
       rapfiOkKeyRef.current = '';
       rapfiInFlightKeyRef.current = '';
@@ -1831,6 +1892,10 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     if (!analysisSignature || analysisMatrix.length !== BOARD_SIZE || analysisPending) return;
     const reqKey = `${analysisSignature}|${mySide}|${canPlay ? 1 : 0}|${strategy}`;
     rapfiWantedKeyRef.current = reqKey;
+    const cachedPonder = rapfiPonderCacheRef.current.get(reqKey);
+    if (cachedPonder && rapfiOkKeyRef.current !== reqKey && rapfiInFlightKeyRef.current !== reqKey) {
+      setRapfiSuggestion(cachedPonder);
+    }
     // 防止请求排队堆积：同一时刻仅允许一个Rapfi请求在飞行。
     // 期间若局面变化，先记录wanted key，等当前请求完成后再自动分析最新局面。
     if (rapfiPending) {
@@ -1864,6 +1929,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
         board: analysisMatrix,
         mySide: mySide === '#' ? 1 : -1,
         timeoutMs: rapfiTimeoutMs,
+        mode: 'move',
       }),
       guardTimeout,
     ])
@@ -1897,6 +1963,109 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       });
   }, [analysisSignature, analysisMatrix, analysisPending, strategy, isHiddenMaster, mySide, canPlay, rapfiPending, rapfiTimeoutMs, rapfiGuardTimeoutMs]);
 
+  useEffect(() => {
+    const canPonder =
+      isHiddenMaster &&
+      strategy === 'rapfi_external' &&
+      !!mySide &&
+      !disabled &&
+      !!turnInfo.name &&
+      !myTurn &&
+      !!analysisSignature &&
+      analysisMatrix.length === BOARD_SIZE &&
+      !analysisPending;
+
+    if (!canPonder) return;
+
+    const ponderKey = `${analysisSignature}|${mySide}|${strategy}`;
+    if (
+      rapfiPonderPending ||
+      rapfiPonderKeyRef.current === ponderKey ||
+      rapfiPonderDoneKeyRef.current === ponderKey
+    ) {
+      return;
+    }
+
+    rapfiPonderKeyRef.current = ponderKey;
+    const seq = rapfiPonderSeqRef.current + 1;
+    rapfiPonderSeqRef.current = seq;
+    setRapfiPonderPending(true);
+
+    const mySideNum: 1 | -1 = mySide === '#' ? 1 : -1;
+    const opponentSideNum: 1 | -1 = mySideNum === 1 ? -1 : 1;
+    const opponentTimeoutMs = clamp(Math.round(rapfiTimeoutMs * 0.35), 2500, 12000);
+    const replyTimeoutMs = clamp(Math.round(rapfiTimeoutMs * 0.45), 3000, 16000);
+
+    const withGuard = <T,>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('Rapfi后台预判超时')), timeoutMs + 6000);
+        }),
+      ]);
+    };
+
+    const run = async () => {
+      const opponentResp = await withGuard(
+        window.api.analyzeGomokuRapfi({
+          board: analysisMatrix,
+          mySide: opponentSideNum,
+          timeoutMs: opponentTimeoutMs,
+          mode: 'ponder',
+        }),
+        opponentTimeoutMs,
+      );
+      if (!opponentResp.ok || !opponentResp.row || !opponentResp.col) return;
+      if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
+      const predictedBoard = matrixWithMove(analysisMatrix, opponentResp.row, opponentResp.col, opponentSideNum);
+      if (!predictedBoard) return;
+
+      const replyResp = await withGuard(
+        window.api.analyzeGomokuRapfi({
+          board: predictedBoard,
+          mySide: mySideNum,
+          timeoutMs: replyTimeoutMs,
+          mode: 'ponder',
+        }),
+        replyTimeoutMs,
+      );
+      if (!replyResp.ok || !replyResp.row || !replyResp.col) return;
+      if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
+
+      const predictedSig = signatureOfMatrix(predictedBoard);
+      const hitKey = `${predictedSig}|${mySide}|1|${strategy}`;
+      rememberLimited(rapfiPonderCacheRef.current, hitKey, {
+        row: replyResp.row,
+        col: replyResp.col,
+        ms: opponentResp.ms + replyResp.ms,
+      }, 24);
+    };
+
+    run()
+      .catch(() => {
+        // 后台预判失败不打扰正式建议，轮到自己时仍走正式高时限分析。
+      })
+      .finally(() => {
+        if (rapfiPonderSeqRef.current === seq) {
+          rapfiPonderDoneKeyRef.current = ponderKey;
+          rapfiPonderKeyRef.current = '';
+          setRapfiPonderPending(false);
+        }
+      });
+  }, [
+    analysisSignature,
+    analysisMatrix,
+    analysisPending,
+    strategy,
+    isHiddenMaster,
+    mySide,
+    disabled,
+    turnInfo.name,
+    myTurn,
+    rapfiPonderPending,
+    rapfiTimeoutMs,
+  ]);
+
   const shownSuggestions = useMemo(() => {
     const base = result.suggestions.slice();
     if (
@@ -1908,18 +2077,20 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       rapfiSuggestion.col >= 1 &&
       rapfiSuggestion.col <= BOARD_SIZE
     ) {
-      const rapfiMove: Suggestion = {
+      const threat = detectOpponentThreat(analysisMatrix, rapfiSuggestion.row, rapfiSuggestion.col, mySide === '#' ? 1 : -1);
+      const reason = threat === 'defend'
+        ? `⚠ 紧急防守！对手有活三/冲四威胁（耗时${rapfiSuggestion.ms}ms）`
+        : `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`;
+      return [{
         row: rapfiSuggestion.row,
         col: rapfiSuggestion.col,
         score: Number.MAX_SAFE_INTEGER,
-        reason: `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`,
-        style: 'Rapfi职业引擎',
-      };
-      const rest = base.filter((s) => !(s.row === rapfiMove.row && s.col === rapfiMove.col));
-      return [rapfiMove, ...rest].slice(0, 3);
+        reason,
+        style: threat === 'defend' ? '紧急防守' : 'Rapfi职业引擎',
+      }];
     }
     return base;
-  }, [result.suggestions, rapfiSuggestion, strategy]);
+  }, [result.suggestions, rapfiSuggestion, strategy, analysisMatrix, mySide]);
 
   const renderedCells = useMemo(() => {
     if (!optimisticPick) return cells;
@@ -1997,6 +2168,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                   Rapfi状态：
                   {analysisPending || rapfiPending
                     ? '分析中...'
+                    : rapfiPonderPending
+                      ? '后台预判中...'
                     : rapfiSuggestion?.error
                       ? `失败（已回退内置）：${rapfiSuggestion.error}`
                       : rapfiSuggestion

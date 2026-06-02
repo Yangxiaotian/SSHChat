@@ -1680,6 +1680,10 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             else:
                 priv, bcast, _ = game.request_undo(conn)
         send_game_private(conn, room, priv)
+        drain = getattr(game, "drain_extra_privates", None)
+        if drain:
+            for peer_conn, extra in drain():
+                send_game_private(peer_conn, room, extra)
         broadcast_game(room, bcast)
         if bcast and hasattr(game, "supports_undo"):
             send_oriented_boards(room, game)

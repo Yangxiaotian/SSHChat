@@ -723,6 +723,112 @@ html, body, #root {
   outline-offset: -2px;
 }
 
+.go-board-wrap {
+  margin: 10px 0;
+  overflow: auto;
+  max-width: 100%;
+}
+
+.go-board {
+  display: grid;
+  grid-template-columns: repeat(19, 24px);
+  grid-template-rows: repeat(19, 24px);
+  width: max-content;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid #7b5b32;
+  background:
+    linear-gradient(#7e5d31, #7e5d31) 26px 26px / calc(100% - 52px) 1px no-repeat,
+    repeating-linear-gradient(0deg, transparent 0, transparent 23px, rgba(82, 55, 25, 0.88) 23px, rgba(82, 55, 25, 0.88) 24px),
+    repeating-linear-gradient(90deg, transparent 0, transparent 23px, rgba(82, 55, 25, 0.88) 23px, rgba(82, 55, 25, 0.88) 24px),
+    linear-gradient(135deg, #d7ad69, #c79248);
+  box-shadow: inset 0 0 0 1px rgba(255, 238, 192, 0.18), 0 4px 12px rgba(0, 0, 0, 0.24);
+}
+
+.go-point {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.go-point::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(70, 43, 18, 0.55);
+  opacity: 0;
+}
+
+.go-point:nth-child(61)::before,
+.go-point:nth-child(67)::before,
+.go-point:nth-child(73)::before,
+.go-point:nth-child(175)::before,
+.go-point:nth-child(181)::before,
+.go-point:nth-child(187)::before,
+.go-point:nth-child(289)::before,
+.go-point:nth-child(295)::before,
+.go-point:nth-child(301)::before {
+  opacity: 1;
+}
+
+.go-point:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+}
+
+.go-point span {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 19px;
+  height: 19px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.go-point.black span {
+  background: radial-gradient(circle at 32% 28%, #6b6f78, #0e1117 58%, #050608);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+.go-point.white span {
+  background: radial-gradient(circle at 32% 28%, #fffefa, #d8d3c6 62%, #9b9386);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.42);
+}
+
+.go-point.last span {
+  outline: 2px solid #f0b44d;
+  outline-offset: 1px;
+}
+
+.go-point.suggested {
+  background: rgba(52, 142, 235, 0.22);
+  border-radius: 50%;
+}
+
+.go-point.suggested::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 23px;
+  height: 23px;
+  border: 2px solid #5db2ff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
 .xiangqi-board {
   position: relative;
   margin: 8px 0 10px;

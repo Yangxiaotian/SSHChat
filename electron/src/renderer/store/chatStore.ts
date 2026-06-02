@@ -5,6 +5,8 @@ import {
   ConnectionStatus,
   GomokuRapfiAnalyzeRequest,
   GomokuRapfiAnalyzeResponse,
+  GoKataGoAnalyzeRequest,
+  GoKataGoAnalyzeResponse,
   ProcessInfo,
   RoomInfo,
 } from '../../shared/protocol';
@@ -29,6 +31,7 @@ declare global {
       minimizeWindow: () => Promise<boolean>;
       closeApp: () => Promise<boolean>;
       analyzeGomokuRapfi: (payload: GomokuRapfiAnalyzeRequest) => Promise<GomokuRapfiAnalyzeResponse>;
+      analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest) => Promise<GoKataGoAnalyzeResponse>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;

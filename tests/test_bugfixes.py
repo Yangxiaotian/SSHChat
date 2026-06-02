@@ -312,6 +312,11 @@ class TestHoldemShowdownTieSplit(unittest.TestCase):
         game.try_join(c2, "B")
         game.try_move(c1, "start")
 
+        # Fold all bot players so only A and B remain
+        for _c, n in list(game.players):
+            if n not in ("A", "B"):
+                game.folded.add(n)
+
         # Set identical hands for both players
         game.hands["A"] = ["A♠", "A♥"]
         game.hands["B"] = ["A♣", "A♦"]

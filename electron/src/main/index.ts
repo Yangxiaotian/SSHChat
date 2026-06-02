@@ -1,11 +1,21 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { exec, spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import * as os from 'os';
+import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
 import { parseServerLine, extractRoomsFromSystem, extractActiveRoom, extractUsersSnapshot, buildSendMessage } from './chat-protocol';
-import { ConnectionConfig, IPC_CHANNELS, ConnectionStatus, GomokuRapfiAnalyzeRequest, GomokuRapfiAnalyzeResponse } from '../shared/protocol';
+import {
+  ConnectionConfig,
+  IPC_CHANNELS,
+  ConnectionStatus,
+  GomokuRapfiAnalyzeRequest,
+  GomokuRapfiAnalyzeResponse,
+  GoKataGoAnalyzeRequest,
+  GoKataGoAnalyzeResponse,
+  GoKataGoSuggestion,
+} from '../shared/protocol';
 
 // ============================================================
 // VSCode Disguise: Process name, app name, user agent
@@ -45,8 +55,38 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY_MS = 3000;
 const singleInstanceLock = app.requestSingleInstanceLock();
-const RAPFI_ANALYZE_DEFAULT_TIMEOUT_MS = 3200;
-const RAPFI_ANALYZE_MAX_TIMEOUT_MS = 12000;
+
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number.parseInt(process.env[name] || '', 10);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, raw));
+}
+
+function defaultRapfiHashMb(): number {
+  const totalMb = Math.floor(os.totalmem() / 1024 / 1024);
+  if (totalMb >= 32768) return 2048;
+  if (totalMb >= 16384) return 1024;
+  return 512;
+}
+
+const RAPFI_ANALYZE_DEFAULT_TIMEOUT_MS = intEnv('RAPFI_DEFAULT_TIMEOUT_MS', 8000, 1000, 60000);
+const RAPFI_ANALYZE_MAX_TIMEOUT_MS = intEnv('RAPFI_MAX_TIMEOUT_MS', 45000, 5000, 90000);
+const RAPFI_HASH_MB = intEnv('RAPFI_HASH_MB', defaultRapfiHashMb(), 128, 4096);
+const RAPFI_PONDER_HASH_MB = intEnv(
+  'RAPFI_PONDER_HASH_MB',
+  Math.max(256, Math.min(1024, Math.floor(RAPFI_HASH_MB / 2))),
+  128,
+  RAPFI_HASH_MB,
+);
+const RAPFI_THREADS = intEnv('RAPFI_THREADS', 0, 0, 128);
+const RAPFI_MIN_DEPTH = intEnv('RAPFI_MIN_DEPTH', 40, 8, 99);
+let resolvedRapfiExecutableCache: string | null | undefined;
+const KATAGO_DEFAULT_TIMEOUT_MS = intEnv('KATAGO_TIMEOUT_MS', 60000, 1500, 180000);
+const KATAGO_DEFAULT_MAX_VISITS = intEnv('KATAGO_MAX_VISITS', 96, 8, 2000);
+let resolvedKataGoPathsCache:
+  | { ok: true; exe: string; model: string; config: string }
+  | { ok: false; error: string }
+  | undefined;
 
 function ensureRapfiLayout(): void {
   const appDir = path.dirname(app.getPath('exe'));
@@ -67,21 +107,49 @@ function ensureRapfiLayout(): void {
   }
 }
 
+function rapfiExeExists(p: string): boolean {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function probeRapfiExecutable(p: string): boolean {
+  try {
+    const r = spawnSync(p, [], {
+      cwd: path.dirname(p),
+      input: 'START 15\nEND\n',
+      encoding: 'utf8',
+      timeout: 2500,
+      windowsHide: true,
+    });
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    return !r.error && out.includes('OK');
+  } catch {
+    return false;
+  }
+}
+
 function resolveRapfiExecutable(): string | null {
+  if (resolvedRapfiExecutableCache !== undefined) return resolvedRapfiExecutableCache;
   ensureRapfiLayout();
   const envPath = process.env.RAPFI_PATH;
   const appDir = path.dirname(app.getPath('exe'));
+  const resourcesDir = process.resourcesPath || path.join(appDir, 'resources');
   const projectDir = path.resolve(__dirname, '../../..');
   const rapfiExeNames = [
-    'rapfi.exe',
-    'pbrain-rapfi-windows-avx2.exe',
-    'pbrain-rapfi-windows-avxvnni.exe',
-    'pbrain-rapfi-windows-avx512.exe',
     'pbrain-rapfi-windows-avx512vnni.exe',
+    'pbrain-rapfi-windows-avx512.exe',
+    'pbrain-rapfi-windows-avxvnni.exe',
+    'pbrain-rapfi-windows-avx2.exe',
     'pbrain-rapfi-windows-sse.exe',
+    'rapfi.exe',
   ];
   const candidates = [
     envPath || '',
+    ...rapfiExeNames.map((n) => path.join(resourcesDir, 'engines', 'rapfi', n)),
+    ...rapfiExeNames.map((n) => path.join(resourcesDir, 'rapfi', n)),
     ...rapfiExeNames.map((n) => path.join(appDir, 'engines', 'rapfi', n)),
     ...rapfiExeNames.map((n) => path.join(appDir, 'rapfi', n)),
     ...rapfiExeNames.map((n) => path.join(appDir, 'Rapfi-engine', n)),
@@ -91,12 +159,17 @@ function resolveRapfiExecutable(): string | null {
   ].filter(Boolean);
 
   for (const p of candidates) {
-    try {
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
-    } catch {
-      // ignore broken path
+    if (!rapfiExeExists(p)) continue;
+    if (envPath && p === envPath) {
+      resolvedRapfiExecutableCache = p;
+      return p;
+    }
+    if (probeRapfiExecutable(p)) {
+      resolvedRapfiExecutableCache = p;
+      return p;
     }
   }
+  resolvedRapfiExecutableCache = null;
   return null;
 }
 
@@ -149,16 +222,74 @@ function validateBoard15(board: number[][]): boolean {
   return true;
 }
 
+function cloneBoard15(board: number[][]): number[][] {
+  return board.map((row) => row.slice());
+}
+
+function boardAfterRapfiMove(board: number[][], mySide: 1 | -1, move?: { row?: number; col?: number }): number[][] | null {
+  const row = move?.row;
+  const col = move?.col;
+  if (!row || !col || row < 1 || row > 15 || col < 1 || col > 15) return null;
+  const r = row - 1;
+  const c = col - 1;
+  if (board[r]?.[c] !== 0) return null;
+  const next = cloneBoard15(board);
+  next[r][c] = mySide;
+  return next;
+}
+
+function diffBoard15(prev: number[][], next: number[][]): Array<{ r: number; c: number; from: number; to: number }> {
+  const out: Array<{ r: number; c: number; from: number; to: number }> = [];
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (prev[r][c] !== next[r][c]) {
+        out.push({ r, c, from: prev[r][c], to: next[r][c] });
+      }
+    }
+  }
+  return out;
+}
+
+function isMyTurnByBoard(board: number[][], mySide: 1 | -1): boolean {
+  let black = 0;
+  let white = 0;
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] === 1) black += 1;
+      else if (board[r][c] === -1) white += 1;
+    }
+  }
+  if (mySide === 1) return black === white;
+  return black === white + 1;
+}
+
+function buildRapfiInitLines(timeoutMs: number): string[] {
+  const lines: string[] = [];
+  lines.push(`INFO timeout_turn ${timeoutMs}`);
+  lines.push(`INFO depth ${RAPFI_MIN_DEPTH}`);
+  lines.push('INFO rule 4');
+  return lines;
+}
+
 function buildRapfiBoardCommands(
   board: number[][],
   mySide: 1 | -1,
   timeoutMs: number,
   inited: boolean,
+  hashMb: number,
+  forceRestart = false,
 ): string[] {
   const lines: string[] = [];
-  lines.push(`INFO timeout_turn ${timeoutMs}`);
-  lines.push(inited ? 'RESTART' : 'START 15');
-  lines.push('INFO rule 4');
+  if (!inited) {
+    lines.push('START 15');
+    lines.push(`INFO hash ${hashMb}`);
+    if (RAPFI_THREADS > 0) {
+      lines.push(`INFO threads ${RAPFI_THREADS}`);
+    }
+  } else if (forceRestart) {
+    lines.push('RESTART');
+  }
+  lines.push(...buildRapfiInitLines(timeoutMs));
   lines.push('BOARD');
   for (let r = 0; r < 15; r++) {
     for (let c = 0; c < 15; c++) {
@@ -169,6 +300,13 @@ function buildRapfiBoardCommands(
     }
   }
   lines.push('DONE');
+  return lines;
+}
+
+function buildRapfiTurnCommands(row0: number, col0: number, timeoutMs: number): string[] {
+  const lines: string[] = [];
+  lines.push(...buildRapfiInitLines(timeoutMs));
+  lines.push(`TURN ${col0},${row0}`);
   return lines;
 }
 
@@ -189,20 +327,29 @@ class RapfiEngineService {
   private stdoutBuf = '';
   private stderrTail: string[] = [];
   private inited = false;
+  private lastEngineBoard: number[][] | null = null;
+  private lastMySide: 1 | -1 | null = null;
   private pending: RapfiPendingRequest | null = null;
   private queue: Promise<void> = Promise.resolve();
   private seq = 0;
   private queuedCount = 0;
   private traceFile: string | null = null;
 
+  constructor(
+    private readonly label: string,
+    private readonly hashMb: number,
+    private readonly allowIncremental: boolean,
+    private readonly rememberEngineBoard: boolean,
+  ) {}
+
   private trace(msg: string): void {
     try {
       if (!this.traceFile) {
         const dir = path.join(app.getPath('userData'), 'logs');
         fs.mkdirSync(dir, { recursive: true });
-        this.traceFile = path.join(dir, 'rapfi-trace.log');
+        this.traceFile = path.join(dir, `rapfi-${this.label}-trace.log`);
       }
-      const line = `[${new Date().toISOString()}] ${msg}\n`;
+      const line = `[${new Date().toISOString()}] [${this.label}] ${msg}\n`;
       fs.appendFile(this.traceFile, line, () => {});
     } catch {
       // ignore trace errors
@@ -284,6 +431,8 @@ class RapfiEngineService {
     this.stdoutBuf = '';
     this.stderrTail = [];
     this.inited = false;
+    this.lastEngineBoard = null;
+    this.lastMySide = null;
   }
 
   disposeAll(): void {
@@ -304,7 +453,7 @@ class RapfiEngineService {
 
     this.disposeProcess();
     try {
-      this.proc = spawn(targetPath, [], { stdio: 'pipe', windowsHide: true });
+      this.proc = spawn(targetPath, [], { cwd: path.dirname(targetPath), stdio: 'pipe', windowsHide: true });
       this.enginePath = targetPath;
       this.trace(`spawn-ok path=${JSON.stringify(targetPath)}`);
     } catch (err) {
@@ -356,7 +505,11 @@ class RapfiEngineService {
   private async runAnalyze(payload: GomokuRapfiAnalyzeRequest, reqId: number, queuedAt: number): Promise<GomokuRapfiAnalyzeResponse> {
     const t0 = Date.now();
     const stones = payload.board.reduce((acc, row) => acc + row.reduce((n, v) => n + (v === 0 ? 0 : 1), 0), 0);
-    this.trace(`req#${reqId} run-start queuedMs=${t0 - queuedAt} stones=${stones} mySide=${payload.mySide} timeoutIn=${payload.timeoutMs ?? -1}`);
+    const requestMode = payload.mode === 'ponder' ? 'ponder' : 'move';
+    this.trace(
+      `req#${reqId} run-start mode=${requestMode} queuedMs=${t0 - queuedAt} stones=${stones} ` +
+        `mySide=${payload.mySide} timeoutIn=${payload.timeoutMs ?? -1} hashMb=${this.hashMb}`,
+    );
     const enginePath = resolveRapfiExecutable();
     if (!enginePath) {
       this.trace(`req#${reqId} fail no-engine`);
@@ -382,6 +535,47 @@ class RapfiEngineService {
     }
 
     const timeoutMs = sanitizeTimeout(payload.timeoutMs);
+    let cmdMode = 'full-board';
+    let cmdReason = 'startup';
+    let cmds: string[] = [];
+
+    const canTryIncremental =
+      this.allowIncremental &&
+      requestMode !== 'ponder' &&
+      this.inited &&
+      this.lastEngineBoard !== null &&
+      this.lastMySide === payload.mySide &&
+      isMyTurnByBoard(payload.board, payload.mySide);
+
+    if (canTryIncremental) {
+      const diffs = diffBoard15(this.lastEngineBoard!, payload.board);
+      if (diffs.length === 1) {
+        const d = diffs[0];
+        // 增量前提：真实棋盘包含了上次引擎建议手，只额外新增了对手一手。
+        if (d.from === 0 && d.to !== 0 && d.to === -payload.mySide) {
+          cmds = buildRapfiTurnCommands(d.r, d.c, timeoutMs);
+          cmdMode = 'incremental-turn';
+          cmdReason = `delta=1 opp@${d.r},${d.c}`;
+        }
+      }
+      if (cmds.length === 0) {
+        cmdReason = `delta-fallback`;
+      }
+    }
+
+    if (cmds.length === 0) {
+      // 回退整盘重建：处理开局、悔棋、多步差分、跨端续玩、执子变化等情况。
+      const forceRestart = this.inited;
+      cmds = buildRapfiBoardCommands(payload.board, payload.mySide, timeoutMs, this.inited, this.hashMb, forceRestart);
+      cmdMode = 'full-board';
+      if (!this.inited) cmdReason = 'cold-start';
+      else if (requestMode === 'ponder') cmdReason = 'ponder-isolated-board';
+      else if (this.lastEngineBoard === null) cmdReason = 'no-engine-board';
+      else if (this.lastMySide !== payload.mySide) cmdReason = 'side-switched';
+      else if (!isMyTurnByBoard(payload.board, payload.mySide)) cmdReason = 'not-my-turn-or-unknown';
+      else cmdReason = 'non-incremental-delta';
+    }
+
     return new Promise<GomokuRapfiAnalyzeResponse>((resolve) => {
       const startedAt = Date.now();
       const startupExtra = this.inited ? 0 : 1800;
@@ -395,35 +589,44 @@ class RapfiEngineService {
         fallbackMove: null,
         timer: setTimeout(() => {
           if (!this.pending) return;
-          if (this.pending.fallbackMove) {
+          const cur = this.pending;
+          if (cur.fallbackMove) {
             this.completePending({
               ok: true,
-              row: this.pending.fallbackMove.row,
-              col: this.pending.fallbackMove.col,
-              ms: Date.now() - this.pending.startedAt,
-              enginePath: this.pending.enginePath,
+              row: cur.fallbackMove.row,
+              col: cur.fallbackMove.col,
+              ms: Date.now() - cur.startedAt,
+              enginePath: cur.enginePath,
             });
           } else {
             const errText = this.stderrTail.slice(-4).join(' | ');
             this.trace(`req#${reqId} timeout errTail=${JSON.stringify(errText)}`);
             this.completePending({
               ok: false,
-              ms: Date.now() - this.pending.startedAt,
-              enginePath: this.pending.enginePath,
+              ms: Date.now() - cur.startedAt,
+              enginePath: cur.enginePath,
               error: errText ? `Rapfi 超时（${timeoutMs}ms）: ${errText}` : `Rapfi 超时（${timeoutMs}ms）`,
             });
           }
-          // timeout means current search might still be alive; restart process for clean next request.
-          this.disposeProcess();
+          // 软超时不杀进程，保留 Hash 缓存
+          // 设置硬超时：如果引擎长时间无响应则杀掉进程
+          const savedSeq = this.seq;
+          setTimeout(() => {
+            // 仅当没有新请求启动时才杀进程（避免影响后续请求）
+            if (this.proc && !this.proc.killed && this.seq === savedSeq) {
+              this.trace(`req#${reqId} hard timeout, disposing process`);
+              this.disposeProcess();
+            }
+          }, timeoutMs + 3000);
         }, timeoutMs + 1400 + startupExtra),
       };
       this.pending = req;
-
-      const cmds = buildRapfiBoardCommands(payload.board, payload.mySide, timeoutMs, this.inited);
       this.inited = true;
       try {
         this.proc!.stdin.write(cmds.join('\n') + '\n');
-        this.trace(`req#${reqId} write-ok timeoutMs=${timeoutMs} startupExtra=${startupExtra}`);
+        this.trace(
+          `req#${reqId} write-ok timeoutMs=${timeoutMs} startupExtra=${startupExtra} mode=${cmdMode} reason=${cmdReason}`,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'stdin write failed';
         this.trace(`req#${reqId} write-fail err=${JSON.stringify(msg)}`);
@@ -448,11 +651,22 @@ class RapfiEngineService {
     this.queue = task.then(() => undefined, () => undefined);
     return task
       .then((resp) => {
+        if (resp.ok && this.rememberEngineBoard && payload.mode !== 'ponder') {
+          const engineBoard = boardAfterRapfiMove(payload.board, payload.mySide, resp);
+          this.lastEngineBoard = engineBoard;
+          this.lastMySide = engineBoard ? payload.mySide : null;
+        } else if (!resp.ok && this.rememberEngineBoard && payload.mode !== 'ponder') {
+          // 失败后下次强制整盘重建，避免增量状态漂移。
+          this.lastEngineBoard = null;
+          this.lastMySide = null;
+        }
         this.trace(`req#${reqId} settle ok=${resp.ok ? 1 : 0} totalMs=${Date.now() - queuedAt}`);
         return resp;
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
+        this.lastEngineBoard = null;
+        this.lastMySide = null;
         this.trace(`req#${reqId} settle-exception err=${JSON.stringify(msg)}`);
         throw err;
       })
@@ -463,10 +677,409 @@ class RapfiEngineService {
   }
 }
 
-const rapfiService = new RapfiEngineService();
+const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, true, true);
+const rapfiPonderService = new RapfiEngineService('ponder', RAPFI_PONDER_HASH_MB, false, false);
 
 async function analyzeGomokuByRapfi(payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> {
-  return rapfiService.analyze(payload);
+  return payload.mode === 'ponder' ? rapfiPonderService.analyze(payload) : rapfiService.analyze(payload);
+}
+
+const GO_COLUMNS = 'ABCDEFGHJKLMNOPQRST';
+
+function resolveKataGoPaths():
+  | { ok: true; exe: string; model: string; config: string }
+  | { ok: false; error: string } {
+  if (resolvedKataGoPathsCache) return resolvedKataGoPathsCache;
+  const appDir = path.dirname(app.getPath('exe'));
+  const resourcesDir = process.resourcesPath || path.join(appDir, 'resources');
+  const projectDir = path.resolve(__dirname, '../../..');
+  const baseDirs = [
+    path.join(resourcesDir, 'engines', 'katago'),
+    path.join(resourcesDir, 'katago'),
+    path.join(appDir, 'engines', 'katago'),
+    path.join(appDir, 'KataGo'),
+    path.join(projectDir, 'engines', 'katago'),
+    path.join(projectDir, 'katago'),
+    path.join(projectDir, 'third_party', 'katago'),
+  ];
+  const exeNames = ['katago.exe', 'katago-opencl.exe', 'katago-cpu.exe', 'katago-cuda.exe', 'katago'];
+  const envExe = process.env.KATAGO_PATH || '';
+  const nestedBaseDirs = baseDirs.flatMap((dir) => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith('_'))
+        .map((d) => path.join(dir, d.name));
+    } catch {
+      return [];
+    }
+  });
+  const exeCandidates = [
+    envExe,
+    ...baseDirs.flatMap((dir) => exeNames.map((n) => path.join(dir, n))),
+    ...nestedBaseDirs.flatMap((dir) => exeNames.map((n) => path.join(dir, n))),
+  ].filter(Boolean);
+  const exe = exeCandidates.find(rapfiExeExists);
+  if (!exe) {
+    resolvedKataGoPathsCache = {
+      ok: false,
+      error: '未找到 KataGo 可执行文件。请放到 engines/katago/katago.exe，或设置 KATAGO_PATH。',
+    };
+    return resolvedKataGoPathsCache;
+  }
+
+  const exeDir = path.dirname(exe);
+  const searchDirs = Array.from(new Set([
+    exeDir,
+    path.dirname(exeDir),
+    ...baseDirs,
+    ...baseDirs.map((dir) => path.join(dir, 'katago-v1.16.5-opencl-windows-x64')),
+  ]));
+  const envModel = process.env.KATAGO_MODEL || '';
+  const model = envModel && rapfiExeExists(envModel)
+    ? envModel
+    : searchDirs.flatMap((dir) => {
+        try {
+          return fs.readdirSync(dir).map((n) => path.join(dir, n));
+        } catch {
+          return [];
+        }
+      })
+      .filter((p) => !p.toLowerCase().includes(`${path.sep}_download${path.sep}`))
+      .sort((a, b) => {
+        try {
+          return fs.statSync(b).size - fs.statSync(a).size;
+        } catch {
+          return 0;
+        }
+      })
+      .find((p) => /\.(bin|txt|onnx)(\.gz)?$/i.test(p) && rapfiExeExists(p));
+  if (!model) {
+    resolvedKataGoPathsCache = {
+      ok: false,
+      error: '未找到 KataGo 模型文件。请放到 engines/katago/，或设置 KATAGO_MODEL。',
+    };
+    return resolvedKataGoPathsCache;
+  }
+
+  const configNames = [
+    'analysis_example.cfg',
+    'analysis.cfg',
+    'gtp.cfg',
+    'default_gtp.cfg',
+    'gtp_example.cfg',
+    path.join('configs', 'analysis.cfg'),
+    path.join('configs', 'gtp.cfg'),
+    path.join('configs', 'gtp_example.cfg'),
+  ];
+  const envConfig = process.env.KATAGO_CONFIG || '';
+  const config = envConfig && rapfiExeExists(envConfig)
+    ? envConfig
+    : searchDirs.flatMap((dir) => configNames.map((n) => path.join(dir, n))).find(rapfiExeExists);
+  if (!config) {
+    resolvedKataGoPathsCache = {
+      ok: false,
+      error: '未找到 KataGo 配置文件 analysis.cfg/gtp.cfg。请放到 engines/katago/，或设置 KATAGO_CONFIG。',
+    };
+    return resolvedKataGoPathsCache;
+  }
+
+  resolvedKataGoPathsCache = { ok: true, exe, model, config };
+  return resolvedKataGoPathsCache;
+}
+
+function validateGoBoard19(board: number[][]): boolean {
+  if (!Array.isArray(board) || board.length !== 19) return false;
+  for (const row of board) {
+    if (!Array.isArray(row) || row.length !== 19) return false;
+    for (const v of row) {
+      if (v !== 0 && v !== 1 && v !== 2) return false;
+    }
+  }
+  return true;
+}
+
+function goUiToGtp(row: number, col: number): string {
+  return `${GO_COLUMNS[col - 1]}${20 - row}`;
+}
+
+function goGtpToUi(loc: string): { row: number; col: number } | null {
+  const t = String(loc || '').trim().toUpperCase();
+  if (!t || t === 'PASS') return null;
+  const m = t.match(/^([A-HJ-T])(\d{1,2})$/);
+  if (!m) return null;
+  const col = GO_COLUMNS.indexOf(m[1]) + 1;
+  const rank = Number(m[2]);
+  const row = 20 - rank;
+  if (col < 1 || col > 19 || row < 1 || row > 19) return null;
+  return { row, col };
+}
+
+function sanitizeKataGoTimeout(timeoutMs?: number): number {
+  if (!Number.isFinite(timeoutMs)) return KATAGO_DEFAULT_TIMEOUT_MS;
+  return Math.max(1500, Math.min(60000, Math.floor(timeoutMs!)));
+}
+
+function sanitizeKataGoVisits(maxVisits?: number): number {
+  if (!Number.isFinite(maxVisits)) return KATAGO_DEFAULT_MAX_VISITS;
+  return Math.max(8, Math.min(2000, Math.floor(maxVisits!)));
+}
+
+type KataGoPendingRequest = {
+  id: string;
+  resolve: (resp: GoKataGoAnalyzeResponse) => void;
+  startedAt: number;
+  timeoutMs: number;
+  enginePath: string;
+  modelPath: string;
+  configPath: string;
+  timer: NodeJS.Timeout;
+};
+
+class KataGoAnalysisService {
+  private proc: ChildProcessWithoutNullStreams | null = null;
+  private procKey = '';
+  private stdoutBuf = '';
+  private stderrTail: string[] = [];
+  private pending: KataGoPendingRequest | null = null;
+  private queue: Promise<void> = Promise.resolve();
+  private seq = 0;
+
+  private disposeProcess(): void {
+    if (this.proc && !this.proc.killed) {
+      try {
+        this.proc.kill();
+      } catch {
+        // ignore
+      }
+    }
+    this.proc = null;
+    this.procKey = '';
+    this.stdoutBuf = '';
+    this.stderrTail = [];
+  }
+
+  disposeAll(): void {
+    if (this.pending) {
+      this.completePending({
+        ok: false,
+        ms: Date.now() - this.pending.startedAt,
+        enginePath: this.pending.enginePath,
+        modelPath: this.pending.modelPath,
+        configPath: this.pending.configPath,
+        error: 'KataGo 服务已关闭',
+      });
+    }
+    this.disposeProcess();
+  }
+
+  private keepStderr(chunk: string): void {
+    for (const line of chunk.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      this.stderrTail.push(line.trim());
+    }
+    if (this.stderrTail.length > 32) this.stderrTail = this.stderrTail.slice(-32);
+  }
+
+  private completePending(resp: GoKataGoAnalyzeResponse): void {
+    if (!this.pending) return;
+    const p = this.pending;
+    this.pending = null;
+    clearTimeout(p.timer);
+    p.resolve(resp);
+  }
+
+  private parseResponse(obj: any, pending: KataGoPendingRequest): GoKataGoAnalyzeResponse | null {
+    if (!obj || obj.id !== pending.id || !Array.isArray(obj.moveInfos)) return null;
+    if (obj.isDuringSearch) return null;
+    const suggestions: GoKataGoSuggestion[] = [];
+    for (const info of obj.moveInfos.slice(0, 5)) {
+      const move = goGtpToUi(info.move);
+      if (!move) continue;
+      suggestions.push({
+        ...move,
+        winrate: typeof info.winrate === 'number' ? info.winrate : undefined,
+        scoreLead: typeof info.scoreLead === 'number' ? info.scoreLead : undefined,
+        visits: typeof info.visits === 'number' ? info.visits : undefined,
+        order: suggestions.length + 1,
+      });
+    }
+    return {
+      ok: suggestions.length > 0,
+      suggestions,
+      ms: Date.now() - pending.startedAt,
+      enginePath: pending.enginePath,
+      modelPath: pending.modelPath,
+      configPath: pending.configPath,
+      error: suggestions.length > 0 ? undefined : 'KataGo 未返回可用落点。',
+    };
+  }
+
+  private handleStdout(chunk: string): void {
+    this.stdoutBuf += chunk;
+    const lines = this.stdoutBuf.split(/\r?\n/);
+    this.stdoutBuf = lines.pop() || '';
+    for (const line of lines) {
+      if (!this.pending || !line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        const resp = this.parseResponse(obj, this.pending);
+        if (resp) {
+          this.completePending(resp);
+          return;
+        }
+      } catch {
+        // KataGo may print non-JSON startup lines; stderr tail keeps useful errors.
+      }
+    }
+  }
+
+  private ensureProcess(paths: { exe: string; model: string; config: string }): { ok: true } | { ok: false; error: string } {
+    const key = `${paths.exe}|${paths.model}|${paths.config}`;
+    if (this.proc && !this.proc.killed && this.procKey === key) return { ok: true };
+    this.disposeProcess();
+    try {
+      this.proc = spawn(paths.exe, ['analysis', '-model', paths.model, '-config', paths.config], {
+        cwd: path.dirname(paths.exe),
+        stdio: 'pipe',
+        windowsHide: true,
+      });
+      this.procKey = key;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'spawn failed';
+      return { ok: false, error: `KataGo 启动失败：${msg}` };
+    }
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stderr.setEncoding('utf8');
+    this.proc.stdout.on('data', (c: string) => this.handleStdout(c));
+    this.proc.stderr.on('data', (c: string) => this.keepStderr(c));
+    this.proc.on('error', (err) => {
+      if (this.pending) {
+        this.completePending({
+          ok: false,
+          ms: Date.now() - this.pending.startedAt,
+          enginePath: this.pending.enginePath,
+          modelPath: this.pending.modelPath,
+          configPath: this.pending.configPath,
+          error: `KataGo 运行错误：${err.message}`,
+        });
+      }
+      this.disposeProcess();
+    });
+    this.proc.on('close', () => {
+      if (this.pending) {
+        const tail = this.stderrTail.slice(-5).join(' | ');
+        this.completePending({
+          ok: false,
+          ms: Date.now() - this.pending.startedAt,
+          enginePath: this.pending.enginePath,
+          modelPath: this.pending.modelPath,
+          configPath: this.pending.configPath,
+          error: tail || 'KataGo 进程已退出。',
+        });
+      }
+      this.disposeProcess();
+    });
+    return { ok: true };
+  }
+
+  private async runAnalyze(payload: GoKataGoAnalyzeRequest, reqId: number): Promise<GoKataGoAnalyzeResponse> {
+    const startedAt = Date.now();
+    const paths = resolveKataGoPaths();
+    if (!paths.ok) return { ok: false, ms: Date.now() - startedAt, error: paths.error };
+    if (!validateGoBoard19(payload.board)) {
+      return { ok: false, ms: Date.now() - startedAt, error: '围棋棋盘数据非法（要求19x19且元素为0/1/2）。' };
+    }
+    if (payload.mySide !== 1 && payload.mySide !== 2) {
+      return { ok: false, ms: Date.now() - startedAt, error: '执子参数非法。' };
+    }
+    const ensured = this.ensureProcess(paths);
+    if (!ensured.ok) {
+      return {
+        ok: false,
+        ms: Date.now() - startedAt,
+        enginePath: paths.exe,
+        modelPath: paths.model,
+        configPath: paths.config,
+        error: ensured.error,
+      };
+    }
+
+    const timeoutMs = sanitizeKataGoTimeout(payload.timeoutMs);
+    const id = `go-${Date.now()}-${reqId}`;
+    const initialStones: Array<[string, string]> = [];
+    for (let r = 0; r < 19; r++) {
+      for (let c = 0; c < 19; c++) {
+        const v = payload.board[r][c];
+        if (v === 0) continue;
+        initialStones.push([v === 1 ? 'B' : 'W', goUiToGtp(r + 1, c + 1)]);
+      }
+    }
+    const turn = payload.mySide === 1 ? 'B' : 'W';
+    const query = {
+      id,
+      rules: 'chinese',
+      komi: Number.isFinite(payload.komi) ? payload.komi : 6.5,
+      boardXSize: 19,
+      boardYSize: 19,
+      initialStones,
+      moves: [],
+      analyzeTurns: [turn],
+      maxVisits: sanitizeKataGoVisits(payload.maxVisits),
+      includeOwnership: false,
+    };
+
+    return new Promise<GoKataGoAnalyzeResponse>((resolve) => {
+      const pending: KataGoPendingRequest = {
+        id,
+        resolve,
+        startedAt,
+        timeoutMs,
+        enginePath: paths.exe,
+        modelPath: paths.model,
+        configPath: paths.config,
+        timer: setTimeout(() => {
+          if (!this.pending) return;
+          const tail = this.stderrTail.slice(-5).join(' | ');
+          this.completePending({
+            ok: false,
+            ms: Date.now() - startedAt,
+            enginePath: paths.exe,
+            modelPath: paths.model,
+            configPath: paths.config,
+            error: tail ? `KataGo 分析超时：${tail}` : `KataGo 分析超时（${timeoutMs}ms）`,
+          });
+        }, timeoutMs + 1000),
+      };
+      this.pending = pending;
+      try {
+        this.proc!.stdin.write(JSON.stringify(query) + '\n');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'stdin write failed';
+        this.completePending({
+          ok: false,
+          ms: Date.now() - startedAt,
+          enginePath: paths.exe,
+          modelPath: paths.model,
+          configPath: paths.config,
+          error: `KataGo 发送命令失败：${msg}`,
+        });
+        this.disposeProcess();
+      }
+    });
+  }
+
+  analyze(payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> {
+    const reqId = ++this.seq;
+    const task = this.queue.then(() => this.runAnalyze(payload, reqId));
+    this.queue = task.then(() => undefined, () => undefined);
+    return task;
+  }
+}
+
+const kataGoService = new KataGoAnalysisService();
+
+async function analyzeGoByKataGo(payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> {
+  return kataGoService.analyze(payload);
 }
 
 function attemptReconnect(): void {
@@ -928,6 +1541,11 @@ function setupIPC(): void {
   ipcMain.handle(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, async (_event, payload: GomokuRapfiAnalyzeRequest) => {
     return analyzeGomokuByRapfi(payload);
   });
+
+  // Go: KataGo external engine analysis
+  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_ANALYZE, async (_event, payload: GoKataGoAnalyzeRequest) => {
+    return analyzeGoByKataGo(payload);
+  });
 }
 
 app.whenReady().then(() => {
@@ -953,6 +1571,8 @@ app.on('second-instance', () => {
 app.on('window-all-closed', () => {
   sshManager.disconnect();
   rapfiService.disposeAll();
+  rapfiPonderService.disposeAll();
+  kataGoService.disposeAll();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -960,5 +1580,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   rapfiService.disposeAll();
+  rapfiPonderService.disposeAll();
+  kataGoService.disposeAll();
 });
 
