@@ -9,6 +9,11 @@ from games import (
     HoldemGame,
     ZhaJinHuaGame,
     NiuTouWangGame,
+    MahjongGame,
+    create_game,
+    resolve_game_name,
+    _mj_is_win,
+    _mj_normalize_tile,
     _SgsPlayer,
 )
 
@@ -382,6 +387,74 @@ class TestNiuTouWangCardEqualRowEnd(unittest.TestCase):
         self.assertFalse(paused)
         # Card should be placed in the row with end <= card
         self.assertIn(10, game.rows[0])
+
+
+class TestMahjongBasics(unittest.TestCase):
+    def test_alias_and_create_game(self):
+        self.assertEqual(resolve_game_name("麻将"), "mahjong")
+        g = create_game("mahjong", object(), "A")
+        self.assertIsInstance(g, MahjongGame)
+
+    def test_standard_win_shape(self):
+        hand = [
+            "m1", "m1", "m1",
+            "m2", "m2", "m2",
+            "m3", "m3", "m3",
+            "p4", "p5", "p6",
+            "z1", "z1",
+        ]
+        self.assertTrue(_mj_is_win(hand))
+
+    def test_chinese_tile_parse(self):
+        self.assertEqual(_mj_normalize_tile("二万"), "m2")
+        self.assertEqual(_mj_normalize_tile("九筒"), "p9")
+        self.assertEqual(_mj_normalize_tile("五条"), "s5")
+        self.assertEqual(_mj_normalize_tile("东风"), "z1")
+        self.assertEqual(_mj_normalize_tile("红中"), "z5")
+
+    def test_claim_pass_then_next_player_draw(self):
+        c1, c2, c3, c4 = object(), object(), object(), object()
+        g = MahjongGame(c1, "A")
+        g.try_join(c2, "B")
+        g.try_join(c3, "C")
+        g.try_join(c4, "D")
+        g.state = "playing"
+        g.turn_idx = 0
+        g.wall = ["m9", "m8", "m7"]
+        g.hands = {
+            "A": ["m1"] * 14,
+            "B": ["p1"] * 13,
+            "C": ["p2"] * 13,
+            "D": ["p3"] * 13,
+        }
+        g.melds = {"A": [], "B": [], "C": [], "D": []}
+        _e, _b, _d = g.try_move(c1, "discard m1")
+        self.assertTrue(g.claim_phase)
+        g.try_move(c2, "pass")
+        g.try_move(c3, "pass")
+        _e2, b2, _d2 = g.try_move(c4, "pass")
+        self.assertFalse(g.claim_phase)
+        self.assertTrue(any("摸牌" in line for line in b2))
+
+    def test_peng_and_discard(self):
+        c1, c2, c3, c4 = object(), object(), object(), object()
+        g = MahjongGame(c1, "A")
+        g.players = [(c1, "A"), (c2, "B"), (c3, "C"), (c4, "D")]
+        g.state = "playing"
+        g.turn_idx = 1
+        g.wall = ["s9", "s8"]
+        g.hands = {
+            "A": ["m1"] * 13,
+            "B": ["m3"] + ["p2"] * 13,
+            "C": ["m3", "m3"] + ["p4"] * 11,
+            "D": ["s1"] * 13,
+        }
+        g.melds = {"A": [], "B": [], "C": [], "D": []}
+        g.try_move(c2, "discard 三万")
+        _e, b, _d = g.try_move(c3, "peng")
+        self.assertTrue(any("碰了 m3" in line for line in b))
+        self.assertEqual(g.turn_idx, 2)
+        self.assertEqual(len(g.melds["C"]), 1)
 
 
 if __name__ == "__main__":

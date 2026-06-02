@@ -8699,6 +8699,519 @@ class NiuTouWangGame:
         return ([], [f"{name} 离开了牛头王对局"], False)
 
 
+def _mj_tile_sort_key(tile: str) -> tuple[int, int]:
+    suit = tile[0]
+    rank = int(tile[1:])
+    suit_order = {"m": 0, "p": 1, "s": 2, "z": 3}
+    return (suit_order.get(suit, 9), rank)
+
+
+def _mj_normalize_tile(raw: str) -> Optional[str]:
+    t = raw.strip().lower()
+    if not t:
+        return None
+    if len(t) == 2 and t[0] in ("m", "p", "s", "z") and t[1].isdigit():
+        suit = t[0]
+        rank = int(t[1])
+        if suit == "z":
+            return f"{suit}{rank}" if 1 <= rank <= 7 else None
+        return f"{suit}{rank}" if 1 <= rank <= 9 else None
+    cn = raw.strip().replace(" ", "")
+    cn = cn.replace("筒子", "筒").replace("条子", "条")
+    digit_map = {
+        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+        "六": 6, "七": 7, "八": 8, "九": 9,
+        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    }
+    if len(cn) == 2 and cn[0] in digit_map:
+        d = digit_map[cn[0]]
+        suit_ch = cn[1]
+        if suit_ch in ("万", "萬"):
+            return f"m{d}"
+        if suit_ch in ("筒", "饼", "餅"):
+            return f"p{d}"
+        if suit_ch in ("条", "條", "索"):
+            return f"s{d}"
+    honor_map = {
+        "东": "z1", "东风": "z1",
+        "南": "z2", "南风": "z2",
+        "西": "z3", "西风": "z3",
+        "北": "z4", "北风": "z4",
+        "中": "z5", "红中": "z5",
+        "发": "z6", "发财": "z6",
+        "白": "z7", "白板": "z7",
+    }
+    return honor_map.get(cn)
+
+
+def _mj_can_form_sets(counts: dict[str, int]) -> bool:
+    while True:
+        active = [t for t, c in counts.items() if c > 0]
+        if not active:
+            return True
+        tile = min(active, key=_mj_tile_sort_key)
+        c = counts[tile]
+        if c >= 3:
+            counts[tile] -= 3
+            if _mj_can_form_sets(counts):
+                counts[tile] += 3
+                return True
+            counts[tile] += 3
+        suit = tile[0]
+        rank = int(tile[1:])
+        if suit in ("m", "p", "s"):
+            t2 = f"{suit}{rank+1}"
+            t3 = f"{suit}{rank+2}"
+            if rank <= 7 and counts.get(t2, 0) > 0 and counts.get(t3, 0) > 0:
+                counts[tile] -= 1
+                counts[t2] -= 1
+                counts[t3] -= 1
+                if _mj_can_form_sets(counts):
+                    counts[tile] += 1
+                    counts[t2] += 1
+                    counts[t3] += 1
+                    return True
+                counts[tile] += 1
+                counts[t2] += 1
+                counts[t3] += 1
+        return False
+
+
+def _mj_is_win(hand: list[str]) -> bool:
+    if len(hand) != 14:
+        return False
+    counts: dict[str, int] = {}
+    for t in hand:
+        counts[t] = counts.get(t, 0) + 1
+        if counts[t] > 4:
+            return False
+    for pair_tile, c in list(counts.items()):
+        if c < 2:
+            continue
+        counts[pair_tile] -= 2
+        if _mj_can_form_sets(counts):
+            counts[pair_tile] += 2
+            return True
+        counts[pair_tile] += 2
+    return False
+
+
+def _mj_is_seven_pairs(hand: list[str]) -> bool:
+    if len(hand) != 14:
+        return False
+    counts: dict[str, int] = {}
+    for t in hand:
+        counts[t] = counts.get(t, 0) + 1
+        if counts[t] > 4:
+            return False
+    return len(counts) == 7 and all(v in (2, 4) for v in counts.values())
+
+
+def _mj_is_win_with_melds(hand: list[str], meld_count: int) -> bool:
+    need = 14 - meld_count * 3
+    if len(hand) != need:
+        return False
+    if need == 14:
+        return _mj_is_win(hand) or _mj_is_seven_pairs(hand)
+    if need < 2 or (need - 2) % 3 != 0:
+        return False
+    counts: dict[str, int] = {}
+    for t in hand:
+        counts[t] = counts.get(t, 0) + 1
+        if counts[t] > 4:
+            return False
+    for pair_tile, c in list(counts.items()):
+        if c < 2:
+            continue
+        counts[pair_tile] -= 2
+        if _mj_can_form_sets(counts):
+            counts[pair_tile] += 2
+            return True
+        counts[pair_tile] += 2
+    return False
+
+
+class MahjongGame:
+    name = "mahjong"
+    first_seat_desc = "东家（房主）"
+    join_blurb = "凑齐 4 人后房主 /game move start 开始；轮到你时用 /game move discard <牌> 出牌。"
+
+    def __init__(self, host_conn, host_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.state = "waiting"
+        self.rng = random.Random()
+        self.hands: dict[str, list[str]] = {}
+        self.wall: list[str] = []
+        self.discards: list[str] = []
+        self.turn_idx = 0
+        self.winner: Optional[str] = None
+        self.melds: dict[str, list[tuple[str, list[str]]]] = {}
+        self.last_discard: Optional[tuple[str, str]] = None
+        self.claim_phase = False
+        self.claim_passed: set[str] = set()
+
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+
+    def _current_name(self) -> Optional[str]:
+        if not self.players:
+            return None
+        return self.players[self.turn_idx % len(self.players)][1]
+
+    def _build_wall(self) -> list[str]:
+        wall: list[str] = []
+        for suit in ("m", "p", "s"):
+            for rank in range(1, 10):
+                wall.extend([f"{suit}{rank}"] * 4)
+        for rank in range(1, 8):
+            wall.extend([f"z{rank}"] * 4)
+        self.rng.shuffle(wall)
+        return wall
+
+    def _draw_one(self, name: str) -> Optional[str]:
+        if not self.wall:
+            self.state = "ended"
+            return None
+        tile = self.wall.pop()
+        self.hands[name].append(tile)
+        self.hands[name].sort(key=_mj_tile_sort_key)
+        return tile
+
+    def _start(self) -> list[str]:
+        if len(self.players) != 4:
+            return ["麻将需要 4 人开局。"]
+        self.wall = self._build_wall()
+        self.hands = {}
+        self.melds = {}
+        self.discards = []
+        self.winner = None
+        self.last_discard = None
+        self.claim_phase = False
+        self.claim_passed = set()
+        for i, (_c, n) in enumerate(self.players):
+            need = 14 if i == 0 else 13
+            self.hands[n] = []
+            self.melds[n] = []
+            for _ in range(need):
+                tile = self.wall.pop()
+                self.hands[n].append(tile)
+            self.hands[n].sort(key=_mj_tile_sort_key)
+        self.turn_idx = 0
+        self.state = "playing"
+        cur = self._current_name()
+        return [
+            "麻将开始：支持吃/碰/杠/胡；轮到你可 /game move discard <牌> 或 hu。",
+            f"当前：{cur} 出牌。",
+        ]
+
+    def _seat_distance(self, from_name: str, to_name: str) -> int:
+        names = [n for _c, n in self.players]
+        i = names.index(from_name)
+        j = names.index(to_name)
+        return (j - i) % len(names)
+
+    def _next_turn_draw(self) -> list[str]:
+        cur = self._current_name()
+        if cur is None:
+            return []
+        tile = self._draw_one(cur)
+        if self.state == "ended":
+            return ["牌墙摸完，荒牌流局。"]
+        return [f"{cur} 摸牌（{tile}），请出牌。"]
+
+    def _can_peng(self, name: str, tile: str) -> bool:
+        return self.hands.get(name, []).count(tile) >= 2
+
+    def _can_ming_gang(self, name: str, tile: str) -> bool:
+        return self.hands.get(name, []).count(tile) >= 3
+
+    def _can_an_gang(self, name: str, tile: str) -> bool:
+        return self.hands.get(name, []).count(tile) >= 4
+
+    def _can_bu_gang(self, name: str, tile: str) -> bool:
+        if self.hands.get(name, []).count(tile) < 1:
+            return False
+        for mtype, mts in self.melds.get(name, []):
+            if mtype == "peng" and mts[0] == tile:
+                return True
+        return False
+
+    def _can_chi(self, name: str, tile: str) -> bool:
+        if tile[0] not in ("m", "p", "s"):
+            return False
+        if self.last_discard is None:
+            return False
+        from_name, _t = self.last_discard
+        if self._seat_distance(from_name, name) != 1:
+            return False
+        hand = self.hands.get(name, [])
+        r = int(tile[1])
+        for a, b in ((r - 2, r - 1), (r - 1, r + 1), (r + 1, r + 2)):
+            if 1 <= a <= 9 and 1 <= b <= 9:
+                ta = f"{tile[0]}{a}"
+                tb = f"{tile[0]}{b}"
+                if ta in hand and tb in hand:
+                    return True
+        return False
+
+    def _consume_chi(self, name: str, tile: str, ta: str, tb: str) -> None:
+        self.hands[name].remove(ta)
+        self.hands[name].remove(tb)
+        self.melds[name].append(("chi", sorted([tile, ta, tb], key=_mj_tile_sort_key)))
+
+    def _consume_peng(self, name: str, tile: str) -> None:
+        self.hands[name].remove(tile)
+        self.hands[name].remove(tile)
+        self.melds[name].append(("peng", [tile, tile, tile]))
+
+    def _consume_ming_gang(self, name: str, tile: str) -> None:
+        for _ in range(3):
+            self.hands[name].remove(tile)
+        self.melds[name].append(("gang_ming", [tile, tile, tile, tile]))
+
+    def _consume_an_gang(self, name: str, tile: str) -> None:
+        for _ in range(4):
+            self.hands[name].remove(tile)
+        self.melds[name].append(("gang_an", [tile, tile, tile, tile]))
+
+    def _consume_bu_gang(self, name: str, tile: str) -> bool:
+        for idx, (mtype, mts) in enumerate(self.melds[name]):
+            if mtype == "peng" and mts[0] == tile:
+                self.melds[name][idx] = ("gang_bu", [tile, tile, tile, tile])
+                self.hands[name].remove(tile)
+                return True
+        return False
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting":
+            return (["对局已开始，无法加入。"], [], False)
+        if any(n == name for _c, n in self.players):
+            return (["该昵称已被占用。"], [], False)
+        if len(self.players) >= 4:
+            return (["麻将满员（4 人）。"], [], False)
+        self.players.append((conn, name))
+        return ([], [f"{name} 加入了麻将（{len(self.players)}/4）"], False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        name = self._name_of(conn)
+        if name is None:
+            return (["你不在本局中。"], [], False)
+        parts = raw.strip().split()
+        if not parts:
+            return (["用法：/game move start | discard <牌> | chi <x> <y> | peng | gang [牌] | hu"], [], False)
+        cmd = parts[0].lower()
+        if cmd == "start":
+            if conn is not self.players[0][0]:
+                return (["只有房主可以开始。"], [], False)
+            if self.state == "playing":
+                return (["对局已经开始。"], [], False)
+            return ([], self._start(), False)
+        if self.state == "waiting":
+            return (["对局尚未开始。"], [], False)
+        if self.state == "ended":
+            return (["对局已结束，请房主重新 /game new mahjong 开新局。"], [], False)
+        cur = self._current_name()
+        hand = self.hands.get(name, [])
+        meld_count = len(self.melds.get(name, []))
+
+        if self.claim_phase:
+            if self.last_discard is None:
+                self.claim_phase = False
+                return (["内部状态错误，请继续。"], [], False)
+            from_name, disc = self.last_discard
+            if name == from_name:
+                return (["出牌者不能在本轮响应自己的弃牌。"], [], False)
+            if cmd == "pass":
+                self.claim_passed.add(name)
+                eligible = {n for _c, n in self.players if n != from_name}
+                if self.claim_passed >= eligible:
+                    self.claim_phase = False
+                    self.last_discard = None
+                    out = ["无人吃碰杠胡。"]
+                    out.extend(self._next_turn_draw())
+                    return ([], out, self.state == "ended")
+                return ([], [f"{name} 选择过"], False)
+            if cmd == "hu":
+                test = sorted(hand + [disc], key=_mj_tile_sort_key)
+                if _mj_is_win_with_melds(test, meld_count):
+                    self.state = "ended"
+                    self.winner = name
+                    return ([], [f"{name} 点炮胡 {from_name} 的 {disc}，本局结束。"], True)
+                return (["你当前不能点炮胡。"], [], False)
+            if cmd == "peng":
+                if not self._can_peng(name, disc):
+                    return (["你当前不能碰这张牌。"], [], False)
+                self._consume_peng(name, disc)
+                self.turn_idx = [n for _c, n in self.players].index(name)
+                self.claim_phase = False
+                self.last_discard = None
+                self.claim_passed = set()
+                return ([], [f"{name} 碰了 {disc}，请出牌。"], False)
+            if cmd == "gang":
+                if not self._can_ming_gang(name, disc):
+                    return (["你当前不能明杠这张牌。"], [], False)
+                self._consume_ming_gang(name, disc)
+                self.turn_idx = [n for _c, n in self.players].index(name)
+                self.claim_phase = False
+                self.last_discard = None
+                self.claim_passed = set()
+                out = [f"{name} 明杠 {disc}"]
+                out.extend(self._next_turn_draw())
+                return ([], out, self.state == "ended")
+            if cmd == "chi":
+                if len(parts) < 3:
+                    return (["用法：/game move chi <牌1> <牌2>"], [], False)
+                if not self._can_chi(name, disc):
+                    return (["你当前不能吃这张牌。"], [], False)
+                t1 = _mj_normalize_tile(parts[1])
+                t2 = _mj_normalize_tile(parts[2])
+                if t1 is None or t2 is None:
+                    return (["吃牌参数格式错误。"], [], False)
+                seq = sorted([disc, t1, t2], key=_mj_tile_sort_key)
+                if seq[0][0] != seq[1][0] or seq[1][0] != seq[2][0]:
+                    return (["吃牌必须同花色顺子。"], [], False)
+                rs = [int(x[1]) for x in seq]
+                if rs[0] + 1 != rs[1] or rs[1] + 1 != rs[2]:
+                    return (["吃牌必须是连续三张。"], [], False)
+                if t1 not in hand or t2 not in hand:
+                    return (["你手里没有这两张吃牌。"], [], False)
+                self._consume_chi(name, disc, t1, t2)
+                self.turn_idx = [n for _c, n in self.players].index(name)
+                self.claim_phase = False
+                self.last_discard = None
+                self.claim_passed = set()
+                return ([], [f"{name} 吃了 {disc}，请出牌。"], False)
+            return (["当前是吃碰杠胡阶段，可用：chi/peng/gang/hu/pass"], [], False)
+
+        if cur != name:
+            return ([f"当前轮到 {cur}，请等待。"], [], False)
+
+        if cmd == "hu":
+            if _mj_is_win_with_melds(hand, meld_count):
+                self.state = "ended"
+                self.winner = name
+                return ([], [f"{name} 自摸胡牌！本局结束。"], True)
+            return (["当前牌型不能胡。"], [], False)
+
+        if cmd == "gang":
+            gang_tile = _mj_normalize_tile(parts[1]) if len(parts) > 1 else None
+            cand = gang_tile
+            if cand is None and len(parts) > 1:
+                return (["杠牌参数错误。"], [], False)
+            if cand and self._can_an_gang(name, cand):
+                self._consume_an_gang(name, cand)
+                out = [f"{name} 暗杠 {cand}"]
+                out.extend(self._next_turn_draw())
+                return ([], out, self.state == "ended")
+            if cand and self._can_bu_gang(name, cand):
+                if not self._consume_bu_gang(name, cand):
+                    return (["补杠失败，请重试。"], [], False)
+                out = [f"{name} 补杠 {cand}"]
+                out.extend(self._next_turn_draw())
+                return ([], out, self.state == "ended")
+            if cand is None:
+                for t in sorted(set(hand), key=_mj_tile_sort_key):
+                    if self._can_an_gang(name, t):
+                        self._consume_an_gang(name, t)
+                        out = [f"{name} 暗杠 {t}"]
+                        out.extend(self._next_turn_draw())
+                        return ([], out, self.state == "ended")
+                    if self._can_bu_gang(name, t):
+                        self._consume_bu_gang(name, t)
+                        out = [f"{name} 补杠 {t}"]
+                        out.extend(self._next_turn_draw())
+                        return ([], out, self.state == "ended")
+            return (["当前没有可执行的暗杠/补杠。"], [], False)
+
+        if cmd != "discard" or len(parts) < 2:
+            return (["用法：/game move discard <牌>（支持 二万/九筒/东风/红中 等）"], [], False)
+        tile = _mj_normalize_tile(parts[1])
+        if tile is None:
+            return (["牌面格式错误：可用 m1~m9/p1~p9/s1~s9/z1~z7，或中文牌名"], [], False)
+        if tile not in hand:
+            return ([f"你手里没有 {tile}"], [], False)
+        hand.remove(tile)
+        self.discards.append(tile)
+        self.last_discard = (name, tile)
+        self.claim_phase = True
+        self.claim_passed = set()
+        self.turn_idx = (self.turn_idx + 1) % len(self.players)
+        next_name = self._current_name()
+        return (
+            [],
+            [
+                f"{name} 打出 {tile}（可写中文如 二万/东风）",
+                f"其余玩家可吃碰杠胡：/game move chi|peng|gang|hu|pass；若无人操作，轮到 {next_name} 摸牌。",
+            ],
+            False,
+        )
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["当前没有进行中的麻将对局。"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} 认输，麻将对局结束。"], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if conn is not self.players[0][0]:
+            return (["只有房主可以终止对局。"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} 终止了麻将对局"], True)
+
+    def seats(self) -> list[str]:
+        lines = [f"麻将 状态：{_game_state_zh(self.state)}"]
+        seat_labels = ["东", "南", "西", "北"]
+        for i, (_c, n) in enumerate(self.players):
+            marker = " <- 当前" if self.state == "playing" and i == self.turn_idx else ""
+            lines.append(f"{seat_labels[i]}家：{n}{marker}")
+        lines.append(f"牌墙剩余：{len(self.wall)}")
+        if self.claim_phase and self.last_discard is not None:
+            lines.append(f"待响应弃牌：{self.last_discard[0]} -> {self.last_discard[1]}")
+        if self.discards:
+            lines.append(f"最近弃牌：{' '.join(self.discards[-8:])}")
+        return lines
+
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = self.seats()
+        me = self._name_of(conn) if conn is not None else None
+        if me and me in self.hands:
+            hand = " ".join(sorted(self.hands[me], key=_mj_tile_sort_key))
+            lines.append(f"你的手牌：{hand}")
+            meld_txt = []
+            for mtype, mts in self.melds.get(me, []):
+                label = {"chi": "吃", "peng": "碰", "gang_ming": "明杠", "gang_an": "暗杠", "gang_bu": "补杠"}.get(mtype, mtype)
+                meld_txt.append(f"{label}({''.join(mts)})")
+            if meld_txt:
+                lines.append(f"你的副露：{' '.join(meld_txt)}")
+            if self.state == "playing" and self.claim_phase:
+                lines.append("当前可用：/game move chi <牌1> <牌2> | peng | gang | hu | pass")
+            elif self.state == "playing" and self._current_name() == me:
+                lines.append("你可用：/game move discard <牌> | gang [牌] | hu")
+            else:
+                cur = self._current_name()
+                lines.append(f"当前轮到：{cur}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        idx = None
+        for i, (c, _n) in enumerate(self.players):
+            if c is conn:
+                idx = i
+                break
+        if idx is None:
+            return ([], [], False)
+        _c, pname = self.players.pop(idx)
+        self.hands.pop(pname, None)
+        if not self.players:
+            self.state = "ended"
+            return ([], [f"{name} 离开，麻将对局已结束"], True)
+        self.state = "ended"
+        return ([], [f"{name} 离开，人数不足，麻将对局结束"], True)
+
+
 def create_game(
     game_name: str,
     creator_conn,
@@ -8756,6 +9269,7 @@ GAMES = {
     HoldemGame.name: HoldemGame,
     ZhaJinHuaGame.name: ZhaJinHuaGame,
     NiuTouWangGame.name: NiuTouWangGame,
+    MahjongGame.name: MahjongGame,
 }
 GAME_ALIASES = {
     "cchess": XiangqiGame.name,
@@ -8779,6 +9293,10 @@ GAME_ALIASES = {
     "niutouwang": NiuTouWangGame.name,
     "ntw": NiuTouWangGame.name,
     "牛头王": NiuTouWangGame.name,
+    "mj": MahjongGame.name,
+    "majiang": MahjongGame.name,
+    "mahjong": MahjongGame.name,
+    "麻将": MahjongGame.name,
     "三国杀": SanguoshaGame.name,
 }
 
@@ -8833,4 +9351,8 @@ HELP_LINES = (
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
     "比牌 compare <昵称> | 弃牌 fold；比牌积分不足时按剩余积分全压支付。",
+    "[*] mahjong（麻将）4 人局：支持吃/碰/杠/点炮胡/自摸胡；"
+    "轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
+    "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",
+    "[*] 麻将支持中文出牌：二万、九筒、五条、东风、红中、发财、白板（也支持 m1/p9/s5/z3）。",
 )
