@@ -3734,7 +3734,7 @@ class SanguoshaGame:
     def _private_hand_view(self, who: int) -> list[str]:
         """当前玩家私信：手牌与装备（不必 /game show）。"""
         p = self.players[who]
-        labels = [card_label(c) for c in p.hand]
+        labels = [f"{i + 1}.{card_label(c)}" for i, c in enumerate(p.hand)]
         lines = [
             f"── 你的手牌（{len(p.hand)}张）──",
             "  " + ("、".join(labels) if labels else "（空）"),
@@ -4227,7 +4227,7 @@ class SanguoshaGame:
             role = f" 身份={p.role}"
         hand = f" 手牌={len(p.hand)}张"
         if viewer is not None and viewer == slot - 1 and not p.dead:
-            labels = [card_label(c) for c in p.hand]
+            labels = [f"{i + 1}.{card_label(c)}" for i, c in enumerate(p.hand)]
             hand = f" 手牌={'、'.join(labels) if labels else '（空）'}"
         gen = ""
         if p.general:
@@ -4673,10 +4673,20 @@ class SanguoshaGame:
         msgs.extend(self._auto_skip_play_phase(who))
         return msgs
 
-    def _end_turn_discard(self, actor: _SgsPlayer) -> list[str]:
+    def _end_turn_discard(
+        self, actor: _SgsPlayer, discard_indices: Optional[list[int]] = None
+    ) -> list[str]:
         msgs: list[str] = []
         dropped = 0
-        while len(actor.hand) > actor.hp:
+        need = max(0, len(actor.hand) - actor.hp)
+        if need > 0 and discard_indices:
+            picked = sorted(discard_indices, reverse=True)
+            for idx in picked:
+                if 0 <= idx < len(actor.hand):
+                    card = actor.hand.pop(idx)
+                    self._discard.append(card)
+                    dropped += 1
+        while dropped < need and len(actor.hand) > actor.hp:
             card = actor.hand.pop()
             self._discard.append(card)
             dropped += 1
@@ -4904,9 +4914,11 @@ class SanguoshaGame:
             bcast.append(f"房主 {host} 可 /game move 开始 开局")
         return (priv, bcast, False)
 
-    def _finish_turn(self, actor_idx: int) -> list[str]:
+    def _finish_turn(
+        self, actor_idx: int, discard_indices: Optional[list[int]] = None
+    ) -> list[str]:
         actor = self.players[actor_idx]
-        msgs = self._end_turn_discard(actor)
+        msgs = self._end_turn_discard(actor, discard_indices=discard_indices)
         nxt, draw_msgs = self._next_alive_turn()
         msgs.extend(draw_msgs)
         return msgs
@@ -6259,15 +6271,41 @@ class SanguoshaGame:
                 [
                     "用法：/game move 杀|火杀|雷杀 <目标> [牌名] | 桃 [目标] | "
                     "决斗 <目标> | 拆 <目标> [区域] | 顺手 <目标> [区域] | "
-                    "装备 <牌名> | 无中生有 | 南蛮 | 万箭 | 酒 | 过",
+                    "装备 <牌名> | 无中生有 | 南蛮 | 万箭 | 酒 | 过 [手牌序号...]",
                 ],
                 [],
                 False,
             )
 
         if verb == "pass":
+            overflow = max(0, len(player.hand) - player.hp)
+            discard_indices: Optional[list[int]] = None
+            if args:
+                if overflow <= 0:
+                    return (["当前无需弃牌，直接 /game move 过 即可。"], [], False)
+                picks: list[int] = []
+                for tok in args:
+                    if not tok.isdigit():
+                        return (["弃牌序号须为数字。"], [], False)
+                    idx = int(tok)
+                    if idx < 1 or idx > len(player.hand):
+                        return (
+                            [f"弃牌序号须在 1～{len(player.hand)} 之间。"],
+                            [],
+                            False,
+                        )
+                    picks.append(idx - 1)
+                if len(set(picks)) != len(picks):
+                    return (["弃牌序号不能重复。"], [], False)
+                if len(picks) != overflow:
+                    return (
+                        [f"你需要弃 {overflow} 张，请给出 {overflow} 个手牌序号。"],
+                        [],
+                        False,
+                    )
+                discard_indices = picks
             bcast = [f"{player.name} 结束出牌阶段"]
-            bcast.extend(self._finish_turn(who))
+            bcast.extend(self._finish_turn(who, discard_indices=discard_indices))
             return ([], bcast, False)
 
         if verb == "jiu":
