@@ -234,6 +234,34 @@ class TestZhaJinHuaCompareTie(unittest.TestCase):
         self.assertTrue(any("B" in line and "胜出" in line for line in bcast))
 
 
+class TestZhaJinHuaCompareAllIn(unittest.TestCase):
+    """Compare should allow all-in payment when attacker stack is insufficient."""
+
+    def test_compare_allows_insufficient_stack_all_in(self):
+        c1 = object()
+        c2 = object()
+        game = ZhaJinHuaGame(c1, "yxt")
+        game.try_join(c2, "zouyu")
+        game.try_move(c1, "start")
+
+        game.looked.add("yxt")
+        game.looked.add("zouyu")
+        game.turn_idx = 0
+        game.current_bet = 601
+        game.pot = 1708
+        game.stacks["yxt"] = 498
+        game.stacks["zouyu"] = 398
+        game.cards["yxt"] = ["Q♣", "7♣", "8♣"]
+        game.cards["zouyu"] = ["2♦", "3♦", "4♦"]
+
+        err, bcast, _done = game.try_move(c1, "compare zouyu")
+        self.assertEqual(err, [])
+        self.assertTrue(any("全压比牌" in line for line in bcast))
+        self.assertEqual(game.stacks["yxt"], 0)
+        self.assertEqual(game.pot, 1708 + 498)
+        self.assertTrue(any("比牌" in line and "胜出" in line for line in bcast))
+
+
 class TestWerewolfWitchMutualExclusion(unittest.TestCase):
     """Witch should not be able to both save and poison in the same night."""
 

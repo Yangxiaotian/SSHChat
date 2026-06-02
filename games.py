@@ -7735,11 +7735,17 @@ class ZhaJinHuaGame:
             if not target: return (["目标不存在。"], [], False)
             if target == actor: return (["不能和自己比牌。"], [], False)
             if target not in self._alive(): return (["目标玩家当前不可比牌。"], [], False)
-            if self.stacks[actor] < cost: return ([f"积分不足，需要 {cost}"], [], False)
-            self.stacks[actor] -= cost; self.pot += cost
+            pay = min(self.stacks[actor], cost)
+            if pay <= 0:
+                return (["你已无可用积分，无法继续操作。"], [], False)
+            self.stacks[actor] -= pay; self.pot += pay
             me = _zjh_eval3(self.cards[actor]); tg = _zjh_eval3(self.cards[target])
             loser = target if me > tg else actor; winner = actor if me > tg else target
-            self.folded.add(loser); bcast.append(f"{actor} 与 {target} 比牌：{winner} 胜出，{loser} 弃牌"); self._advance()
+            self.folded.add(loser)
+            if pay < cost:
+                bcast.append(f"{actor} 积分不足（需 {cost}，实付 {pay}）发起全压比牌")
+            bcast.append(f"{actor} 与 {target} 比牌：{winner} 胜出，{loser} 弃牌")
+            self._advance()
         else: return (["可用操作：开始、看牌、跟注、加注、弃牌、比牌。"], [], False)
         done = self._finish_if_one()
         if done: return ([], bcast + done, True)
@@ -8826,5 +8832,5 @@ HELP_LINES = (
     "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
-    "比牌 compare <昵称> | 弃牌 fold。",
+    "比牌 compare <昵称> | 弃牌 fold；比牌积分不足时按剩余积分全压支付。",
 )

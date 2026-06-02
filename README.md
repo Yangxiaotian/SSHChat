@@ -31,6 +31,7 @@
   - `/game move raise <amount>`
   - `/game move compare <name>`
   - `/game move fold`
+  - `compare` when points are insufficient: auto all-in with remaining points
 - Added aliases:
   - `zjh`
   - `zhajinhua`
