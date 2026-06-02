@@ -8834,10 +8834,17 @@ def _mj_is_win_with_melds(hand: list[str], meld_count: int) -> bool:
 class MahjongGame:
     name = "mahjong"
     first_seat_desc = "东家（房主）"
-    join_blurb = "凑齐 4 人后房主 /game move start 开始；轮到你时用 /game move discard <牌> 出牌。"
+    join_blurb = (
+        "凑齐 4 人（不足时 start 自动补 AI）后房主 /game move start 开始；"
+        "轮到你时用 /game move discard <牌> 出牌。"
+    )
 
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
+        self.bot_names: set[str] = set()
+        self.bot_conns: dict[str, object] = {}
+        self.bot_level = "hard"
+        self._bot_running = False
         self.state = "waiting"
         self.rng = random.Random()
         self.hands: dict[str, list[str]] = {}
@@ -8849,6 +8856,107 @@ class MahjongGame:
         self.last_discard: Optional[tuple[str, str]] = None
         self.claim_phase = False
         self.claim_passed: set[str] = set()
+
+    def _is_bot(self, name: str) -> bool:
+        return name in self.bot_names
+
+    def _auto_add_bots(self) -> list[str]:
+        add_n = 4 - len(self.players)
+        if add_n <= 0:
+            return []
+        added: list[str] = []
+        for _ in range(add_n):
+            idx = len(self.bot_names) + 1
+            bn = f"R{idx}"
+            while any(n == bn for _c, n in self.players):
+                idx += 1
+                bn = f"R{idx}"
+            bc = object()
+            self.players.append((bc, bn))
+            self.bot_names.add(bn)
+            self.bot_conns[bn] = bc
+            added.append(bn)
+        return added
+
+    def _bot_pick_discard(self, name: str) -> str:
+        hand = list(self.hands.get(name, []))
+        if not hand:
+            return "m1"
+        if self.bot_level == "easy":
+            return self.rng.choice(hand)
+        counts: dict[str, int] = {}
+        for t in hand:
+            counts[t] = counts.get(t, 0) + 1
+        lonely = [t for t in hand if t[0] == "z" or counts[t] == 1]
+        if lonely:
+            return self.rng.choice(lonely)
+        return self.rng.choice(hand)
+
+    def _bot_claim_action(self, name: str, disc: str) -> str:
+        hand = self.hands.get(name, [])
+        meld_count = len(self.melds.get(name, []))
+        test = sorted(hand + [disc], key=_mj_tile_sort_key)
+        if _mj_is_win_with_melds(test, meld_count):
+            if self.bot_level == "easy" and self.rng.random() < 0.25:
+                return "pass"
+            return "hu"
+        if self.bot_level != "easy" and self._can_peng(name, disc):
+            chance = 0.55 if self.bot_level == "pro" else 0.30
+            if self.rng.random() < chance:
+                return "peng"
+        return "pass"
+
+    def _bot_turn_action(self, name: str) -> str:
+        hand = self.hands.get(name, [])
+        meld_count = len(self.melds.get(name, []))
+        if _mj_is_win_with_melds(hand, meld_count):
+            return "hu"
+        return f"discard {self._bot_pick_discard(name)}"
+
+    def _run_bots(self) -> list[str]:
+        if self._bot_running:
+            return []
+        out: list[str] = []
+        guard = 0
+        self._bot_running = True
+        try:
+            while self.state == "playing" and guard < 80:
+                guard += 1
+                if self.claim_phase and self.last_discard is not None:
+                    from_name, disc = self.last_discard
+                    pending = [
+                        n for _c, n in self.players
+                        if n != from_name and n not in self.claim_passed and n in self.bot_names
+                    ]
+                    if not pending:
+                        break
+                    bn = pending[0]
+                    bc = self.bot_conns.get(bn)
+                    if bc is None:
+                        break
+                    _e, b, _d = self.try_move(bc, self._bot_claim_action(bn, disc))
+                    out.extend(b)
+                    continue
+                cur = self._current_name()
+                if cur is None or cur not in self.bot_names or self.claim_phase:
+                    break
+                bc = self.bot_conns.get(cur)
+                if bc is None:
+                    break
+                _e, b, _d = self.try_move(bc, self._bot_turn_action(cur))
+                out.extend(b)
+                if self.state == "ended":
+                    break
+        finally:
+            self._bot_running = False
+        return out
+
+    def _finish_move(self, priv: list[str], bcast: list[str], ended: bool) -> GameResult:
+        if not ended and self.state == "playing" and not self._bot_running:
+            extra = self._run_bots()
+            if extra:
+                bcast = list(bcast) + extra
+        return (priv, bcast, ended)
 
     def _name_of(self, conn) -> Optional[str]:
         for c, n in self.players:
@@ -8881,6 +8989,7 @@ class MahjongGame:
         return tile
 
     def _start(self) -> list[str]:
+        added = self._auto_add_bots()
         if len(self.players) != 4:
             return ["麻将需要 4 人开局。"]
         self.wall = self._build_wall()
@@ -8902,10 +9011,16 @@ class MahjongGame:
         self.turn_idx = 0
         self.state = "playing"
         cur = self._current_name()
-        return [
+        out = [
             "麻将开始：支持吃/碰/杠/胡；轮到你可 /game move discard <牌> 或 hu。",
             f"当前：{cur} 出牌。",
         ]
+        if added:
+            out.append(f"已自动补 AI：{', '.join(added)}（难度={_bot_level_zh(self.bot_level)}）")
+        elif self.bot_names:
+            out.append(f"AI 玩家：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
+        out.extend(self._run_bots())
+        return out
 
     def _seat_distance(self, from_name: str, to_name: str) -> int:
         names = [n for _c, n in self.players]
@@ -9003,6 +9118,23 @@ class MahjongGame:
         if not parts:
             return (["用法：/game move start | discard <牌> | chi <x> <y> | peng | gang [牌] | hu"], [], False)
         cmd = parts[0].lower()
+        cmd = {
+            "开始": "start",
+            "出牌": "discard",
+            "过": "pass",
+            "胡": "hu",
+            "碰": "peng",
+            "杠": "gang",
+            "吃": "chi",
+            "机器人": "bot",
+        }.get(parts[0], cmd)
+        if cmd == "bot":
+            if conn is not self.players[0][0]:
+                return (["只有房主可以设置机器人难度。"], [], False)
+            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
+                return (["用法：/game move bot <easy|hard|pro>"], [], False)
+            self.bot_level = parts[1].lower()
+            return ([], [f"机器人难度已设为：{_bot_level_zh(self.bot_level)}"], False)
         if cmd == "start":
             if conn is not self.players[0][0]:
                 return (["只有房主可以开始。"], [], False)
@@ -9032,8 +9164,8 @@ class MahjongGame:
                     self.last_discard = None
                     out = ["无人吃碰杠胡。"]
                     out.extend(self._next_turn_draw())
-                    return ([], out, self.state == "ended")
-                return ([], [f"{name} 选择过"], False)
+                    return self._finish_move([], out, self.state == "ended")
+                return self._finish_move([], [f"{name} 选择过"], False)
             if cmd == "hu":
                 test = sorted(hand + [disc], key=_mj_tile_sort_key)
                 if _mj_is_win_with_melds(test, meld_count):
@@ -9049,7 +9181,7 @@ class MahjongGame:
                 self.claim_phase = False
                 self.last_discard = None
                 self.claim_passed = set()
-                return ([], [f"{name} 碰了 {disc}，请出牌。"], False)
+                return self._finish_move([], [f"{name} 碰了 {disc}，请出牌。"], False)
             if cmd == "gang":
                 if not self._can_ming_gang(name, disc):
                     return (["你当前不能明杠这张牌。"], [], False)
@@ -9060,7 +9192,7 @@ class MahjongGame:
                 self.claim_passed = set()
                 out = [f"{name} 明杠 {disc}"]
                 out.extend(self._next_turn_draw())
-                return ([], out, self.state == "ended")
+                return self._finish_move([], out, self.state == "ended")
             if cmd == "chi":
                 if len(parts) < 3:
                     return (["用法：/game move chi <牌1> <牌2>"], [], False)
@@ -9083,7 +9215,7 @@ class MahjongGame:
                 self.claim_phase = False
                 self.last_discard = None
                 self.claim_passed = set()
-                return ([], [f"{name} 吃了 {disc}，请出牌。"], False)
+                return self._finish_move([], [f"{name} 吃了 {disc}，请出牌。"], False)
             return (["当前是吃碰杠胡阶段，可用：chi/peng/gang/hu/pass"], [], False)
 
         if cur != name:
@@ -9105,25 +9237,25 @@ class MahjongGame:
                 self._consume_an_gang(name, cand)
                 out = [f"{name} 暗杠 {cand}"]
                 out.extend(self._next_turn_draw())
-                return ([], out, self.state == "ended")
+                return self._finish_move([], out, self.state == "ended")
             if cand and self._can_bu_gang(name, cand):
                 if not self._consume_bu_gang(name, cand):
                     return (["补杠失败，请重试。"], [], False)
                 out = [f"{name} 补杠 {cand}"]
                 out.extend(self._next_turn_draw())
-                return ([], out, self.state == "ended")
+                return self._finish_move([], out, self.state == "ended")
             if cand is None:
                 for t in sorted(set(hand), key=_mj_tile_sort_key):
                     if self._can_an_gang(name, t):
                         self._consume_an_gang(name, t)
                         out = [f"{name} 暗杠 {t}"]
                         out.extend(self._next_turn_draw())
-                        return ([], out, self.state == "ended")
+                        return self._finish_move([], out, self.state == "ended")
                     if self._can_bu_gang(name, t):
                         self._consume_bu_gang(name, t)
                         out = [f"{name} 补杠 {t}"]
                         out.extend(self._next_turn_draw())
-                        return ([], out, self.state == "ended")
+                        return self._finish_move([], out, self.state == "ended")
             return (["当前没有可执行的暗杠/补杠。"], [], False)
 
         if cmd != "discard" or len(parts) < 2:
@@ -9140,7 +9272,7 @@ class MahjongGame:
         self.claim_passed = set()
         self.turn_idx = (self.turn_idx + 1) % len(self.players)
         next_name = self._current_name()
-        return (
+        return self._finish_move(
             [],
             [
                 f"{name} 打出 {tile}（可写中文如 二万/东风）",
@@ -9166,7 +9298,8 @@ class MahjongGame:
         seat_labels = ["东", "南", "西", "北"]
         for i, (_c, n) in enumerate(self.players):
             marker = " <- 当前" if self.state == "playing" and i == self.turn_idx else ""
-            lines.append(f"{seat_labels[i]}家：{n}{marker}")
+            bot_tag = " [AI]" if n in self.bot_names else ""
+            lines.append(f"{seat_labels[i]}家：{n}{bot_tag}{marker}")
         lines.append(f"牌墙剩余：{len(self.wall)}")
         if self.claim_phase and self.last_discard is not None:
             lines.append(f"待响应弃牌：{self.last_discard[0]} -> {self.last_discard[1]}")
@@ -9351,8 +9484,8 @@ HELP_LINES = (
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
     "比牌 compare <昵称> | 弃牌 fold；比牌积分不足时按剩余积分全压支付。",
-    "[*] mahjong（麻将）4 人局：支持吃/碰/杠/点炮胡/自摸胡；"
-    "轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
+    "[*] mahjong（麻将）4 人局：人数不足时 start 自动补 AI；房主可 bot <easy|hard|pro> 调难度。",
+    "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
     "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",
     "[*] 麻将支持中文出牌：二万、九筒、五条、东风、红中、发财、白板（也支持 m1/p9/s5/z3）。",
 )

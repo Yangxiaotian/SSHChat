@@ -436,6 +436,15 @@ class TestMahjongBasics(unittest.TestCase):
         self.assertFalse(g.claim_phase)
         self.assertTrue(any("摸牌" in line for line in b2))
 
+    def test_start_auto_fills_bots(self):
+        c1 = object()
+        g = MahjongGame(c1, "A")
+        _e, b, ended = g.try_move(c1, "start")
+        self.assertFalse(ended)
+        self.assertEqual(len(g.players), 4)
+        self.assertEqual(len(g.bot_names), 3)
+        self.assertTrue(any("自动补 AI" in line for line in b))
+
     def test_peng_and_discard(self):
         c1, c2, c3, c4 = object(), object(), object(), object()
         g = MahjongGame(c1, "A")
