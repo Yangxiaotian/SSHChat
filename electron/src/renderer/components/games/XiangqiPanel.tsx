@@ -113,7 +113,7 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
   const lastMoverSide = turnSide ? ((-turnSide) as Side) : null;
 
   // 只取“棋盘行”：每行应有 9 个格子 token（+车 / -马 / !炮 / · / *）
-  const boardRows: string[][] = [];
+  const boardRows: Array<{ row: number | null; tokens: string[] }> = [];
   const tokenRe = /(?:[+\-!][^\s]{1,2}|[·*])/g;
   for (const rawLine of boardText.split('\n')) {
     const line = rawLine.trim();
@@ -123,12 +123,20 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
     const rowTokens = tokens.slice(0, COLS);
     const allCellLike = rowTokens.every((t) => t === '·' || t === '*' || /^[+\-!]/.test(t));
     if (!allCellLike) continue;
-    boardRows.push(rowTokens);
+    const explicitRow = line.match(/^(\d{1,2})\s+/);
+    const parsedRow = explicitRow ? Number(explicitRow[1]) : null;
+    boardRows.push({
+      row: parsedRow && parsedRow >= 1 && parsedRow <= ROWS ? parsedRow : null,
+      tokens: rowTokens,
+    });
     if (boardRows.length >= ROWS) break;
   }
 
-  for (const rowTokens of boardRows) {
-    if (rowNum > ROWS) break;
+  for (const row of boardRows) {
+    const targetRow = row.row ?? rowNum;
+    rowNum = Math.max(rowNum + 1, targetRow + 1);
+    if (targetRow < 1 || targetRow > ROWS) continue;
+    const rowTokens = row.tokens;
     for (let c = 0; c < COLS; c += 1) {
       const cell = rowTokens[c];
       if (cell === '·' || cell === '*') continue;
@@ -146,12 +154,12 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
         if (RED_UNIQUE.has(symbol)) isRed = true;
         else if (BLACK_UNIQUE.has(symbol)) isRed = false;
         else if (lastMoverSide) isRed = lastMoverSide === RED;
-        else isRed = rowNum >= 6;
+        else isRed = targetRow >= 6;
       }
 
       const colNum = c + 1;
-              pieces.set(`${rowNum}-${colNum}`, {
-                row: rowNum,
+              pieces.set(`${targetRow}-${colNum}`, {
+                row: targetRow,
                 col: colNum,
                 symbol,
         isRed,
@@ -159,10 +167,9 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
 
       const pt = pieceTypeFromSymbol(symbol);
       if (pt) {
-        board[rowNum - 1][colNum - 1] = (isRed ? RED : BLACK) * pt;
+        board[targetRow - 1][colNum - 1] = (isRed ? RED : BLACK) * pt;
       }
     }
-    rowNum += 1;
   }
 
   let pieceCount = 0;
@@ -652,7 +659,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">中国象棋（真实棋盘，先点起点再点终点）</div>
+      <div className="game-interaction-title">中国象棋棋盘（真实棋盘，先点起点再点终点）</div>
       {turn.name && !myTurn && (
         <div className="game-workbench-hint">当前轮到：{turn.name}，你暂时不能走子。</div>
       )}
@@ -728,7 +735,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
             return (
               <button
                 key={key}
-                className={`xiangqi-piece ${selected ? 'selected' : ''} ${piece ? (piece.isRed ? 'red-piece' : 'black-piece') : 'empty-point'}`}
+                className={`xiangqi-cell xiangqi-piece ${selected ? 'selected' : ''} ${piece ? (piece.isRed ? 'red-piece' : 'black-piece') : 'empty-point'}`}
                 style={{ left: pad + cIx * cell, top: pad + rIx * cell }}
                 onClick={() => {
                   if (!canPlay) return;

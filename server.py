@@ -44,11 +44,16 @@ room_announcements: dict[str, str] = {}
 room_games: dict[str, object] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
+# lower nickname -> last known rooms/current room for reconnect resume
+disconnected_sessions: dict[str, dict[str, object]] = {}
 lock = threading.Lock()
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
+SESSION_RESUME_TTL_SECONDS = int(
+    os.environ.get("SSHCHAT_SESSION_RESUME_TTL_SECONDS", "86400")
+)
 
 # VT100: clear display + cursor home; trailing \n so line-oriented clients flush it.
 _CLEAR_SCREEN = "\x1b[2J\x1b[H\n"
@@ -283,14 +288,50 @@ def _enabled_games_for_room_locked(room: str) -> set[str]:
 
 
 def _drop_game_if_room_empty_locked(room: str) -> None:
-    """Caller holds lock; drop the game session when the room has no clients."""
-    if not rooms.get(room):
+    """Caller holds lock; drop ended/inactive games when the room has no clients."""
+    game = room_games.get(room)
+    game_active = game is not None and getattr(game, "state", "ended") != "ended"
+    if not rooms.get(room) and not game_active:
         room_games.pop(room, None)
+
+
+def _nick_key(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _remember_session_locked(name: str, joined_rooms: list[str], current_room: str) -> None:
+    """Keep enough account state for app restart reconnect resume."""
+    key = _nick_key(name)
+    if not key:
+        return
+    room_set = {r for r in joined_rooms if r}
+    room_set.add(DEFAULT_ROOM)
+    active = current_room if current_room in room_set else DEFAULT_ROOM
+    disconnected_sessions[key] = {
+        "name": name,
+        "rooms": set(room_set),
+        "current_room": active,
+        "ts": time.time(),
+    }
+
+
+def _load_recent_session_locked(name: str) -> dict[str, object] | None:
+    key = _nick_key(name)
+    if not key:
+        return None
+    session = disconnected_sessions.get(key)
+    if not session:
+        return None
+    ts = float(session.get("ts") or 0)
+    if SESSION_RESUME_TTL_SECONDS > 0 and time.time() - ts > SESSION_RESUME_TTL_SECONDS:
+        disconnected_sessions.pop(key, None)
+        return None
+    return session
 
 
 def _same_name_peer_in_room_locked(room: str, name: str, exclude_conn=None):
     """Find another online connection in room that has the same nickname."""
-    key = (name or "").strip().lower()
+    key = _nick_key(name)
     if not key:
         return None
     for peer in list(rooms.get(room, ())):
@@ -302,6 +343,22 @@ def _same_name_peer_in_room_locked(room: str, name: str, exclude_conn=None):
         if info["name"].strip().lower() == key:
             return peer
     return None
+
+
+def _is_conn_seated_in_game(game, conn) -> bool:
+    is_seated = getattr(game, "is_seated", None)
+    if callable(is_seated):
+        try:
+            return bool(is_seated(conn))
+        except Exception:
+            return False
+    players = getattr(game, "players", None)
+    if isinstance(players, list):
+        return any(isinstance(item, tuple) and item and item[0] is conn for item in players)
+    for attr in ("white_conn", "black_conn", "red_conn"):
+        if getattr(game, attr, None) is conn:
+            return True
+    return False
 
 
 def _replace_conn_refs(value, old_conn, new_conn):
@@ -371,7 +428,7 @@ def _replace_conn_refs(value, old_conn, new_conn):
 
 def _game_seat_conn_by_name(game, nickname: str):
     """Best-effort: find seated connection by nickname in heterogeneous game classes."""
-    key = (nickname or "").strip().lower()
+    key = _nick_key(nickname)
     if not key:
         return None
 
@@ -1082,15 +1139,24 @@ def remove_client(conn) -> None:
             return
         name = info["name"]
         joined_rooms = list(info["rooms"])
+        current_room = info.get("current_room", DEFAULT_ROOM)
+        _remember_session_locked(name, joined_rooms, current_room)
         game_notices: list[tuple[str, list[str]]] = []
         for room in joined_rooms:
-            rooms[room].discard(conn)
             same_name_peer = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
-            if room_owners.get(room) is conn and same_name_peer is not None:
-                room_owners[room] = same_name_peer
-            else:
-                _reassign_room_owner_locked(room, conn)
             game = room_games.get(room)
+            preserve_disconnected_seat = (
+                same_name_peer is None
+                and game is not None
+                and getattr(game, "state", "ended") != "ended"
+                and _is_conn_seated_in_game(game, conn)
+            )
+            rooms[room].discard(conn)
+            if room_owners.get(room) is conn:
+                if same_name_peer is not None:
+                    room_owners[room] = same_name_peer
+                elif not preserve_disconnected_seat:
+                    _reassign_room_owner_locked(room, conn)
             if game is not None:
                 resumed = _resume_same_account_seat_locked(
                     room,
@@ -1104,6 +1170,13 @@ def remove_client(conn) -> None:
                         (
                             room,
                             [f"{name} 在另一终端续玩，当前对局席位已自动迁移。"],
+                        )
+                    )
+                elif preserve_disconnected_seat:
+                    game_notices.append(
+                        (
+                            room,
+                            [f"{name} 暂时离线，席位已保留；重新连接后可继续本局。"],
                         )
                     )
                 else:
@@ -1785,12 +1858,16 @@ def handle_client(conn, addr) -> None:
         first, buffer = buffer.split(b"\n", 1)
         name = _parse_handshake_line(first.decode("utf-8", errors="replace"))
 
+        restored_from_session = False
+        resumed_game_rooms: list[str] = []
+        active_game_lines: list[str] = []
         with lock:
             same_name_peers = [
                 c
                 for c, info in clients.items()
                 if info["name"].strip().lower() == name.strip().lower()
             ]
+            previous_session = _load_recent_session_locked(name)
             inherited_rooms: set[str] = set()
             active_room = DEFAULT_ROOM
             if same_name_peers:
@@ -1801,6 +1878,12 @@ def handle_client(conn, addr) -> None:
                     inherited_rooms.update(peer_info["rooms"])
                     if active_room == DEFAULT_ROOM:
                         active_room = peer_info["current_room"]
+            elif previous_session is not None:
+                inherited_rooms.update(previous_session.get("rooms") or set())
+                previous_active = previous_session.get("current_room")
+                if isinstance(previous_active, str) and previous_active:
+                    active_room = previous_active
+                restored_from_session = True
             inherited_rooms.add(DEFAULT_ROOM)
             if active_room not in inherited_rooms:
                 inherited_rooms.add(active_room)
@@ -1815,6 +1898,22 @@ def handle_client(conn, addr) -> None:
                 rooms[room].add(conn)
                 if was_empty:
                     room_owners[room] = conn
+            for room in inherited_rooms:
+                game = room_games.get(room)
+                if _resume_same_account_seat_locked(room, game, conn, name):
+                    resumed_game_rooms.append(room)
+            active_game = room_games.get(active_room)
+            if active_game is not None and getattr(active_game, "state", "ended") != "ended":
+                try:
+                    active_game_lines = active_game.show(conn)
+                except TypeError:
+                    active_game_lines = active_game.show()
+                if active_room in resumed_game_rooms:
+                    active_game_lines = ["已自动续玩接管旧终端席位。"] + active_game_lines
+            room_labels = [
+                f"*#{r}" if r == active_room else f"#{r}"
+                for r in sorted(inherited_rooms)
+            ]
 
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
@@ -1825,9 +1924,16 @@ def handle_client(conn, addr) -> None:
             f"[*] Active room #{active_room}. "
             f"/names /rooms /join /switch /msg /part /announce /game /news /clear /help\n",
         )
+        send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if same_name_peers:
             send_line(conn, "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n")
+        elif restored_from_session:
+            send_line(conn, "[*] 已恢复上次客户端会话，回到原房间；如有未结束对局可继续操作。\n")
+        if resumed_game_rooms:
+            send_line(conn, "[*] 已接管旧连接保留的游戏席位。\n")
         send_room_announcement_preview(conn, active_room)
+        if active_game_lines:
+            send_game_private(conn, active_room, active_game_lines)
 
         while True:
             if not buffer:

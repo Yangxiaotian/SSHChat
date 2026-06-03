@@ -98,6 +98,8 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
   const canTuneBot = isHost;
+  const amountNum = Number(raiseAmount.trim());
+  const hasValidRaise = Number.isFinite(amountNum) && amountNum > 0;
 
   const stateText = isPlaying ? '进行中' : isWaiting ? '等待开始' : isEnded ? '已结束' : (meta.state || '未知');
   const startReason = !isHost
@@ -145,12 +147,26 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
 
       <div className="game-chip-row">
         <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
-        <button className={`mini-btn ${canAct && !!raiseAmount.trim() ? 'ready' : ''}`} disabled={disabled || !canAct || !raiseAmount.trim()} onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}>加注</button>
+        <button
+          className={`mini-btn ${canAct && hasValidRaise ? 'ready' : ''}`}
+          disabled={disabled || !canAct || !hasValidRaise}
+          title={!hasValidRaise ? '请输入大于 0 的加注金额' : ''}
+          onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}
+        >
+          加注
+        </button>
       </div>
 
       <div className="game-chip-row">
         {candidates.map((u) => (
-          <button key={u} className={`mini-btn ${target === u ? 'active ready' : ''}`} onClick={() => setTarget(u)}>{u}</button>
+          <button
+            key={u}
+            className={`mini-btn ${target === u ? 'active ready' : ''}`}
+            disabled={disabled}
+            onClick={() => setTarget(u)}
+          >
+            {u}
+          </button>
         ))}
         <button className={`mini-btn ${canAct && !!target ? 'ready' : ''}`} disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>比牌</button>
       </div>

@@ -76,6 +76,15 @@ export default function App() {
       if (config) {
         useChatStore.getState().setConfig(config);
         useChatStore.getState().setNickname(config.user);
+        if (config.host && config.user) {
+          useChatStore.getState().setShowLogin(false);
+          window.api.connect(config, config.user).then((result) => {
+            if (!result.success) {
+              useChatStore.getState().setError(result.error || '自动重连失败');
+              useChatStore.getState().setShowLogin(true);
+            }
+          });
+        }
       }
     });
 

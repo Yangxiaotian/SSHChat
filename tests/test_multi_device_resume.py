@@ -1,5 +1,6 @@
 import unittest
 
+from games import GomokuGame
 import server
 
 
@@ -37,6 +38,7 @@ class MultiDeviceResumeTests(unittest.TestCase):
         server.room_announcements.clear()
         server.room_games.clear()
         server.room_enabled_games.clear()
+        server.disconnected_sessions.clear()
 
     def test_resume_helper_transfers_same_account_seat(self) -> None:
         room = "default"
@@ -73,6 +75,67 @@ class MultiDeviceResumeTests(unittest.TestCase):
         self.assertIs(game.players[0][0], new_conn)
         self.assertEqual(game.leave_calls, 0)
         self.assertIs(server.room_owners[room], new_conn)
+
+    def test_disconnect_without_peer_preserves_active_game_for_later_reconnect(self) -> None:
+        room = "default"
+        old_conn = DummyConn()
+        game = DummyGame(old_conn, "zouyu")
+
+        server.clients[old_conn] = {"name": "zouyu", "rooms": {room}, "current_room": room}
+        server.rooms[room].add(old_conn)
+        server.room_owners[room] = old_conn
+        server.room_games[room] = game
+
+        server.remove_client(old_conn)
+
+        self.assertNotIn(old_conn, server.clients)
+        self.assertIn(room, server.room_games)
+        self.assertEqual(game.leave_calls, 0)
+        self.assertIs(game.players[0][0], old_conn)
+        self.assertIn("zouyu", server.disconnected_sessions)
+
+        new_conn = DummyConn()
+        session = server._load_recent_session_locked("zouyu")
+        self.assertIsNotNone(session)
+        restored_rooms = set(session["rooms"])
+        server.clients[new_conn] = {
+            "name": "zouyu",
+            "rooms": restored_rooms,
+            "current_room": session["current_room"],
+        }
+        for restored_room in restored_rooms:
+            server.rooms[restored_room].add(new_conn)
+
+        moved = server._resume_same_account_seat_locked(room, game, new_conn, "zouyu")
+
+        self.assertTrue(moved)
+        self.assertIs(game.players[0][0], new_conn)
+
+    def test_reconnected_gomoku_player_can_continue_turn(self) -> None:
+        room = "default"
+        old_black = DummyConn()
+        white = DummyConn()
+        new_black = DummyConn()
+        game = GomokuGame(old_black, "zouyu")
+        err_join, _bcast_join, _ = game.try_join(white, "yxt")
+        self.assertEqual(err_join, [])
+
+        server.clients[old_black] = {"name": "zouyu", "rooms": {room}, "current_room": room}
+        server.clients[white] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room].update({old_black, white})
+        server.room_owners[room] = old_black
+        server.room_games[room] = game
+
+        server.remove_client(old_black)
+        server.clients[new_black] = {"name": "zouyu", "rooms": {room}, "current_room": room}
+        server.rooms[room].add(new_black)
+
+        moved = server._resume_same_account_seat_locked(room, game, new_black, "zouyu")
+        priv, _bcast, _done = game.try_move(new_black, "8 8")
+
+        self.assertTrue(moved)
+        self.assertEqual(priv, [])
+        self.assertEqual(game.grid[7][7], 1)
 
 
 if __name__ == "__main__":

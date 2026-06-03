@@ -1,4 +1,4 @@
-﻿import { spawn } from 'node:child_process';
+﻿import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -249,15 +249,26 @@ try {
   // 3) 中国象棋
   await openByLines([
     '中国象棋 对局',
-    'turn: zouyu',
+    '红：zouyu 黑：R1',
+    '轮到 红方 zouyu 走子',
+    '1 -车 -马 -象 -士 -将 -士 -象 -马 -车',
+    '2 · · · · · · · · ·',
+    '3 · -炮 · · · · · -炮 ·',
+    '4 -卒 · -卒 · -卒 · -卒 · -卒',
+    '5 · · · · · · · · ·',
+    '6 · · · · · · · · ·',
+    '7 +兵 · +兵 · +兵 · +兵 · +兵',
+    '8 · +炮 · · · · · +炮 ·',
+    '9 · · · · · · · · ·',
+    '10 +车 +马 +相 +仕 +帅 +仕 +相 +马 +车',
   ], '中国象棋棋盘');
   await page.evaluate(() => {
     // @ts-ignore
     window.__qa.clearSent();
   });
-  await page.locator('.xiangqi-cell[title="1,1"]').click();
-  await page.locator('.xiangqi-cell[title="1,2"]').click();
-  await assertSentIncludes('/game move 1 1 1 2');
+  await page.locator('.xiangqi-cell[title="10,1"]').click();
+  await page.locator('.xiangqi-cell[title="9,1"]').click();
+  await assertSentIncludes('/game move 10 1 9 1');
 
   // 4) 三国杀
   await openByLines([
@@ -358,5 +369,10 @@ try {
   if (browser) {
     await browser.close().catch(() => {});
   }
-  vite.kill('SIGTERM');
+  if (process.platform === 'win32' && vite.pid) {
+    spawnSync('taskkill', ['/pid', String(vite.pid), '/t', '/f'], { stdio: 'ignore' });
+  } else {
+    vite.kill('SIGTERM');
+  }
 }
+

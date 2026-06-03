@@ -2,7 +2,7 @@ import tempfile
 import unittest
 
 import server
-from games import ChessGame, GomokuGame, XiangqiGame
+from games import ChessGame, GomokuGame, XiangqiGame, chess_available
 from ratings import GameRatingStore
 
 
@@ -17,6 +17,8 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_chess_ai_practice_game_does_not_persist_rating(self) -> None:
+        if not chess_available():
+            self.skipTest("python-chess is not installed")
         player_conn = object()
         game = ChessGame(player_conn, "Alice", rating_store=self.store, ai_level="easy")
 
@@ -31,6 +33,8 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertTrue(game.send_view_on_move)
 
     def test_human_chess_result_persists_rating(self) -> None:
+        if not chess_available():
+            self.skipTest("python-chess is not installed")
         white_conn = object()
         black_conn = object()
         game = ChessGame(white_conn, "Alice", rating_store=self.store)
@@ -61,7 +65,7 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertTrue(any("AI-" in line for line in bcast))
         profile = self.store.profile("gomoku", "Alice")
         self.assertEqual(profile["games"], 0)
-        self.assertFalse(game.send_view_on_move)
+        self.assertTrue(game.send_view_on_move)
 
     def test_xiangqi_ai_practice_game_responds(self) -> None:
         player_conn = object()

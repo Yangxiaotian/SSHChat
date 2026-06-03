@@ -84,6 +84,8 @@ function isLikelyGameLine(line: string): boolean {
   if (/^\s*[1-8]\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])(?:\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])){7}\s*$/.test(line)) return true;
   if (/^\s+[a-h](?:\s+[a-h]){7}\s*$/.test(line.trim().toLowerCase())) return true;
   if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
+  if (/^(红|黑|白)[:：]\s*\S+/.test(line.trim())) return true;
+  if (/^红[:：]\s*\S+\s+黑[:：]\s*\S+/.test(line.trim())) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
   if (/^上一步[:：]/.test(line.trim())) return true;
@@ -450,7 +452,8 @@ export default function GameWorkbench() {
     }
 
     const noGameIdx = findLastIndex(allLines, (l) => /本房没有进行中的对局/.test(l));
-    const scopedLines = noGameIdx >= 0 ? allLines.slice(noGameIdx + 1) : allLines;
+    const scopedLinesRaw = noGameIdx >= 0 ? allLines.slice(noGameIdx + 1) : allLines;
+    const scopedLines = scopedLinesRaw.slice(-360);
     const gameLines = scopedLines.filter(isLikelyGameLine);
     const parsed = extractBoardBlock(gameLines);
     if (parsed.game === 'none' && parsed.board) {
@@ -573,7 +576,7 @@ export default function GameWorkbench() {
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
           {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c))} />}
           {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c))} onCmd={(cmd) => sendMove(cmd)} />}
-          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
+          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}

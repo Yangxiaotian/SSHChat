@@ -263,6 +263,36 @@ function isMyTurnByBoard(board: number[][], mySide: 1 | -1): boolean {
   return black === white + 1;
 }
 
+function hasFiveOnBoard(board: number[][], side: 1 | -1): boolean {
+  const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]] as const;
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] !== side) continue;
+      for (const [dr, dc] of dirs) {
+        const prevR = r - dr;
+        const prevC = c - dc;
+        if (prevR >= 0 && prevR < 15 && prevC >= 0 && prevC < 15 && board[prevR][prevC] === side) continue;
+        let len = 0;
+        let rr = r;
+        let cc = c;
+        while (rr >= 0 && rr < 15 && cc >= 0 && cc < 15 && board[rr][cc] === side) {
+          len += 1;
+          rr += dr;
+          cc += dc;
+        }
+        if (side === 1 ? len === 5 : len >= 5) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function gomokuWinnerOnBoard(board: number[][]): 1 | -1 | null {
+  if (hasFiveOnBoard(board, 1)) return 1;
+  if (hasFiveOnBoard(board, -1)) return -1;
+  return null;
+}
+
 function buildRapfiInitLines(timeoutMs: number): string[] {
   const lines: string[] = [];
   lines.push(`INFO timeout_turn ${timeoutMs}`);
@@ -527,6 +557,16 @@ class RapfiEngineService {
       this.trace(`req#${reqId} fail bad-side side=${payload.mySide}`);
       return { ok: false, ms: Date.now() - t0, enginePath, error: '执子参数非法。' };
     }
+    const winner = gomokuWinnerOnBoard(payload.board);
+    if (winner !== null) {
+      this.trace(`req#${reqId} fail terminal-board winner=${winner}`);
+      return {
+        ok: false,
+        ms: Date.now() - t0,
+        enginePath,
+        error: `${winner === 1 ? '黑方' : '白方'}已连五，当前局面应已结束，不再请求 Rapfi。`,
+      };
+    }
 
     const ensured = this.ensureProcess(enginePath);
     if (!ensured.ok) {
@@ -651,7 +691,7 @@ class RapfiEngineService {
     this.queue = task.then(() => undefined, () => undefined);
     return task
       .then((resp) => {
-        if (resp.ok && this.rememberEngineBoard && payload.mode !== 'ponder') {
+        if (resp.ok && this.rememberEngineBoard && payload.mode !== 'ponder' && isMyTurnByBoard(payload.board, payload.mySide)) {
           const engineBoard = boardAfterRapfiMove(payload.board, payload.mySide, resp);
           this.lastEngineBoard = engineBoard;
           this.lastMySide = engineBoard ? payload.mySide : null;
@@ -698,6 +738,7 @@ function resolveKataGoPaths():
     path.join(resourcesDir, 'katago'),
     path.join(appDir, 'engines', 'katago'),
     path.join(appDir, 'KataGo'),
+    path.join(projectDir, 'electron', 'engines', 'katago'),
     path.join(projectDir, 'engines', 'katago'),
     path.join(projectDir, 'katago'),
     path.join(projectDir, 'third_party', 'katago'),
@@ -816,7 +857,7 @@ function goGtpToUi(loc: string): { row: number; col: number } | null {
 
 function sanitizeKataGoTimeout(timeoutMs?: number): number {
   if (!Number.isFinite(timeoutMs)) return KATAGO_DEFAULT_TIMEOUT_MS;
-  return Math.max(1500, Math.min(60000, Math.floor(timeoutMs!)));
+  return Math.max(1500, Math.min(180000, Math.floor(timeoutMs!)));
 }
 
 function sanitizeKataGoVisits(maxVisits?: number): number {
@@ -889,8 +930,31 @@ class KataGoAnalysisService {
   }
 
   private parseResponse(obj: any, pending: KataGoPendingRequest): GoKataGoAnalyzeResponse | null {
-    if (!obj || obj.id !== pending.id || !Array.isArray(obj.moveInfos)) return null;
+    if (!obj || obj.id !== pending.id) return null;
+    if (typeof obj.error === 'string') {
+      const field = typeof obj.field === 'string' ? `${obj.field}: ` : '';
+      return {
+        ok: false,
+        suggestions: [],
+        ms: Date.now() - pending.startedAt,
+        enginePath: pending.enginePath,
+        modelPath: pending.modelPath,
+        configPath: pending.configPath,
+        error: `${field}${obj.error}`,
+      };
+    }
     if (obj.isDuringSearch) return null;
+    if (!Array.isArray(obj.moveInfos)) {
+      return {
+        ok: false,
+        suggestions: [],
+        ms: Date.now() - pending.startedAt,
+        enginePath: pending.enginePath,
+        modelPath: pending.modelPath,
+        configPath: pending.configPath,
+        error: 'KataGo 响应缺少 moveInfos。',
+      };
+    }
     const suggestions: GoKataGoSuggestion[] = [];
     for (const info of obj.moveInfos.slice(0, 5)) {
       const move = goGtpToUi(info.move);
@@ -1023,7 +1087,7 @@ class KataGoAnalysisService {
       boardYSize: 19,
       initialStones,
       moves: [],
-      analyzeTurns: [turn],
+      initialPlayer: turn,
       maxVisits: sanitizeKataGoVisits(payload.maxVisits),
       includeOwnership: false,
     };
@@ -1048,6 +1112,7 @@ class KataGoAnalysisService {
             configPath: paths.config,
             error: tail ? `KataGo 分析超时：${tail}` : `KataGo 分析超时（${timeoutMs}ms）`,
           });
+          this.disposeProcess();
         }, timeoutMs + 1000),
       };
       this.pending = pending;
