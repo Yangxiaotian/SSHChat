@@ -8845,6 +8845,7 @@ class MahjongGame:
         self.bot_conns: dict[str, object] = {}
         self.bot_level = "hard"
         self._bot_running = False
+        self._bot_resume_needed = False
         self.state = "waiting"
         self.rng = random.Random()
         self.hands: dict[str, list[str]] = {}
@@ -8913,6 +8914,25 @@ class MahjongGame:
             return "hu"
         return f"discard {self._bot_pick_discard(name)}"
 
+    def _claim_eligible_names(self) -> set[str]:
+        if not self.claim_phase or self.last_discard is None:
+            return set()
+        from_name, _disc = self.last_discard
+        return {n for _c, n in self.players if n != from_name}
+
+    def _resolve_claim_if_all_passed(self) -> list[str]:
+        """End claim window when everyone eligible has passed (e.g. bots done, humans already passed)."""
+        if not self.claim_phase or self.last_discard is None:
+            return []
+        eligible = self._claim_eligible_names()
+        if not eligible or self.claim_passed < eligible:
+            return []
+        self.claim_phase = False
+        self.last_discard = None
+        out = ["无人吃碰杠胡。"]
+        out.extend(self._next_turn_draw())
+        return out
+
     def _run_bots(self) -> list[str]:
         if self._bot_running:
             return []
@@ -8929,6 +8949,10 @@ class MahjongGame:
                         if n != from_name and n not in self.claim_passed and n in self.bot_names
                     ]
                     if not pending:
+                        resolved = self._resolve_claim_if_all_passed()
+                        if resolved:
+                            out.extend(resolved)
+                            continue
                         break
                     bn = pending[0]
                     bc = self.bot_conns.get(bn)
@@ -8949,13 +8973,25 @@ class MahjongGame:
                     break
         finally:
             self._bot_running = False
+            if self._bot_resume_needed and self.state == "playing":
+                self._bot_resume_needed = False
+                out.extend(self._run_bots())
         return out
 
+    def nudge_bots(self) -> list[str]:
+        """Advance AI after reconnect or idle claim window (safe to call from /game show)."""
+        if self.state != "playing":
+            return []
+        return self._run_bots()
+
     def _finish_move(self, priv: list[str], bcast: list[str], ended: bool) -> GameResult:
-        if not ended and self.state == "playing" and not self._bot_running:
-            extra = self._run_bots()
-            if extra:
-                bcast = list(bcast) + extra
+        if not ended and self.state == "playing":
+            if self._bot_running:
+                self._bot_resume_needed = True
+            else:
+                extra = self._run_bots()
+                if extra:
+                    bcast = list(bcast) + extra
         return (priv, bcast, ended)
 
     def _name_of(self, conn) -> Optional[str]:
@@ -9296,13 +9332,22 @@ class MahjongGame:
     def seats(self) -> list[str]:
         lines = [f"麻将 状态：{_game_state_zh(self.state)}"]
         seat_labels = ["东", "南", "西", "北"]
+        eligible = self._claim_eligible_names() if self.claim_phase else set()
         for i, (_c, n) in enumerate(self.players):
-            marker = " <- 当前" if self.state == "playing" and i == self.turn_idx else ""
+            marker = ""
+            if self.state == "playing":
+                if self.claim_phase and n in eligible and n not in self.claim_passed:
+                    marker = " <- 待响应"
+                elif not self.claim_phase and i == self.turn_idx:
+                    marker = " <- 当前"
             bot_tag = " [AI]" if n in self.bot_names else ""
             lines.append(f"{seat_labels[i]}家：{n}{bot_tag}{marker}")
         lines.append(f"牌墙剩余：{len(self.wall)}")
         if self.claim_phase and self.last_discard is not None:
             lines.append(f"待响应弃牌：{self.last_discard[0]} -> {self.last_discard[1]}")
+            waiting = sorted(eligible - self.claim_passed)
+            if waiting:
+                lines.append(f"尚未响应：{', '.join(waiting)}")
         if self.discards:
             lines.append(f"最近弃牌：{' '.join(self.discards[-8:])}")
         return lines
@@ -9319,13 +9364,25 @@ class MahjongGame:
                 meld_txt.append(f"{label}({''.join(mts)})")
             if meld_txt:
                 lines.append(f"你的副露：{' '.join(meld_txt)}")
-            if self.state == "playing" and self.claim_phase:
-                lines.append("当前可用：/game move chi <牌1> <牌2> | peng | gang | hu | pass")
+            if self.state == "playing" and self.claim_phase and self.last_discard is not None:
+                from_name, disc = self.last_discard
+                if me == from_name:
+                    lines.append(f"你已打出 {disc}，等待他人吃碰杠胡或过。")
+                elif me not in self.claim_passed:
+                    lines.append("当前可用：/game move chi <牌1> <牌2> | peng | gang | hu | pass")
+                else:
+                    waiting = sorted(self._claim_eligible_names() - self.claim_passed)
+                    lines.append(
+                        f"你已选择过，等待：{', '.join(waiting) if waiting else '结算'}"
+                    )
             elif self.state == "playing" and self._current_name() == me:
                 lines.append("你可用：/game move discard <牌> | gang [牌] | hu")
             else:
                 cur = self._current_name()
-                lines.append(f"当前轮到：{cur}")
+                if self.claim_phase:
+                    lines.append("当前为响应弃牌阶段，请等待他人或过牌。")
+                else:
+                    lines.append(f"当前轮到：{cur}")
         return lines
 
     def on_player_leave(self, conn, name: str) -> GameResult:

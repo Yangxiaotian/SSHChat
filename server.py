@@ -1669,6 +1669,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub == "show":
+        bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
             if game is None:
@@ -1686,7 +1687,12 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                         lines = game.show()
                 if resumed:
                     lines = ["已检测到同账号旧终端席位，已自动续玩接管。"] + lines
+                nudge = getattr(game, "nudge_bots", None)
+                if callable(nudge):
+                    bot_lines = nudge()
         send_game_private(conn, room, lines)
+        if bot_lines:
+            broadcast_game(room, bot_lines)
         return
 
     if sub == "move":
@@ -1934,6 +1940,13 @@ def handle_client(conn, addr) -> None:
         send_room_announcement_preview(conn, active_room)
         if active_game_lines:
             send_game_private(conn, active_room, active_game_lines)
+            if resumed_game_rooms:
+                with lock:
+                    g = room_games.get(active_room)
+                    nudge = getattr(g, "nudge_bots", None) if g is not None else None
+                    bot_lines = nudge() if callable(nudge) else []
+                if bot_lines:
+                    broadcast_game(active_room, bot_lines)
 
         while True:
             if not buffer:
