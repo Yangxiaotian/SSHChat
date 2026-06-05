@@ -2,6 +2,7 @@ import unittest
 
 from games import GomokuGame
 import server
+from session_store import DisconnectedSeat
 
 
 class DummyConn:
@@ -91,7 +92,8 @@ class MultiDeviceResumeTests(unittest.TestCase):
         self.assertNotIn(old_conn, server.clients)
         self.assertIn(room, server.room_games)
         self.assertEqual(game.leave_calls, 0)
-        self.assertIs(game.players[0][0], old_conn)
+        self.assertIsInstance(game.players[0][0], DisconnectedSeat)
+        self.assertEqual(game.players[0][0].nickname, "zouyu")
         self.assertIn("zouyu", server.disconnected_sessions)
 
         new_conn = DummyConn()
