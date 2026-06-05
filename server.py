@@ -1,6 +1,9 @@
 import argparse
+import base64
 import os
+import pickle
 import re
+import signal
 import socket
 import ssl
 import textwrap
@@ -14,10 +17,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from collections import defaultdict
 from html import unescape
+from pathlib import Path
 from typing import Optional
 
+import dict_lookup
 import games
+import library
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
+from session_store import DisconnectedSeat, GameSessionStore
 
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
@@ -30,7 +37,23 @@ def _rating_store_path() -> str:
     return os.path.join(os.path.dirname(__file__), "game_ratings.json")
 
 
+def _library_bookmarks_path() -> str:
+    raw = os.environ.get("SSHCHAT_LIBRARY_BOOKMARKS", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "library_bookmarks.json")
+
+
+def _session_store_path() -> str:
+    raw = os.environ.get("SSHCHAT_SESSION_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "game_sessions.json")
+
+
 rating_store = GameRatingStore(_rating_store_path())
+library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
+session_store = GameSessionStore(_session_store_path())
 
 # conn -> {"name", "rooms", "current_room"}
 clients = {}
@@ -46,7 +69,16 @@ room_games: dict[str, object] = {}
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
+# conn -> {"path": str, "page": int (0-based)}
+library_reading: dict[object, dict[str, object]] = {}
+# resolved path -> (mtime_ns, BookDocument)
+library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
 lock = threading.Lock()
+_persist_dirty = False
+_persist_timer: Optional[threading.Timer] = None
+PERSIST_DEBOUNCE_SECONDS = float(
+    os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
+)
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
@@ -157,6 +189,9 @@ HELP_LINES = (
     "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
+    "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
+    "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
+    "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
     "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
@@ -505,6 +540,201 @@ def _resume_same_account_seat_locked(
     if changed and room_owners.get(room) is old_conn:
         room_owners[room] = new_conn
     return changed
+
+
+def _iter_game_conn_seats(game):
+    """Yield (conn, display_name) for seated human/placeholder roles."""
+    seen: set[int] = set()
+    players = getattr(game, "players", None)
+    if isinstance(players, list):
+        for item in players:
+            if isinstance(item, tuple) and len(item) >= 2:
+                conn, name = item[0], item[1]
+                if conn is not None and isinstance(name, str) and id(conn) not in seen:
+                    seen.add(id(conn))
+                    yield conn, name
+            elif hasattr(item, "conn") and hasattr(item, "name"):
+                conn, name = item.conn, item.name
+                if conn is not None and isinstance(name, str) and id(conn) not in seen:
+                    seen.add(id(conn))
+                    yield conn, name
+    for conn_attr, name_attr in (
+        ("white_conn", "white_name"),
+        ("black_conn", "black_name"),
+        ("red_conn", "red_name"),
+    ):
+        conn = getattr(game, conn_attr, None)
+        name = getattr(game, name_attr, None)
+        if (
+            conn is not None
+            and isinstance(name, str)
+            and name
+            and id(conn) not in seen
+        ):
+            seen.add(id(conn))
+            yield conn, name
+
+
+def _conn_needs_seat_swap(conn) -> bool:
+    if conn is None or isinstance(conn, DisconnectedSeat):
+        return False
+    if conn in clients:
+        return True
+    return hasattr(conn, "send") or hasattr(conn, "recv")
+
+
+def _pickle_game_for_storage(game) -> bytes:
+    swaps: list[tuple[DisconnectedSeat, object]] = []
+    for conn, name in _iter_game_conn_seats(game):
+        if not _conn_needs_seat_swap(conn):
+            continue
+        seat = DisconnectedSeat(name)
+        _replace_conn_refs(game, conn, seat)
+        swaps.append((seat, conn))
+    try:
+        return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
+    finally:
+        for seat, conn in swaps:
+            _replace_conn_refs(game, seat, conn)
+
+
+def _rebind_game_services(game) -> None:
+    if hasattr(game, "rating_store"):
+        game.rating_store = rating_store
+
+
+def _build_session_payload_locked() -> dict[str, object]:
+    games_blob: dict[str, str] = {}
+    for room, game in room_games.items():
+        if game is None or getattr(game, "state", "ended") == "ended":
+            continue
+        raw = _pickle_game_for_storage(game)
+        games_blob[room] = base64.b64encode(raw).decode("ascii")
+    sessions: dict[str, dict[str, object]] = {}
+    for key, sess in disconnected_sessions.items():
+        rooms_set = sess.get("rooms") or set()
+        if isinstance(rooms_set, set):
+            room_list = sorted(rooms_set)
+        else:
+            room_list = sorted(str(r) for r in rooms_set)
+        sessions[key] = {
+            "name": sess.get("name"),
+            "rooms": room_list,
+            "current_room": sess.get("current_room"),
+            "ts": sess.get("ts"),
+        }
+    return {
+        "room_games": games_blob,
+        "disconnected_sessions": sessions,
+        "room_enabled_games": {
+            room: sorted(enabled)
+            for room, enabled in room_enabled_games.items()
+        },
+        "room_announcements": dict(room_announcements),
+    }
+
+
+def _apply_session_payload_locked(payload: dict[str, object]) -> None:
+    games_blob = payload.get("room_games")
+    if isinstance(games_blob, dict):
+        for room, encoded in games_blob.items():
+            if not isinstance(room, str) or not isinstance(encoded, str):
+                continue
+            try:
+                game = pickle.loads(base64.b64decode(encoded))
+            except Exception as e:
+                print(f"skip restoring room {room!r} game: {e!r}")
+                continue
+            _rebind_game_services(game)
+            room_games[room] = game
+    sessions = payload.get("disconnected_sessions")
+    if isinstance(sessions, dict):
+        for key, sess in sessions.items():
+            if not isinstance(sess, dict):
+                continue
+            rooms_raw = sess.get("rooms")
+            if isinstance(rooms_raw, list):
+                room_set = {str(r) for r in rooms_raw if r}
+            else:
+                room_set = set()
+            room_set.add(DEFAULT_ROOM)
+            current = sess.get("current_room")
+            if not isinstance(current, str) or not current:
+                current = DEFAULT_ROOM
+            if current not in room_set:
+                room_set.add(current)
+            disconnected_sessions[str(key)] = {
+                "name": sess.get("name") or key,
+                "rooms": room_set,
+                "current_room": current,
+                "ts": float(sess.get("ts") or time.time()),
+            }
+    enabled = payload.get("room_enabled_games")
+    if isinstance(enabled, dict):
+        for room, names in enabled.items():
+            if isinstance(room, str) and isinstance(names, list):
+                room_enabled_games[room] = {str(n) for n in names}
+    announcements = payload.get("room_announcements")
+    if isinstance(announcements, dict):
+        for room, text in announcements.items():
+            if isinstance(room, str) and isinstance(text, str):
+                room_announcements[room] = text
+
+
+def _mark_sessions_dirty() -> None:
+    global _persist_dirty, _persist_timer
+    _persist_dirty = True
+    if _persist_timer is not None:
+        return
+    timer = threading.Timer(PERSIST_DEBOUNCE_SECONDS, _flush_sessions_if_dirty)
+    timer.daemon = True
+    _persist_timer = timer
+    timer.start()
+
+
+def _flush_sessions_if_dirty() -> None:
+    global _persist_dirty, _persist_timer
+    _persist_timer = None
+    if not _persist_dirty:
+        return
+    _persist_dirty = False
+    try:
+        with lock:
+            payload = _build_session_payload_locked()
+        session_store.save(payload)
+    except Exception as e:
+        print(f"session persist failed: {e!r}")
+        _mark_sessions_dirty()
+
+
+def _persist_sessions_now() -> None:
+    global _persist_dirty, _persist_timer
+    _persist_dirty = False
+    if _persist_timer is not None:
+        _persist_timer.cancel()
+        _persist_timer = None
+    with lock:
+        payload = _build_session_payload_locked()
+    session_store.save(payload)
+
+
+def _load_persisted_sessions() -> None:
+    payload = session_store.load()
+    if not payload:
+        return
+    with lock:
+        _apply_session_payload_locked(payload)
+        active = sum(
+            1
+            for game in room_games.values()
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        )
+        sessions = len(disconnected_sessions)
+    if active or sessions:
+        print(
+            f"restored {active} active room game(s) and "
+            f"{sessions} reconnect session(s) from {session_store.path}"
+        )
 
 
 def send_line(conn, text: str) -> None:
@@ -1110,6 +1340,343 @@ def _handle_news(conn, payload: str) -> None:
     _send_news_section(conn, category, limit)
 
 
+def _library_dir() -> Path:
+    return library.default_library_dir()
+
+
+def _client_name(conn) -> str:
+    with lock:
+        info = clients.get(conn)
+    return str(info["name"]) if info else "Unknown"
+
+
+def _set_library_page(conn, user: str, path: Path, page: int) -> None:
+    page = max(0, int(page))
+    with lock:
+        library_reading[conn] = {"path": str(path.resolve()), "page": page}
+    library_bookmarks.set_page(user, path.name, page)
+
+
+def _get_cached_book(path: Path) -> library.BookDocument:
+    key = str(path.resolve())
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise FileNotFoundError(str(path)) from exc
+    cached = library_doc_cache.get(key)
+    if cached and cached[0] == mtime_ns:
+        return cached[1]
+    doc = library.load_book(path)
+    library_doc_cache[key] = (mtime_ns, doc)
+    return doc
+
+
+def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
+    total = doc.total_pages
+    page_idx = max(0, min(page_idx, total - 1))
+    send_line(conn, f"[*] --- 《{doc.title}》 第 {page_idx + 1}/{total} 页 ---\n")
+    for ln in library.wrap_page_lines(doc.pages[page_idx]):
+        send_line(conn, f"[*]    {ln}\n")
+    send_line(
+        conn,
+        "[*] 翻页：/library next | prev | page <页码> | info | close（进度已自动存书签）\n",
+    )
+
+
+def _send_library_catalog(conn, user: str) -> None:
+    lib_dir = _library_dir()
+    send_line(conn, "[*] --- 图书馆 ---\n")
+    if not lib_dir.is_dir():
+        send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
+        send_line(conn, "[*] 请将 epub / txt / pdf 放入该目录后重试。\n")
+        return
+    books = library.list_books(lib_dir)
+    if not books:
+        send_line(conn, f"[*] 目录为空：{lib_dir}\n")
+        send_line(conn, "[*] 支持格式：.epub、.txt、.pdf\n")
+        return
+    user_marks = library_bookmarks.list_for_user(user)
+    for entry in books:
+        mark = user_marks.get(entry.name)
+        mark_suffix = f" · 书签第 {mark + 1} 页" if mark is not None else ""
+        send_line(
+            conn,
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
+        )
+    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    send_line(conn, "[*] 我的书签：/library bookmarks\n")
+
+
+def _send_library_bookmarks(conn, user: str) -> None:
+    lib_dir = _library_dir()
+    marks = library_bookmarks.list_for_user(user)
+    send_line(conn, "[*] --- 我的书签 ---\n")
+    if not marks:
+        send_line(conn, "[*] 暂无书签；打开图书并翻页后会自动保存。\n")
+        return
+    catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
+    name_by_file = {entry.name: entry for entry in catalog}
+    for book_name in sorted(marks, key=lambda n: n.lower()):
+        page = marks[book_name]
+        entry = name_by_file.get(book_name)
+        if entry:
+            label = f"{entry.index}. [{entry.ext.upper()}] {book_name}"
+        else:
+            label = book_name
+        send_line(conn, f"[*] {label} · 第 {page + 1} 页\n")
+    send_line(conn, "[*] 打开对应图书会自动从书签继续。\n")
+
+
+def _handle_library(conn, payload: str) -> None:
+    raw = payload[len("/library") :].strip()
+    lib_dir = _library_dir()
+    user = _client_name(conn)
+
+    if not raw:
+        _send_library_catalog(conn, user)
+        with lock:
+            session = library_reading.get(conn)
+        if session:
+            path = session.get("path")
+            page = int(session.get("page") or 0)
+            if path:
+                try:
+                    doc = _get_cached_book(Path(str(path)))
+                    send_line(
+                        conn,
+                        f"[*] 当前在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页\n",
+                    )
+                except Exception:
+                    library_reading.pop(conn, None)
+        return
+
+    parts = raw.split()
+    head = parts[0].lower()
+
+    if head in {"help", "?", "帮助"}:
+        send_line(conn, "[*] /library 用法：\n")
+        send_line(conn, "[*]   /library                     书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library open <序号|文件名>    打开（有书签则从书签继续）\n")
+        send_line(conn, "[*]   /library next | 下一页         下一页（自动存书签）\n")
+        send_line(conn, "[*]   /library prev | 上一页         上一页（自动存书签）\n")
+        send_line(conn, "[*]   /library page <页码> | 页 N    跳到指定页（自动存书签）\n")
+        send_line(conn, "[*]   /library bookmarks | 书签       列出我的全部书签\n")
+        send_line(conn, "[*]   /library reset <序号|文件名>   清除某本书的书签\n")
+        send_line(conn, "[*]   /library info | 状态           当前阅读进度\n")
+        send_line(conn, "[*]   /library close | 关闭          结束阅读（保留书签）\n")
+        send_line(conn, f"[*] 目录：{lib_dir}\n")
+        return
+
+    if head in {"bookmarks", "bookmark", "书签"}:
+        _send_library_bookmarks(conn, user)
+        return
+
+    if head in {"reset", "清除"}:
+        if len(parts) < 2:
+            send_line(conn, "[*] Usage: /library reset <序号|文件名>\n")
+            return
+        token = raw.split(None, 1)[1].strip()
+        if not lib_dir.is_dir():
+            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
+            return
+        catalog = library.list_books(lib_dir)
+        entry = library.resolve_book(lib_dir, token, catalog)
+        book_name = entry.name if entry else Path(token).name
+        if library_bookmarks.clear_book(user, book_name):
+            send_line(conn, f"[*] 已清除《{book_name}》的书签。\n")
+        else:
+            send_line(conn, f"[*] 《{book_name}》没有保存的书签。\n")
+        return
+
+    if head in {"close", "关闭"}:
+        with lock:
+            library_reading.pop(conn, None)
+        send_line(conn, "[*] 已关闭当前图书（书签已保留）。\n")
+        return
+
+    if head in {"info", "状态"}:
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 当前没有在阅读的图书。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取当前图书：{exc}\n")
+            return
+        page = int(session.get("page") or 0)
+        send_line(
+            conn,
+            f"[*] 在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页（{doc.source_path.name}）\n",
+        )
+        return
+
+    if head in {"next", "n", "下一页"}:
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        page = int(session.get("page") or 0) + 1
+        if page >= doc.total_pages:
+            send_line(conn, "[*] 已是最后一页。\n")
+            page = doc.total_pages - 1
+        _set_library_page(conn, user, Path(str(session["path"])), page)
+        _send_library_page(conn, doc, page)
+        return
+
+    if head in {"prev", "p", "上一页"}:
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        page = max(0, int(session.get("page") or 0) - 1)
+        if page == int(session.get("page") or 0):
+            send_line(conn, "[*] 已是第一页。\n")
+        _set_library_page(conn, user, Path(str(session["path"])), page)
+        _send_library_page(conn, doc, page)
+        return
+
+    if head in {"page", "页"}:
+        if len(parts) < 2:
+            send_line(conn, "[*] Usage: /library page <页码>\n")
+            return
+        try:
+            page_1based = int(parts[1])
+        except ValueError:
+            send_line(conn, "[*] 页码须为整数，例如：/library page 3\n")
+            return
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        if page_1based < 1 or page_1based > doc.total_pages:
+            send_line(
+                conn,
+                f"[*] 无效页码：共 {doc.total_pages} 页，请用 1～{doc.total_pages}。\n",
+            )
+            return
+        page = page_1based - 1
+        _set_library_page(conn, user, Path(str(session["path"])), page)
+        _send_library_page(conn, doc, page)
+        return
+
+    if head in {"open", "read", "读", "打开"}:
+        if len(parts) < 2:
+            send_line(conn, "[*] Usage: /library open <序号|文件名>\n")
+            return
+        token = raw.split(None, 1)[1].strip()
+        if not lib_dir.is_dir():
+            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
+            return
+        catalog = library.list_books(lib_dir)
+        entry = library.resolve_book(lib_dir, token, catalog)
+        if not entry:
+            send_line(conn, f"[*] 未找到图书：{token}\n")
+            send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
+            return
+        try:
+            doc = _get_cached_book(entry.path)
+        except Exception as exc:
+            send_line(conn, f"[*] 打开失败：{exc}\n")
+            return
+        saved = library_bookmarks.get_page(user, entry.name)
+        page = saved if saved is not None else 0
+        page = min(page, doc.total_pages - 1)
+        _set_library_page(conn, user, entry.path, page)
+        if saved is not None and saved > 0:
+            send_line(
+                conn,
+                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
+            )
+        else:
+            send_line(
+                conn,
+                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，共 {doc.total_pages} 页。\n",
+            )
+        _send_library_page(conn, doc, page)
+        return
+
+    send_line(conn, "[*] 未知子命令。试试 /library help\n")
+
+
+def _send_dict_help(conn) -> None:
+    send_line(conn, "[*] /dict 用法：\n")
+    send_line(conn, "[*]   /dict en <英文>     英→中（中英文词典）\n")
+    send_line(conn, "[*]   /dict cn <中文>     中→英（中英文词典）\n")
+    send_line(conn, "[*]   /dict hh <词语>     汉语词典（汉→汉释义）\n")
+    send_line(conn, "[*]   /dict <词语>        自动：英文查英→中，中文查中→英+汉语\n")
+    send_line(conn, "[*] 别名：英/en、中/cn/中英、汉/hh/汉语\n")
+
+
+def _handle_dict(conn, payload: str) -> None:
+    raw = payload[len("/dict") :].strip()
+    if not raw or raw.lower() in ("help", "?", "帮助"):
+        _send_dict_help(conn)
+        return
+
+    parts = raw.split(None, 1)
+    explicit_mode = dict_lookup.normalize_mode(parts[0])
+    if explicit_mode and len(parts) > 1:
+        word = parts[1].strip()
+        modes = [explicit_mode]
+    elif explicit_mode:
+        send_line(conn, "[*] 请提供要查询的词语，例如：/dict en hello\n")
+        return
+    else:
+        word = raw
+        if dict_lookup.detect_mode(word) == "cn":
+            modes = ["cn", "hh"]
+        else:
+            modes = ["en"]
+
+    if not word:
+        send_line(conn, "[*] 请提供要查询的词语。\n")
+        return
+
+    try:
+        for idx, mode in enumerate(modes):
+            if idx:
+                send_line(conn, "[*]\n")
+            for line in dict_lookup.lookup_lines(mode, word):
+                send_line(conn, f"[*] {line}\n")
+    except ValueError as e:
+        send_line(conn, f"[*] {e}\n")
+    except urllib.error.URLError as e:
+        print(f"/dict network error: {e!r}")
+        send_line(conn, "[*] 词典查询失败：网络不可用或超时，请稍后重试。\n")
+    except Exception as e:
+        print(f"/dict error: {e!r}")
+        traceback.print_exc()
+        send_line(conn, "[*] 词典查询失败，请稍后重试（详情见服务端日志）。\n")
+
+
 def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
     with lock:
         targets = [
@@ -1140,6 +1707,7 @@ def remove_client(conn) -> None:
         name = info["name"]
         joined_rooms = list(info["rooms"])
         current_room = info.get("current_room", DEFAULT_ROOM)
+        library_reading.pop(conn, None)
         _remember_session_locked(name, joined_rooms, current_room)
         game_notices: list[tuple[str, list[str]]] = []
         for room in joined_rooms:
@@ -1173,6 +1741,10 @@ def remove_client(conn) -> None:
                         )
                     )
                 elif preserve_disconnected_seat:
+                    seat = DisconnectedSeat(name)
+                    _replace_conn_refs(game, conn, seat)
+                    if room_owners.get(room) is conn:
+                        room_owners.pop(room, None)
                     game_notices.append(
                         (
                             room,
@@ -1193,6 +1765,7 @@ def remove_client(conn) -> None:
         conn.close()
     except Exception:
         pass
+    _mark_sessions_dirty()
 
 
 def handle_command(conn, payload: str) -> None:
@@ -1480,6 +2053,19 @@ def handle_command(conn, payload: str) -> None:
             send_line(conn, "[*] 新闻命令处理失败，请稍后重试（详情见服务端日志）。\n")
         return
 
+    if cmd == "/library":
+        try:
+            _handle_library(conn, payload)
+        except Exception as e:
+            print(f"/library error: {e!r}")
+            traceback.print_exc()
+            send_line(conn, "[*] 图书馆命令处理失败，请稍后重试（详情见服务端日志）。\n")
+        return
+
+    if cmd == "/dict":
+        _handle_dict(conn, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
 
 
@@ -1571,6 +2157,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 else:
                     enabled.add(game_name)
                     send_line(conn, f"[*] 已上线 {game_name}，/game list 可见。\n")
+                _mark_sessions_dirty()
                 return
             if game_name not in enabled:
                 send_line(conn, f"[*] {game_name} 已在本房下线。\n")
@@ -1589,6 +2176,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 return
             enabled.discard(game_name)
         send_line(conn, f"[*] 已下线 {game_name}，/game list 不再显示。\n")
+        _mark_sessions_dirty()
         return
 
     if sub == "new":
@@ -1642,6 +2230,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             [f"{name} 开了一局 {game_name}（{seat}），{join_hint}"],
         )
         send_oriented_boards(room, new_game)
+        _mark_sessions_dirty()
         return
 
     if sub == "join":
@@ -1659,6 +2248,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
         send_oriented_boards(room, game)
+        _mark_sessions_dirty()
         return
 
     if sub == "seats":
@@ -1721,6 +2311,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         if ended or getattr(game, "send_view_on_move", True):
             send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
+        _mark_sessions_dirty()
         return
 
     if sub == "resign":
@@ -1735,6 +2326,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        _mark_sessions_dirty()
         return
 
     if sub == "undo":
@@ -1766,6 +2358,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         broadcast_game(room, bcast)
         if bcast and hasattr(game, "supports_undo"):
             send_oriented_boards(room, game)
+        _mark_sessions_dirty()
         return
 
     if sub == "abort":
@@ -1780,6 +2373,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        _mark_sessions_dirty()
         return
 
     if sub == "pgn":
@@ -1811,6 +2405,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 room_owners[room] = conn
             room_games.pop(room, None)
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
+        _mark_sessions_dirty()
         return
 
     send_line(conn, f"[*] 未知子命令 /game {sub}；用 /game help 查看。\n")
@@ -1928,7 +2523,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /part /announce /game /news /clear /help\n",
+            f"/names /rooms /join /switch /msg /part /announce /game /news /dict /clear /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if same_name_peers:
@@ -1937,6 +2532,7 @@ def handle_client(conn, addr) -> None:
             send_line(conn, "[*] 已恢复上次客户端会话，回到原房间；如有未结束对局可继续操作。\n")
         if resumed_game_rooms:
             send_line(conn, "[*] 已接管旧连接保留的游戏席位。\n")
+        _mark_sessions_dirty()
         send_room_announcement_preview(conn, active_room)
         if active_game_lines:
             send_game_private(conn, active_room, active_game_lines)
@@ -1975,6 +2571,15 @@ def handle_client(conn, addr) -> None:
 
 
 def run_server() -> int:
+    _load_persisted_sessions()
+
+    def _handle_shutdown_signal(signum, _frame) -> None:
+        print(f"shutdown signal {signum}, saving game sessions...")
+        _persist_sessions_now()
+
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PORT))

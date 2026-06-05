@@ -77,7 +77,7 @@
 
    连上后会进入聊天界面，不是平时那种可随便执行命令的 shell（由服务器配置决定）。
 
-4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/game`、`/news`、`/clear`。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
+4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/game`、`/news`、`/library`、`/dict`、`/clear`。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
 
 ---
 
@@ -217,8 +217,12 @@ npm run build:portable
 | `/switch 房间名` | 在已加入房间之间切换 |
 | `/msg #房间名 内容` | 不切换当前房间，向指定房间发一行话（`#` 开头表示房间） |
 | `/msg 昵称 内容` | 私聊该昵称（大小写不敏感；同昵称多人则都会收到） |
+| `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
 | `/game help` | 查看房间小游戏用法 |
-| `/game new chess`、`gomoku` 或 `xiangqi` | 在当前房间开一局国际象棋、五子棋或中国象棋 |
+| `/library` | 列出图书馆书目（epub / txt / pdf）；每人自带书签，翻页自动保存 |
+| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续）；`next` / `prev` / `page` 翻页 |
+| `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
+| `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
 | `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
 | `/news 中文`、`/news 国际`、`/news 科技` | 只看某一类；可加条数，如 `/news 科技 10` |
 | `/news detail 中文 2` 或 `/news 详情 中文 2` | 该分类列表 **第 2 条** 的更长 RSS 提要（非网页全文） |
@@ -230,34 +234,105 @@ npm run build:portable
 
 ### 房间小游戏
 
-游戏按**房间**隔离：每个房间同一时间最多一局。开局、走子、棋盘显示都会广播到当前房间；旁观者可以用 `/game show` 看棋盘。
+游戏按**房间**隔离：每个房间同一时间最多一局。开局、走子、局面显示都会广播到当前房间；旁观者可以用 `/game show` 查看。
 
-常用命令：
+**可玩游戏一览**（`/game list`；房主可用 `/game on|off <名称>` 在本房上下线）：
 
-- `/game list`：列出可玩游戏，目前有 `chess`、`gomoku`、`xiangqi`（别名 `cchess`）。
-- `/game new chess`：开国际象棋；发起人执白，另一人用 `/game join` 加入后执黑。棋盘用 Unicode 棋子（♔♕♖♗♘♙ / ♚♛♜♝♞♟），空位为 `·`。走法支持 SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。
-- `/game new gomoku`：开 15×15 五子棋（连珠规则）；发起人执黑先手。黑方禁手：长连、四四、三三；黑方仅「恰好五连」取胜，白方五连及以上胜。走法是 `/game move 行 列`，例如 `/game move 8 8` 或 `/game move 8,8`。
-- `/game new xiangqi`：开中国象棋；发起人执红先手。推荐 **棋谱记法**：`/game move 炮二平五`、`/game move 马2进3`（黑方纵线可用 1～9）；同线双子加 **前/后**（如 `前马进七`）。也可用坐标 `/game move 8 二 8 五`（行 1～10；红列 九…一，黑列 1…9）。棋盘用 **`+` 红子**、**`-` 黑子**、**`!` 上一步**（等宽字体下对齐）；底行纵线为红方 **九…一**（汉字），顶行为黑方 **1…9**。**第二席（对手）** 看到的棋盘会自动 **翻转**，己方始终在下方。
-- `/game new chess ai [easy|normal|hard]`、`/game new gomoku ai [easy|normal|hard]`、`/game new xiangqi ai [easy|normal|hard]`：开 AI 练习局。AI 局**不会计入持久化积分**，用于练手防刷分。
-- `/game join`：加入空席位。
-- `/game seats`：查看双方与对局状态。
-- `/game show`：重新显示棋盘。
-- `/game move ...`：走子。
-- `/game rating [游戏] [昵称]`：查看棋类持久化积分/等级。积分按**用户 + 游戏**维度保存，**跨房间共享**，重新登录不会重置。
-- `/game undo`：悔棋（仅 `chess` / `gomoku` / `xiangqi`）。**上一步的走子方**发起请求，对方执行 `/game undo accept`（或 `同意`）后撤销一步；对方可用 `/game undo reject` 拒绝，请求方可用 `/game undo cancel` 取消。
+| 名称 | 说明 | 常用别名 |
+|------|------|----------|
+| `chess` | 国际象棋 | — |
+| `gomoku` | 15×15 五子棋（连珠规则） | — |
+| `go` | 围棋（19×19） | `weiqi`、`baduk`、`围棋` |
+| `xiangqi` | 中国象棋 | `cchess` |
+| `sanguo` | 三国杀（军争版，2～6 人） | `sgs`、`三国杀` |
+| `werewolf` | 狼人杀（5～12 人） | `langrensha` |
+| `holdem` | 德州扑克 | `poker`、`texas`、`dezhou`、`德州` |
+| `zjh` | 炸金花 | `zhajinhua`、`炸金花` |
+| `niutou` | 牛头王（卡牌计分型） | `niutouwang`、`ntw`、`牛头王` |
+| `mahjong` | 麻将（4 人，可补 AI） | `mj`、`majiang`、`麻将` |
+
+**通用命令：**
+
+- `/game list`：列出本房已上线、可玩的游戏。
+- `/game new <名称>`：在当前房间开一局；发起人坐第一席（棋类：chess 白 / gomoku·go·xiangqi 黑或红先手；sanguo 为房主）。
+- `/game new <名称> ai [easy\|normal\|hard]`：棋类 AI 练习局（仅 `chess` / `gomoku` / `go` / `xiangqi`）；**不计入持久化积分**。
+- `/game join`：加入对局（棋类为第二席；sanguo 可 2～6 人 join 后房主 `/game move 开始`；狼人杀等多人局按提示 join）。
+- `/game seats`：查看席位与对局状态。
+- `/game show`：重新显示棋盘/局面（棋类第二席视角自动翻转，己方在下）。
+- `/game move …`：走子或游戏内操作（各游戏语法不同，见下）。
+- `/game rating [游戏] [昵称]`：查看棋类持久化积分/等级（**跨房间共享**）。
+- `/game undo`：悔棋（`chess` / `gomoku` / `go` / `xiangqi`）；上一步走子方发起，对方 `/game undo accept` 同意。
 - `/game pgn`：导出国际象棋 PGN（仅 `chess`）。
 - `/game resign`：认负。
 - `/game abort`：终止尚未开始的对局。
 - `/game end`：房主强制结束当前房间对局。
+- `/game on <名称>` / `/game off <名称>`：房主在本房上线/下线某游戏（进行中的该局不受影响）。
 
-棋类积分说明：
+**棋类走法摘要：**
+
+- **`chess`**：SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。棋盘用 Unicode 棋子（♔♕♖♗♘♙ / ♚♛♜♝♞♟），空位为 `·`。
+- **`gomoku`**：`/game move 行 列`，如 `/game move 8 8`。黑方禁手（长连、四四、三三）；黑方仅「恰好五连」取胜。
+- **`go`**：`/game move 行 列` 落子；`/game move pass` 停一手。19×19 标准围棋规则。
+- **`xiangqi`**：推荐棋谱记法 `/game move 炮二平五`、`/game move 马2进3`；也可用坐标 `/game move 8 二 8 五`。棋盘 **`+` 红子**、**`-` 黑子**、**`!` 上一步**。
+
+**牌类 / 多人局摘要：**
+
+- **`sanguo`（三国杀）**：房主 `/game move 开始` 开局；`/game move 武将` 查武将池；观星/蛊惑/断粮等技能见 `/game show`。
+- **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
+- **`holdem`（德州扑克）**：`start` 开始 \| `look` 看牌 \| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可 `bot <easy\|hard\|pro>` 加机器人。
+- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌积分不足时按剩余积分全压。
+- **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
+- **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
+
+**棋类积分说明：**
 
 - `chess` 使用 **FIDE Elo** 风格积分与等级线（GM/IM/FM/CM 线等）。
-- `gomoku`、`xiangqi` 使用统一 Elo 积分并映射到业余级位。
+- `gomoku`、`go`、`xiangqi` 使用统一 Elo 积分并映射到业余级位。
 - 只有**真人对真人**对局会写入持久化积分；AI 练习局、观战不会写入。
-- terminal 端不再在每步自动整页刷棋盘，避免五子棋把聊天内容快速顶出可视区；需要时可手动 `/game show` 刷新局面。
+- terminal 端不再在每步自动整页刷棋盘；需要时可手动 `/game show` 刷新局面。
 
-`gomoku` 与 `xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。如果没装，服务端仍能启动，但 `/game new chess` 会提示缺依赖。
+`gomoku`、`go`、`xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。Electron 客户端左侧栏有**游戏工作台**，可按钮化执行常用 `/game` 操作。
+
+### 词典查询
+
+通过服务端调用有道 JSON API，在当前用户私屏显示结果（不广播到房间）。
+
+| 命令 | 说明 |
+|------|------|
+| `/dict en <英文>` | **英→中**（中英文词典） |
+| `/dict cn <中文>` | **中→英**（中英文词典） |
+| `/dict hh <词语>` | **汉语词典**（汉→汉释义，来源《现代汉语规范词典》） |
+| `/dict <词语>` | 自动识别：英文查英→中；中文同时返回中→英 + 汉语释义 |
+| `/dict help` | 完整用法与别名 |
+
+**模式别名：** `en`/`英`、`cn`/`中`/`中英`、`hh`/`汉`/`汉语`。
+
+示例：
+
+```text
+/dict en hello
+/dict cn 你好
+/dict hh 学习
+/dict 学习          # 自动：中→英 + 汉语释义
+```
+
+环境变量（可选）：`SSHCHAT_DICT_TIMEOUT`（超时秒数）、`SSHCHAT_DICT_PROXY`（或复用 `SSHCHAT_NEWS_PROXY` 等代理变量）、`SSHCHAT_DICT_TLS_FALLBACK=0` 关闭 TLS 校验回退。
+
+### 图书馆
+
+服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / pdf** 图书文件。
+
+| 命令 | 说明 |
+|------|------|
+| `/library` | 书目列表（含你的书签进度） |
+| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续） |
+| `/library next` / `prev` | 翻页（自动存书签） |
+| `/library page <页码>` | 跳到指定页 |
+| `/library bookmarks` | 列出我的全部书签 |
+| `/library reset <序号\|文件名>` | 清除某本书的书签 |
+| `/library close` | 结束阅读（保留书签） |
+
+Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。
 
 ### RSS 新闻
 
@@ -329,6 +404,8 @@ npm run build:portable
 | `deploy.sh` | 一键部署 |
 | `admin-add-user.sh` | 添加用户与公钥 |
 | `server.py` / `client.py` | 服务端与终端客户端 |
+| `games.py` | 房间小游戏逻辑 |
+| `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
 | `sshchat_gui.py` | 图形客户端源码 |
 | `easy_connect.py` | 按 JSON 调用 `ssh` |
 | `scripts/build-gui-packages.*` | 打 Windows / Unix 图形包 |

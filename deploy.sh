@@ -106,8 +106,9 @@ games.py updates always take effect without a manual restart.
 EOF
 }
 
-# Stop chat TCP server so redeploy loads fresh server.py / games.py (in-memory
-# games reset on process exit).
+# Stop chat TCP server so redeploy loads fresh server.py / games.py. Active room
+# games and reconnect sessions are persisted to game_sessions.json and restored
+# on startup when possible.
 sshchat_stop_running_server() {
   local unit="/etc/systemd/system/sshchat.service"
   if command -v systemctl &>/dev/null && [[ -f "$unit" ]]; then
@@ -427,7 +428,7 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py chat.sh server.sh admin-add-user.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py chat.sh server.sh admin-add-user.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 
@@ -496,9 +497,10 @@ if [[ "$INSTALL_SYSTEMD" -eq 1 && "$RUN_USER" == "root" ]]; then
 fi
 
 install -m 0755 -d "$PREFIX"
+install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -528,7 +530,7 @@ fi
 if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
   "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
 fi
-"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" prompt_toolkit 'chess>=1.10'
+"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" prompt_toolkit 'chess>=1.10' 'pypdf>=4.0' 'ebooklib>=0.18'
 rm -rf "$DEPLOY_TMP"
 
 umask 022
@@ -541,6 +543,7 @@ SSHCHAT_PORT=$PORT
 SSHCHAT_ALERT_SOUND=auto
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
+# 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
 EOF
 fi
 

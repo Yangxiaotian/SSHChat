@@ -1647,6 +1647,171 @@ html, body, #root {
 }
 
 /* ============================================================
+   Library Panel
+   ============================================================ */
+
+.library-panel {
+  padding: 8px 12px;
+}
+
+.library-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 8px;
+  background: linear-gradient(to bottom, var(--vscode-sidebar) 75%, rgba(0, 0, 0, 0));
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.library-reader {
+  margin-bottom: 16px;
+  padding: 10px;
+  border: 1px solid var(--vscode-border);
+  border-radius: 4px;
+  background: var(--vscode-hover);
+}
+
+.library-reader-header {
+  margin-bottom: 8px;
+}
+
+.library-reader-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vscode-fg);
+}
+
+.library-reader-meta {
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+  margin-top: 2px;
+}
+
+.library-reader-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--vscode-fg);
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin-bottom: 8px;
+}
+
+.library-reader-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.library-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.library-item {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--vscode-border-light);
+  border-radius: 3px;
+}
+
+.library-item:hover {
+  background-color: var(--vscode-sidebar-hover);
+}
+
+.library-item-main {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.library-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.library-rank {
+  font-size: 10px;
+  color: var(--vscode-text-secondary);
+}
+
+.library-format {
+  font-size: 10px;
+  color: var(--vscode-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.library-size {
+  font-size: 10px;
+  color: var(--vscode-text-secondary);
+}
+
+.library-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-fg);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.library-loading {
+  font-size: 11px;
+  color: var(--vscode-info);
+}
+
+.library-empty {
+  color: var(--vscode-text-secondary);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.library-bookmark {
+  font-size: 10px;
+  color: var(--vscode-info);
+}
+
+.library-bookmarks {
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-border);
+}
+
+.library-bookmarks-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--vscode-sidebar-section-header);
+  margin-bottom: 8px;
+}
+
+.library-bookmark-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--vscode-border-light);
+}
+
+.library-bookmark-label {
+  color: var(--vscode-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-bookmark-page {
+  color: var(--vscode-info);
+  flex-shrink: 0;
+}
+
+/* ============================================================
    Login Dialog
    ============================================================ */
 

@@ -1,2 +1,4 @@
 prompt_toolkit
 chess>=1.10
+pypdf>=4.0
+ebooklib>=0.18
