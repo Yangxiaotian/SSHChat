@@ -73,6 +73,9 @@ const api = {
   analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> => {
     return ipcRenderer.invoke(IPC_CHANNELS.GO_KATAGO_ANALYZE, payload);
   },
+  warmupGoKataGo: (): Promise<GoKataGoAnalyzeResponse> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GO_KATAGO_WARMUP);
+  },
 
   // Event listeners
   onChatMessage: (callback: (message: ChatMessage) => void) => {

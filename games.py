@@ -1665,6 +1665,7 @@ class GomokuGame(BoardUndoMixin):
 
 GO_SIZE = 19
 GO_KOMI = 6.5
+GO_COLUMNS = "ABCDEFGHJKLMNOPQRST"
 
 
 def _go_parse_move(raw: str) -> Optional[tuple[int, int]]:
@@ -1681,6 +1682,10 @@ def _go_parse_move(raw: str) -> Optional[tuple[int, int]]:
     if not (1 <= r <= GO_SIZE and 1 <= c <= GO_SIZE):
         return None
     return (r - 1, c - 1)
+
+
+def _go_to_gtp(row: int, col: int) -> str:
+    return f"{GO_COLUMNS[col]}{GO_SIZE - row}"
 
 
 def _go_neighbors(row: int, col: int):
@@ -1852,8 +1857,14 @@ class GoGame(BoardUndoMixin):
         self.join_blurb = "等另一位玩家用 /game join 加入。"
         self._undo_clear_pending()
 
-    def _snapshot(self, player: int, action: str) -> dict:
-        return {
+    def _snapshot(
+        self,
+        player: int,
+        action: str,
+        row: Optional[int] = None,
+        col: Optional[int] = None,
+    ) -> dict:
+        snap = {
             "player": player,
             "action": action,
             "grid": [row[:] for row in self.grid],
@@ -1863,6 +1874,27 @@ class GoGame(BoardUndoMixin):
             "passes": self._passes,
             "captures": dict(self._captures),
         }
+        if row is not None and col is not None:
+            snap["row"] = row
+            snap["col"] = col
+        return snap
+
+    def _katago_moves_line(self) -> Optional[str]:
+        moves: list[str] = []
+        for snap in self._history:
+            player = "B" if snap.get("player") == 1 else "W"
+            if snap.get("action") == "pass":
+                moves.append(f"{player} pass")
+                continue
+            if snap.get("action") != "move":
+                continue
+            row = snap.get("row")
+            col = snap.get("col")
+            if isinstance(row, int) and isinstance(col, int):
+                moves.append(f"{player} {_go_to_gtp(row, col)}")
+        if not moves:
+            return None
+        return "KataGo手顺：" + "; ".join(moves)
 
     def _undo_has_moves(self) -> bool:
         return bool(self._history)
@@ -2009,7 +2041,7 @@ class GoGame(BoardUndoMixin):
                 False,
             )
         row, col = pos
-        snap = self._snapshot(player, "move")
+        snap = self._snapshot(player, "move", row, col)
         ok, err, captured, next_ko = _go_try_play(self.grid, row, col, player, self._ko_point)
         if not ok:
             return ([err], [], False)
@@ -2067,6 +2099,12 @@ class GoGame(BoardUndoMixin):
         ]
         lines.extend(self._rating_lines())
         lines.extend(_go_render(self.grid, last=self._last))
+        if self._ko_point is not None:
+            kr, kc = self._ko_point
+            lines.append(f"劫点：第 {kr + 1} 行，第 {kc + 1} 列，不能立刻回提。")
+        moves_line = self._katago_moves_line()
+        if moves_line:
+            lines.append(moves_line)
         if self.state == "playing":
             lines.append(self._turn_line())
         elif self.state == "waiting":

@@ -53,7 +53,9 @@ export interface GoKataGoAnalyzeRequest {
   board: number[][];
   mySide: 1 | 2;
   komi?: number;
+  moves?: Array<{ player: 'B' | 'W'; move: string }>;
   maxVisits?: number;
+  maxTimeSec?: number;
   timeoutMs?: number;
 }
 
@@ -112,6 +114,7 @@ export const IPC_CHANNELS = {
 
   // Go external engine
   GO_KATAGO_ANALYZE: 'go:katago-analyze',
+  GO_KATAGO_WARMUP: 'go:katago-warmup',
 } as const;
 
 // Special message tokens

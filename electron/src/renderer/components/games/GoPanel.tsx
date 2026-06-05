@@ -28,6 +28,8 @@ type AdvisorMove = {
   source: 'katago' | 'fallback';
 };
 
+type KataGoHistoryMove = { player: 'B' | 'W'; move: string };
+
 function emptyBoard(): Cell[][] {
   return Array.from({ length: BOARD_SIZE }, (_, r) =>
     Array.from({ length: BOARD_SIZE }, (_, c) => ({
@@ -91,8 +93,35 @@ function parseSeats(boardText: string): { black: string; white: string } {
 function parseMeta(boardText: string): string[] {
   return boardText
     .split('\n')
-    .filter((l) => /贴目|提子|结果|双方连续停一手/.test(l))
+    .filter((l) => /贴目|提子|结果|劫点|双方连续停一手/.test(l))
     .slice(0, 3);
+}
+
+function parseKoPoint(boardText: string): { row: number; col: number } | null {
+  const line = boardText.split('\n').find((l) => l.includes('劫点'));
+  if (!line) return null;
+  const m = line.match(/第\s*(\d{1,2})\s*行[，,\s]+第\s*(\d{1,2})\s*列/);
+  if (!m) return null;
+  const row = Number(m[1]);
+  const col = Number(m[2]);
+  if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
+  if (row < 1 || row > BOARD_SIZE || col < 1 || col > BOARD_SIZE) return null;
+  return { row, col };
+}
+
+function parseKataGoMoves(boardText: string): KataGoHistoryMove[] {
+  const line = boardText.split('\n').find((l) => l.trim().startsWith('KataGo手顺：'));
+  if (!line) return [];
+  const body = line.split('：').slice(1).join('：');
+  const moves: KataGoHistoryMove[] = [];
+  for (const part of body.split(';')) {
+    const m = part.trim().match(/^(B|W)\s+([A-HJ-T](?:1[0-9]|[1-9])|pass)$/i);
+    if (!m) continue;
+    const player = m[1].toUpperCase() as 'B' | 'W';
+    const move = m[2].toLowerCase() === 'pass' ? 'pass' : m[2].toUpperCase();
+    moves.push({ player, move });
+  }
+  return moves;
 }
 
 function toMatrix(cells: Cell[][]): number[][] {
@@ -131,8 +160,26 @@ function isLegalEmptyPoint(matrix: number[][], row: number, col: number): boolea
   return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && matrix[r]?.[c] === 0;
 }
 
-function filterPlayableMoves(moves: AdvisorMove[], matrix: number[][]): AdvisorMove[] {
-  return moves.filter((m) => isLegalEmptyPoint(matrix, m.row, m.col));
+function isClientLegalGoMove(
+  matrix: number[][],
+  row: number,
+  col: number,
+  side: 1 | 2 | null,
+  koPoint: { row: number; col: number } | null,
+): boolean {
+  if (!side) return false;
+  if (!isLegalEmptyPoint(matrix, row, col)) return false;
+  if (koPoint && koPoint.row === row && koPoint.col === col) return false;
+  return !!simulateGoMove(matrix, row - 1, col - 1, side);
+}
+
+function filterPlayableMoves(
+  moves: AdvisorMove[],
+  matrix: number[][],
+  side: 1 | 2 | null,
+  koPoint: { row: number; col: number } | null,
+): AdvisorMove[] {
+  return moves.filter((m) => isClientLegalGoMove(matrix, m.row, m.col, side, koPoint));
 }
 
 function goNeighbors(r: number, c: number): Array<[number, number]> {
@@ -287,7 +334,75 @@ function opponentMoveValue(matrix: number[][], r: number, c: number, side: 1 | 2
   return capture + attack + rescue + connect + cut + liberties;
 }
 
-function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
+function addCandidatePoint(out: Set<string>, r: number, c: number): void {
+  if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) out.add(pointKey(r, c));
+}
+
+function strategicGoCandidateKeys(matrix: number[][]): Set<string> {
+  const out = new Set<string>();
+  const stones: Array<[number, number]> = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (matrix[r][c] !== 0) stones.push([r, c]);
+    }
+  }
+  const stageRadius = stones.length <= 24 ? 4 : stones.length <= 120 ? 3 : 2;
+  const fuseki = [
+    [3, 3], [3, 9], [3, 15],
+    [9, 3], [9, 9], [9, 15],
+    [15, 3], [15, 9], [15, 15],
+    [2, 2], [2, 3], [3, 2], [2, 15], [2, 16], [3, 16],
+    [15, 2], [16, 2], [16, 3], [15, 16], [16, 15], [16, 16],
+  ] as Array<[number, number]>;
+  for (const [r, c] of fuseki) addCandidatePoint(out, r, c);
+  for (const [ar, ac] of stones.length ? stones : fuseki) {
+    for (let dr = -stageRadius; dr <= stageRadius; dr++) {
+      for (let dc = -stageRadius; dc <= stageRadius; dc++) {
+        if (Math.abs(dr) + Math.abs(dc) > stageRadius + 1) continue;
+        addCandidatePoint(out, ar + dr, ac + dc);
+      }
+    }
+  }
+  return out;
+}
+
+function strongestOpponentReplyValue(matrix: number[][], side: 1 | 2, focusR: number, focusC: number): number {
+  let best = 0;
+  const keys = new Set<string>();
+  for (let dr = -4; dr <= 4; dr++) {
+    for (let dc = -4; dc <= 4; dc++) {
+      if (Math.abs(dr) + Math.abs(dc) <= 5) addCandidatePoint(keys, focusR + dr, focusC + dc);
+    }
+  }
+  for (const [nr, nc] of goNeighbors(focusR, focusC)) {
+    if (matrix[nr][nc] === side) {
+      const g = collectGoGroup(matrix, nr, nc);
+      for (const p of g.liberties) keys.add(p);
+    }
+  }
+  for (const key of keys) {
+    const [r, c] = key.split(',').map(Number);
+    if (matrix[r]?.[c] !== 0) continue;
+    best = Math.max(best, opponentMoveValue(matrix, r, c, side));
+  }
+  return best;
+}
+
+function globalOpponentPlanValue(matrix: number[][], side: 1 | 2): number {
+  let best = 0;
+  for (const key of strategicGoCandidateKeys(matrix)) {
+    const [r, c] = key.split(',').map(Number);
+    if (matrix[r]?.[c] !== 0) continue;
+    best = Math.max(best, opponentMoveValue(matrix, r, c, side));
+  }
+  return best;
+}
+
+function fallbackGoSuggestions(
+  matrix: number[][],
+  side: 1 | 2,
+  koPoint: { row: number; col: number } | null,
+): AdvisorMove[] {
   const opp = side === 1 ? 2 : 1;
   const stones: Array<[number, number]> = [];
   for (let r = 0; r < BOARD_SIZE; r++) {
@@ -298,13 +413,11 @@ function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
   const candidates: Array<{ row: number; col: number; score: number; why: string }> = [];
   const seen = new Set<string>();
   const influenceMap = buildGoInfluence(matrix);
-  const anchors = stones.length ? stones : [[3, 3], [3, 15], [9, 9], [15, 3], [15, 15]] as Array<[number, number]>;
-  for (const [ar, ac] of anchors) {
-    for (let dr = -3; dr <= 3; dr++) {
-      for (let dc = -3; dc <= 3; dc++) {
-        const r = ar + dr;
-        const c = ac + dc;
+  const opponentPlanBefore = globalOpponentPlanValue(matrix, side);
+  for (const candidateKey of strategicGoCandidateKeys(matrix)) {
+        const [r, c] = candidateKey.split(',').map(Number);
         if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE || matrix[r][c] !== 0) continue;
+        if (koPoint && koPoint.row === r + 1 && koPoint.col === c + 1) continue;
         const key = `${r},${c}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -329,12 +442,20 @@ function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
         const ownMoyo = Math.max(0, ownInfluence - oppInfluence);
         const center = 18 - Math.abs(r - 9) - Math.abs(c - 9);
         const starBonus = ((r === 3 || r === 9 || r === 15) && (c === 3 || c === 9 || c === 15)) ? 6 : 0;
+        const cornerEfficiency =
+          stones.length <= 40 && ((r <= 4 || r >= 14) && (c <= 4 || c >= 14)) ? 520 : 0;
+        const sideExtension =
+          stones.length <= 80 && ((r <= 4 || r >= 14 || c <= 4 || c >= 14) && ownNear > 0 && oppNear <= 1) ? 420 : 0;
         const fillOwnEyePenalty = ownNear >= 3 && oppNear === 0 ? 950 : 0;
         const selfAtariPenalty = sim.ownLiberties === 1 && sim.capturedCount === 0 ? 1200 : 0;
         const deepInEnemyPenalty =
           enemyMoyo >= 22 && ownNear === 0 && sim.capturedCount === 0 && sim.ownLiberties <= 2 ? 900 : 0;
+        const opponentReply = strongestOpponentReplyValue(sim.next, side, r, c);
+        const opponentPlanAfter = Math.max(opponentReply, opponentMoveValue(sim.next, r, c, side));
+        const senteGain = Math.max(0, opponentPlanBefore - opponentPlanAfter) * 0.28;
+        const counterRiskPenalty = Math.min(1800, Math.max(0, opponentReply - 900) * 0.42);
         const connection = sim.adjacentOwnGroups >= 2 ? 760 + sim.ownGroupSize * 18 : 0;
-        const cut = sim.adjacentOppGroups >= 2 ? 680 : 0;
+        const cut = sim.adjacentOppGroups >= 2 ? 900 + contested * 14 : 0;
         const capture = sim.capturedCount > 0 ? 2200 + sim.capturedCount * 520 : 0;
         const rescue = sim.savesOwnAtari > 0 ? 1900 + sim.savedStones * 260 : 0;
         const attack = sim.attacksOppAtari > 0 ? 1050 + sim.attackedStones * 180 : 0;
@@ -353,24 +474,32 @@ function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
           defense +
           attack +
           denyOpponentPlan +
+          senteGain +
           reduceEnemyMoyo +
           buildOwnMoyo +
+          cornerEfficiency +
+          sideExtension +
           connection +
           cut +
           libertyShape +
           influence -
           selfAtariPenalty -
           fillOwnEyePenalty -
-          deepInEnemyPenalty;
+          deepInEnemyPenalty -
+          counterRiskPenalty;
         let why = '全局评估：兼顾布局、连接和双方气口';
         if (capture) why = `可提掉对方 ${sim.capturedCount} 子，优先获得实利`;
         else if (rescue) why = `救回己方被打吃棋块（${sim.savedStones} 子），先稳住基本盘`;
         else if (defense) why = `防止对手在此提掉我方 ${oppCapture} 子，先消除威胁`;
         else if (attack) why = `压缩对方气口，制造打吃压力（目标约 ${sim.attackedStones} 子）`;
+        else if (counterRiskPenalty >= 700) why = '此点已考虑对手下一手反击风险，保留主动权';
+        else if (senteGain >= 500) why = '降低对手下一手最大收益，抢先化解后续威胁';
         else if (denyOpponentPlan >= 900) why = '抢占对手下一手价值点，提前打断对方布局';
         else if (reduceEnemyMoyo >= 700) why = '打入/削减对方势力范围，防止对手围大空';
         else if (connection) why = '连接己方棋块，减少被分断风险';
         else if (cut) why = '切断对方棋形，打乱对手布局';
+        else if (cornerEfficiency) why = '开局优先占角/拆边，提高实地效率';
+        else if (sideExtension) why = '沿边拆开扩张，兼顾实地和后续出路';
         else if (buildOwnMoyo >= 450) why = '扩张己方势力，同时保留后续连接';
         else if (fillOwnEyePenalty) why = '该点接近己方眼位，已降权避免无意义填眼';
         candidates.push({
@@ -379,8 +508,6 @@ function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
           score,
           why,
         });
-      }
-    }
   }
   return candidates
     .sort((a, b) => b.score - a.score || a.row - b.row || a.col - b.col)
@@ -400,6 +527,12 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   const turn = useMemo(() => parseTurn(boardText), [boardText]);
   const seats = useMemo(() => parseSeats(boardText), [boardText]);
   const meta = useMemo(() => parseMeta(boardText), [boardText]);
+  const koPoint = useMemo(() => parseKoPoint(boardText), [boardText]);
+  const katagoHistoryMoves = useMemo(() => parseKataGoMoves(boardText), [boardText]);
+  const katagoHistorySig = useMemo(
+    () => katagoHistoryMoves.map((m) => `${m.player}${m.move}`).join('|'),
+    [katagoHistoryMoves],
+  );
   const matrix = useMemo(() => toMatrix(cells), [cells]);
   const sig = useMemo(() => boardSignature(matrix), [matrix]);
   const mySide = nickname === seats.black ? 'black' : nickname === seats.white ? 'white' : null;
@@ -417,17 +550,30 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   const katagoFailCooldownRef = useRef<{ key: string; until: number }>({ key: '', until: 0 });
   const katagoCacheRef = useRef<Map<string, AdvisorMove[]>>(new Map());
   const katagoEverOkRef = useRef(false);
+  const katagoWarmupRef = useRef<{ started: boolean; ok: boolean }>({ started: false, ok: false });
   const fallbackMoves = useMemo(
-    () => (mySideNum ? fallbackGoSuggestions(matrix, mySideNum) : []),
-    [matrix, mySideNum],
+    () => (mySideNum ? fallbackGoSuggestions(matrix, mySideNum, koPoint) : []),
+    [matrix, mySideNum, koPoint],
   );
-  const playableKataGoMoves = useMemo(() => filterPlayableMoves(katagoMoves, matrix), [katagoMoves, matrix]);
-  const shownMoves = playableKataGoMoves.length > 0 ? playableKataGoMoves : fallbackMoves;
+  const playableKataGoMoves = useMemo(
+    () => filterPlayableMoves(katagoMoves, matrix, mySideNum, koPoint),
+    [katagoMoves, matrix, mySideNum, koPoint],
+  );
+  const rawShownMoves = playableKataGoMoves.length > 0 ? playableKataGoMoves : fallbackMoves;
+  const shownMoves = filterPlayableMoves(rawShownMoves, matrix, mySideNum, koPoint);
+  const canPlayAdvisorMove = (m: AdvisorMove): boolean =>
+    !disabled &&
+    (!turn.name || myTurn) &&
+    isClientLegalGoMove(matrix, m.row, m.col, mySideNum, koPoint);
+  const pickAdvisorMove = (m: AdvisorMove): void => {
+    if (!canPlayAdvisorMove(m)) return;
+    onPick(m.row, m.col);
+  };
   const katagoElapsedSec = katagoPending && katagoStartedAt > 0
     ? Math.max(0, Math.floor((katagoStatusTick - katagoStartedAt) / 1000))
     : 0;
   const katagoStatusText = katagoPending
-    ? `KataGo 分析中 ${katagoElapsedSec}s，已先显示内置全局建议`
+    ? `${katagoEverOkRef.current ? 'KataGo 分析中' : 'KataGo 首次预热中'} ${katagoElapsedSec}s，已先显示内置全局建议`
     : playableKataGoMoves.length
       ? `已接入 KataGo${katagoLastMeta ? `（${katagoLastMeta}）` : ''}`
       : katagoError
@@ -441,6 +587,28 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   }, [katagoPending]);
 
   useEffect(() => {
+    if (!isHiddenMaster || !mySideNum || !sig || disabled) return;
+    if (katagoWarmupRef.current.started || katagoWarmupRef.current.ok || katagoEverOkRef.current) return;
+    const likelyMyTurn = myTurn || (!turn.name && isGoSideTurnByMatrix(matrix, mySideNum));
+    if (likelyMyTurn) return;
+
+    katagoWarmupRef.current.started = true;
+    window.api.warmupGoKataGo()
+      .then((resp) => {
+        if (resp.ok) {
+          katagoWarmupRef.current.ok = true;
+          katagoEverOkRef.current = true;
+          setKataGoLastMeta(resp.ms > 0 ? `已预热${resp.ms}ms` : '已预热');
+        } else {
+          katagoWarmupRef.current.started = false;
+        }
+      })
+      .catch(() => {
+        katagoWarmupRef.current.started = false;
+      });
+  }, [isHiddenMaster, mySideNum, sig, disabled, myTurn, turn.name, matrix]);
+
+  useEffect(() => {
     if (!isHiddenMaster || !mySideNum || !sig || disabled) {
       katagoSeqRef.current += 1;
       setKataGoMoves([]);
@@ -450,7 +618,8 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       return;
     }
 
-    const key = `${sig}|${mySideNum}`;
+    const koSig = koPoint ? `${koPoint.row},${koPoint.col}` : '-';
+    const key = `${sig}|${mySideNum}|${katagoHistorySig}|ko:${koSig}`;
     const likelyMyTurn = myTurn || (!turn.name && isGoSideTurnByMatrix(matrix, mySideNum));
 
     if (!likelyMyTurn) {
@@ -463,7 +632,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
     }
 
     const cached = katagoCacheRef.current.get(key);
-    const playableCached = cached ? filterPlayableMoves(cached, matrix) : [];
+    const playableCached = cached ? filterPlayableMoves(cached, matrix, mySideNum, koPoint) : [];
     if (cached?.length && playableCached.length === 0) {
       katagoCacheRef.current.delete(key);
       katagoOkKeyRef.current = '';
@@ -486,9 +655,11 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
 
     const stoneN = goStoneCount(matrix);
     const maxVisits = stoneN <= 80 ? 64 : stoneN <= 180 ? 96 : 128;
-    const timeoutMs = katagoEverOkRef.current ? 30000 : 45000;
+    const maxTimeSec = stoneN <= 80 ? 8 : stoneN <= 180 ? 10 : 12;
+    const firstColdStart = !katagoEverOkRef.current;
+    const timeoutMs = firstColdStart ? 120000 : 30000;
     const guard = new Promise<never>((_, reject) => {
-      window.setTimeout(() => reject(new Error('KataGo 响应超时（前端保护）')), timeoutMs + 5000);
+      window.setTimeout(() => reject(new Error('KataGo 响应超时（前端保护）')), timeoutMs + (firstColdStart ? 10000 : 5000));
     });
 
     Promise.race([
@@ -496,7 +667,9 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
         board: matrix,
         mySide: mySideNum,
         komi: 6.5,
+        moves: katagoHistoryMoves,
         maxVisits,
+        maxTimeSec,
         timeoutMs,
       }),
       guard,
@@ -515,7 +688,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
               detail: [wr, lead, visits].filter(Boolean).join('，') || 'KataGo 推荐',
               source: 'katago' as const,
             };
-          }).filter((m) => isLegalEmptyPoint(matrix, m.row, m.col)).slice(0, 3);
+          }).filter((m) => isClientLegalGoMove(matrix, m.row, m.col, mySideNum, koPoint)).slice(0, 3);
           if (moves.length === 0) {
             setKataGoMoves([]);
             setKataGoError('KataGo 返回的建议点当前已不可落子，已自动过滤。');
@@ -552,7 +725,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
           setKataGoStartedAt(0);
         }
       });
-  }, [isHiddenMaster, mySideNum, sig, matrix, disabled, myTurn, turn.name, katagoPending]);
+  }, [isHiddenMaster, mySideNum, sig, matrix, koPoint, katagoHistoryMoves, katagoHistorySig, disabled, myTurn, turn.name, katagoPending]);
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">围棋棋盘（19 路，点击交叉点落子）</div>
@@ -586,8 +759,8 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
               <button
                 key={`${m.source}-${m.row}-${m.col}`}
                 className="mini-btn"
-                disabled={disabled || (!!turn.name && !myTurn)}
-                onClick={() => onPick(m.row, m.col)}
+                disabled={!canPlayAdvisorMove(m)}
+                onClick={() => pickAdvisorMove(m)}
                 title={m.detail}
               >
                 {m.label}
@@ -608,7 +781,13 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
               <button
                 key={`${cell.row}-${cell.col}`}
                 className={`go-point ${cell.stone === '#' ? 'black' : ''} ${cell.stone === 'o' ? 'white' : ''} ${cell.last ? 'last' : ''} ${shownMoves[0]?.row === cell.row && shownMoves[0]?.col === cell.col ? 'suggested' : ''}`}
-                disabled={disabled || cell.stone !== '.' || !mySide || (!!turn.name && !myTurn)}
+                disabled={
+                  disabled ||
+                  cell.stone !== '.' ||
+                  !mySide ||
+                  (!!turn.name && !myTurn) ||
+                  !isClientLegalGoMove(matrix, cell.row, cell.col, mySideNum, koPoint)
+                }
                 onClick={() => onPick(cell.row, cell.col)}
                 title={`第${cell.row}行，第${cell.col}列`}
               >

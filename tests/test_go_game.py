@@ -84,6 +84,38 @@ class GoGameTests(unittest.TestCase):
         self.assertEqual(game._turn, 2)
         self.assertTrue(any("轮到 白方 Bob 落子" in line for line in bcast))
 
+    def test_show_exposes_current_ko_point(self) -> None:
+        game, _black, _white = self._started()
+        game._ko_point = (4, 5)
+
+        lines = game.show()
+
+        self.assertTrue(any("劫点：第 5 行，第 6 列" in line for line in lines))
+
+    def test_show_exposes_katago_move_history(self) -> None:
+        game, black, white = self._started()
+        self.assertEqual(game.try_move(black, "4 4")[0], [])
+        self.assertEqual(game.try_move(white, "16 16")[0], [])
+        self.assertEqual(game.try_move(black, "pass")[0], [])
+
+        lines = game.show()
+
+        self.assertTrue(
+            any("KataGo手顺：B D16; W Q4; B pass" in line for line in lines)
+        )
+
+    def test_undo_rewinds_katago_move_history(self) -> None:
+        game, black, white = self._started()
+        self.assertEqual(game.try_move(black, "4 4")[0], [])
+        self.assertEqual(game.try_move(white, "16 16")[0], [])
+
+        game.request_undo(white)
+        game.accept_undo(black)
+        lines = game.show()
+
+        self.assertTrue(any("KataGo手顺：B D16" in line for line in lines))
+        self.assertFalse(any("W Q4" in line for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -288,3 +288,93 @@
   - electron: npx tsc -p tsconfig.json --noEmit 通过
   - electron: npx tsc -p tsconfig.node.json --noEmit 通过
   - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-03（KataGo 分析耗时修复）
+- 用户反馈：KataGo 分析时间过长，常出现 30 秒以上。
+- 定位结论：
+  1) 864MB B40 模型 + Intel UHD Graphics 770 OpenCL 初始化导致冷启动约 39-45 秒。
+  2) 原先首次前端保护只有约 45 秒，可能在 KataGo 完成预热前杀掉进程，导致下一次又重新冷启动。
+  3) 原先只传 maxVisits，不传 KataGo analysis 的时间上限，集显慢/资源竞争时会为了访问数拖到 30 秒以上。
+  4) 同机若已有另一个 katago.exe 常驻，会抢集显资源，热分析也会明显变慢。
+- 已修复：
+  1) 新增 GO_KATAGO_WARMUP IPC 和 warmupGoKataGo preload API。
+  2) KataGoAnalysisService 新增 warmup()，低 visits 后台预热，同进程成功后标记 warmed，后续复用常驻进程。
+  3) 围棋助手在 zouyu 入座且非本人回合时自动后台预热；本人回合首次冷启动保护放宽到 120s，避免误杀。
+  4) GoKataGoAnalyzeRequest 新增 maxTimeSec；主进程用 overrideSettings.maxTime 正确传给 KataGo analysis engine。
+  5) 前端按局面传 maxTimeSec：开局/前中盘/后盘约 8/10/12 秒，快机器仍可按 maxVisits 多算，慢机器不会无限拖。
+- 验证：
+  - 直接 KataGo 直测：预热请求约 41.4s（含冷启动），随后正式 maxVisits=64/maxTime=8 请求约 11.2s 返回（当前机器另有免安装包 katago.exe 抢资源）。
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-03（围棋内置建议策略增强）
+- 用户要求：KataGo 未返回前，内置建议也要更强、更有压迫感，不能只是普通 fallback。
+- 已修复：
+  1) 候选点从“只围绕已有棋子附近”升级为“战略候选点集合”：星位、角部、三三/小目、边路拆边、棋子周边均纳入，避免开局只局部跟随。
+  2) 新增 strongestOpponentReplyValue：模拟我方落子后，对手下一手在局部的最大反击收益，用于降权会被反杀/失先的点。
+  3) 新增 globalOpponentPlanValue：评估对手当前最大计划收益，若我方落子能降低对手下一手最大收益，则加先手收益。
+  4) 加强中盘策略：切断从固定分升级为结合争夺区加权；补充开局占角效率、沿边拆开扩张、打入削减对方势力、保留出路。
+  5) 保留原有战术优先级：提子、救被打吃、阻止对手提子、打吃、连接、切断、自紧气/填眼降权。
+- 说明：内置启发式已增强为强 fallback；真正接近“不可战胜”的强度仍必须依赖 KataGo 神经网络搜索，内置策略负责 KataGo 预热/超时时提供可靠强建议。
+- 验证：
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-04（围棋劫点合法性过滤）
+- 用户反馈：KataGo/助手仍提示“此处为劫点，不能立刻回提”的点，说明建议没有遵守服务端劫规则。
+- 根因：服务端 GoGame 已维护 _ko_point 并拒绝立即回提，但 show() 未输出当前劫点；前端只能按“空点”过滤 KataGo/内置建议，无法知道哪一个空点是当前禁入劫点。
+- 已修复：
+  1) GoGame.show() 输出当前劫点坐标：`劫点：第 X 行，第 Y 列，不能立刻回提。`
+  2) GoPanel 解析劫点坐标并纳入 meta 展示。
+  3) 新增 isClientLegalGoMove：统一过滤空点、劫点和自杀点。
+  4) KataGo 返回建议、KataGo 缓存建议、内置 fallback 建议、棋盘点击按钮全部走同一套合法性过滤。
+  5) 补充 test_show_exposes_current_ko_point，锁住服务端劫点输出。
+- 说明：KataGo analysis 当前只拿到 initialStones，不拿完整历史，单靠当前盘面不能可靠知道服务端劫点；客户端按服务端输出的 ko point 做最终过滤，避免非法建议和误点。
+- 验证：
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过（6 passed）
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-04（围棋 KataGo 完整手顺与 EvalCache）
+- 用户要求：开启 useEvalCache，并让 KataGo 不再只看当前棋盘，而是接收服务端完整手顺，提高劫、连续布局和历史上下文判断。
+- 已修复：
+  1) GoGame 记录每步落子坐标到 _history；show() 输出紧凑机器可读行：`KataGo手顺：B D16; W Q4; B pass`。
+  2) 悔棋复用现有 _history 回退机制，手顺会同步回退；新增单测锁住落子、pass、悔棋后的手顺输出。
+  3) GoPanel 解析 `KataGo手顺`，随 analyzeGoKataGo 请求传递 moves；缓存 key 增加手顺签名，避免 pass 后棋盘不变但建议复用旧缓存。
+  4) 主进程优先用真实 moves 调用 KataGo；没有手顺时保留旧的 initialStones 整盘重建兜底。
+  5) KataGo 配置文件开启 `useEvalCache = true`、`evalCacheMinVisits = 16`。
+- 关键坑位：
+  - smoke test 证明 `useEvalCache` 不能放在 per-query `overrideSettings` 中，否则 KataGo 返回 `Cannot change useEvalCache after initialization`；必须在 analysis config 启动时配置。
+- 验证：
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过（8 passed）
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过
+  - KataGo 真实协议 smoke：带 moves + maxTime override 返回 `SMOKE_OK move=C4 ms=32656`（耗时含冷启动）
+- 后续修正：由于 `electron/engines/katago/*` 被 `.gitignore` 忽略，不能依赖直接修改 analysis_example.cfg 提交远程；已改为主进程运行时基于原始配置生成用户数据目录下的 `sshchat-analysis.cfg`，自动写入 `useEvalCache = true` 与 `evalCacheMinVisits = 16`，保证打包/远程代码可复现。
+- 回归验证：
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过（8 passed）
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-04（围棋助手劫点建议过滤修复）
+- 用户反馈：助手给出的建议落子位置仍然可能是劫点，点击后服务端提示“此处为劫点，不能立刻回提”。
+- 根因：
+  1) 棋盘格子点击已经走 isClientLegalGoMove 过滤，但助手建议按钮原先只判断回合，可能绕过合法性守卫。
+  2) KataGo 建议缓存 key 包含棋盘/执子/手顺，但未包含 koPoint；劫点状态变化时可能复用旧建议。
+  3) “首选”展示直接使用 shownMoves，缺少最终兜底过滤。
+- 已修复：
+  1) 助手建议按钮新增 canPlayAdvisorMove/pickAdvisorMove，点击前再次校验空点、劫点、自杀点。
+  2) 缓存 key 增加 `ko:row,col`，劫点变化会触发重新过滤/分析。
+  3) 渲染前对 rawShownMoves 再执行 filterPlayableMoves，确保按钮和“首选”文字都不会展示劫点。
+- 验证：
+  - electron: npx tsc -p tsconfig.json --noEmit 通过
+  - electron: npx tsc -p tsconfig.node.json --noEmit 通过
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过（8 passed）
+  - node electron/scripts/qa-game-panels-playwright.mjs 通过

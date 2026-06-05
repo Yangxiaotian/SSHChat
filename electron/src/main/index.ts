@@ -83,10 +83,40 @@ const RAPFI_MIN_DEPTH = intEnv('RAPFI_MIN_DEPTH', 40, 8, 99);
 let resolvedRapfiExecutableCache: string | null | undefined;
 const KATAGO_DEFAULT_TIMEOUT_MS = intEnv('KATAGO_TIMEOUT_MS', 60000, 1500, 180000);
 const KATAGO_DEFAULT_MAX_VISITS = intEnv('KATAGO_MAX_VISITS', 96, 8, 2000);
+const KATAGO_WARMUP_TIMEOUT_MS = intEnv('KATAGO_WARMUP_TIMEOUT_MS', 120000, 30000, 180000);
 let resolvedKataGoPathsCache:
   | { ok: true; exe: string; model: string; config: string }
   | { ok: false; error: string }
   | undefined;
+
+function withKataGoConfigValue(text: string, key: string, value: string): string {
+  const line = `${key} = ${value}`;
+  const pattern = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, 'm');
+  if (pattern.test(text)) return text.replace(pattern, line);
+  return `${text.trimEnd()}\n${line}\n`;
+}
+
+function prepareKataGoConfig(baseConfig: string): string {
+  try {
+    let text = fs.readFileSync(baseConfig, 'utf8');
+    text = withKataGoConfigValue(text, 'useEvalCache', 'true');
+    text = withKataGoConfigValue(text, 'evalCacheMinVisits', '16');
+
+    const dir = path.join(app.getPath('userData'), 'engines', 'katago');
+    fs.mkdirSync(dir, { recursive: true });
+    const out = path.join(dir, 'sshchat-analysis.cfg');
+    let old = '';
+    try {
+      old = fs.readFileSync(out, 'utf8');
+    } catch {
+      old = '';
+    }
+    if (old !== text) fs.writeFileSync(out, text, 'utf8');
+    return out;
+  } catch {
+    return baseConfig;
+  }
+}
 
 function ensureRapfiLayout(): void {
   const appDir = path.dirname(app.getPath('exe'));
@@ -824,7 +854,7 @@ function resolveKataGoPaths():
     return resolvedKataGoPathsCache;
   }
 
-  resolvedKataGoPathsCache = { ok: true, exe, model, config };
+  resolvedKataGoPathsCache = { ok: true, exe, model, config: prepareKataGoConfig(config) };
   return resolvedKataGoPathsCache;
 }
 
@@ -855,6 +885,23 @@ function goGtpToUi(loc: string): { row: number; col: number } | null {
   return { row, col };
 }
 
+function sanitizeKataGoMoves(moves?: GoKataGoAnalyzeRequest['moves']): Array<['B' | 'W', string]> {
+  if (!Array.isArray(moves)) return [];
+  const out: Array<['B' | 'W', string]> = [];
+  for (const item of moves) {
+    const player = item?.player;
+    if (player !== 'B' && player !== 'W') continue;
+    const raw = String(item?.move || '').trim().toUpperCase();
+    if (raw === 'PASS') {
+      out.push([player, 'pass']);
+      continue;
+    }
+    if (!goGtpToUi(raw)) continue;
+    out.push([player, raw]);
+  }
+  return out;
+}
+
 function sanitizeKataGoTimeout(timeoutMs?: number): number {
   if (!Number.isFinite(timeoutMs)) return KATAGO_DEFAULT_TIMEOUT_MS;
   return Math.max(1500, Math.min(180000, Math.floor(timeoutMs!)));
@@ -863,6 +910,11 @@ function sanitizeKataGoTimeout(timeoutMs?: number): number {
 function sanitizeKataGoVisits(maxVisits?: number): number {
   if (!Number.isFinite(maxVisits)) return KATAGO_DEFAULT_MAX_VISITS;
   return Math.max(8, Math.min(2000, Math.floor(maxVisits!)));
+}
+
+function sanitizeKataGoMaxTime(maxTimeSec?: number): number | undefined {
+  if (!Number.isFinite(maxTimeSec)) return undefined;
+  return Math.max(1, Math.min(60, Number(maxTimeSec!.toFixed(2))));
 }
 
 type KataGoPendingRequest = {
@@ -884,6 +936,7 @@ class KataGoAnalysisService {
   private pending: KataGoPendingRequest | null = null;
   private queue: Promise<void> = Promise.resolve();
   private seq = 0;
+  private warmed = false;
 
   private disposeProcess(): void {
     if (this.proc && !this.proc.killed) {
@@ -897,6 +950,7 @@ class KataGoAnalysisService {
     this.procKey = '';
     this.stdoutBuf = '';
     this.stderrTail = [];
+    this.warmed = false;
   }
 
   disposeAll(): void {
@@ -985,12 +1039,15 @@ class KataGoAnalysisService {
     for (const line of lines) {
       if (!this.pending || !line.trim()) continue;
       try {
-        const obj = JSON.parse(line);
-        const resp = this.parseResponse(obj, this.pending);
-        if (resp) {
-          this.completePending(resp);
-          return;
-        }
+          const obj = JSON.parse(line);
+          const resp = this.parseResponse(obj, this.pending);
+          if (resp) {
+            if (resp.ok) {
+              this.warmed = true;
+            }
+            this.completePending(resp);
+            return;
+          }
       } catch {
         // KataGo may print non-JSON startup lines; stderr tail keeps useful errors.
       }
@@ -1079,16 +1136,21 @@ class KataGoAnalysisService {
       }
     }
     const turn = payload.mySide === 1 ? 'B' : 'W';
+    const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
+    const historyMoves = sanitizeKataGoMoves(payload.moves);
+    const overrideSettings: Record<string, number> = {};
+    if (maxTime) overrideSettings.maxTime = maxTime;
     const query = {
       id,
       rules: 'chinese',
       komi: Number.isFinite(payload.komi) ? payload.komi : 6.5,
       boardXSize: 19,
       boardYSize: 19,
-      initialStones,
-      moves: [],
+      initialStones: historyMoves.length > 0 ? [] : initialStones,
+      moves: historyMoves,
       initialPlayer: turn,
       maxVisits: sanitizeKataGoVisits(payload.maxVisits),
+      ...(Object.keys(overrideSettings).length > 0 ? { overrideSettings } : {}),
       includeOwnership: false,
     };
 
@@ -1139,12 +1201,39 @@ class KataGoAnalysisService {
     this.queue = task.then(() => undefined, () => undefined);
     return task;
   }
+
+  warmup(): Promise<GoKataGoAnalyzeResponse> {
+    const paths = resolveKataGoPaths();
+    if (paths.ok && this.proc && !this.proc.killed && this.warmed) {
+      return Promise.resolve({
+        ok: true,
+        ms: 0,
+        suggestions: [],
+        enginePath: paths.exe,
+        modelPath: paths.model,
+        configPath: paths.config,
+      });
+    }
+    const board = Array.from({ length: 19 }, () => Array.from({ length: 19 }, () => 0));
+    return this.analyze({
+      board,
+      mySide: 1,
+      komi: 6.5,
+      maxVisits: 8,
+      maxTimeSec: 2,
+      timeoutMs: KATAGO_WARMUP_TIMEOUT_MS,
+    });
+  }
 }
 
 const kataGoService = new KataGoAnalysisService();
 
 async function analyzeGoByKataGo(payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> {
   return kataGoService.analyze(payload);
+}
+
+async function warmupGoByKataGo(): Promise<GoKataGoAnalyzeResponse> {
+  return kataGoService.warmup();
 }
 
 function attemptReconnect(): void {
@@ -1610,6 +1699,9 @@ function setupIPC(): void {
   // Go: KataGo external engine analysis
   ipcMain.handle(IPC_CHANNELS.GO_KATAGO_ANALYZE, async (_event, payload: GoKataGoAnalyzeRequest) => {
     return analyzeGoByKataGo(payload);
+  });
+  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_WARMUP, async () => {
+    return warmupGoByKataGo();
   });
 }
 
