@@ -1,4 +1,5 @@
 ﻿import React from 'react';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -50,6 +51,7 @@ function includesAny(source: string, needles: string[]): boolean {
 }
 
 export default function NiuTouPanel({ disabled, nickname, boardText, onCmd }: Props) {
+  const { t } = useTranslation();
   const hand = extractHand(boardText);
   const rows = parseRows(boardText);
   const meta = parseMeta(boardText);
@@ -61,8 +63,8 @@ export default function NiuTouPanel({ disabled, nickname, boardText, onCmd }: Pr
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">谁是牛头王互动面板（新手引导）</div>
-      <div className="game-workbench-hint">每回合点一张手牌；若提示必须吃行，再点“吃第1~4行”。牛头越少越好。</div>
+      <div className="game-interaction-title">{t('game.niutou.title')}</div>
+      <div className="game-workbench-hint">{t('game.niutou.hint')}</div>
       {rows.length > 0 && (
         <div className="game-chip-row">
           {rows.map((r, i) => (
@@ -71,12 +73,12 @@ export default function NiuTouPanel({ disabled, nickname, boardText, onCmd }: Pr
         </div>
       )}
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>发牌开始</button>
-        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 1')}>吃第1行</button>
-        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 2')}>吃第2行</button>
-        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 3')}>吃第3行</button>
-        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 4')}>吃第4行</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
+        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>{t('game.niutou.dealStart')}</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 1')}>{t('game.niutou.eatRow', { row: 1 })}</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 2')}>{t('game.niutou.eatRow', { row: 2 })}</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 3')}>{t('game.niutou.eatRow', { row: 3 })}</button>
+        <button className="mini-btn" disabled={disabled || !canChooseRow} onClick={() => onCmd('row 4')}>{t('game.niutou.eatRow', { row: 4 })}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>
       </div>
       <div className="game-chip-row">
         {hand.map((n) => (

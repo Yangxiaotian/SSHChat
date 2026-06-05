@@ -1,6 +1,7 @@
 ﻿import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { useChatStore } from './store/chatStore';
 import { SHAKE_TOKEN } from '../shared/protocol';
+import { useTranslation } from './i18n';
 import ActivityBar from './components/ActivityBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
@@ -30,7 +31,7 @@ type BoundaryState = {
   message: string;
 };
 
-class RendererErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> {
+class RendererErrorBoundary extends Component<{ children: ReactNode; t: (key: string) => string }, BoundaryState> {
   state: BoundaryState = {
     hasError: false,
     message: '',
@@ -58,10 +59,10 @@ class RendererErrorBoundary extends Component<{ children: ReactNode }, BoundaryS
     }
     return (
       <div style={{ padding: 20, color: '#ddd', background: '#1e1e1e', height: '100vh' }}>
-        <h3 style={{ marginTop: 0 }}>界面异常已拦截</h3>
-        <p>已避免白屏。请点击“重载界面”恢复。</p>
-        <pre style={{ whiteSpace: 'pre-wrap', color: '#f2c08a' }}>{this.state.message || '未知错误'}</pre>
-        <button className="mini-btn" onClick={this.onReload}>重载界面</button>
+        <h3 style={{ marginTop: 0 }}>{this.props.t('app.errorTitle')}</h3>
+        <p>{this.props.t('app.errorHint')}</p>
+        <pre style={{ whiteSpace: 'pre-wrap', color: '#f2c08a' }}>{this.state.message || this.props.t('app.unknownError')}</pre>
+        <button className="mini-btn" onClick={this.onReload}>{this.props.t('common.reload')}</button>
       </div>
     );
   }
@@ -69,6 +70,7 @@ class RendererErrorBoundary extends Component<{ children: ReactNode }, BoundaryS
 
 export default function App() {
   const { status, showLogin, theme, privacyMode, activeRoom } = useChatStore();
+  const { t } = useTranslation();
   const [sidebarVisible, setSidebarVisible] = useState(true);
 
   useEffect(() => {
@@ -80,7 +82,7 @@ export default function App() {
           useChatStore.getState().setShowLogin(false);
           window.api.connect(config, config.user).then((result) => {
             if (!result.success) {
-              useChatStore.getState().setError(result.error || '自动重连失败');
+              useChatStore.getState().setError(result.error || t('app.autoReconnectFailed'));
               useChatStore.getState().setShowLogin(true);
             }
           });
@@ -93,12 +95,12 @@ export default function App() {
       const isShakeSignal = message.content.trim() === SHAKE_TOKEN;
       if (isShakeSignal) {
         // Show who sent the shake in chat
-        const sender = message.sender === me ? 'You' : message.sender;
+        const sender = message.sender === me ? t('common.you') : message.sender;
         useChatStore.getState().addMessage({
           id: `shake_${Date.now()}`,
           room: message.room,
           sender: '*',
-          content: `${sender} sent a room shake`,
+          content: t('app.roomShake', { sender }),
           timestamp: Date.now(),
           type: 'system',
         });
@@ -174,12 +176,12 @@ export default function App() {
   }, [theme, privacyMode]);
 
   return (
-    <RendererErrorBoundary>
+    <RendererErrorBoundary t={t}>
       <div className="app-container">
         <div className="titlebar">
           <span className="titlebar-icon">{'</>'}</span>
           <span className="titlebar-title">
-            {privacyMode ? 'VsCodeEn' : `SSHChat${status === 'connected' ? '' : ' (Offline)'}`}
+            {privacyMode ? 'VsCodeEn' : `${t('app.title')}${status === 'connected' ? '' : ` (${t('status.disconnected')})`}`}
           </span>
         </div>
 

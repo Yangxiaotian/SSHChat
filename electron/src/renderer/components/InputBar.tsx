@@ -1,20 +1,23 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { SHAKE_TOKEN } from '../../shared/protocol';
+import { useTranslation } from '../i18n';
 
-const COMMANDS = [
-  { name: '/help', desc: 'Show help' },
-  { name: '/names', desc: 'List users in room' },
-  { name: '/rooms', desc: 'List joined rooms' },
-  { name: '/join', desc: 'Join a room' },
-  { name: '/switch', desc: 'Switch active room' },
-  { name: '/part', desc: 'Leave a room' },
-  { name: '/msg', desc: 'Send private message' },
-  { name: '/clear', desc: 'Clear local view (current room)' },
-  { name: '/game', desc: 'Game commands' },
-  { name: '/news', desc: 'Show news' },
-  { name: '/announce', desc: 'Room announcement' },
-];
+const COMMAND_KEYS = [
+  { name: '/help', key: 'input.commands.help' },
+  { name: '/names', key: 'input.commands.names' },
+  { name: '/rooms', key: 'input.commands.rooms' },
+  { name: '/join', key: 'input.commands.join' },
+  { name: '/switch', key: 'input.commands.switch' },
+  { name: '/part', key: 'input.commands.part' },
+  { name: '/msg', key: 'input.commands.msg' },
+  { name: '/clear', key: 'input.commands.clear' },
+  { name: '/game', key: 'input.commands.game' },
+  { name: '/news', key: 'input.commands.news' },
+  { name: '/library', key: 'input.commands.library' },
+  { name: '/dict', key: 'input.commands.dict' },
+  { name: '/announce', key: 'input.commands.announce' },
+] as const;
 
 export default function InputBar() {
   type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' };
@@ -22,8 +25,14 @@ export default function InputBar() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { status, activeRoom, composerText, setComposerText } = useChatStore();
+  const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
+  const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
+
+  const commands = useMemo(
+    () => COMMAND_KEYS.map((cmd) => ({ name: cmd.name, desc: t(cmd.key) })),
+    [t],
+  );
 
   useEffect(() => {
     try {
@@ -46,7 +55,6 @@ export default function InputBar() {
       // no-op
     }
   };
-  const { clearMessages } = useChatStore();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -54,7 +62,7 @@ export default function InputBar() {
     const keyword = value.trim().toLowerCase();
     const commandMatches =
       value.startsWith('/') && !value.includes(' ')
-        ? COMMANDS.filter((cmd) => cmd.name.startsWith(value.toLowerCase())).map((cmd) => ({
+        ? commands.filter((cmd) => cmd.name.startsWith(value.toLowerCase())).map((cmd) => ({
             value: cmd.name,
             desc: cmd.desc,
             source: 'command' as const,
@@ -67,7 +75,7 @@ export default function InputBar() {
             .slice(0, 10)
             .map((item) => ({
               value: item,
-              desc: 'Recent input',
+              desc: t('common.recentInput'),
               source: 'history' as const,
             }))
         : [];
@@ -118,7 +126,6 @@ export default function InputBar() {
   const isConnected = status === 'connected';
   const triggerRoomShake = async () => {
     if (!isConnected) return;
-    // Send shake signal to server; all clients (including sender via echo) will shake
     await window.api.sendMessage(SHAKE_TOKEN);
   };
 
@@ -146,23 +153,23 @@ export default function InputBar() {
           value={composerText}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder={isConnected ? `Message #${activeRoom}...` : 'Not connected'}
+          placeholder={isConnected ? t('input.placeholder', { room: activeRoom }) : t('input.notConnected')}
           disabled={!isConnected}
         />
         <button
           className="send-button"
           onClick={triggerRoomShake}
           disabled={!isConnected}
-          title="Shake all clients in this room"
+          title={t('input.shakeTitle')}
         >
-          Shake
+          {t('common.shake')}
         </button>
         <button
           className="send-button"
           onClick={handleSend}
           disabled={!isConnected || !composerText.trim()}
         >
-          Send
+          {t('common.send')}
         </button>
       </div>
     </div>

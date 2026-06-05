@@ -1,5 +1,6 @@
 import React from 'react';
 import { useChatStore } from '../store/chatStore';
+import { useTranslation } from '../i18n';
 
 export default function StatusBar() {
   const {
@@ -8,17 +9,19 @@ export default function StatusBar() {
     rooms,
     nickname,
     theme,
-    privacyMode,
     toggleTheme,
+    toggleLocale,
+    privacyMode,
     togglePrivacyMode,
     setShowLogin,
   } = useChatStore();
+  const { t } = useTranslation();
 
   const statusText: Record<string, string> = {
-    disconnected: 'Disconnected',
-    connecting: 'Connecting...',
-    connected: 'Connected',
-    error: 'Error',
+    disconnected: t('status.disconnected'),
+    connecting: t('status.connecting'),
+    connected: t('status.connected'),
+    error: t('status.error'),
   };
 
   const statusColor: Record<string, string> = {
@@ -49,14 +52,18 @@ export default function StatusBar() {
         )}
       </div>
       <div className="statusbar-right">
-        <span className="statusbar-item">{rooms.length} rooms</span>
+        <span className="statusbar-item">{t('common.rooms', { count: rooms.length })}</span>
+        <span className="statusbar-separator"></span>
+        <span className="statusbar-item clickable" onClick={toggleLocale} title="中文 / English">
+          {t('status.language')}
+        </span>
         <span className="statusbar-separator"></span>
         <span className="statusbar-item clickable" onClick={toggleTheme}>
-          {theme === 'dark' ? 'Dark' : 'Light'}
+          {theme === 'dark' ? t('status.dark') : t('status.light')}
         </span>
         <span className="statusbar-separator"></span>
         <span className="statusbar-item clickable" onClick={togglePrivacyMode}>
-          {privacyMode ? 'Focus' : 'Visible'}
+          {privacyMode ? t('status.focus') : t('status.visible')}
         </span>
       </div>
     </div>

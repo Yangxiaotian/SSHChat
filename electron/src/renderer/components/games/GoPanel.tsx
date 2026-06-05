@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -394,6 +395,7 @@ function fallbackGoSuggestions(matrix: number[][], side: 1 | 2): AdvisorMove[] {
 }
 
 export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }: Props) {
+  const { t } = useTranslation();
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const turn = useMemo(() => parseTurn(boardText), [boardText]);
   const seats = useMemo(() => parseSeats(boardText), [boardText]);
@@ -562,10 +564,10 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
         <div key={line} className="game-advisor-detail">{line}</div>
       ))}
       <div className="game-chip-row" style={{ marginTop: 6 }}>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('pass')}>停一手</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game join')}>加入对局</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game seats')}>查看席位</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game resign')}>认输</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('pass')}>{t('game.go.pass')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game join')}>{t('game.go.join')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game seats')}>{t('game.go.seats')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game resign')}>{t('game.go.resign')}</button>
       </div>
       {turn.name && !myTurn && (
         <div className="game-workbench-hint">当前不是你的回合，可先观察气口、劫点和下一手方向。</div>

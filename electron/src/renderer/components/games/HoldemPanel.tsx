@@ -1,5 +1,6 @@
 ﻿import React, { useMemo, useState } from 'react';
 import PokerCardsView from './PokerCardsView';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -107,19 +108,20 @@ function includesAny(source: string, needles: string[]): boolean {
   return needles.some((n) => s.includes(n.toLowerCase()));
 }
 
-function streetHint(street: string, boardCards: string[]): string {
+function streetHint(street: string, boardCards: string[], tr: (key: string) => string): string {
   const s = street.toLowerCase();
   if (s.includes('preflop') || s.includes('翻牌前')) {
-    return '翻牌前公共牌未发出，本轮下注结束后会自动发出 3 张翻牌。';
+    return tr('game.holdem.preflop');
   }
-  if (boardCards.length === 3) return '当前是翻牌轮，本轮结束后进入转牌。';
-  if (boardCards.length === 4) return '当前是转牌轮，本轮结束后进入河牌。';
-  if (boardCards.length >= 5) return '当前是河牌轮，本轮结束后进入摊牌结算。';
+  if (boardCards.length === 3) return tr('game.holdem.flop');
+  if (boardCards.length === 4) return tr('game.holdem.turnStreet');
+  if (boardCards.length >= 5) return tr('game.holdem.river');
   return '';
 }
 
 export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Props) {
   const [raiseAmount, setRaiseAmount] = useState('10');
+  const { t } = useTranslation();
 
   const handCards = useMemo(() => extractCards(boardText, ['你的手牌', 'your hand']), [boardText]);
   const boardCards = useMemo(() => extractCards(boardText, ['公共牌', 'board']), [boardText]);
@@ -142,53 +144,51 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
 
   const stageText =
     meta.street ||
-    (isPlaying ? '进行中' : isWaiting ? '等待开始' : isEnded ? '已结束' : '未知');
+    (isPlaying ? t('game.holdem.playing') : isWaiting ? t('game.holdem.waiting') : isEnded ? t('game.holdem.ended') : t('game.holdem.unknown'));
 
-  const phaseHint = streetHint(meta.street, boardCards);
+  const phaseHint = streetHint(meta.street, boardCards, t);
 
   const actionBlockReason = !isPlaying
-    ? '当前不在进行中'
+    ? t('game.holdem.notPlaying')
     : !meta.turn
-      ? '未解析到当前行动玩家，请点刷新局面'
+      ? t('game.holdem.noTurn')
       : !myTurn
-        ? `当前轮到 ${meta.turn}`
+        ? t('game.holdem.waitingTurn', { name: meta.turn })
         : '';
 
   const startReason = !isHost
-    ? '仅房主可发牌开始'
+    ? t('game.holdem.hostOnly')
     : isPlaying
-      ? '当前对局进行中，不能重复发牌'
+      ? t('game.holdem.alreadyPlaying')
       : '';
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">德州扑克互动面板</div>
-      <div className="game-workbench-hint">阶段：{stageText}</div>
-      <div className="game-workbench-hint">底池={meta.pot}，当前注={meta.currentBet}</div>
+      <div className="game-interaction-title">{t('game.holdem.title')}</div>
+      <div className="game-workbench-hint">{t('game.holdem.stage', { stage: stageText })}</div>
+      <div className="game-workbench-hint">{t('game.holdem.pot', { pot: meta.pot, currentBet: meta.currentBet })}</div>
       {phaseHint && <div className="game-workbench-hint">{phaseHint}</div>}
 
       {isPlaying && !myTurn && meta.turn && (
-        <div className="game-workbench-hint">当前轮到：{meta.turn}</div>
+        <div className="game-workbench-hint">{t('game.holdem.turn', { name: meta.turn })}</div>
       )}
       {isPlaying && myTurn && (
-        <div className="game-workbench-hint">当前轮到你操作：可过牌/跟注/加注/全下/弃牌。</div>
+        <div className="game-workbench-hint">{t('game.holdem.yourTurn')}</div>
       )}
       {isPlaying && handCards.length === 0 && (
-        <div className="game-workbench-hint">当前为闷牌状态，先点“看牌”显示你的底牌。</div>
+        <div className="game-workbench-hint">{t('game.holdem.lookHint')}</div>
       )}
 
-      <div className="game-workbench-hint">
-        命令（中英文等价）：开始 start · 看牌 look · 过牌 check · 跟注 call · 加注 raise N · 弃牌 fold · 全下 allin
-      </div>
-      <div className="game-workbench-hint">手敲示例：/game move 跟注 或 /game move call；/game show 帮助 看完整对照</div>
+      <div className="game-workbench-hint">{t('game.holdem.cmdHint')}</div>
+      <div className="game-workbench-hint">{t('game.holdem.cmdExample')}</div>
 
-      <PokerCardsView title="你的手牌" cards={handCards} />
-      <PokerCardsView title="公共牌" cards={boardCards} />
+      <PokerCardsView title={t('game.holdem.yourHand')} cards={handCards} />
+      <PokerCardsView title={t('game.holdem.board')} cards={boardCards} />
 
       {scores.length > 0 && (
         <div className="game-chip-row">
           {scores.map((s) => (
-            <span key={s.name} className="game-workbench-hint">{s.name}：剩余积分 {s.score}</span>
+            <span key={s.name} className="game-workbench-hint">{s.name}：{t('game.holdem.chips')} {s.score}</span>
           ))}
         </div>
       )}
@@ -200,14 +200,14 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
           title={startReason}
           onClick={() => onCmd('start')}
         >
-          发牌开始
+          {t('game.holdem.dealStart')}
         </button>
-        <button className={`mini-btn ${canLook ? 'ready' : ''}`} disabled={disabled || !canLook} onClick={() => onCmd('look')}>看牌</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('check')} title={actionBlockReason}>过牌</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('call')} title={actionBlockReason}>跟注</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('allin')} title={actionBlockReason}>全下</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')} title={actionBlockReason}>弃牌</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
+        <button className={`mini-btn ${canLook ? 'ready' : ''}`} disabled={disabled || !canLook} onClick={() => onCmd('look')}>{t('game.holdem.look')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('check')} title={actionBlockReason}>{t('game.holdem.check')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('call')} title={actionBlockReason}>{t('game.holdem.call')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('allin')} title={actionBlockReason}>{t('game.holdem.allin')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')} title={actionBlockReason}>{t('game.holdem.fold')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>
       </div>
 
       <div className="game-chip-row">
@@ -215,21 +215,21 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
           className="game-mini-input"
           value={raiseAmount}
           onChange={(e) => setRaiseAmount(e.target.value)}
-          placeholder="加注金额"
+          placeholder={t('game.holdem.raiseAmount')}
           disabled={disabled}
         />
         <button
           className={`mini-btn ${canAct && hasValidRaise ? 'ready' : ''}`}
           disabled={disabled || !canAct || !hasValidRaise}
-          title={!hasValidRaise ? '请输入大于 0 的加注金额' : actionBlockReason}
+          title={!hasValidRaise ? t('game.holdem.invalidRaise') : actionBlockReason}
           onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}
         >
-          加注
+          {t('game.holdem.raise')}
         </button>
       </div>
 
       <div className="game-chip-row">
-        <span className="game-workbench-hint">机器人难度</span>
+        <span className="game-workbench-hint">{t('game.holdem.botLevel')}</span>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>

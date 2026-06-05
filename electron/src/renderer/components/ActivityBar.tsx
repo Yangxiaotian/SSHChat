@@ -1,5 +1,6 @@
 import React from 'react';
 import { useChatStore } from '../store/chatStore';
+import { useTranslation } from '../i18n';
 
 interface ActivityBarProps {
   onToggleSidebar: () => void;
@@ -8,16 +9,18 @@ interface ActivityBarProps {
 
 export default function ActivityBar({ onToggleSidebar, sidebarVisible }: ActivityBarProps) {
   const { sidebarView, setSidebarView } = useChatStore();
+  const { t } = useTranslation();
 
   const topItems = [
-    { id: 'rooms' as const, icon: 'E', tooltip: 'Explorer' },
-    { id: 'users' as const, icon: 'U', tooltip: 'Online Users' },
-    { id: 'news' as const, icon: 'N', tooltip: 'News' },
-    { id: 'monitor' as const, icon: 'M', tooltip: '监控' },
+    { id: 'rooms' as const, icon: 'E', tooltip: t('activity.rooms') },
+    { id: 'users' as const, icon: 'U', tooltip: t('activity.users') },
+    { id: 'news' as const, icon: 'N', tooltip: t('activity.news') },
+    { id: 'library' as const, icon: 'L', tooltip: t('activity.library') },
+    { id: 'monitor' as const, icon: 'M', tooltip: t('activity.monitor') },
   ];
 
   const bottomItems = [
-    { id: 'settings' as const, icon: 'S', tooltip: 'Settings' },
+    { id: 'settings' as const, icon: 'S', tooltip: t('activity.settings') },
   ];
 
   const handleItemClick = (id: string) => {
@@ -27,7 +30,7 @@ export default function ActivityBar({ onToggleSidebar, sidebarVisible }: Activit
     if (sidebarView === id && sidebarVisible) {
       onToggleSidebar();
     } else {
-      setSidebarView(id as 'rooms' | 'users' | 'news' | 'monitor');
+      setSidebarView(id as 'rooms' | 'users' | 'news' | 'library' | 'monitor');
       if (!sidebarVisible) onToggleSidebar();
     }
   };

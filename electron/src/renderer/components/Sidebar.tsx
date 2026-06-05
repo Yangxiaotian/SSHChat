@@ -1,26 +1,23 @@
 import React from 'react';
 import { useChatStore } from '../store/chatStore';
+import { useTranslation } from '../i18n';
 import RoomList from './RoomList';
 import UserList from './UserList';
 import NewsPanel from './NewsPanel';
+import LibraryPanel from './LibraryPanel';
 import MonitorPanel from './MonitorPanel';
 
 export default function Sidebar() {
-  const { sidebarView, privacyMode } = useChatStore();
+  const { sidebarView } = useChatStore();
+  const { t } = useTranslation();
 
-  const titles = privacyMode
-    ? {
-        rooms: 'EXPLORER',
-        users: 'TEAM',
-        news: 'FEED',
-        monitor: 'WATCHER',
-      }
-    : {
-        rooms: 'ROOMS',
-        users: 'ONLINE USERS',
-        news: 'NEWS',
-        monitor: '监控',
-      };
+  const titles = {
+    rooms: t('sidebar.rooms'),
+    users: t('sidebar.users'),
+    news: t('sidebar.news'),
+    library: t('sidebar.library'),
+    monitor: t('sidebar.monitor'),
+  };
 
   return (
     <div className="sidebar">
@@ -29,6 +26,7 @@ export default function Sidebar() {
         {sidebarView === 'rooms' && <RoomList />}
         {sidebarView === 'users' && <UserList />}
         {sidebarView === 'news' && <NewsPanel />}
+        {sidebarView === 'library' && <LibraryPanel />}
         {sidebarView === 'monitor' && <MonitorPanel />}
       </div>
     </div>

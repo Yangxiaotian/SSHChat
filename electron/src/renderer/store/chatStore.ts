@@ -10,6 +10,7 @@ import {
   ProcessInfo,
   RoomInfo,
 } from '../../shared/protocol';
+import { initLocaleFromStorage, persistLocale, type Locale } from '../i18n';
 
 declare global {
   interface Window {
@@ -54,8 +55,9 @@ interface ChatState {
   users: string[];
 
   showLogin: boolean;
-  sidebarView: 'rooms' | 'users' | 'news' | 'monitor';
+  sidebarView: 'rooms' | 'users' | 'news' | 'library' | 'monitor';
   theme: 'dark' | 'light';
+  locale: Locale;
   privacyMode: boolean;
   composerText: string;
 
@@ -77,9 +79,11 @@ interface ChatState {
   addMessage: (message: ChatMessage) => void;
   setUsers: (users: string[]) => void;
   setShowLogin: (show: boolean) => void;
-  setSidebarView: (view: 'rooms' | 'users' | 'news' | 'monitor') => void;
+  setSidebarView: (view: 'rooms' | 'users' | 'news' | 'library' | 'monitor') => void;
   setTheme: (theme: 'dark' | 'light') => void;
   toggleTheme: () => void;
+  setLocale: (locale: Locale) => void;
+  toggleLocale: () => void;
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
   setComposerText: (value: string) => void;
@@ -105,6 +109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   showLogin: true,
   sidebarView: 'rooms',
   theme: 'dark',
+  locale: initLocaleFromStorage(),
   privacyMode: true,
   composerText: '',
 
@@ -194,6 +199,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSidebarView: (view) => set({ sidebarView: view }),
   setTheme: (theme) => set({ theme }),
   toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+  setLocale: (locale) => {
+    persistLocale(locale);
+    set({ locale });
+  },
+  toggleLocale: () =>
+    set((state) => {
+      const next: Locale = state.locale === 'zh' ? 'en' : 'zh';
+      persistLocale(next);
+      return { locale: next };
+    }),
   setPrivacyMode: (value) => set({ privacyMode: value }),
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
   setComposerText: (value) => set({ composerText: value }),

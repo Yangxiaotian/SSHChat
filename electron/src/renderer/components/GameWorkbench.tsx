@@ -9,8 +9,9 @@ import ZjhPanel from './games/ZjhPanel';
 import SanguoPanel from './games/SanguoPanel';
 import WerewolfPanel from './games/WerewolfPanel';
 import NiuTouPanel from './games/NiuTouPanel';
-import { GameCommandFactory, quickByGame } from './games/commandFactory';
+import { GameCommandFactory, getQuickByGame } from './games/commandFactory';
 import { GameKind } from './games/types';
+import { buildGameMove, t as translate, type Locale } from '../i18n';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
@@ -169,20 +170,16 @@ function hasFreshNoActiveGame(allLines: string[]): boolean {
   return noGameIdx > activeSignalIdx;
 }
 
-function gameLabel(game: GameKind): string {
-  const map: Record<GameKind, string> = {
-    none: '游戏',
-    chess: '国际象棋',
-    gomoku: '五子棋',
-    go: '围棋',
-    xiangqi: '中国象棋',
-    sanguo: '三国杀',
-    werewolf: '狼人杀',
-    holdem: '德州扑克',
-    zjh: '炸金花',
-    niutou: '牛头王',
-  };
-  return map[game];
+function gameLabel(game: GameKind, locale: Locale): string {
+  return translate(locale, `game.names.${game}`);
+}
+
+function gameMoveHint(game: GameKind, locale: Locale): string {
+  return translate(locale, `game.hints.${game}`);
+}
+
+function gameTip(game: GameKind, locale: Locale): string {
+  return translate(locale, `game.tips.${game}`);
 }
 
 function parseTurnName(board: string): string {
@@ -211,22 +208,6 @@ function hostName(board: string): string {
   }
   const m = line.trim().match(/^#1\s+([^:：]+)[:：]/);
   return m ? m[1].trim() : '';
-}
-
-function gameMoveHint(game: GameKind): string {
-  const map: Record<GameKind, string> = {
-    none: '可先点“可玩列表”或新开一局。',
-    chess: '在棋盘上点起点和终点，或输入 UCI/SAN。',
-    gomoku: '直接点棋盘落子点。',
-    go: '直接点19路棋盘交叉点落子；也可以点“停一手”。',
-    xiangqi: '先点棋子，再点目标位置。',
-    sanguo: '按按钮出牌或“过”，必要时先看武将池。',
-    werewolf: '先选目标玩家，再点对应技能。',
-    holdem: '按钮与手敲命令均可用；中英文等价（如 跟注/call、加注/raise 10）。/game show 帮助 看对照表。',
-    zjh: '建议先看牌，再决定跟注、加注或比牌。',
-    niutou: '先选手牌；若提示吃行，再选第1~4行。',
-  };
-  return map[game];
 }
 
 function latestIssue(lines: string[]): string {
@@ -259,17 +240,17 @@ function latestIssue(lines: string[]): string {
   return '';
 }
 
-function extractPlayerStats(board: string): Array<{ name: string; label: string; value: number }> {
+function extractPlayerStats(board: string, locale: Locale): Array<{ name: string; label: string; value: number }> {
   const out: Array<{ name: string; label: string; value: number }> = [];
   for (const line of board.split('\n')) {
     const score = line.match(/^#\d+\s+([^:：]+)\s*[:：]\s*积分\s*=\s*(\d+)/);
     if (score) {
-      out.push({ name: score[1].trim(), label: '积分', value: Number(score[2]) });
+      out.push({ name: score[1].trim(), label: translate(locale, 'game.advisor.scoreLabel'), value: Number(score[2]) });
       continue;
     }
     const bull = line.match(/^\-\s+([^:：]+)[:：]\s+牛头=(\d+)/);
     if (bull) {
-      out.push({ name: bull[1].trim(), label: '牛头', value: Number(bull[2]) });
+      out.push({ name: bull[1].trim(), label: translate(locale, 'game.advisor.bullLabel'), value: Number(bull[2]) });
     }
   }
   return out;
@@ -285,37 +266,38 @@ type Advisor = {
   secondaryLabel?: string;
 };
 
-function buildAdvisor(game: GameKind, board: string, systemLines: string[], nickname: string): Advisor {
+function buildAdvisor(locale: Locale, game: GameKind, board: string, systemLines: string[], nickname: string): Advisor {
+  const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const issue = latestIssue(systemLines);
   if (issue) {
     return {
-      title: '上一步操作失败',
+      title: tr('game.advisor.lastFailed'),
       detail: issue,
       level: 'error',
       primaryCmd: '/game show',
-      primaryLabel: '刷新局面',
+      primaryLabel: tr('game.advisor.refresh'),
       secondaryCmd: '/game help',
-      secondaryLabel: '查看玩法',
+      secondaryLabel: tr('game.advisor.viewHelp'),
     };
   }
   if (game === 'none') {
     return {
-      title: '当前房间暂无进行中的对局',
-      detail: '你可以直接新开任意游戏，或先点“可玩列表”查看已上线游戏。',
+      title: tr('game.advisor.noActive'),
+      detail: tr('game.advisor.noActiveDetail'),
       level: 'info',
       primaryCmd: '/game list',
-      primaryLabel: '可玩列表',
+      primaryLabel: tr('game.list'),
     };
   }
   if (!board.trim()) {
     return {
-      title: `检测到 ${gameLabel(game)} 对局`,
-      detail: '可先加入对局，再显示局面。',
+      title: tr('game.advisor.detected', { name: gameLabel(game, locale) }),
+      detail: tr('game.advisor.detectedDetail'),
       level: 'info',
       primaryCmd: '/game join',
-      primaryLabel: '加入对局',
+      primaryLabel: tr('game.quick.join'),
       secondaryCmd: '/game show',
-      secondaryLabel: '显示局面',
+      secondaryLabel: tr('game.showBoard'),
     };
   }
   const stateLine = board.split('\n').find((l) => l.includes('state:') || l.includes('状态：')) || '';
@@ -323,81 +305,81 @@ function buildAdvisor(game: GameKind, board: string, systemLines: string[], nick
   const joined = inSeats(board, nickname);
   if (!joined) {
     return {
-      title: `当前房间正在进行 ${gameLabel(game)}，你可直接加入`,
-      detail: '同一房间同一时刻只会有一场进行中的对局；加入后即可操作。',
+      title: tr('game.advisor.inProgress', { name: gameLabel(game, locale) }),
+      detail: tr('game.advisor.inProgressDetail'),
       level: 'warn',
       primaryCmd: '/game join',
-      primaryLabel: '加入对局',
+      primaryLabel: tr('game.quick.join'),
       secondaryCmd: '/game seats',
-      secondaryLabel: '查看席位',
+      secondaryLabel: tr('game.quick.seats'),
     };
   }
   if (stateLine.includes('waiting') || stateLine.includes('等待开始')) {
     const host = hostName(board);
     if (host && host === nickname) {
       return {
-        title: '你是房主，可以开始对局',
-        detail: '开局后可按面板按钮操作；若人数不足会自动补机器人。',
+        title: tr('game.advisor.hostCanStart'),
+        detail: tr('game.advisor.hostCanStartDetail'),
         level: 'info',
-        primaryCmd: '/game move start',
-        primaryLabel: '开始对局',
+        primaryCmd: buildGameMove(locale, 'start', game),
+        primaryLabel: tr('game.advisor.startGame'),
         secondaryCmd: '/game seats',
-        secondaryLabel: '查看席位',
+        secondaryLabel: tr('game.quick.seats'),
       };
     }
     return {
-      title: '已加入，等待房主开始',
-      detail: host ? `当前房主：${host}` : '可用“查看席位”确认房主。',
+      title: tr('game.advisor.waitingHost'),
+      detail: host ? tr('game.advisor.waitingHostDetailNamed', { host }) : tr('game.advisor.waitingHostDetailGeneric'),
       level: 'warn',
       primaryCmd: '/game seats',
-      primaryLabel: '查看席位',
+      primaryLabel: tr('game.quick.seats'),
     };
   }
   if (stateLine.includes('ended') || stateLine.includes('已结束')) {
     const host = hostName(board);
     if (host && host === nickname) {
       return {
-        title: '本局已结束，可立即发牌开始下一局',
-        detail: '将沿用当前席位玩家进行新一局。',
+        title: tr('game.advisor.hostRestart'),
+        detail: tr('game.advisor.hostRestartDetail'),
         level: 'info',
-        primaryCmd: '/game move start',
-        primaryLabel: '发牌开始',
+        primaryCmd: buildGameMove(locale, 'start', game),
+        primaryLabel: tr('game.advisor.dealStart'),
         secondaryCmd: '/game seats',
-        secondaryLabel: '查看席位',
+        secondaryLabel: tr('game.quick.seats'),
       };
     }
     return {
-      title: '本局已结束，等待房主发牌',
-      detail: host ? `当前房主：${host}` : '可先查看席位确认房主。',
+      title: tr('game.advisor.endedWait'),
+      detail: host ? tr('game.advisor.waitingHostDetailNamed', { host }) : tr('game.advisor.endedWaitDetail'),
       level: 'warn',
       primaryCmd: '/game seats',
-      primaryLabel: '查看席位',
+      primaryLabel: tr('game.quick.seats'),
     };
   }
   if (turn) {
     if (turn === nickname) {
       return {
-        title: '轮到你操作',
-        detail: gameMoveHint(game),
+        title: tr('game.advisor.yourTurnTitle'),
+        detail: gameMoveHint(game, locale),
         level: 'info',
         primaryCmd: '/game show',
-        primaryLabel: '刷新局面',
+        primaryLabel: tr('game.advisor.refresh'),
       };
     }
     return {
-      title: `当前轮到 ${turn}`,
-      detail: '你可以先观察局面，提前规划下一步。',
+      title: tr('game.advisor.waitingNamed', { name: turn }),
+      detail: tr('game.advisor.waitingNamedDetail'),
       level: 'warn',
       primaryCmd: '/game show',
-      primaryLabel: '刷新局面',
+      primaryLabel: tr('game.advisor.refresh'),
     };
   }
   return {
-    title: `${gameLabel(game)} 对局进行中`,
-    detail: gameMoveHint(game),
+    title: tr('game.advisor.inProgressNamed', { name: gameLabel(game, locale) }),
+    detail: gameMoveHint(game, locale),
     level: 'info',
     primaryCmd: '/game show',
-    primaryLabel: '刷新局面',
+    primaryLabel: tr('game.advisor.refresh'),
   };
 }
 
@@ -419,21 +401,9 @@ function sanitizeBoard(raw: string): string {
   return out.join('\n').trim();
 }
 
-const gameTips: Record<GameKind, string> = {
-  none: '先用上方快捷按钮创建游戏，优先使用点击交互，不必手敲命令。',
-  chess: '点击棋盘两次完成走子（起点 -> 终点）。',
-  gomoku: '直接点击落子点即可发送坐标。',
-  go: '直接点击交叉点落子；需要收官时可点“停一手”。',
-  xiangqi: '点击棋子起点后再点终点完成走子。',
-  sanguo: '先选目标玩家，再点技能按钮执行。',
-  werewolf: '先选目标玩家，再点投票/刀人/查验/毒人。',
-  holdem: '优先用按钮操作：过牌/跟注/加注/全下/弃牌。',
-  zjh: '先看牌再决策，支持跟注、加注、比牌、弃牌。',
-  niutou: '每回合先选一张牌；若小于所有行尾，必须选择吃一行。',
-};
-
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode, status, users, nickname } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, users, nickname, locale } = useChatStore();
+  const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -464,12 +434,13 @@ export default function GameWorkbench() {
     return { board: parsed.board, game: openGame, systemLines: scopedLines };
   }, [roomMessages]);
   const advisor = useMemo(
-    () => buildAdvisor(game, board, systemLines, nickname),
-    [game, board, systemLines, nickname],
+    () => buildAdvisor(locale, game, board, systemLines, nickname),
+    [locale, game, board, systemLines, nickname],
   );
   const cleanBoard = useMemo(() => sanitizeBoard(board), [board]);
   const hasBoard = cleanBoard.length > 0;
-  const playerStats = useMemo(() => extractPlayerStats(cleanBoard), [cleanBoard]);
+  const playerStats = useMemo(() => extractPlayerStats(cleanBoard, locale), [cleanBoard, locale]);
+  const quickActions = useMemo(() => getQuickByGame(locale, game), [locale, game]);
 
   const send = async (cmd: string) => {
     if (status !== 'connected') return false;
@@ -479,10 +450,10 @@ export default function GameWorkbench() {
   const runAction = async (cmd: string) => {
     const ok = await send(cmd);
     if (!ok) {
-      setActionHint(`发送失败：${cmd}`);
+      setActionHint(tr('game.sendFailed', { cmd }));
       return false;
     }
-    setActionHint(`已发送：${cmd}`);
+    setActionHint(tr('game.sent', { cmd }));
     if (shouldRefreshAfter(cmd)) {
       await send('/game show');
     }
@@ -514,14 +485,14 @@ export default function GameWorkbench() {
       await runAction(text);
       return;
     }
-    const cmd = GameCommandFactory.move(text);
+    const cmd = GameCommandFactory.move(text, locale, game);
     await runAction(cmd);
   };
 
   const onMove = async () => {
-    const t = moveText.trim();
-    if (!t) return;
-    const cmd = t.startsWith('/') ? t : GameCommandFactory.move(t);
+    const raw = moveText.trim();
+    if (!raw) return;
+    const cmd = raw.startsWith('/') ? raw : GameCommandFactory.move(raw, locale, game);
     await runAction(cmd);
     setMoveText('');
   };
@@ -531,16 +502,16 @@ export default function GameWorkbench() {
   return (
     <div className={`game-workbench ${showWorkbenchContent ? 'expanded' : 'collapsed'}`}>
       <div className="game-workbench-header">
-        <span>{privacyMode ? '诊断视图' : '游戏工作台'} · 当前：{gameLabel(game)}</span>
+        <span>{privacyMode ? tr('game.workbenchPrivacy') : tr('game.workbench')} · {tr('game.current', { name: gameLabel(game, locale) })}</span>
         <div className="game-workbench-actions">
           <button className="mini-btn" onClick={() => setShowWorkbenchContent((v) => !v)}>
-            {showWorkbenchContent ? '收起面板' : '展开面板'}
+            {showWorkbenchContent ? tr('game.collapse') : tr('game.expand')}
           </button>
-          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game show')}>显示局面</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game help')}>玩法帮助</button>
-          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game list')}>可玩列表</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game show')}>{tr('game.showBoard')}</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game help')}>{tr('game.help')}</button>
+          <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game list')}>{tr('game.list')}</button>
           {game !== 'none' && (
-            <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game end')}>结束对局</button>
+            <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game end')}>{tr('game.end')}</button>
           )}
         </div>
       </div>
@@ -548,14 +519,14 @@ export default function GameWorkbench() {
       {showWorkbenchContent && (
         <>
           <div className="game-workbench-quick">
-            {(quickByGame[game] || quickByGame['none']).map((q) => (
-              <button key={q.label} className="mini-btn" disabled={disabled} onClick={() => runAction(q.cmd)}>
+            {quickActions.map((q) => (
+              <button key={`${q.label}:${q.cmd}`} className="mini-btn" disabled={disabled} onClick={() => runAction(q.cmd)}>
                 {q.label}
               </button>
             ))}
           </div>
           {actionHint && <div className="game-workbench-hint">{actionHint}</div>}
-          <div className="game-workbench-hint">{gameTips[game]}</div>
+          <div className="game-workbench-hint">{gameTip(game, locale)}</div>
           <div className={`game-advisor game-advisor-${advisor.level}`}>
             <div className="game-advisor-title">{advisor.title}</div>
             <div className="game-advisor-detail">{advisor.detail}</div>
@@ -574,9 +545,9 @@ export default function GameWorkbench() {
           </div>
 
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
-          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c))} />}
-          {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c))} onCmd={(cmd) => sendMove(cmd)} />}
-          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc))} />}
+          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} />}
+          {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c, locale))} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc, locale))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
@@ -594,21 +565,21 @@ export default function GameWorkbench() {
           )}
 
           <div className="game-workbench-toolbar">
-            <span className="game-workbench-hint-inline">同一房间同一时刻仅允许一场进行中的对局</span>
+            <span className="game-workbench-hint-inline">{tr('game.oneGameRule')}</span>
             <div className="game-workbench-toolbar-actions">
               {hasBoard && (
                 <button className="mini-btn" disabled={disabled} onClick={() => setShowBoard((v) => !v)}>
-                  {showBoard ? '收起局面原文' : '展开局面原文'}
+                  {showBoard ? tr('game.advisor.collapseBoard') : tr('game.advisor.expandBoard')}
                 </button>
               )}
               <button className="mini-btn" disabled={disabled} onClick={() => setShowAdvanced((v) => !v)}>
-                {showAdvanced ? '收起高级命令' : '高级命令'}
+                {showAdvanced ? tr('game.hideAdvanced') : tr('game.advancedInput')}
               </button>
             </div>
           </div>
 
           {hasBoard && showBoard && <pre className="game-workbench-body">{cleanBoard}</pre>}
-          {!hasBoard && <div className="game-workbench-empty">当前房间暂无已展示的游戏局面。</div>}
+          {!hasBoard && <div className="game-workbench-empty">{tr('game.advisor.noBoard')}</div>}
 
           {showAdvanced ? (
             <div className="game-workbench-input">
@@ -616,7 +587,7 @@ export default function GameWorkbench() {
                 className="game-workbench-command"
                 value={moveText}
                 onChange={(e) => setMoveText(e.target.value)}
-                placeholder={privacyMode ? '输入命令...' : '输入走法或操作...'}
+                placeholder={tr('game.movePlaceholder')}
                 disabled={disabled}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -625,15 +596,15 @@ export default function GameWorkbench() {
                   }
                 }}
               />
-              <button className="send-button" onClick={onMove} disabled={disabled || !moveText.trim()}>发送</button>
+              <button className="send-button" onClick={onMove} disabled={disabled || !moveText.trim()}>{tr('game.sendMove')}</button>
             </div>
           ) : (
-            <div className="game-workbench-input-compact">优先使用上方交互按钮；需要手动命令时再展开“高级命令”。</div>
+            <div className="game-workbench-input-compact">{tr('game.advisor.advancedCompact')}</div>
           )}
         </>
       )}
       {!showWorkbenchContent && (
-        <div className="game-workbench-input-compact">游戏面板已收起，聊天区已为你腾出空间。</div>
+        <div className="game-workbench-input-compact">{tr('game.advisor.collapsedCompact')}</div>
       )}
     </div>
   );

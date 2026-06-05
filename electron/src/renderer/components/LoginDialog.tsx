@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { ConnectionConfig } from '../../shared/protocol';
+import { useTranslation } from '../i18n';
 
 export default function LoginDialog() {
   const { config, status, error, setShowLogin } = useChatStore();
+  const { t } = useTranslation();
   const [host, setHost] = useState('');
   const [user, setUser] = useState('');
   const [sshPort, setSshPort] = useState('22');
@@ -24,23 +26,23 @@ export default function LoginDialog() {
     setLocalError('');
 
     if (!host.trim()) {
-      setLocalError('Please enter server host');
+      setLocalError(t('login.enterHost'));
       return;
     }
     if (!user.trim()) {
-      setLocalError('Please enter username');
+      setLocalError(t('login.enterUser'));
       return;
     }
 
     const portNum = parseInt(sshPort);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      setLocalError('Invalid SSH port');
+      setLocalError(t('login.invalidSshPort'));
       return;
     }
 
     const chatPortNum = parseInt(chatPort);
     if (isNaN(chatPortNum) || chatPortNum < 1 || chatPortNum > 65535) {
-      setLocalError('Invalid chat port');
+      setLocalError(t('login.invalidChatPort'));
       return;
     }
 
@@ -60,7 +62,7 @@ export default function LoginDialog() {
 
     const result = await window.api.connect(connectionConfig, user.trim());
     if (!result.success) {
-      setLocalError(result.error || 'Connection failed');
+      setLocalError(result.error || t('login.connectFailed'));
     }
   };
 
@@ -84,37 +86,37 @@ export default function LoginDialog() {
       }
     }}>
       <div className="login-dialog animate-slide-in" onKeyDown={handleKeyDown}>
-        <div className="login-title">Connect to SSHChat</div>
-        <div className="login-subtitle">Enter your connection details below</div>
+        <div className="login-title">{t('login.title')}</div>
+        <div className="login-subtitle">{t('login.subtitle')}</div>
 
         <div className="login-field">
-          <label className="login-label">Server Host</label>
+          <label className="login-label">{t('login.host')}</label>
           <input
             type="text"
             className="login-input"
             value={host}
             onChange={(e) => setHost(e.target.value)}
-            placeholder="chat.example.com or IP address"
+            placeholder={t('login.hostPlaceholder')}
             disabled={isConnecting}
             autoFocus
           />
         </div>
 
         <div className="login-field">
-          <label className="login-label">Username</label>
+          <label className="login-label">{t('login.username')}</label>
           <input
             type="text"
             className="login-input"
             value={user}
             onChange={(e) => setUser(e.target.value)}
-            placeholder="your-username"
+            placeholder={t('login.usernamePlaceholder')}
             disabled={isConnecting}
           />
         </div>
 
         <div className="login-row">
           <div className="login-field">
-            <label className="login-label">SSH Port</label>
+            <label className="login-label">{t('login.sshPort')}</label>
             <input
               type="text"
               className="login-input"
@@ -126,7 +128,7 @@ export default function LoginDialog() {
           </div>
 
           <div className="login-field">
-            <label className="login-label">Chat Port</label>
+            <label className="login-label">{t('login.chatPort')}</label>
             <input
               type="text"
               className="login-input"
@@ -145,7 +147,7 @@ export default function LoginDialog() {
             onChange={(e) => setSaveConfig(e.target.checked)}
             disabled={isConnecting}
           />
-          <span className="login-checkbox-label">Save connection settings</span>
+          <span className="login-checkbox-label">{t('login.saveSettings')}</span>
         </label>
 
         {(localError || error) && (
@@ -157,7 +159,7 @@ export default function LoginDialog() {
         {isConnecting && (
           <div className="login-status">
             <span className="login-spinner"></span>
-            Connecting to {host}...
+            {t('login.connectingTo', { host })}
           </div>
         )}
 
@@ -167,14 +169,14 @@ export default function LoginDialog() {
             onClick={() => setShowLogin(false)}
             disabled={isConnecting}
           >
-            Cancel
+            {t('common.cancel')}
           </button>
           <button
             className="login-button primary"
             onClick={handleConnect}
             disabled={isConnecting}
           >
-            {isConnecting ? 'Connecting...' : 'Connect'}
+            {isConnecting ? t('common.connecting') : t('common.connect')}
           </button>
         </div>
       </div>

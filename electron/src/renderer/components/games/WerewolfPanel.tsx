@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -40,6 +41,7 @@ function parseMeta(boardText: string): { state: string; host: string; alive: str
 
 export default function WerewolfPanel({ disabled, users, nickname, boardText, onCmd }: Props) {
   const [target, setTarget] = useState('');
+  const { t } = useTranslation();
   const meta = useMemo(() => parseMeta(boardText), [boardText]);
   const candidates = useMemo(() => {
     const base = meta.alive.length > 0 ? meta.alive : users;
@@ -64,10 +66,12 @@ export default function WerewolfPanel({ disabled, users, nickname, boardText, on
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">狼人杀互动面板</div>
+      <div className="game-interaction-title">{t('game.werewolf.title')}</div>
       <div className="game-workbench-hint">
-        当前阶段：{meta.state || '未知'}
-        {role ? `，你的身份：${role}` : '，你的身份：未公开（请查看系统私信）'}
+        {t('game.werewolf.phase', {
+          state: meta.state || '?',
+          role: role ? t('game.werewolf.roleKnown', { role }) : t('game.werewolf.roleHidden'),
+        })}
       </div>
 
       <div className="game-chip-row">
@@ -79,14 +83,14 @@ export default function WerewolfPanel({ disabled, users, nickname, boardText, on
       </div>
 
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>开始对局</button>
-        <button className="mini-btn" disabled={disabled || !canVote || !target} onClick={() => onCmd(`vote ${target}`)}>投票</button>
-        <button className="mini-btn" disabled={disabled || !canWolfKill || !target} onClick={() => onCmd(`kill ${target}`)}>刀人</button>
-        <button className="mini-btn" disabled={disabled || !canSeerCheck || !target} onClick={() => onCmd(`check ${target}`)}>查验</button>
-        <button className="mini-btn" disabled={disabled || !canWitchSave} onClick={() => onCmd('save')}>救人</button>
-        <button className="mini-btn" disabled={disabled || !canWitchPoison || !target} onClick={() => onCmd(`poison ${target}`)}>毒人</button>
-        <button className="mini-btn" disabled={disabled || !canWitchPass} onClick={() => onCmd('pass')}>放弃夜技</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
+        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>{t('game.werewolf.start')}</button>
+        <button className="mini-btn" disabled={disabled || !canVote || !target} onClick={() => onCmd(`vote ${target}`)}>{t('game.werewolf.vote')}</button>
+        <button className="mini-btn" disabled={disabled || !canWolfKill || !target} onClick={() => onCmd(`kill ${target}`)}>{t('game.werewolf.kill')}</button>
+        <button className="mini-btn" disabled={disabled || !canSeerCheck || !target} onClick={() => onCmd(`check ${target}`)}>{t('game.werewolf.check')}</button>
+        <button className="mini-btn" disabled={disabled || !canWitchSave} onClick={() => onCmd('save')}>{t('game.werewolf.save')}</button>
+        <button className="mini-btn" disabled={disabled || !canWitchPoison || !target} onClick={() => onCmd(`poison ${target}`)}>{t('game.werewolf.poison')}</button>
+        <button className="mini-btn" disabled={disabled || !canWitchPass} onClick={() => onCmd('pass')}>{t('game.werewolf.pass')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>
       </div>
     </div>
   );

@@ -1,130 +1,151 @@
-﻿import { GameKind, QuickAction } from './types';
+﻿import type { Locale } from '../../i18n/types';
+import { buildGameMove, buildGameMoveFromKey } from '../../i18n/gameCommands';
+import { t } from '../../i18n';
+import { GameKind, QuickAction } from './types';
 
-export const quickByGame: Record<GameKind, QuickAction[]> = {
-  none: [
-    { label: '新开国际象棋', cmd: '/game new chess' },
-    { label: '国际象棋 AI', cmd: '/game new chess ai normal' },
-    { label: '新开五子棋', cmd: '/game new gomoku' },
-    { label: '五子棋 AI（人机）', cmd: '/game new gomoku ai normal' },
-    { label: '新开围棋', cmd: '/game new go' },
-    { label: '新开象棋', cmd: '/game new xiangqi' },
-    { label: '象棋 AI', cmd: '/game new xiangqi ai normal' },
-    { label: '新开三国杀', cmd: '/game new sanguo' },
-    { label: '新开狼人杀', cmd: '/game new werewolf' },
-    { label: '新开德州', cmd: '/game new holdem' },
-    { label: '新开炸金花', cmd: '/game new zjh' },
-    { label: '新开牛头王', cmd: '/game new niutou' },
-    { label: '我的棋类积分', cmd: '/game rating' },
-  ],
-  chess: [
-    { label: '显示棋盘', cmd: '/game show' },
-    { label: '查看积分', cmd: '/game rating chess' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '申请悔棋', cmd: '/game undo' },
-    { label: '同意悔棋', cmd: '/game undo accept' },
-    { label: 'PGN', cmd: '/game pgn' },
-    { label: '认输', cmd: '/game resign' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  gomoku: [
-    { label: '显示棋盘', cmd: '/game show' },
-    { label: '查看积分', cmd: '/game rating gomoku' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '申请悔棋', cmd: '/game undo' },
-    { label: '同意悔棋', cmd: '/game undo accept' },
-    { label: '认输', cmd: '/game resign' },
-    { label: '终止对局', cmd: '/game abort' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  go: [
-    { label: '显示棋盘', cmd: '/game show' },
-    { label: '查看积分', cmd: '/game rating go' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '停一手', cmd: '/game move pass' },
-    { label: '申请悔棋', cmd: '/game undo' },
-    { label: '同意悔棋', cmd: '/game undo accept' },
-    { label: '认输', cmd: '/game resign' },
-    { label: '终止对局', cmd: '/game abort' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  xiangqi: [
-    { label: '显示棋盘', cmd: '/game show' },
-    { label: '查看积分', cmd: '/game rating xiangqi' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '申请悔棋', cmd: '/game undo' },
-    { label: '同意悔棋', cmd: '/game undo accept' },
-    { label: '认输', cmd: '/game resign' },
-    { label: '终止对局', cmd: '/game abort' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  sanguo: [
-    { label: '显示局面', cmd: '/game show' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '开始', cmd: '/game move 开始' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '武将池', cmd: '/game move 武将' },
-    { label: '过', cmd: '/game move 过' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  werewolf: [
-    { label: '显示局面', cmd: '/game show' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '开始', cmd: '/game move start' },
-    { label: '过', cmd: '/game move pass' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  holdem: [
-    { label: '显示牌面', cmd: '/game show' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '开始', cmd: '/game move start' },
-    { label: '过牌', cmd: '/game move check' },
-    { label: '跟注', cmd: '/game move call' },
-    { label: '全下', cmd: '/game move allin' },
-    { label: '弃牌', cmd: '/game move fold' },
-    { label: '机器人硬核', cmd: '/game move bot hard' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  zjh: [
-    { label: '显示牌面', cmd: '/game show' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '开始', cmd: '/game move start' },
-    { label: '看牌', cmd: '/game move look' },
-    { label: '跟注', cmd: '/game move follow' },
-    { label: '弃牌', cmd: '/game move fold' },
-    { label: '机器人硬核', cmd: '/game move bot hard' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-  niutou: [
-    { label: '显示局面', cmd: '/game show' },
-    { label: '加入对局', cmd: '/game join' },
-    { label: '查看席位', cmd: '/game seats' },
-    { label: '开始', cmd: '/game move start' },
-    { label: '机器人硬核', cmd: '/game move bot hard' },
-    { label: '结束对局', cmd: '/game end' },
-  ],
-};
+function qa(labelKey: string, cmd: string, locale: Locale): QuickAction {
+  return { label: t(locale, labelKey), cmd };
+}
+
+export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
+  const m = (key: string, cmd: string) => qa(`game.quick.${key}`, cmd, locale);
+  const move = (key: string, verb: string, gameKind?: GameKind) =>
+    qa(`game.quick.${key}`, buildGameMove(locale, verb, gameKind), locale);
+
+  const catalog: Record<GameKind, QuickAction[]> = {
+    none: [
+      m('newChess', '/game new chess'),
+      m('chessAi', '/game new chess ai normal'),
+      m('newGomoku', '/game new gomoku'),
+      m('gomokuAi', '/game new gomoku ai normal'),
+      m('newGo', '/game new go'),
+      m('newXiangqi', '/game new xiangqi'),
+      m('xiangqiAi', '/game new xiangqi ai normal'),
+      m('newSanguo', '/game new sanguo'),
+      m('newWerewolf', '/game new werewolf'),
+      m('newHoldem', '/game new holdem'),
+      m('newZjh', '/game new zjh'),
+      m('newNiutou', '/game new niutou'),
+      m('myRating', '/game rating'),
+    ],
+    chess: [
+      m('show', '/game show'),
+      m('rating', '/game rating chess'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('undo', '/game undo'),
+      m('undoAccept', '/game undo accept'),
+      m('pgn', '/game pgn'),
+      m('resign', '/game resign'),
+      m('end', '/game end'),
+    ],
+    gomoku: [
+      m('show', '/game show'),
+      m('rating', '/game rating gomoku'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('undo', '/game undo'),
+      m('undoAccept', '/game undo accept'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    go: [
+      m('show', '/game show'),
+      m('rating', '/game rating go'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      move('pass', 'pass', 'go'),
+      m('undo', '/game undo'),
+      m('undoAccept', '/game undo accept'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    xiangqi: [
+      m('show', '/game show'),
+      m('rating', '/game rating xiangqi'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('undo', '/game undo'),
+      m('undoAccept', '/game undo accept'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    sanguo: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      move('sanguoStart', 'start', 'sanguo'),
+      m('seats', '/game seats'),
+      move('sanguoGenerals', 'generals', 'sanguo'),
+      move('sanguoPass', 'pass', 'sanguo'),
+      m('end', '/game end'),
+    ],
+    werewolf: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      qa('game.quick.werewolfStart', buildGameMove(locale, 'start', 'werewolf'), locale),
+      qa('game.quick.werewolfPass', buildGameMove(locale, 'pass', 'werewolf'), locale),
+      m('end', '/game end'),
+    ],
+    holdem: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      move('werewolfStart', 'start', 'holdem'),
+      move('holdemCheck', 'check', 'holdem'),
+      move('holdemCall', 'call', 'holdem'),
+      move('holdemAllin', 'allin', 'holdem'),
+      move('holdemFold', 'fold', 'holdem'),
+      qa('game.quick.holdemBot', buildGameMove(locale, 'bot hard', 'holdem'), locale),
+      m('end', '/game end'),
+    ],
+    zjh: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      move('werewolfStart', 'start', 'zjh'),
+      move('zjhLook', 'look', 'zjh'),
+      move('zjhFollow', 'follow', 'zjh'),
+      move('zjhFold', 'fold', 'zjh'),
+      qa('game.quick.niutouBot', buildGameMove(locale, 'bot hard', 'zjh'), locale),
+      m('end', '/game end'),
+    ],
+    niutou: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      move('werewolfStart', 'start', 'niutou'),
+      qa('game.quick.niutouBot', buildGameMove(locale, 'bot hard', 'niutou'), locale),
+      m('end', '/game end'),
+    ],
+  };
+
+  return catalog[game] ?? catalog.none;
+}
 
 export const GameCommandFactory = {
-  move(payload: string): string {
-    return `/game move ${payload.trim()}`;
+  move(payload: string, locale: Locale, game?: GameKind): string {
+    return buildGameMove(locale, payload.trim(), game);
   },
-  chessMove(from: string, to: string): string {
-    return GameCommandFactory.move(`${from}${to}`);
+  chessMove(from: string, to: string, locale: Locale): string {
+    return GameCommandFactory.move(`${from}${to}`, locale);
   },
-  gomokuMove(row: number, col: number): string {
-    return GameCommandFactory.move(`${row} ${col}`);
+  gomokuMove(row: number, col: number, locale: Locale): string {
+    return GameCommandFactory.move(`${row} ${col}`, locale);
   },
-  goMove(row: number, col: number): string {
-    return GameCommandFactory.move(`${row} ${col}`);
+  goMove(row: number, col: number, locale: Locale): string {
+    return GameCommandFactory.move(`${row} ${col}`, locale, 'go');
   },
-  xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number): string {
-    return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`);
+  xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
+    return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`, locale, 'xiangqi');
+  },
+  hostStart(locale: Locale, game?: GameKind): string {
+    return buildGameMoveFromKey(locale, 'start');
   },
 };
+
+/** @deprecated Use getQuickByGame(locale, game) */
+export const quickByGame = {} as Record<GameKind, QuickAction[]>;

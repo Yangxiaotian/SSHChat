@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -43,6 +44,7 @@ function includesAny(source: string, needles: string[]): boolean {
 
 export default function SanguoPanel({ disabled, users, nickname, boardText, onCmd }: Props) {
   const [target, setTarget] = useState('');
+  const { t } = useTranslation();
   const meta = useMemo(() => parseState(boardText), [boardText]);
   const candidates = useMemo(() => {
     const base = meta.seated.length > 0 ? meta.seated : users;
@@ -60,9 +62,9 @@ export default function SanguoPanel({ disabled, users, nickname, boardText, onCm
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">三国杀互动面板</div>
+      <div className="game-interaction-title">{t('game.sanguo.title')}</div>
       {(isPlaying && meta.turn && !myTurn) && (
-        <div className="game-workbench-hint">当前轮到：{meta.turn}，你的出牌按钮已暂时禁用。</div>
+        <div className="game-workbench-hint">{t('game.sanguo.turn', { name: meta.turn })}</div>
       )}
 
       <div className="game-chip-row">
@@ -74,13 +76,13 @@ export default function SanguoPanel({ disabled, users, nickname, boardText, onCm
       </div>
 
       <div className="game-chip-row">
-        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('开始')}>开始对局</button>
-        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`杀 ${target}`)}>杀</button>
-        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`决斗 ${target}`)}>决斗</button>
-        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`火攻 ${target}`)}>火攻</button>
-        <button className="mini-btn" disabled={disabled || !canAct} onClick={() => onCmd('过')}>过</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('武将')}>武将池</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
+        <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>{t('game.sanguo.start')}</button>
+        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`杀 ${target}`)}>{t('game.sanguo.sha')}</button>
+        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`决斗 ${target}`)}>{t('game.sanguo.duel')}</button>
+        <button className="mini-btn" disabled={disabled || !canAct || !target} onClick={() => onCmd(`火攻 ${target}`)}>{t('game.sanguo.fire')}</button>
+        <button className="mini-btn" disabled={disabled || !canAct} onClick={() => onCmd('pass')}>{t('game.sanguo.pass')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('generals')}>{t('game.sanguo.generals')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>
       </div>
     </div>
   );

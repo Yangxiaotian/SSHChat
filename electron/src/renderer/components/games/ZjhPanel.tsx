@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import PokerCardsView from './PokerCardsView';
+import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
@@ -81,6 +82,7 @@ function includesAny(source: string, needles: string[]): boolean {
 export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }: Props) {
   const [raiseAmount, setRaiseAmount] = useState('1');
   const [target, setTarget] = useState('');
+  const { t } = useTranslation();
   const handCards = extractCards('你的手牌', boardText);
   const scores = extractScores(boardText);
   const seats = extractSeats(boardText);
@@ -101,31 +103,31 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
   const amountNum = Number(raiseAmount.trim());
   const hasValidRaise = Number.isFinite(amountNum) && amountNum > 0;
 
-  const stateText = isPlaying ? '进行中' : isWaiting ? '等待开始' : isEnded ? '已结束' : (meta.state || '未知');
+  const stateText = isPlaying ? t('game.zjh.playing') : isWaiting ? t('game.zjh.waiting') : isEnded ? t('game.zjh.ended') : (meta.state || t('game.zjh.unknown'));
   const startReason = !isHost
-    ? '仅房主可发牌开始。'
+    ? t('game.zjh.hostOnly')
     : isPlaying
-      ? '当前对局进行中，无法重复发牌。'
+      ? t('game.zjh.alreadyPlaying')
       : '';
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">炸金花互动面板</div>
-      <div className="game-workbench-hint">状态：{stateText}，底池：{meta.pot}，当前注：{meta.currentBet}</div>
+      <div className="game-interaction-title">{t('game.zjh.title')}</div>
+      <div className="game-workbench-hint">{t('game.zjh.status', { state: stateText, pot: meta.pot, currentBet: meta.currentBet })}</div>
 
       {(isPlaying && meta.turn && !myTurn) && (
-        <div className="game-workbench-hint">当前轮到：{meta.turn}，你的操作按钮已暂时禁用。</div>
+        <div className="game-workbench-hint">{t('game.zjh.turn', { name: meta.turn })}</div>
       )}
       {(isPlaying && myTurn) && (
-        <div className="game-workbench-hint">当前轮到你操作：建议先看牌，再跟注/加注/比牌。</div>
+        <div className="game-workbench-hint">{t('game.zjh.yourTurn')}</div>
       )}
 
-      <PokerCardsView title="你的手牌" cards={handCards} />
+      <PokerCardsView title={t('game.zjh.yourHand')} cards={handCards} />
 
       {scores.length > 0 && (
         <div className="game-chip-row">
           {scores.map((s) => (
-            <span key={s.name} className="game-workbench-hint">{s.name}：剩余积分 {s.score}</span>
+            <span key={s.name} className="game-workbench-hint">{s.name}：{t('game.zjh.chips')} {s.score}</span>
           ))}
         </div>
       )}
@@ -137,23 +139,23 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
           title={startReason}
           onClick={() => onCmd('start')}
         >
-          发牌开始
+          {t('game.zjh.dealStart')}
         </button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('look')}>看牌</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('follow')}>跟注</button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')}>弃牌</button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>结束对局</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('look')}>{t('game.zjh.look')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('follow')}>{t('game.zjh.follow')}</button>
+        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')}>{t('game.zjh.fold')}</button>
+        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>
       </div>
 
       <div className="game-chip-row">
-        <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder="加注金额" disabled={disabled} />
+        <input className="game-mini-input" value={raiseAmount} onChange={(e) => setRaiseAmount(e.target.value)} placeholder={t('game.zjh.raiseAmount')} disabled={disabled} />
         <button
           className={`mini-btn ${canAct && hasValidRaise ? 'ready' : ''}`}
           disabled={disabled || !canAct || !hasValidRaise}
-          title={!hasValidRaise ? '请输入大于 0 的加注金额' : ''}
+          title={!hasValidRaise ? t('game.zjh.invalidRaise') : ''}
           onClick={() => onCmd(`raise ${raiseAmount.trim()}`)}
         >
-          加注
+          {t('game.zjh.raise')}
         </button>
       </div>
 
@@ -168,15 +170,15 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
             {u}
           </button>
         ))}
-        <button className={`mini-btn ${canAct && !!target ? 'ready' : ''}`} disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>比牌</button>
+        <button className={`mini-btn ${canAct && !!target ? 'ready' : ''}`} disabled={disabled || !canAct || !target} onClick={() => onCmd(`compare ${target}`)}>{t('game.zjh.compare')}</button>
       </div>
 
       {candidates.length === 0 && (
-        <div className="game-workbench-hint">当前没有可比牌目标，请先等待其他玩家/机器人入局并存活。</div>
+        <div className="game-workbench-hint">{t('game.zjh.noTarget')}</div>
       )}
 
       <div className="game-chip-row">
-        <span className="game-workbench-hint">机器人难度</span>
+        <span className="game-workbench-hint">{t('game.zjh.botLevel')}</span>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>
