@@ -9005,6 +9005,21 @@ class MahjongGame:
                         if n != from_name and n not in self.claim_passed and n in self.bot_names
                     ]
                     if not pending:
+                        # In games with bots, auto-pass human players who have
+                        # no valid action so they aren't stuck waiting to /game
+                        # move pass when they have nothing to do.  In all-human
+                        # games each player should still respond explicitly.
+                        if self.bot_names:
+                            human_pending = [
+                                n for _c, n in self.players
+                                if n != from_name
+                                and n not in self.claim_passed
+                                and n not in self.bot_names
+                            ]
+                            for hn in human_pending:
+                                if not self._human_can_act(hn, disc):
+                                    self.claim_passed.add(hn)
+                                    out.append(f"{hn} 无可用操作，自动过。")
                         resolved = self._resolve_claim_if_all_passed()
                         if resolved:
                             out.extend(resolved)
@@ -9127,7 +9142,21 @@ class MahjongGame:
         tile = self._draw_one(cur)
         if self.state == "ended":
             return ["牌墙摸完，荒牌流局。"]
-        return [f"{cur} 摸牌（{tile}），请出牌。"]
+        # Don't reveal the drawn tile to other players; the drawing player sees
+        # it in their hand via show(). Bots' tiles are always hidden.
+        return [f"{cur} 摸牌，请出牌。"]
+
+    def _human_can_act(self, name: str, disc: str) -> bool:
+        """Return True if the human player has at least one valid response to disc."""
+        return (
+            self._can_chi(name, disc)
+            or self._can_peng(name, disc)
+            or self._can_ming_gang(name, disc)
+            or _mj_is_win_with_melds(
+                sorted(self.hands.get(name, []) + [disc], key=_mj_tile_sort_key),
+                len(self.melds.get(name, [])),
+            )
+        )
 
     def _can_peng(self, name: str, tile: str) -> bool:
         return self.hands.get(name, []).count(tile) >= 2
