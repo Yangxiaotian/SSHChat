@@ -67,6 +67,14 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertEqual(profile["games"], 0)
         self.assertTrue(game.send_view_on_move)
 
+    def test_gomoku_ai_nudge_after_reconnect_when_ai_turn(self) -> None:
+        player_conn = object()
+        game = GomokuGame(player_conn, "Alice", ai_level="easy")
+        game._turn = 2
+        lines = game.nudge_bots()
+        self.assertTrue(lines)
+        self.assertEqual(game._turn, 1)
+
     def test_xiangqi_ai_practice_game_responds(self) -> None:
         player_conn = object()
         game = XiangqiGame(player_conn, "Alice", rating_store=self.store, ai_level="easy")

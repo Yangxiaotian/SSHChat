@@ -1,9 +1,10 @@
 import tempfile
 import unittest
 
-from games import GomokuGame
+from games import ChessGame, GoGame, GomokuGame, chess_available
 import server
 from session_store import DisconnectedSeat, GameSessionStore
+from unittest.mock import patch
 
 
 class DummyConn:
@@ -83,6 +84,91 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertIs(restored.white_conn, new_white)
         self.assertEqual(priv, [])
         self.assertEqual(restored.grid[7][8], 2)
+
+    def test_safe_persist_does_not_raise_on_save_failure(self) -> None:
+        room = "default"
+        black = DummyConn()
+        game = GomokuGame(black, "zouyu")
+        server.room_games[room] = game
+        with patch.object(server.session_store, "save", side_effect=OSError("denied")):
+            server._safe_persist_sessions_now()
+        self.assertTrue(server._persist_dirty)
+
+    def test_shutdown_disconnect_keeps_active_game_in_store(self) -> None:
+        room = "default"
+        black = DummyConn()
+        white = DummyConn()
+        game = GoGame(black, "zouyu")
+        game.try_join(white, "yxt")
+        game.try_move(black, "4 4")
+
+        server.clients[black] = {"name": "zouyu", "rooms": {room}, "current_room": room}
+        server.clients[white] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room] = {black, white}
+        server.room_games[room] = game
+
+        server._safe_persist_sessions_now()
+        server._shutting_down = True
+        try:
+            server.remove_client(black)
+            server.remove_client(white)
+        finally:
+            server._shutting_down = False
+
+        self.assertEqual(server.room_games[room].state, "playing")
+        payload = server.session_store.load()
+        self.assertIn(room, payload["room_games"])
+
+    def test_disconnect_preserves_go_before_immediate_persist(self) -> None:
+        room = "default"
+        black = DummyConn()
+        white = DummyConn()
+        game = GoGame(black, "zouyu")
+        game.try_join(white, "yxt")
+        game.try_move(black, "4 4")
+
+        server.clients[black] = {"name": "zouyu", "rooms": {room}, "current_room": room}
+        server.clients[white] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room].update({black, white})
+        server.room_games[room] = game
+
+        server.remove_client(black)
+        server.remove_client(white)
+
+        payload = server.session_store.load()
+        self.assertIsNotNone(payload)
+        self.assertIn(room, payload["room_games"])
+        server.room_games.clear()
+        server._load_persisted_sessions()
+        restored = server.room_games[room]
+        self.assertEqual(restored.grid[3][3], 1)
+        self.assertIsInstance(restored.black_conn, DisconnectedSeat)
+        self.assertIsInstance(restored.white_conn, DisconnectedSeat)
+
+    def test_chess_ai_practice_survives_disconnect_and_reload(self) -> None:
+        if not chess_available():
+            self.skipTest("python-chess is not installed")
+        room = "default"
+        conn = DummyConn()
+        game = ChessGame(conn, "yxt", ai_level="hard")
+        err, _bcast, done = game.try_move(conn, "e4")
+        self.assertEqual(err, [])
+        self.assertFalse(done)
+
+        server.clients[conn] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room].add(conn)
+        server.room_games[room] = game
+
+        server.remove_client(conn)
+
+        payload = server.session_store.load()
+        self.assertIn(room, payload["room_games"])
+        server.room_games.clear()
+        server._load_persisted_sessions()
+        restored = server.room_games[room]
+        self.assertEqual(restored.state, "playing")
+        self.assertEqual(restored.ai_level, "hard")
+        self.assertIsInstance(restored.white_conn, DisconnectedSeat)
 
     def test_ended_games_are_not_persisted(self) -> None:
         room = "default"

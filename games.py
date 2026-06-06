@@ -928,6 +928,12 @@ class ChessGame(BoardUndoMixin):
         bcast.append(f"轮到 白方 {self.white_name}（第 {self.board.fullmove_number} 手）{suffix}")
         return bcast
 
+    def nudge_bots(self) -> list[str]:
+        """Resume AI practice after reconnect (/game show)."""
+        if self.state != "playing" or not self._is_ai_turn():
+            return []
+        return self._run_ai_turn()
+
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
             return (
@@ -1498,6 +1504,12 @@ class GomokuGame(BoardUndoMixin):
         self._turn = 1
         bcast.append(f"轮到 黑方 {self.black_name} 落子")
         return bcast
+
+    def nudge_bots(self) -> list[str]:
+        """Resume AI practice after reconnect (/game show)."""
+        if self.state != "playing" or not self._is_ai_turn():
+            return []
+        return self._run_ai_turn()
 
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
@@ -2930,6 +2942,12 @@ class XiangqiGame(BoardUndoMixin):
         suffix = "（被将军）" if in_check else ""
         bcast.append(f"轮到 红方 {self.red_name} 走子{suffix}")
         return bcast
+
+    def nudge_bots(self) -> list[str]:
+        """Resume AI practice after reconnect (/game show)."""
+        if self.state != "playing" or not self._is_ai_turn():
+            return []
+        return self._run_ai_turn()
 
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":

@@ -620,6 +620,8 @@ ${SVC_USER}WorkingDirectory=$PREFIX
 EnvironmentFile=-$PREFIX/sshchat.env
 ExecStart=$PREFIX/venv/bin/python $PREFIX/server.py
 Restart=on-failure
+TimeoutStopSec=15
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target

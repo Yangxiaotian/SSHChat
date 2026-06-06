@@ -76,6 +76,9 @@ library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
 lock = threading.Lock()
 _persist_dirty = False
 _persist_timer: Optional[threading.Timer] = None
+_shutting_down = False
+_shutdown_requested = False
+_listen_socket: Optional[socket.socket] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -716,6 +719,20 @@ def _persist_sessions_now() -> None:
     with lock:
         payload = _build_session_payload_locked()
     session_store.save(payload)
+
+
+def _safe_persist_sessions_now() -> None:
+    """Persist session state; never raise to callers (avoid disconnecting clients)."""
+    try:
+        _persist_sessions_now()
+    except Exception as e:
+        print(f"session persist failed: {e!r} (path={session_store.path!r})")
+        _mark_sessions_dirty()
+
+
+def _persist_after_game_change() -> None:
+    """Write in-progress games to disk immediately after state changes."""
+    _safe_persist_sessions_now()
 
 
 def _load_persisted_sessions() -> None:
@@ -1696,6 +1713,7 @@ def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
 
 
 def remove_client(conn) -> None:
+    flush_now = False
     with lock:
         info = clients.pop(conn, None)
         if not info:
@@ -1714,7 +1732,7 @@ def remove_client(conn) -> None:
             same_name_peer = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
             game = room_games.get(room)
             preserve_disconnected_seat = (
-                same_name_peer is None
+                not _shutting_down
                 and game is not None
                 and getattr(game, "state", "ended") != "ended"
                 and _is_conn_seated_in_game(game, conn)
@@ -1723,38 +1741,75 @@ def remove_client(conn) -> None:
             if room_owners.get(room) is conn:
                 if same_name_peer is not None:
                     room_owners[room] = same_name_peer
-                elif not preserve_disconnected_seat:
+                elif not preserve_disconnected_seat and not _shutting_down:
                     _reassign_room_owner_locked(room, conn)
             if game is not None:
-                resumed = _resume_same_account_seat_locked(
-                    room,
-                    game,
-                    same_name_peer,
-                    name,
-                    old_conn_hint=conn,
-                ) if same_name_peer is not None else False
-                if resumed:
-                    game_notices.append(
-                        (
+                if _shutting_down:
+                    if _is_conn_seated_in_game(game, conn):
+                        seat = DisconnectedSeat(name)
+                        _replace_conn_refs(game, conn, seat)
+                        flush_now = True
+                elif _is_conn_seated_in_game(game, conn):
+                    if same_name_peer is not None:
+                        resumed = _resume_same_account_seat_locked(
                             room,
-                            [f"{name} 在另一终端续玩，当前对局席位已自动迁移。"],
+                            game,
+                            same_name_peer,
+                            name,
+                            old_conn_hint=conn,
                         )
-                    )
-                elif preserve_disconnected_seat:
-                    seat = DisconnectedSeat(name)
-                    _replace_conn_refs(game, conn, seat)
-                    if room_owners.get(room) is conn:
-                        room_owners.pop(room, None)
-                    game_notices.append(
-                        (
-                            room,
-                            [f"{name} 暂时离线，席位已保留；重新连接后可继续本局。"],
+                        if resumed:
+                            game_notices.append(
+                                (
+                                    room,
+                                    [f"{name} 在另一终端续玩，当前对局席位已自动迁移。"],
+                                )
+                            )
+                        elif _game_seat_conn_by_name(game, name) is conn:
+                            seat = DisconnectedSeat(name)
+                            _replace_conn_refs(game, conn, seat)
+                            if room_owners.get(room) is conn:
+                                room_owners.pop(room, None)
+                            flush_now = True
+                            game_notices.append(
+                                (
+                                    room,
+                                    [
+                                        f"{name} 暂时离线，席位已保留；"
+                                        "重新连接后可继续本局。"
+                                    ],
+                                )
+                            )
+                    else:
+                        seat = DisconnectedSeat(name)
+                        _replace_conn_refs(game, conn, seat)
+                        if room_owners.get(room) is conn:
+                            room_owners.pop(room, None)
+                        flush_now = True
+                        game_notices.append(
+                            (
+                                room,
+                                [
+                                    f"{name} 暂时离线，席位已保留；"
+                                    "重新连接后可继续本局。"
+                                ],
+                            )
                         )
+                elif same_name_peer is not None:
+                    resumed = _resume_same_account_seat_locked(
+                        room,
+                        game,
+                        same_name_peer,
+                        name,
+                        old_conn_hint=conn,
                     )
-                else:
-                    _, bcast, _ended = game.on_player_leave(conn, name)
-                    if bcast:
-                        game_notices.append((room, bcast))
+                    if resumed:
+                        game_notices.append(
+                            (
+                                room,
+                                [f"{name} 在另一终端续玩，当前对局席位已自动迁移。"],
+                            )
+                        )
             _drop_game_if_room_empty_locked(room)
     for room in joined_rooms:
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
@@ -1765,7 +1820,10 @@ def remove_client(conn) -> None:
         conn.close()
     except Exception:
         pass
-    _mark_sessions_dirty()
+    if flush_now:
+        _safe_persist_sessions_now()
+    else:
+        _mark_sessions_dirty()
 
 
 def handle_command(conn, payload: str) -> None:
@@ -2041,7 +2099,12 @@ def handle_command(conn, payload: str) -> None:
         return
 
     if cmd == "/game":
-        _handle_game(conn, name, current_room, payload)
+        try:
+            _handle_game(conn, name, current_room, payload)
+        except Exception as e:
+            print(f"/game error: room={current_room} user={name} payload={payload!r} err={e!r}")
+            traceback.print_exc()
+            send_line(conn, "[*] /game 命令执行失败，请稍后重试（详情见服务端日志）。\n")
         return
 
     if cmd == "/news":
@@ -2230,7 +2293,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             [f"{name} 开了一局 {game_name}（{seat}），{join_hint}"],
         )
         send_oriented_boards(room, new_game)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "join":
@@ -2248,7 +2311,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
         send_oriented_boards(room, game)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "seats":
@@ -2311,7 +2374,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         if ended or getattr(game, "send_view_on_move", True):
             send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "resign":
@@ -2326,7 +2389,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "undo":
@@ -2358,7 +2421,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         broadcast_game(room, bcast)
         if bcast and hasattr(game, "supports_undo"):
             send_oriented_boards(room, game)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "abort":
@@ -2373,7 +2436,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     if sub == "pgn":
@@ -2405,7 +2468,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 room_owners[room] = conn
             room_games.pop(room, None)
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
-        _mark_sessions_dirty()
+        _persist_after_game_change()
         return
 
     send_line(conn, f"[*] 未知子命令 /game {sub}；用 /game help 查看。\n")
@@ -2571,11 +2634,25 @@ def handle_client(conn, addr) -> None:
 
 
 def run_server() -> int:
+    global _listen_socket, _shutdown_requested, _shutting_down
     _load_persisted_sessions()
 
     def _handle_shutdown_signal(signum, _frame) -> None:
-        print(f"shutdown signal {signum}, saving game sessions...")
-        _persist_sessions_now()
+        global _shutting_down, _shutdown_requested
+        if _shutting_down:
+            return
+        _shutting_down = True
+        print(
+            f"shutdown signal {signum}, saving game sessions to {session_store.path}..."
+        )
+        _safe_persist_sessions_now()
+        _shutdown_requested = True
+        sock = _listen_socket
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
@@ -2584,15 +2661,20 @@ def run_server() -> int:
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PORT))
     s.listen()
+    _listen_socket = s
     print(f"chat server started on port {PORT} (default room #{DEFAULT_ROOM})")
 
-    while True:
-        conn, addr = s.accept()
+    while not _shutdown_requested:
+        try:
+            conn, addr = s.accept()
+        except OSError:
+            break
         threading.Thread(
             target=handle_client,
             args=(conn, addr),
             daemon=True,
         ).start()
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
