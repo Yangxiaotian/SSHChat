@@ -74,6 +74,7 @@ library_reading: dict[object, dict[str, object]] = {}
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
 lock = threading.Lock()
+_MISSING = object()  # sentinel for "attribute not present"
 _persist_dirty = False
 _persist_timer: Optional[threading.Timer] = None
 _shutting_down = False
@@ -594,9 +595,16 @@ def _pickle_game_for_storage(game) -> bytes:
         seat = DisconnectedSeat(name)
         _replace_conn_refs(game, conn, seat)
         swaps.append((seat, conn))
+    # rating_store contains an RLock and cannot be pickled; it is rebound after
+    # loading via _rebind_game_services, so strip it before serialising.
+    saved_rs = getattr(game, "rating_store", _MISSING)
+    if saved_rs is not _MISSING:
+        game.rating_store = None
     try:
         return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
     finally:
+        if saved_rs is not _MISSING:
+            game.rating_store = saved_rs
         for seat, conn in swaps:
             _replace_conn_refs(game, seat, conn)
 
