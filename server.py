@@ -195,6 +195,7 @@ HELP_LINES = (
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
     "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
+    "[*] /library search <关键词>    在当前书中按关键词检索并跳转（别名：find / 搜索 / 检索）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
@@ -1404,7 +1405,7 @@ def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
         send_line(conn, f"[*]    {ln}\n")
     send_line(
         conn,
-        "[*] 翻页：/library next | prev | page <页码> | info | close（进度已自动存书签）\n",
+        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | info | close\n",
     )
 
 
@@ -1480,15 +1481,16 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library                     书目列表（含你的书签进度）\n")
-        send_line(conn, "[*]   /library open <序号|文件名>    打开（有书签则从书签继续）\n")
-        send_line(conn, "[*]   /library next | 下一页         下一页（自动存书签）\n")
-        send_line(conn, "[*]   /library prev | 上一页         上一页（自动存书签）\n")
-        send_line(conn, "[*]   /library page <页码> | 页 N    跳到指定页（自动存书签）\n")
-        send_line(conn, "[*]   /library bookmarks | 书签       列出我的全部书签\n")
-        send_line(conn, "[*]   /library reset <序号|文件名>   清除某本书的书签\n")
-        send_line(conn, "[*]   /library info | 状态           当前阅读进度\n")
-        send_line(conn, "[*]   /library close | 关闭          结束阅读（保留书签）\n")
+        send_line(conn, "[*]   /library                         书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
+        send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
+        send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
+        send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
+        send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
+        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
+        send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
+        send_line(conn, "[*]   /library info | 状态               当前阅读进度\n")
+        send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
         send_line(conn, f"[*] 目录：{lib_dir}\n")
         return
 
@@ -1610,6 +1612,42 @@ def _handle_library(conn, payload: str) -> None:
         page = page_1based - 1
         _set_library_page(conn, user, Path(str(session["path"])), page)
         _send_library_page(conn, doc, page)
+        return
+
+    if head in {"search", "find", "搜索", "查找", "检索"}:
+        query = raw.split(None, 1)[1].strip() if len(parts) >= 2 else ""
+        if not query:
+            send_line(conn, "[*] 用法：/library search <关键词>\n")
+            return
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书，再搜索。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        results = library.search_book(doc, query)
+        if not results:
+            send_line(conn, f"[*] 在《{doc.title}》中未找到「{query}」。\n")
+            return
+        send_line(
+            conn,
+            f"[*] 在《{doc.title}》中搜索「{query}」，找到 {len(results)} 处：\n",
+        )
+        for page_idx, snippet in results:
+            send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
+        if len(results) == 1:
+            page_idx = results[0][0]
+            _set_library_page(conn, user, Path(str(session["path"])), page_idx)
+            send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
+            _send_library_page(conn, doc, page_idx)
+        else:
+            send_line(conn, "[*] 用 /library page <页码> 跳转到对应页。\n")
         return
 
     if head in {"open", "read", "读", "打开"}:

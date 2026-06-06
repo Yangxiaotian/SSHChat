@@ -224,6 +224,40 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
+def search_book(
+    doc: BookDocument,
+    query: str,
+    max_results: int = 20,
+    snippet_context: int = 50,
+) -> list[tuple[int, str]]:
+    """Search all pages for *query* (case-insensitive).
+
+    Returns a list of ``(page_index, snippet)`` tuples in page order.
+    The snippet is a short excerpt of the surrounding text with the match
+    approximately centred, suitable for display in a single terminal line.
+    """
+    if not query:
+        return []
+    query_lower = query.lower()
+    results: list[tuple[int, str]] = []
+    for page_idx, page_text in enumerate(doc.pages):
+        page_lower = page_text.lower()
+        pos = page_lower.find(query_lower)
+        if pos == -1:
+            continue
+        start = max(0, pos - snippet_context)
+        end = min(len(page_text), pos + len(query) + snippet_context)
+        snippet = page_text[start:end].replace("\n", " ").replace("\r", " ").strip()
+        if start > 0:
+            snippet = "…" + snippet
+        if end < len(page_text):
+            snippet = snippet + "…"
+        results.append((page_idx, snippet))
+        if len(results) >= max_results:
+            break
+    return results
+
+
 def wrap_page_lines(text: str, width: int = LIBRARY_WRAP_WIDTH) -> list[str]:
     text = (text or "").strip()
     if not text:
