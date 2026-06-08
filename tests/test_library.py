@@ -90,5 +90,65 @@ class TestLibraryHtml(unittest.TestCase):
         self.assertIn("world", text)
 
 
+class TestLibrarySplitPages(unittest.TestCase):
+    def test_split_pages_preserves_all_characters(self) -> None:
+        text = "中文测试" * 1200
+        pages = library._split_pages(text, 500)
+        self.assertEqual("".join(pages), text)
+
+    def test_split_pages_keeps_ascii_word_count(self) -> None:
+        text = "word " * 800
+        pages = library._split_pages(text, 500)
+        self.assertGreater(len(pages), 1)
+        self.assertEqual("".join(pages).count("word"), text.count("word"))
+
+
+class TestLibraryPdfExtract(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_pdf_text_quality_prefers_readable_chinese(self) -> None:
+        good = "这是完整的中文正文。"
+        bad = "Ùf/{,N\x00LN-eÿ"
+        self.assertGreater(library._pdf_text_quality(good), library._pdf_text_quality(bad))
+
+    def test_pick_best_pdf_text(self) -> None:
+        chosen = library._pick_best_pdf_text(["Ù\x00garbage", "readable english", "中文正文"])
+        self.assertEqual(chosen, "中文正文")
+
+    def test_extract_pdf_page_text_pypdf_falls_back_to_plain(self) -> None:
+        class _Page:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def extract_text(self, **kwargs: object) -> str:
+                self.calls.append(kwargs)
+                if kwargs:
+                    raise TypeError("layout unsupported")
+                return "plain text"
+
+        page = _Page()
+        self.assertEqual(library._extract_pdf_page_text_pypdf(page), "plain text")
+        self.assertGreaterEqual(len(page.calls), 1)
+
+    def test_load_pdf_prefers_pymupdf_for_chinese(self) -> None:
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("pymupdf not installed")
+        path = Path(self.tmp.name) / "cjk.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "第二行中间有重要内容不应丢失。", fontsize=12, fontname="china-s")
+        doc.save(path)
+        doc.close()
+        loaded = library.load_book(path)
+        full = "\n".join(loaded.pages)
+        self.assertIn("中间有重要内容", full)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ function parseLibraryMessages(messages: { type: string; sender: string; content:
   let inBookmarks = false;
   let reading: ReadingState | null = null;
   let currentReading: ReadingState | null = null;
+  let collectingBody = false;
 
   for (const msg of systemMsgs) {
     const content = msg.content.trimEnd();
@@ -38,12 +39,14 @@ function parseLibraryMessages(messages: { type: string; sender: string; content:
     if (/^---\s*图书馆\s*---$/.test(content)) {
       inCatalog = true;
       inBookmarks = false;
+      collectingBody = false;
       continue;
     }
 
     if (/^---\s*我的书签\s*---$/.test(content)) {
       inBookmarks = true;
       inCatalog = false;
+      collectingBody = false;
       continue;
     }
 
@@ -82,14 +85,16 @@ function parseLibraryMessages(messages: { type: string; sender: string; content:
         total: Number.parseInt(pageMatch[3], 10),
         body: '',
       };
+      collectingBody = true;
       continue;
     }
 
-    if (currentReading && content.startsWith('    ')) {
-      const line = content.trim();
-      if (line && !line.startsWith('翻页：')) {
-        currentReading.body += `${line}\n`;
+    if (collectingBody && currentReading) {
+      if (content.startsWith('翻页：')) {
+        collectingBody = false;
+        continue;
       }
+      currentReading.body += `${content}\n`;
     }
   }
 

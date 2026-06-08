@@ -54,12 +54,16 @@ def _split_pages(text: str, page_chars: int) -> list[str]:
         end = min(start + page_chars, length)
         if end < length:
             break_at = text.rfind("\n\n", start, end)
-            if break_at <= start:
-                break_at = text.rfind("\n", start, end)
-            if break_at <= start:
-                break_at = text.rfind(" ", start, end)
             if break_at > start:
-                end = break_at
+                end = break_at + 2 if text[break_at : break_at + 2] == "\n\n" else break_at + 1
+            else:
+                break_at = text.rfind("\n", start, end)
+                if break_at > start:
+                    end = break_at + 1
+                else:
+                    break_at = text.rfind(" ", start, end)
+                    if break_at > start:
+                        end = break_at + 1
         chunk = text[start:end].strip()
         if chunk:
             pages.append(chunk)
@@ -152,7 +156,137 @@ def _load_txt(path: Path) -> BookDocument:
     return BookDocument(title=path.stem, pages=pages, source_path=path)
 
 
-def _load_pdf(path: Path) -> BookDocument:
+def _pdf_text_quality(text: str) -> tuple[int, int, int]:
+    """Score extracted PDF text; higher is better."""
+    if not text:
+        return (0, 0, 0)
+    readable = 0
+    cjk = 0
+    penalty = 0
+    for ch in text:
+        code = ord(ch)
+        if ch in "\n\r\t":
+            continue
+        if 0x4E00 <= code <= 0x9FFF:
+            cjk += 1
+            readable += 2
+        elif ch.isalnum():
+            readable += 1
+        elif ch in "，。！？；：、（）《》—…·“”‘’":
+            readable += 1
+        elif ch == "\ufffd":
+            penalty += 8
+        elif code < 32 or code == 0xFFFD:
+            penalty += 6
+        elif code < 0x80 and not ch.isprintable():
+            penalty += 4
+    return (cjk, readable - penalty, len(text.strip()))
+
+
+def _pick_best_pdf_text(candidates: list[str]) -> str:
+    best = ""
+    best_score = (-1, -1, -1)
+    for text in candidates:
+        score = _pdf_text_quality(text)
+        if score > best_score:
+            best = text
+            best_score = score
+    return best
+
+
+def _layout_fragments_to_text(fragments: list[tuple[float, float, str]]) -> str:
+    if not fragments:
+        return ""
+    ordered = sorted(fragments, key=lambda item: (-round(item[0], 1), item[1]))
+    parts: list[str] = []
+    prev_y: Optional[float] = None
+    for y, _x, text in ordered:
+        if not text:
+            continue
+        if prev_y is not None and abs(y - prev_y) > 4:
+            if parts and not parts[-1].endswith("\n"):
+                parts.append("\n")
+        elif parts and not parts[-1].endswith(("\n", " ")):
+            parts.append(" ")
+        parts.append(text)
+        prev_y = y
+    return "".join(parts)
+
+
+def _extract_pdf_page_text_pypdf_visitor(page: object) -> str:
+    fragments: list[tuple[float, float, str]] = []
+
+    def visitor_text(
+        text: str,
+        _cm: object,
+        tm: object,
+        _font_dict: object,
+        _font_size: object,
+    ) -> None:
+        if not text:
+            return
+        try:
+            tm_list = list(tm)  # type: ignore[arg-type]
+            x = float(tm_list[4])
+            y = float(tm_list[5])
+        except Exception:
+            x, y = 0.0, 0.0
+        fragments.append((y, x, text))
+
+    try:
+        page.extract_text(visitor_text=visitor_text)  # type: ignore[union-attr]
+    except Exception:
+        return ""
+    return _layout_fragments_to_text(fragments)
+
+
+def _extract_pdf_page_text_pypdf(page: object) -> str:
+    candidates: list[str] = []
+    attempts: list[dict[str, object]] = [
+        {},
+        {"extraction_mode": "layout", "layout_mode_space_vertically": False},
+    ]
+    for kwargs in attempts:
+        try:
+            text = page.extract_text(**kwargs) or ""  # type: ignore[union-attr]
+        except TypeError:
+            try:
+                text = page.extract_text() or ""  # type: ignore[union-attr]
+            except Exception:
+                text = ""
+        except Exception:
+            text = ""
+        if text.strip():
+            candidates.append(text)
+    visitor_text = _extract_pdf_page_text_pypdf_visitor(page)
+    if visitor_text.strip():
+        candidates.append(visitor_text)
+    return _pick_best_pdf_text(candidates)
+
+
+def _load_pdf_pymupdf(path: Path) -> Optional[BookDocument]:
+    try:
+        import fitz
+    except ImportError:
+        return None
+    pages: list[str] = []
+    try:
+        with fitz.open(str(path)) as doc:
+            for page in doc:
+                text = page.get_text("text") or ""
+                text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+                if not text:
+                    pages.append("（本页未能提取文字，可能是扫描版 PDF）")
+                else:
+                    pages.extend(_split_pages(text, LIBRARY_PAGE_CHARS))
+    except Exception:
+        return None
+    if not pages:
+        pages = ["（未能从 PDF 提取文字）"]
+    return BookDocument(title=path.stem, pages=pages, source_path=path)
+
+
+def _load_pdf_pypdf(path: Path) -> BookDocument:
     try:
         from pypdf import PdfReader
     except ImportError as exc:
@@ -160,10 +294,7 @@ def _load_pdf(path: Path) -> BookDocument:
     reader = PdfReader(str(path))
     pages: list[str] = []
     for page in reader.pages:
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
+        text = _extract_pdf_page_text_pypdf(page)
         text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not text:
             pages.append("（本页未能提取文字，可能是扫描版 PDF）")
@@ -172,6 +303,13 @@ def _load_pdf(path: Path) -> BookDocument:
     if not pages:
         pages = ["（未能从 PDF 提取文字）"]
     return BookDocument(title=path.stem, pages=pages, source_path=path)
+
+
+def _load_pdf(path: Path) -> BookDocument:
+    doc = _load_pdf_pymupdf(path)
+    if doc is not None:
+        return doc
+    return _load_pdf_pypdf(path)
 
 
 def _load_epub(path: Path) -> BookDocument:

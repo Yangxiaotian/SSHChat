@@ -530,7 +530,7 @@ fi
 if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
   "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
 fi
-"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" prompt_toolkit 'chess>=1.10' 'pypdf>=4.0' 'ebooklib>=0.18'
+"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" -r "$SCRIPT_DIR/requirements-server.txt"
 rm -rf "$DEPLOY_TMP"
 
 umask 022
