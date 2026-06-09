@@ -266,6 +266,106 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         self.assertEqual(game.pot, 1708 + 498)
         self.assertTrue(any("比牌" in line and "胜出" in line for line in bcast))
 
+    def test_all_in_compare_win_ends_game_when_only_one_not_folded(self):
+        """All-in compare win with 0 stack and all others folded should end game."""
+        c1 = object()
+        c2 = object()
+        game = ZhaJinHuaGame(c1, "yxt")
+        game.try_join(c2, "zouyu")
+        game.try_move(c1, "start")
+
+        for bot in ("R1", "R2", "R3"):
+            game.folded.add(bot)
+
+        game.looked.add("yxt")
+        game.looked.add("zouyu")
+        game.folded.discard("yxt")
+        game.folded.discard("zouyu")
+        game.turn_idx = 0
+        game.current_bet = 701
+        game.pot = 1684
+        game.stacks["yxt"] = 277
+        game.stacks["zouyu"] = 602
+        game.cards["yxt"] = ["A♠", "A♥", "A♦"]
+        game.cards["zouyu"] = ["2♦", "3♦", "4♦"]
+
+        err, bcast, done = game.try_move(c1, "compare zouyu")
+        self.assertEqual(err, [])
+        self.assertTrue(done)
+        self.assertEqual(game.state, "ended")
+        self.assertEqual(game.stacks["yxt"], 1684 + 277)
+        self.assertEqual(game.pot, 0)
+        self.assertIn("zouyu", game.folded)
+        self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast))
+
+    def test_folded_human_nudge_advances_bot_turn(self):
+        """Folded human poking the game should still advance bot turns."""
+        c1 = object()
+        c2 = object()
+        game = ZhaJinHuaGame(c1, "yxt")
+        game.try_join(c2, "zouyu")
+        game.try_move(c1, "start")
+        game.folded = {"yxt", "zouyu", "R1"}
+        game.pot = 1405
+        game.current_bet = 20
+        game.stacks = {
+            "yxt": 859,
+            "zouyu": 959,
+            "R1": 899,
+            "R2": 579,
+            "R3": 299,
+        }
+        for i, (_, n) in enumerate(game.players):
+            if n == "R2":
+                game.turn_idx = i
+                break
+
+        err, bcast, done = game.try_move(c1, "fold")
+        self.assertEqual(err, ["你已经弃牌。"])
+        self.assertTrue(done)
+        self.assertEqual(game.state, "ended")
+        self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast))
+
+    def test_zero_stack_bots_auto_fold_and_finish(self):
+        """Bots with 0 stack but not folded should not deadlock bot runner."""
+        c1 = object()
+        c2 = object()
+        game = ZhaJinHuaGame(c1, "yxt")
+        game.try_join(c2, "zouyu")
+        game.try_move(c1, "start")
+        game.state = "playing"
+        game.folded = {"yxt", "zouyu", "R1"}
+        game.stacks = {"R2": 0, "R3": 0, "R1": 899}
+        game.pot = 1405
+        game.turn_idx = next(
+            i for i, (_, n) in enumerate(game.players) if n == "R2"
+        )
+
+        out = game.nudge_bots()
+        self.assertEqual(game.state, "ended")
+        self.assertTrue(any("积分耗尽，自动弃牌" in line for line in out))
+
+    def test_stuck_state_recovers_on_any_move(self):
+        """Already-stuck state: sole survivor with 0 stack auto-finishes on move attempt."""
+        c1 = object()
+        game = ZhaJinHuaGame(c1, "yxt")
+        game.state = "playing"
+        game.folded = {"zouyu", "R1", "R2", "R3"}
+        game.looked = {"yxt"}
+        game.players = [(c1, "yxt"), (object(), "zouyu"), (object(), "R1"), (object(), "R2"), (object(), "R3")]
+        game.stacks = {"yxt": 0, "zouyu": 602, "R1": 998, "R2": 858, "R3": 858}
+        game.pot = 1684
+        game.current_bet = 701
+        game.turn_idx = 0
+        game.cards = {"yxt": ["J♥", "8♣", "7♣"]}
+
+        err, bcast, done = game.try_move(c1, "follow")
+        self.assertEqual(err, [])
+        self.assertTrue(done)
+        self.assertEqual(game.state, "ended")
+        self.assertEqual(game.stacks["yxt"], 1684)
+        self.assertEqual(game.pot, 0)
+
 
 class TestWerewolfWitchMutualExclusion(unittest.TestCase):
     """Witch should not be able to both save and poison in the same night."""

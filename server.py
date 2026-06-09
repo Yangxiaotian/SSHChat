@@ -615,6 +615,20 @@ def _rebind_game_services(game) -> None:
         game.rating_store = rating_store
 
 
+def _nudge_game_bots_locked(game) -> list[str]:
+    """Advance bot turns when humans are idle; caller holds lock."""
+    if game is None or getattr(game, "state", "ended") == "ended":
+        return []
+    nudge = getattr(game, "nudge_bots", None)
+    if not callable(nudge):
+        return []
+    try:
+        return list(nudge() or [])
+    except Exception as e:
+        print(f"nudge_bots failed for {getattr(game, 'name', game)!r}: {e!r}")
+        return []
+
+
 def _build_session_payload_locked() -> dict[str, object]:
     games_blob: dict[str, str] = {}
     for room, game in room_games.items():
@@ -750,6 +764,8 @@ def _load_persisted_sessions() -> None:
         return
     with lock:
         _apply_session_payload_locked(payload)
+        for game in room_games.values():
+            _nudge_game_bots_locked(game)
         active = sum(
             1
             for game in room_games.values()
@@ -2403,6 +2419,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     return
                 resumed = _resume_same_account_seat_locked(room, game, conn, name)
                 priv, bcast, ended = game.try_move(conn, rest)
+                if not ended:
+                    extra = _nudge_game_bots_locked(game)
+                    if extra:
+                        bcast = list(bcast) + extra
+                        ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"/game move failed: room={room} user={name} cmd={rest!r} err={e!r}")
             send_line(conn, f"[*] /game move 执行失败：{e}\n")
@@ -2430,11 +2451,18 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 send_line(conn, "[*] 本房没有进行中的对局。\n")
                 return
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
-            priv, bcast, _ = game.resign(conn, name)
+            priv, bcast, ended = game.resign(conn, name)
+            if not ended:
+                extra = _nudge_game_bots_locked(game)
+                if extra:
+                    bcast = list(bcast) + extra
+                    ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         send_game_private(conn, room, priv)
         broadcast_game(room, bcast)
+        if ended or getattr(game, "send_view_on_move", True):
+            send_oriented_boards(room, game)
         _persist_after_game_change()
         return
 

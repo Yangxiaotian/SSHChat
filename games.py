@@ -7658,6 +7658,17 @@ class ZhaJinHuaGame:
         if not looked and risk < 0.12 and self.rng.random() < 0.25:
             return "look"
         return "fold" if risk >= 0.20 else ("follow" if self.rng.random() < 0.80 else "look")
+    def _bot_turn(self) -> bool:
+        if self.state != "playing" or not self.players:
+            return False
+        return self.players[self.turn_idx][1] in self.bot_names
+
+    def nudge_bots(self) -> list[str]:
+        """Resume bot turns after reconnect, deploy, or idle human seats."""
+        if not self._bot_turn():
+            return []
+        return self._run_bots()
+
     def _run_bots(self) -> list[str]:
         if self._bot_running:
             return []
@@ -7669,6 +7680,19 @@ class ZhaJinHuaGame:
                 guard += 1
                 cur = self.players[self.turn_idx][1]
                 if cur not in self._alive():
+                    if cur in self._not_folded() and self.stacks.get(cur, 0) <= 0:
+                        self.folded.add(cur)
+                        out.append(f"{cur} 积分耗尽，自动弃牌")
+                        done = self._finish_if_one()
+                        if done:
+                            out.extend(done)
+                            break
+                        self._advance()
+                        continue
+                    done = self._finish_if_one()
+                    if done:
+                        out.extend(done)
+                        break
                     self._advance()
                     continue
                 if cur not in self.bot_names:
@@ -7676,8 +7700,15 @@ class ZhaJinHuaGame:
                 bot_conn = self.bot_conns.get(cur)
                 if bot_conn is None:
                     break
-                _err, b, _done = self.try_move(bot_conn, self._bot_action(cur))
-                out.extend(b)
+                action = self._bot_action(cur)
+                _err, b, _done = self.try_move(bot_conn, action)
+                if _err:
+                    _err2, b2, _done2 = self.try_move(bot_conn, "fold")
+                    out.extend(b2)
+                    if _err2:
+                        break
+                else:
+                    out.extend(b)
                 if self.state == "ended":
                     break
         finally:
@@ -7688,8 +7719,11 @@ class ZhaJinHuaGame:
             if c is conn:
                 return n
         return None
+    def _not_folded(self) -> list[str]:
+        return [n for _c, n in self.players if n not in self.folded]
+
     def _alive(self) -> list[str]:
-        return [n for _c, n in self.players if n not in self.folded and self.stacks.get(n, 0) > 0]
+        return [n for n in self._not_folded() if self.stacks.get(n, 0) > 0]
     def _pick_next_actor_from_start(self) -> bool:
         alive = set(self._alive())
         for i, (_c, n) in enumerate(self.players):
@@ -7722,10 +7756,10 @@ class ZhaJinHuaGame:
             if self.players[self.turn_idx][1] in alive:
                 return
     def _finish_if_one(self) -> Optional[list[str]]:
-        alive = self._alive()
-        if len(alive) != 1:
+        remaining = self._not_folded()
+        if len(remaining) != 1:
             return None
-        w = alive[0]
+        w = remaining[0]
         gain = self.pot
         self.stacks[w] += gain
         self.pot = 0
@@ -7787,7 +7821,12 @@ class ZhaJinHuaGame:
             if conn is not self.players[0][0]: return (["只有房主可以开始对局。"], [], False)
             return ([], self._start(), False)
         if self.state != "playing": return (["当前不是进行中状态。"], [], False)
-        if actor in self.folded: return (["你已经弃牌。"], [], False)
+        if actor in self.folded:
+            bcast = self.nudge_bots()
+            return (["你已经弃牌。"], bcast, self.state == "ended")
+        done = self._finish_if_one()
+        if done:
+            return ([], done, True)
         if self.stacks.get(actor, 0) <= 0: return (["你已无可用积分，无法继续操作。"], [], False)
         current = self.players[self.turn_idx][1]
         if actor != current: return ([f"还没轮到你，当前轮到：{current}"], [], False)
