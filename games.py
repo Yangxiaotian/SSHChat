@@ -1295,6 +1295,25 @@ def _gomoku_axis_open_three(line: str) -> bool:
         and s[7] in ".#"
     ):
         return True
+    # Jump open three: X.XX / XX.X through center X
+    if (
+        s[1] == "X"
+        and s[3] == "X"
+        and s[4] == "X"
+        and s[2] == "."
+        and s[0] in ".#"
+        and s[5] == "."
+    ):
+        return True
+    if (
+        s[1] == "X"
+        and s[2] == "X"
+        and s[4] == "X"
+        and s[3] == "."
+        and s[0] in ".#"
+        and s[5] == "."
+    ):
+        return True
     return False
 
 

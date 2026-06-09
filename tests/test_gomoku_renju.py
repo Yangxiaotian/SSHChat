@@ -19,6 +19,12 @@ class TestGomokuRenjuAxisPatterns(unittest.TestCase):
     def test_open_three_jump(self) -> None:
         self.assertTrue(_gomoku_axis_open_three("..X.XX..."))
 
+    def test_open_three_jump_xx_x(self) -> None:
+        self.assertTrue(_gomoku_axis_open_three(".XX.X...."))
+
+    def test_open_three_jump_x_xx(self) -> None:
+        self.assertTrue(_gomoku_axis_open_three(".X.XX...."))
+
     def test_four_rush(self) -> None:
         self.assertTrue(_gomoku_axis_has_four(".XXXX...."))
 
@@ -94,6 +100,35 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         last = (2, 8)
         g[last[0]][last[1]] = 1
         self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
+
+    def test_double_open_three_on_user_position(self) -> None:
+        """Regression: (10,5) must be 三三 — diag ..XXX.. and vertical .X.XX.."""
+        g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
+        rows = [
+            "...............",
+            "...............",
+            "...............",
+            "....#.#........",
+            ".#ooo.#........",
+            ".o.o.#.o#......",
+            "..oo###oooo#...",
+            ".o#o.oo#..o....",
+            "#..##o#.o#.....",
+            "....##..#......",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+        ]
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    g[r][c] = 1
+                elif ch == "o":
+                    g[r][c] = 2
+        last = (9, 4)  # (10, 5)
+        self.assertIn("三三", _gomoku_renju_forbidden(g, last[0], last[1]))
 
 
 class TestGomokuRenjuTryMove(unittest.TestCase):
