@@ -187,17 +187,22 @@ def _pick_best_pdf_text(candidates: list[str]) -> str:
     best = ""
     best_score = (-1, -1, -1)
     for text in candidates:
+        if not (text or "").strip():
+            continue
         score = _pdf_text_quality(text)
         if score > best_score:
             best = text
             best_score = score
+        elif score == best_score and len(text.strip()) > len(best.strip()):
+            best = text
     return best
 
 
 def _layout_fragments_to_text(fragments: list[tuple[float, float, str]]) -> str:
     if not fragments:
         return ""
-    ordered = sorted(fragments, key=lambda item: (-round(item[0], 1), item[1]))
+    # PDF user-space y grows downward; read top-to-bottom, then left-to-right.
+    ordered = sorted(fragments, key=lambda item: (round(item[0], 1), item[1]))
     parts: list[str] = []
     prev_y: Optional[float] = None
     for y, _x, text in ordered:
@@ -264,6 +269,69 @@ def _extract_pdf_page_text_pypdf(page: object) -> str:
     return _pick_best_pdf_text(candidates)
 
 
+def _extract_pdf_page_text_pymupdf_blocks(page: object) -> str:
+    try:
+        raw_blocks = page.get_text("blocks") or []  # type: ignore[union-attr]
+    except Exception:
+        return ""
+    fragments: list[tuple[float, float, str]] = []
+    for block in raw_blocks:
+        if len(block) < 7 or block[6] != 0:
+            continue
+        text = (block[4] or "").strip()
+        if not text:
+            continue
+        fragments.append((float(block[1]), float(block[0]), text))
+    return _layout_fragments_to_text(fragments)
+
+
+def _extract_pdf_page_text_pymupdf_dict(page: object) -> str:
+    try:
+        data = page.get_text("dict") or {}  # type: ignore[union-attr]
+    except Exception:
+        return ""
+    fragments: list[tuple[float, float, str]] = []
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = (span.get("text") or "").strip()
+                if not text:
+                    continue
+                bbox = span.get("bbox") or (0, 0, 0, 0)
+                fragments.append((float(bbox[1]), float(bbox[0]), text))
+    return _layout_fragments_to_text(fragments)
+
+
+def _extract_pdf_page_text_pymupdf(page: object) -> str:
+    candidates: list[str] = []
+    for kwargs in ({}, {"sort": True}):
+        try:
+            text = page.get_text("text", **kwargs) or ""  # type: ignore[union-attr]
+        except TypeError:
+            try:
+                text = page.get_text("text") or ""  # type: ignore[union-attr]
+            except Exception:
+                text = ""
+        except Exception:
+            text = ""
+        if text.strip():
+            candidates.append(text)
+    for extractor in (
+        _extract_pdf_page_text_pymupdf_blocks,
+        _extract_pdf_page_text_pymupdf_dict,
+    ):
+        text = extractor(page)
+        if text.strip():
+            candidates.append(text)
+    return _pick_best_pdf_text(candidates)
+
+
+def _pdf_document_quality(pages: list[str]) -> tuple[int, int, int]:
+    return _pdf_text_quality("\n".join(pages))
+
+
 def _load_pdf_pymupdf(path: Path) -> Optional[BookDocument]:
     try:
         import fitz
@@ -273,7 +341,7 @@ def _load_pdf_pymupdf(path: Path) -> Optional[BookDocument]:
     try:
         with fitz.open(str(path)) as doc:
             for page in doc:
-                text = page.get_text("text") or ""
+                text = _extract_pdf_page_text_pymupdf(page)
                 text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
                 if not text:
                     pages.append("（本页未能提取文字，可能是扫描版 PDF）")
@@ -306,10 +374,30 @@ def _load_pdf_pypdf(path: Path) -> BookDocument:
 
 
 def _load_pdf(path: Path) -> BookDocument:
-    doc = _load_pdf_pymupdf(path)
-    if doc is not None:
-        return doc
-    return _load_pdf_pypdf(path)
+    pymupdf_doc: Optional[BookDocument] = None
+    try:
+        pymupdf_doc = _load_pdf_pymupdf(path)
+    except Exception:
+        pymupdf_doc = None
+    try:
+        pypdf_doc = _load_pdf_pypdf(path)
+    except Exception:
+        pypdf_doc = None
+    if pymupdf_doc is None:
+        if pypdf_doc is None:
+            raise RuntimeError("无法读取 PDF（pymupdf 与 pypdf 均失败）")
+        return pypdf_doc
+    if pypdf_doc is None:
+        return pymupdf_doc
+    pymupdf_score = _pdf_document_quality(pymupdf_doc.pages)
+    pypdf_score = _pdf_document_quality(pypdf_doc.pages)
+    if pypdf_score > pymupdf_score:
+        return pypdf_doc
+    if pypdf_score == pymupdf_score and sum(len(p) for p in pypdf_doc.pages) > sum(
+        len(p) for p in pymupdf_doc.pages
+    ):
+        return pypdf_doc
+    return pymupdf_doc
 
 
 def _load_epub(path: Path) -> BookDocument:

@@ -65,7 +65,7 @@ export default function MessageBubble({ message, isMe, currentNickname }: Messag
       <span className="message-time">{formatTime(message.timestamp)}</span>
       <div className="message-content">
         {showSender && <span className={`message-sender ${senderClass}`}>{message.sender}</span>}
-        <span className={`message-text ${textClass}`}>{renderContent()}</span>
+        <div className={`message-text ${textClass}`}>{renderContent()}</div>
         <button className="message-copy" onClick={handleCopy} title="Copy">
           Copy
         </button>

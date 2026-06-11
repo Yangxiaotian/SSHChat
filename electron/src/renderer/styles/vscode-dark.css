@@ -1165,7 +1165,8 @@ html, body, #root {
   flex: 1;
   min-height: 140px;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
+  overflow-anchor: none;
   padding: 10px 0 8px;
   font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
   font-size: 13px;
@@ -1217,10 +1218,12 @@ html, body, #root {
 .message-content {
   flex: 1;
   min-width: 0;
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: baseline;
   gap: 6px;
+  padding-right: 52px;
 }
 
 .message-sender {
@@ -1247,9 +1250,11 @@ html, body, #root {
 }
 
 .message-text {
-  word-break: break-word;
+  display: block;
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: normal;
   user-select: text;
   white-space: pre-wrap;
 }
@@ -1276,6 +1281,9 @@ html, body, #root {
 }
 
 .message-copy {
+  position: absolute;
+  top: 0;
+  right: 0;
   opacity: 0;
   height: 20px;
   padding: 0 6px;
@@ -1695,8 +1703,12 @@ html, body, #root {
   font-size: 12px;
   line-height: 1.55;
   color: var(--vscode-fg);
-  max-height: 240px;
+  max-height: min(240px, 40vh);
+  overflow-x: auto;
   overflow-y: auto;
+  overflow-anchor: none;
+  overflow-wrap: anywhere;
+  word-break: normal;
   white-space: pre-wrap;
   margin-bottom: 8px;
 }

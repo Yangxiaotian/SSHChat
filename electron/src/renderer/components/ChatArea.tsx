@@ -109,6 +109,27 @@ export default function ChatArea() {
   }, [workbenchHeight]);
 
   useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const scrollTop = el.scrollTop;
+        void el.offsetHeight;
+        if (el.scrollTop !== scrollTop) {
+          el.scrollTop = scrollTop;
+        }
+      });
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isResizing) return;
     const onMove = (evt: MouseEvent) => {
       const root = splitRootRef.current;
