@@ -145,9 +145,12 @@ export default function App() {
       if (nextStatus === 'connected') {
         useChatStore.getState().setShowLogin(false);
         useChatStore.getState().setError(null);
+        const { messages, activeRoom } = useChatStore.getState();
+        useChatStore.getState().rebuildLibraryView(messages.get(activeRoom) || []);
         window.api.requestUsers();
       } else if (nextStatus === 'disconnected') {
         useChatStore.getState().setShowLogin(true);
+        useChatStore.getState().resetLibraryView();
       }
     });
 

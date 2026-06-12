@@ -14,6 +14,8 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   type: 'chat' | 'system' | 'pm' | 'game' | 'join' | 'leave';
+  /** Library page body lines are hidden from the chat timeline. */
+  hidden?: boolean;
 }
 
 export interface RoomInfo {

@@ -1703,14 +1703,23 @@ html, body, #root {
   font-size: 12px;
   line-height: 1.55;
   color: var(--vscode-fg);
-  max-height: min(240px, 40vh);
+  max-height: min(320px, 55vh);
   overflow-x: auto;
   overflow-y: auto;
   overflow-anchor: none;
   overflow-wrap: anywhere;
   word-break: normal;
   white-space: pre-wrap;
+  -webkit-overflow-scrolling: touch;
   margin-bottom: 8px;
+}
+
+@media (max-width: 720px) {
+  .library-reader-body {
+    max-height: min(420px, 62vh);
+    font-size: 13px;
+    line-height: 1.6;
+  }
 }
 
 .library-reader-actions {

@@ -1,115 +1,34 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../store/chatStore';
-
-type BookItem = {
-  id: string;
-  index: number;
-  format: string;
-  name: string;
-  size: string;
-  bookmarkPage?: number;
-};
-
-type BookmarkItem = {
-  label: string;
-  page: number;
-};
-
-type ReadingState = {
-  title: string;
-  page: number;
-  total: number;
-  body: string;
-};
-
-function parseLibraryMessages(messages: { type: string; sender: string; content: string }[]) {
-  const systemMsgs = messages.filter((m) => m.type === 'system' && m.sender === '*');
-
-  const books: BookItem[] = [];
-  const bookmarks: BookmarkItem[] = [];
-  let inCatalog = false;
-  let inBookmarks = false;
-  let reading: ReadingState | null = null;
-  let currentReading: ReadingState | null = null;
-  let collectingBody = false;
-
-  for (const msg of systemMsgs) {
-    const content = msg.content.trimEnd();
-
-    if (/^---\s*图书馆\s*---$/.test(content)) {
-      inCatalog = true;
-      inBookmarks = false;
-      collectingBody = false;
-      continue;
-    }
-
-    if (/^---\s*我的书签\s*---$/.test(content)) {
-      inBookmarks = true;
-      inCatalog = false;
-      collectingBody = false;
-      continue;
-    }
-
-    const bookMatch = content.match(
-      /^(\d+)\.\s+\[([A-Z]+)\]\s+(.+?)\s+\(([^)]+)\)(?:\s+·\s+书签第\s+(\d+)\s+页)?$/,
-    );
-    if (inCatalog && bookMatch) {
-      const idx = Number.parseInt(bookMatch[1], 10);
-      const bookmarkPage = bookMatch[5] ? Number.parseInt(bookMatch[5], 10) : undefined;
-      books.push({
-        id: String(idx),
-        index: idx,
-        format: bookMatch[2],
-        name: bookMatch[3],
-        size: bookMatch[4],
-        bookmarkPage,
-      });
-      continue;
-    }
-
-    const bookmarkMatch = content.match(/^(.+?)\s+·\s+第\s+(\d+)\s+页$/);
-    if (inBookmarks && bookmarkMatch) {
-      bookmarks.push({
-        label: bookmarkMatch[1],
-        page: Number.parseInt(bookmarkMatch[2], 10),
-      });
-      continue;
-    }
-
-    const pageMatch = content.match(/^---\s*《(.+?)》\s*第\s*(\d+)\/(\d+)\s*页\s*---$/);
-    if (pageMatch) {
-      if (currentReading) reading = currentReading;
-      currentReading = {
-        title: pageMatch[1],
-        page: Number.parseInt(pageMatch[2], 10),
-        total: Number.parseInt(pageMatch[3], 10),
-        body: '',
-      };
-      collectingBody = true;
-      continue;
-    }
-
-    if (collectingBody && currentReading) {
-      if (content.startsWith('翻页：')) {
-        collectingBody = false;
-        continue;
-      }
-      currentReading.body += `${content}\n`;
-    }
-  }
-
-  if (currentReading) reading = currentReading;
-  return { books, bookmarks, reading };
-}
+import type { LibraryBookItem } from '../lib/libraryMessages';
 
 export default function LibraryPanel() {
-  const { messages, activeRoom } = useChatStore();
+  const { libraryView } = useChatStore();
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const readerBodyRef = useRef<HTMLDivElement>(null);
 
-  const { books, bookmarks, reading } = useMemo(() => {
-    const roomMessages = messages.get(activeRoom) || [];
-    return parseLibraryMessages(roomMessages);
-  }, [messages, activeRoom]);
+  const { books, bookmarks, reading } = libraryView;
+
+  useEffect(() => {
+    const el = readerBodyRef.current;
+    if (!el) return;
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const scrollTop = el.scrollTop;
+        void el.offsetHeight;
+        if (el.scrollTop !== scrollTop) {
+          el.scrollTop = scrollTop;
+        }
+      });
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [reading?.page, reading?.title]);
 
   const handleRefresh = async () => {
     await window.api.sendMessage('/library');
@@ -119,7 +38,7 @@ export default function LibraryPanel() {
     await window.api.sendMessage('/library bookmarks');
   };
 
-  const handleOpen = async (item: BookItem) => {
+  const handleOpen = async (item: LibraryBookItem) => {
     setLoadingId(item.id);
     await window.api.sendMessage(`/library open ${item.index}`);
     setLoadingId(null);
@@ -152,7 +71,9 @@ export default function LibraryPanel() {
               第 {reading.page} / {reading.total} 页
             </div>
           </div>
-          <div className="library-reader-body">{reading.body.trim() || '（空白页）'}</div>
+          <div ref={readerBodyRef} className="library-reader-body">
+            {reading.body.trim() || '（空白页）'}
+          </div>
           <div className="library-reader-actions">
             <button className="mini-btn" onClick={handlePrev} disabled={reading.page <= 1}>Prev</button>
             <button className="mini-btn" onClick={handleNext} disabled={reading.page >= reading.total}>Next</button>

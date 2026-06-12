@@ -84,6 +84,7 @@ export default function ChatArea() {
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
     return roomMessages.filter((msg) => {
+      if (msg.hidden) return false;
       if (msg.type === 'chat' || msg.type === 'pm') return true;
       if (msg.type === 'game') return false;
       if (msg.type === 'system') return !isGameFloodMessage(msg.content);

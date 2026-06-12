@@ -184,11 +184,20 @@ def _pdf_text_quality(text: str) -> tuple[int, int, int]:
 
 
 def _pick_best_pdf_text(candidates: list[str]) -> str:
+    nonempty = [text for text in candidates if (text or "").strip()]
+    if not nonempty:
+        return ""
+    # Drop strict substrings so a shorter partial extraction cannot beat a fuller one.
+    kept: list[str] = []
+    for text in nonempty:
+        if any(text in other and text != other for other in nonempty):
+            continue
+        kept.append(text)
+    if not kept:
+        kept = nonempty
     best = ""
     best_score = (-1, -1, -1)
-    for text in candidates:
-        if not (text or "").strip():
-            continue
+    for text in kept:
         score = _pdf_text_quality(text)
         if score > best_score:
             best = text

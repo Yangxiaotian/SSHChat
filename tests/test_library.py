@@ -165,6 +165,12 @@ class TestLibraryPdfExtract(unittest.TestCase):
         chosen = library._pick_best_pdf_text([short, long])
         self.assertEqual(chosen, long)
 
+    def test_pick_best_pdf_text_drops_strict_substring(self) -> None:
+        partial = "万幸，直播时没出"
+        full = "万幸，直播时没出错。还有一位记者，在香港特首府邸做直播"
+        chosen = library._pick_best_pdf_text([partial, full])
+        self.assertEqual(chosen, full)
+
     def test_load_pdf_preserves_paragraph_boundary_phrase(self) -> None:
         try:
             import fitz

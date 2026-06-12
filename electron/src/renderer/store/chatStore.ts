@@ -11,6 +11,13 @@ import {
   RoomInfo,
 } from '../../shared/protocol';
 import { initLocaleFromStorage, persistLocale, type Locale } from '../i18n';
+import {
+  applyLibrarySystemMessage,
+  emptyLibraryViewState,
+  rebuildLibraryViewFromMessages,
+  type LibraryViewState,
+} from '../lib/libraryMessages';
+import type { ChatMessage } from '../../shared/protocol';
 
 declare global {
   interface Window {
@@ -61,6 +68,7 @@ interface ChatState {
   locale: Locale;
   privacyMode: boolean;
   composerText: string;
+  libraryView: LibraryViewState;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -78,6 +86,8 @@ interface ChatState {
   removeRoom: (room: string) => void;
   setRoomUnread: (room: string, count: number) => void;
   addMessage: (message: ChatMessage) => void;
+  resetLibraryView: () => void;
+  rebuildLibraryView: (messages: ChatMessage[]) => void;
   setUsers: (users: string[]) => void;
   setShowLogin: (show: boolean) => void;
   setSidebarView: (view: 'rooms' | 'users' | 'news' | 'library' | 'monitor') => void;
@@ -113,6 +123,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   locale: initLocaleFromStorage(),
   privacyMode: true,
   composerText: '',
+  libraryView: emptyLibraryViewState(),
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -178,12 +189,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addMessage: (message) => {
-    const { messages, activeRoom, rooms } = get();
+    const { messages, activeRoom, rooms, libraryView } = get();
+    let nextMessage = message;
+    let nextLibraryView = libraryView;
+    if (message.type === 'system' && message.sender === '*') {
+      const effect = applyLibrarySystemMessage(libraryView, message.content);
+      nextLibraryView = effect.state;
+      if (effect.hideFromChat) {
+        nextMessage = { ...message, hidden: true };
+      }
+    }
+
     const roomMessages = messages.get(message.room) || [];
     const MAX_MESSAGES = 1200;
     const trimmed = roomMessages.length >= MAX_MESSAGES ? roomMessages.slice(-MAX_MESSAGES + 1) : roomMessages;
     const newMessages = new Map(messages);
-    newMessages.set(message.room, [...trimmed, message]);
+    newMessages.set(message.room, [...trimmed, nextMessage]);
 
     let newRooms = rooms;
     if (message.room !== activeRoom && message.type !== 'system') {
@@ -192,8 +213,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
     }
 
-    set({ messages: newMessages, rooms: newRooms });
+    set({ messages: newMessages, rooms: newRooms, libraryView: nextLibraryView });
   },
+
+  resetLibraryView: () => set({ libraryView: emptyLibraryViewState() }),
+
+  rebuildLibraryView: (roomMessages) =>
+    set({ libraryView: rebuildLibraryViewFromMessages(roomMessages) }),
 
   setUsers: (users) => set({ users }),
   setShowLogin: (show) => set({ showLogin: show }),
