@@ -75,6 +75,15 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertTrue(lines)
         self.assertEqual(game._turn, 1)
 
+    def test_gomoku_uses_cultivation_levels_without_affecting_other_board_games(self) -> None:
+        gomoku_profile = self.store.profile("gomoku", "Alice")
+        go_profile = self.store.profile("go", "Alice")
+        xiangqi_profile = self.store.profile("xiangqi", "Alice")
+
+        self.assertEqual(gomoku_profile["level"], "?????")
+        self.assertEqual(go_profile["level"], "10?")
+        self.assertEqual(xiangqi_profile["level"], "10?")
+
     def test_xiangqi_ai_practice_game_responds(self) -> None:
         player_conn = object()
         game = XiangqiGame(player_conn, "Alice", rating_store=self.store, ai_level="easy")

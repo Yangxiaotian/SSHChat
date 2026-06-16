@@ -1,6 +1,13 @@
 ﻿import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { useChatStore } from './store/chatStore';
-import { SHAKE_TOKEN } from '../shared/protocol';
+import {
+  ChatHistoryIdentity,
+  ChatHistorySnapshot,
+  ChatMessage,
+  ConnectionConfig,
+  RoomInfo,
+  SHAKE_TOKEN,
+} from '../shared/protocol';
 import { useTranslation } from './i18n';
 import ActivityBar from './components/ActivityBar';
 import Sidebar from './components/Sidebar';
@@ -24,6 +31,31 @@ function playNotificationSound(): void {
   } catch {
     // ignore audio errors
   }
+}
+
+function getHistoryIdentity(config: ConnectionConfig | null): ChatHistoryIdentity | null {
+  if (!config?.host.trim() || !config.user.trim()) return null;
+  return {
+    host: config.host,
+    chatPort: config.chatPort || 12345,
+    user: config.user,
+  };
+}
+
+function getHistoryIdentityKey(identity: ChatHistoryIdentity): string {
+  return `${identity.host.trim().toLowerCase()}:${identity.chatPort || 12345}:${identity.user.trim().toLowerCase()}`;
+}
+
+function getHistorySnapshot(messages: Map<string, ChatMessage[]>, rooms: RoomInfo[]): ChatHistorySnapshot {
+  return {
+    roomNames: rooms.map((room) => room.name),
+    rooms: Object.fromEntries(
+      [...messages.entries()].map(([room, roomMessages]) => [
+        room,
+        roomMessages.filter((message) => message.type !== 'game'),
+      ]),
+    ),
+  };
 }
 
 type BoundaryState = {
@@ -69,9 +101,13 @@ class RendererErrorBoundary extends Component<{ children: ReactNode; t: (key: st
 }
 
 export default function App() {
-  const { status, showLogin, theme, privacyMode, activeRoom } = useChatStore();
+  const { status, showLogin, theme, privacyMode, activeRoom, config, messages, rooms } = useChatStore();
   const { t } = useTranslation();
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const loadedHistoryKey = React.useRef<string | null>(null);
+  const activeHistoryKey = React.useRef<string | null>(null);
+  const activeHistoryIdentity = React.useRef<ChatHistoryIdentity | null>(null);
+  const historyLoadSequence = React.useRef(0);
 
   useEffect(() => {
     window.api.loadConfig().then((config) => {
@@ -165,6 +201,71 @@ export default function App() {
       unsubError();
       unsubUsers();
     };
+  }, []);
+
+  useEffect(() => {
+    const identity = getHistoryIdentity(config);
+    if (!identity) return;
+    const key = getHistoryIdentityKey(identity);
+    const sequence = ++historyLoadSequence.current;
+
+    if (activeHistoryKey.current !== key) {
+      if (
+        activeHistoryIdentity.current
+        && loadedHistoryKey.current === activeHistoryKey.current
+      ) {
+        window.api.flushChatHistory(
+          activeHistoryIdentity.current,
+          getHistorySnapshot(useChatStore.getState().messages, useChatStore.getState().rooms),
+        );
+      }
+      activeHistoryKey.current = key;
+      activeHistoryIdentity.current = identity;
+      loadedHistoryKey.current = null;
+      useChatStore.getState().resetWorkspace();
+    }
+
+    window.api.loadChatHistory(identity)
+      .then((snapshot) => {
+        if (sequence !== historyLoadSequence.current || activeHistoryKey.current !== key) return;
+        useChatStore.getState().hydrateMessages(snapshot.rooms, snapshot.roomNames);
+        loadedHistoryKey.current = key;
+      })
+      .catch((error) => {
+        console.error('[ChatHistory] Failed to load:', error);
+        if (sequence === historyLoadSequence.current && activeHistoryKey.current === key) {
+          loadedHistoryKey.current = key;
+        }
+      });
+  }, [config]);
+
+  useEffect(() => {
+    const identity = getHistoryIdentity(config);
+    if (!identity) return;
+    const key = getHistoryIdentityKey(identity);
+    if (loadedHistoryKey.current !== key) return;
+
+    const timer = window.setTimeout(() => {
+      window.api.saveChatHistory(
+        identity,
+        getHistorySnapshot(useChatStore.getState().messages, useChatStore.getState().rooms),
+      )
+        .catch((error) => console.error('[ChatHistory] Failed to save:', error));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [config, messages, rooms]);
+
+  useEffect(() => {
+    const flushBeforeClose = () => {
+      const identity = activeHistoryIdentity.current;
+      if (!identity || loadedHistoryKey.current !== activeHistoryKey.current) return;
+      window.api.flushChatHistory(
+        identity,
+        getHistorySnapshot(useChatStore.getState().messages, useChatStore.getState().rooms),
+      );
+    };
+    window.addEventListener('beforeunload', flushBeforeClose);
+    return () => window.removeEventListener('beforeunload', flushBeforeClose);
   }, []);
 
   useEffect(() => {

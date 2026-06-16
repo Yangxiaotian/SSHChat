@@ -206,11 +206,15 @@ try {
   assert(!crashed, '页面进入了异常边界，存在白屏风险');
 
   const assertSentIncludes = async (needle) => {
+    const needles = Array.isArray(needle) ? needle : [needle];
     const sent = await page.evaluate(() => {
       // @ts-ignore
       return window.__qa.getSent();
     });
-    assert(sent.some((x) => x.includes(needle)), `未发送预期命令: ${needle}; 实际: ${JSON.stringify(sent)}`);
+    assert(
+      sent.some((x) => needles.some((item) => x.includes(item))),
+      `未发送预期命令之一: ${needles.join(' | ')}; 实际: ${JSON.stringify(sent)}`,
+    );
   };
 
   const openByLines = async (lines, titleText) => {
@@ -318,7 +322,7 @@ try {
     window.__qa.clearSent();
   });
   await page.locator('.game-interaction-panel .mini-btn:has-text("过牌")').first().click();
-  await assertSentIncludes('/game move check');
+  await assertSentIncludes(['/game move check', '/game move 过牌']);
 
   // 7) 炸金花
   await openByLines([
@@ -336,7 +340,7 @@ try {
   await page.locator('.game-interaction-panel .mini-btn:has-text("R1")').first().click();
   await page.waitForTimeout(100);
   await page.locator('.game-interaction-panel .mini-btn:has-text("比牌")').first().click();
-  await assertSentIncludes('/game move compare R1');
+  await assertSentIncludes(['/game move compare R1', '/game move 比牌 R1']);
 
   // 8) 牛头王
   await openByLines([

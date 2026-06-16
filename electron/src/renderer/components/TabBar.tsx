@@ -4,9 +4,16 @@ import { useChatStore } from '../store/chatStore';
 export default function TabBar() {
   const { rooms, activeRoom, setActiveRoom, removeRoom } = useChatStore();
 
-  const handleTabClick = (roomName: string) => {
+  const handleTabClick = async (roomName: string) => {
+    if (roomName === activeRoom) return;
+    const previousRoom = activeRoom;
     setActiveRoom(roomName);
-    window.api.switchRoom(roomName);
+    const ok = await window.api.switchRoom(roomName);
+    if (!ok) {
+      setActiveRoom(previousRoom);
+    } else {
+      window.api.requestUsers();
+    }
   };
 
   const handleClose = (e: React.MouseEvent, roomName: string) => {

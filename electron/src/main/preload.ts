@@ -9,6 +9,8 @@ import {
   GomokuRapfiAnalyzeResponse,
   GoKataGoAnalyzeRequest,
   GoKataGoAnalyzeResponse,
+  ChatHistoryIdentity,
+  ChatHistorySnapshot,
 } from '../shared/protocol';
 
 const api = {
@@ -18,6 +20,15 @@ const api = {
   },
   saveConfig: (config: ConnectionConfig): Promise<boolean> => {
     return ipcRenderer.invoke(IPC_CHANNELS.SAVE_CONFIG, config);
+  },
+  loadChatHistory: (identity: ChatHistoryIdentity): Promise<ChatHistorySnapshot> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.LOAD_CHAT_HISTORY, identity);
+  },
+  saveChatHistory: (identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.SAVE_CHAT_HISTORY, identity, snapshot);
+  },
+  flushChatHistory: (identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot): boolean => {
+    return ipcRenderer.sendSync(IPC_CHANNELS.FLUSH_CHAT_HISTORY, identity, snapshot);
   },
 
   // Connection

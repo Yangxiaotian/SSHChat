@@ -378,3 +378,27 @@
   - electron: npx tsc -p tsconfig.node.json --noEmit 通过
   - python -m unittest discover -s tests -p test_go_game.py -v 通过（8 passed）
   - node electron/scripts/qa-game-panels-playwright.mjs 通过
+
+2026-06-06（KataGo 前端保护超时与队列阻塞修复）
+- 用户反馈：围棋助手经常显示“已回退内置：KataGo 响应超时（前端保护）”。
+- 日志结论：
+  1) 当前 Intel UHD Graphics 770 + 864MB B40 模型冷启动约 30 秒（13:30:05 启动，13:30:35 ready）。
+  2) 前端热请求保护约 35 秒；该计时包含主进程队列等待，而主进程超时只从真正开始运行后计时，因此旧分析占用队列时前端会先超时。
+  3) 旧实现只要一次主进程超时就杀掉 KataGo，导致热引擎丢失、下一次重新冷启动，形成超时循环。
+- 已修复：
+  1) KataGo 主进程改为 latest-position-wins：新请求使用官方 analysis `terminate` 动作终止正在分析的旧 id。
+  2) 未开始的旧队列任务按 reqId 直接 skip，不再消耗 8~12 秒搜索时间。
+  3) 前端新增 katagoPendingKeyRef：相同局面不重复请求，不同局面可立即替换旧请求，不再被 katagoPending 全局挡住。
+  4) 首次超时只 terminate 当前请求并保留热引擎；连续两次超时才重启进程，避免冷启动连锁。
+  5) 新增用户数据日志 `logs/katago-service.log`，记录 enqueue/start/terminate/skip/complete，以及 queueMs/runMs/totalMs。
+  6) QA 脚本兼容中英文德州/炸金花命令断言。
+- 验证：
+  - npx tsc -p tsconfig.node.json --noEmit 通过
+  - npx vite build 通过
+  - python -m unittest discover -s tests -p test_go_game.py -v 通过（8 passed）
+  - qa-game-panels-playwright 输出 QA PASS；脚本结束清理阶段未退出导致外层超时，但全部场景断言已完成并通过。
+- 已知无关问题：完整 renderer tsc 被 develop 现有 i18n 类型定义错误阻塞（messages/en.ts 英文值被推断为中文字面量类型），不是本次 KataGo 改动引入。
+
+2026-06-12 09:20:37 Rapfi Gomoku fix: diagnosed weak defense as formal move path using incremental TURN state; direct full-board Rapfi blocks simple opponent four. Disabled incremental TURN for formal move service and changed ponder cache to provisional-only so high-time full-board analysis still runs.
+
+2026-06-12 09:44:24 Rapfi hybrid restore: re-enabled formal incremental TURN with safeguards. Default RAPFI_RULE changed 0->4 to match server renju-style gomoku. Formal move now forces full BOARD on tactical emergencies (any side has one-move win) and every 8 stones since last full sync, preserving speed while preventing drift. Verified npm run build and direct rule=4 Rapfi blocks opponent four.

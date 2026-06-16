@@ -432,7 +432,7 @@ function winnerOnBoard(board: number[][]): 1 | -1 | null {
             rr += dr;
             cc += dc;
           }
-          if (side === 1 ? len === 5 : len >= 5) return side;
+          if (len >= 5) return side;
         }
       }
     }
@@ -534,7 +534,7 @@ function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | 
     row: best.move.r + 1,
     col: best.move.c + 1,
     score: Number.MAX_SAFE_INTEGER - 1,
-    reason: `${label.reason}（安全兜底已覆盖引擎原始建议）`,
+    reason: `${label.reason}（Rapfi未返回时由内置兜底提供）`,
     style: label.style,
   };
 }
@@ -1864,7 +1864,7 @@ function rememberLimited<K, V>(cache: Map<K, V>, key: K, value: V, limit: number
 }
 
 export default function GomokuPanel({ disabled, nickname, boardText, onPick }: Props) {
-  const [strategy, setStrategy] = useState<StrategyId>('auto');
+  const [strategy, setStrategy] = useState<StrategyId>('rapfi_external');
   const [variationSeed, setVariationSeed] = useState<number>(() => Math.floor(Math.random() * 1_000_000));
   const [rapfiSuggestion, setRapfiSuggestion] = useState<{ row: number; col: number; ms: number; error?: string } | null>(null);
   const [rapfiPending, setRapfiPending] = useState<boolean>(false);
@@ -2021,18 +2021,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       return;
     }
 
-    const cachedPonder = rapfiPonderCacheRef.current.get(reqKey);
-    if (
-      cachedPonder &&
-      analysisMatrix[cachedPonder.row - 1]?.[cachedPonder.col - 1] === 0 &&
-      rapfiOkKeyRef.current !== reqKey &&
-      rapfiInFlightKeyRef.current !== reqKey
-    ) {
-      setRapfiSuggestion(cachedPonder);
-      rapfiOkKeyRef.current = reqKey;
-      rapfiFailCooldownRef.current = { key: '', until: 0 };
-      return;
-    }
+    // 后台预判只做缓存命中提示，不直接展示为正式建议；正式落点必须来自 move 服务。
     // 防止请求排队堆积：同一时刻仅允许一个Rapfi请求在飞行。
     // 期间若局面变化，先记录wanted key，等当前请求完成后再自动分析最新局面。
     if (rapfiPending) {
@@ -2055,6 +2044,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
 
     const seq = rapfiReqSeqRef.current + 1;
     rapfiReqSeqRef.current = seq;
+    setRapfiSuggestion(null);
     setRapfiPending(true);
 
     const guardTimeout = new Promise<never>((_, reject) => {
@@ -2222,6 +2212,19 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       mySideNum && analysisMatrix.length === BOARD_SIZE
         ? findUrgentDefenseMove(analysisMatrix, mySideNum)
         : null;
+    const directWins =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? immediateWinningPoints(analysisMatrix, mySideNum)
+        : [];
+    if (directWins.length > 0) {
+      return directWins.slice(0, 3).map((move, idx) => ({
+        row: move.r + 1,
+        col: move.c + 1,
+        score: Number.MAX_SAFE_INTEGER - idx,
+        reason: '我方下一手可直接连五，优先落下赢棋点，不再考虑对手威胁。',
+        style: '一步必胜',
+      }));
+    }
     if (
       strategy === 'rapfi_external' &&
       rapfiSuggestion &&
@@ -2231,25 +2234,21 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       rapfiSuggestion.col >= 1 &&
       rapfiSuggestion.col <= BOARD_SIZE
     ) {
-      const rapfiCoversDefense =
-        !!forcedDefense &&
-        forcedDefense.row === rapfiSuggestion.row &&
-        forcedDefense.col === rapfiSuggestion.col;
-      if (forcedDefense && !rapfiCoversDefense) {
-        return [forcedDefense];
-      }
-      const threat = detectOpponentThreat(analysisMatrix, rapfiSuggestion.row, rapfiSuggestion.col, mySideNum || 1);
-      const reason = threat === 'defend'
-        ? `⚠ 紧急防守！对手有活三/冲四威胁（耗时${rapfiSuggestion.ms}ms）`
-        : forcedDefense
-          ? `${forcedDefense.reason}（Rapfi耗时${rapfiSuggestion.ms}ms）`
-        : `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`;
       return [{
         row: rapfiSuggestion.row,
         col: rapfiSuggestion.col,
         score: Number.MAX_SAFE_INTEGER,
-        reason,
-        style: threat === 'defend' || forcedDefense ? '紧急防守' : 'Rapfi职业引擎',
+        reason: `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`,
+        style: 'Rapfi职业引擎',
+      }];
+    }
+    if (strategy === 'rapfi_external' && !rapfiSuggestion?.error) {
+      return [{
+        row: 0,
+        col: 0,
+        score: 0,
+        reason: 'Rapfi 正在分析，本模式不使用内置兜底建议；请等待职业引擎返回。',
+        style: 'Rapfi分析中',
       }];
     }
     return forcedDefense ? [forcedDefense] : base;
@@ -2336,7 +2335,9 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                   {boardWinner !== null
                     ? `终局：${boardWinner === 1 ? '黑方' : '白方'}已连五`
                     : analysisPending || rapfiPending
-                    ? '分析中...'
+                    ? '正式分析中...（等待 Rapfi move 结果）'
+                    : rapfiSuggestion && !rapfiSuggestion.error && rapfiPonderPending
+                      ? `已接入（${rapfiSuggestion.ms}ms），后台预判下一手...`
                     : rapfiPonderPending
                       ? '后台预判中...'
                     : rapfiSuggestion?.error
@@ -2344,6 +2345,17 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                       : rapfiSuggestion
                         ? `已接入（${rapfiSuggestion.ms}ms）`
                         : '等待分析'}
+                </div>
+              )}
+              {strategy === 'rapfi_external' && rapfiSuggestion && !rapfiSuggestion.error && (
+                <div className="game-advisor-detail" style={{ marginTop: 4 }}>
+                  Rapfi原始落子：第 {rapfiSuggestion.row} 行，第 {rapfiSuggestion.col} 列（耗时{rapfiSuggestion.ms}ms）
+                  {shownSuggestions[0] &&
+                  shownSuggestions[0].row >= 1 &&
+                  shownSuggestions[0].col >= 1 &&
+                  (shownSuggestions[0].row !== rapfiSuggestion.row || shownSuggestions[0].col !== rapfiSuggestion.col)
+                    ? `；当前展示为更高优先级点：第 ${shownSuggestions[0].row} 行，第 ${shownSuggestions[0].col} 列`
+                    : '；当前展示采用 Rapfi 建议'}
                 </div>
               )}
               <div className="game-chip-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>

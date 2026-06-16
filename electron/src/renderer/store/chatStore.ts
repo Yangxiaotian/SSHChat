@@ -1,6 +1,8 @@
 ﻿import { create } from 'zustand';
 import {
   ChatMessage,
+  ChatHistoryIdentity,
+  ChatHistorySnapshot,
   ConnectionConfig,
   ConnectionStatus,
   GomokuRapfiAnalyzeRequest,
@@ -17,13 +19,15 @@ import {
   rebuildLibraryViewFromMessages,
   type LibraryViewState,
 } from '../lib/libraryMessages';
-import type { ChatMessage } from '../../shared/protocol';
 
 declare global {
   interface Window {
     api: {
       loadConfig: () => Promise<ConnectionConfig | null>;
       saveConfig: (config: ConnectionConfig) => Promise<boolean>;
+      loadChatHistory: (identity: ChatHistoryIdentity) => Promise<ChatHistorySnapshot>;
+      saveChatHistory: (identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot) => Promise<boolean>;
+      flushChatHistory: (identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot) => boolean;
       connect: (config: ConnectionConfig, nickname: string) => Promise<{ success: boolean; error?: string }>;
       disconnect: () => Promise<boolean>;
       isConnected: () => Promise<boolean>;
@@ -88,6 +92,9 @@ interface ChatState {
   addMessage: (message: ChatMessage) => void;
   resetLibraryView: () => void;
   rebuildLibraryView: (messages: ChatMessage[]) => void;
+  hydrateMessages: (rooms: Record<string, ChatMessage[]>, roomNames?: string[]) => void;
+  resetMessages: () => void;
+  resetWorkspace: () => void;
   setUsers: (users: string[]) => void;
   setShowLogin: (show: boolean) => void;
   setSidebarView: (view: 'rooms' | 'users' | 'news' | 'library' | 'monitor') => void;
@@ -156,9 +163,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   setActiveRoom: (room) => {
     const { rooms } = get();
+    const hasRoom = rooms.some((r) => r.name === room);
+    const nextRooms = hasRoom
+      ? rooms
+      : [...rooms, { name: room, isDefault: room === 'default', unreadCount: 0, lastActivity: Date.now() }];
     set({
       activeRoom: room,
-      rooms: rooms.map((r) => (r.name === room ? { ...r, unreadCount: 0 } : r)),
+      rooms: nextRooms.map((r) => (r.name === room ? { ...r, unreadCount: 0, lastActivity: Date.now() } : r)),
     });
   },
 
@@ -206,10 +217,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const newMessages = new Map(messages);
     newMessages.set(message.room, [...trimmed, nextMessage]);
 
-    let newRooms = rooms;
+    let newRooms = rooms.some((r) => r.name === message.room)
+      ? rooms
+      : [...rooms, { name: message.room, isDefault: message.room === 'default', unreadCount: 0, lastActivity: Date.now() }];
     if (message.room !== activeRoom && message.type !== 'system') {
-      newRooms = rooms.map((r) =>
+      newRooms = newRooms.map((r) =>
         r.name === message.room ? { ...r, unreadCount: r.unreadCount + 1, lastActivity: Date.now() } : r,
+      );
+    } else {
+      newRooms = newRooms.map((r) =>
+        r.name === message.room ? { ...r, lastActivity: Date.now() } : r,
       );
     }
 
@@ -220,6 +237,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   rebuildLibraryView: (roomMessages) =>
     set({ libraryView: rebuildLibraryViewFromMessages(roomMessages) }),
+
+  hydrateMessages: (historyRooms, roomNames) => {
+    const { messages, rooms } = get();
+    const mergedMessages = new Map<string, ChatMessage[]>();
+    const allRoomNames = new Set([...Object.keys(historyRooms), ...messages.keys()]);
+    for (const room of allRoomNames) {
+      const history = Array.isArray(historyRooms[room]) ? historyRooms[room] : [];
+      const current = messages.get(room) || [];
+      const byId = new Map<string, ChatMessage>();
+      for (const message of [...history, ...current]) {
+        byId.set(message.id, message);
+      }
+      mergedMessages.set(
+        room,
+        [...byId.values()]
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(-1200),
+      );
+    }
+
+    const savedRoomNames = Array.isArray(roomNames) ? roomNames : [];
+    const knownRooms = new Set(rooms.map((room) => room.name));
+    const nextRooms = [...rooms];
+    for (const room of new Set(['default', ...savedRoomNames, ...Object.keys(historyRooms)])) {
+      if (knownRooms.has(room)) continue;
+      const roomHistory = historyRooms[room] || [];
+      nextRooms.push({
+        name: room,
+        isDefault: room === 'default',
+        unreadCount: 0,
+        lastActivity: roomHistory.length > 0
+          ? roomHistory[roomHistory.length - 1].timestamp
+          : Date.now(),
+      });
+    }
+    set({ messages: mergedMessages, rooms: nextRooms });
+  },
+
+  resetMessages: () => set({ messages: new Map() }),
+  resetWorkspace: () => set({
+    messages: new Map(),
+    rooms: [{ name: 'default', isDefault: true, unreadCount: 0, lastActivity: Date.now() }],
+    activeRoom: 'default',
+    users: [],
+  }),
 
   setUsers: (users) => set({ users }),
   setShowLogin: (show) => set({ showLogin: show }),

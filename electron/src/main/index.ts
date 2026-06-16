@@ -5,6 +5,7 @@ import * as os from 'os';
 import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
+import { ChatHistoryManager } from './chat-history-manager';
 import { parseServerLine, extractRoomsFromSystem, extractActiveRoom, extractUsersSnapshot, buildSendMessage } from './chat-protocol';
 import {
   ConnectionConfig,
@@ -15,6 +16,8 @@ import {
   GoKataGoAnalyzeRequest,
   GoKataGoAnalyzeResponse,
   GoKataGoSuggestion,
+  ChatHistoryIdentity,
+  ChatHistorySnapshot,
 } from '../shared/protocol';
 
 // ============================================================
@@ -47,14 +50,39 @@ if (process.platform === 'win32') {
 let mainWindow: BrowserWindow | null = null;
 const sshManager = new SSHManager();
 const configManager = new ConfigManager();
+const chatHistoryManager = new ChatHistoryManager();
 let currentRoom = 'default';
 let currentNickname = '';
+let knownRooms = new Set<string>(['default']);
 let lastConfig: ConnectionConfig | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY_MS = 3000;
 const singleInstanceLock = app.requestSingleInstanceLock();
+
+function normalizeRoomName(room: string): string | null {
+  const normalized = room.trim().replace(/^#/, '');
+  return /^[a-zA-Z0-9_-]{1,32}$/.test(normalized) ? normalized : null;
+}
+
+function rememberRooms(rooms: string[]): string[] {
+  for (const rawRoom of rooms) {
+    const room = normalizeRoomName(rawRoom);
+    if (room) {
+      knownRooms.add(room);
+    }
+  }
+  knownRooms.add('default');
+  return [...knownRooms];
+}
+
+function pushRoomState(activeRoom = currentRoom): void {
+  const normalized = normalizeRoomName(activeRoom) || 'default';
+  currentRoom = normalized;
+  rememberRooms([normalized]);
+  sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, [...knownRooms], currentRoom);
+}
 
 function intEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = Number.parseInt(process.env[name] || '', 10);
@@ -79,7 +107,8 @@ const RAPFI_PONDER_HASH_MB = intEnv(
   RAPFI_HASH_MB,
 );
 const RAPFI_THREADS = intEnv('RAPFI_THREADS', 0, 0, 128);
-const RAPFI_MIN_DEPTH = intEnv('RAPFI_MIN_DEPTH', 40, 8, 99);
+const RAPFI_MAX_DEPTH = intEnv('RAPFI_MAX_DEPTH', 99, 8, 200);
+const RAPFI_RULE = intEnv('RAPFI_RULE', 4, 0, 6);
 let resolvedRapfiExecutableCache: string | null | undefined;
 const KATAGO_DEFAULT_TIMEOUT_MS = intEnv('KATAGO_TIMEOUT_MS', 60000, 1500, 180000);
 const KATAGO_DEFAULT_MAX_VISITS = intEnv('KATAGO_MAX_VISITS', 96, 8, 2000);
@@ -310,7 +339,7 @@ function hasFiveOnBoard(board: number[][], side: 1 | -1): boolean {
           rr += dr;
           cc += dc;
         }
-        if (side === 1 ? len === 5 : len >= 5) return true;
+        if (len >= 5) return true;
       }
     }
   }
@@ -323,11 +352,69 @@ function gomokuWinnerOnBoard(board: number[][]): 1 | -1 | null {
   return null;
 }
 
+function immediateWinningPoints(board: number[][], side: 1 | -1): Array<{ r: number; c: number }> {
+  const points: Array<{ r: number; c: number }> = [];
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] !== 0) continue;
+      board[r][c] = side;
+      if (hasFiveOnBoard(board, side)) {
+        points.push({ r, c });
+      }
+      board[r][c] = 0;
+    }
+  }
+  return points;
+}
+
+function hasStrongLineThreat(board: number[][], side: 1 | -1): boolean {
+  const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]] as const;
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] !== side) continue;
+      for (const [dr, dc] of dirs) {
+        const prevR = r - dr;
+        const prevC = c - dc;
+        if (prevR >= 0 && prevR < 15 && prevC >= 0 && prevC < 15 && board[prevR][prevC] === side) {
+          continue;
+        }
+        let len = 0;
+        let rr = r;
+        let cc = c;
+        while (rr >= 0 && rr < 15 && cc >= 0 && cc < 15 && board[rr][cc] === side) {
+          len += 1;
+          rr += dr;
+          cc += dc;
+        }
+        const leftR = r - dr;
+        const leftC = c - dc;
+        const rightR = rr;
+        const rightC = cc;
+        const openEnds =
+          (leftR >= 0 && leftR < 15 && leftC >= 0 && leftC < 15 && board[leftR][leftC] === 0 ? 1 : 0) +
+          (rightR >= 0 && rightR < 15 && rightC >= 0 && rightC < 15 && board[rightR][rightC] === 0 ? 1 : 0);
+        if (len >= 4 && openEnds >= 1) return true;
+        if (len === 3 && openEnds === 2) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function tacticalEmergencyReason(board: number[][], mySide: 1 | -1): string | null {
+  const opp = mySide === 1 ? -1 : 1;
+  if (immediateWinningPoints(board, mySide).length > 0) return 'my-one-move-win';
+  if (immediateWinningPoints(board, opp).length > 0) return 'opp-one-move-win';
+  if (hasStrongLineThreat(board, mySide)) return 'my-strong-line-threat';
+  if (hasStrongLineThreat(board, opp)) return 'opp-strong-line-threat';
+  return null;
+}
+
 function buildRapfiInitLines(timeoutMs: number): string[] {
   const lines: string[] = [];
   lines.push(`INFO timeout_turn ${timeoutMs}`);
-  lines.push(`INFO depth ${RAPFI_MIN_DEPTH}`);
-  lines.push('INFO rule 4');
+  lines.push(`INFO max_depth ${RAPFI_MAX_DEPTH}`);
+  lines.push(`INFO rule ${RAPFI_RULE}`);
   return lines;
 }
 
@@ -342,9 +429,9 @@ function buildRapfiBoardCommands(
   const lines: string[] = [];
   if (!inited) {
     lines.push('START 15');
-    lines.push(`INFO hash ${hashMb}`);
+    lines.push(`INFO hash_size ${hashMb * 1024}`);
     if (RAPFI_THREADS > 0) {
-      lines.push(`INFO threads ${RAPFI_THREADS}`);
+      lines.push(`INFO thread_num ${RAPFI_THREADS}`);
     }
   } else if (forceRestart) {
     lines.push('RESTART');
@@ -389,6 +476,7 @@ class RapfiEngineService {
   private inited = false;
   private lastEngineBoard: number[][] | null = null;
   private lastMySide: 1 | -1 | null = null;
+  private lastFullBoardStones = -1;
   private pending: RapfiPendingRequest | null = null;
   private queue: Promise<void> = Promise.resolve();
   private seq = 0;
@@ -493,6 +581,7 @@ class RapfiEngineService {
     this.inited = false;
     this.lastEngineBoard = null;
     this.lastMySide = null;
+    this.lastFullBoardStones = -1;
   }
 
   disposeAll(): void {
@@ -609,9 +698,13 @@ class RapfiEngineService {
     let cmdReason = 'startup';
     let cmds: string[] = [];
 
+    const tacticalReason = tacticalEmergencyReason(payload.board, payload.mySide);
+    const needsPeriodicResync = this.lastFullBoardStones < 0 || stones - this.lastFullBoardStones >= 8;
     const canTryIncremental =
       this.allowIncremental &&
       requestMode !== 'ponder' &&
+      !tacticalReason &&
+      !needsPeriodicResync &&
       this.inited &&
       this.lastEngineBoard !== null &&
       this.lastMySide === payload.mySide &&
@@ -639,6 +732,8 @@ class RapfiEngineService {
       cmds = buildRapfiBoardCommands(payload.board, payload.mySide, timeoutMs, this.inited, this.hashMb, forceRestart);
       cmdMode = 'full-board';
       if (!this.inited) cmdReason = 'cold-start';
+      else if (tacticalReason) cmdReason = `tactical-full-board:${tacticalReason}`;
+      else if (needsPeriodicResync) cmdReason = 'periodic-resync';
       else if (requestMode === 'ponder') cmdReason = 'ponder-isolated-board';
       else if (this.lastEngineBoard === null) cmdReason = 'no-engine-board';
       else if (this.lastMySide !== payload.mySide) cmdReason = 'side-switched';
@@ -697,6 +792,9 @@ class RapfiEngineService {
         this.trace(
           `req#${reqId} write-ok timeoutMs=${timeoutMs} startupExtra=${startupExtra} mode=${cmdMode} reason=${cmdReason}`,
         );
+        if (cmdMode === 'full-board') {
+          this.lastFullBoardStones = stones;
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'stdin write failed';
         this.trace(`req#${reqId} write-fail err=${JSON.stringify(msg)}`);
@@ -919,7 +1017,9 @@ function sanitizeKataGoMaxTime(maxTimeSec?: number): number | undefined {
 
 type KataGoPendingRequest = {
   id: string;
+  reqId: number;
   resolve: (resp: GoKataGoAnalyzeResponse) => void;
+  queuedAt: number;
   startedAt: number;
   timeoutMs: number;
   enginePath: string;
@@ -936,7 +1036,40 @@ class KataGoAnalysisService {
   private pending: KataGoPendingRequest | null = null;
   private queue: Promise<void> = Promise.resolve();
   private seq = 0;
+  private latestReqId = 0;
   private warmed = false;
+  private timeoutStreak = 0;
+
+  private trace(message: string): void {
+    try {
+      const dir = path.join(app.getPath('userData'), 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(
+        path.join(dir, 'katago-service.log'),
+        `${new Date().toISOString()} ${message}\n`,
+        'utf8',
+      );
+    } catch {
+      // Diagnostics must never break gameplay.
+    }
+  }
+
+  private terminatePending(reason: string): void {
+    if (!this.pending || !this.proc || this.proc.killed) return;
+    const target = this.pending;
+    const id = `terminate-${Date.now()}-${target.reqId}`;
+    try {
+      this.proc.stdin.write(JSON.stringify({
+        id,
+        action: 'terminate',
+        terminateId: target.id,
+      }) + '\n');
+      this.trace(`req#${target.reqId} terminate reason=${reason}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'stdin write failed';
+      this.trace(`req#${target.reqId} terminate-failed err=${JSON.stringify(msg)}`);
+    }
+  }
 
   private disposeProcess(): void {
     if (this.proc && !this.proc.killed) {
@@ -951,6 +1084,7 @@ class KataGoAnalysisService {
     this.stdoutBuf = '';
     this.stderrTail = [];
     this.warmed = false;
+    this.timeoutStreak = 0;
   }
 
   disposeAll(): void {
@@ -980,6 +1114,12 @@ class KataGoAnalysisService {
     const p = this.pending;
     this.pending = null;
     clearTimeout(p.timer);
+    this.trace(
+      `req#${p.reqId} complete ok=${resp.ok ? 1 : 0} queueMs=${p.startedAt - p.queuedAt} ` +
+      `runMs=${Date.now() - p.startedAt} totalMs=${Date.now() - p.queuedAt} ` +
+      `err=${resp.error ? JSON.stringify(resp.error) : '""'}`,
+    );
+    if (resp.ok) this.timeoutStreak = 0;
     p.resolve(resp);
   }
 
@@ -998,6 +1138,17 @@ class KataGoAnalysisService {
       };
     }
     if (obj.isDuringSearch) return null;
+    if (obj.noResults === true) {
+      return {
+        ok: false,
+        suggestions: [],
+        ms: Date.now() - pending.startedAt,
+        enginePath: pending.enginePath,
+        modelPath: pending.modelPath,
+        configPath: pending.configPath,
+        error: '旧局面分析已终止。',
+      };
+    }
     if (!Array.isArray(obj.moveInfos)) {
       return {
         ok: false,
@@ -1103,8 +1254,16 @@ class KataGoAnalysisService {
     return { ok: true };
   }
 
-  private async runAnalyze(payload: GoKataGoAnalyzeRequest, reqId: number): Promise<GoKataGoAnalyzeResponse> {
+  private async runAnalyze(
+    payload: GoKataGoAnalyzeRequest,
+    reqId: number,
+    queuedAt: number,
+  ): Promise<GoKataGoAnalyzeResponse> {
     const startedAt = Date.now();
+    if (reqId !== this.latestReqId) {
+      this.trace(`req#${reqId} skip-stale queueMs=${startedAt - queuedAt}`);
+      return { ok: false, ms: startedAt - queuedAt, error: '旧局面请求已跳过。' };
+    }
     const paths = resolveKataGoPaths();
     if (!paths.ok) return { ok: false, ms: Date.now() - startedAt, error: paths.error };
     if (!validateGoBoard19(payload.board)) {
@@ -1138,6 +1297,11 @@ class KataGoAnalysisService {
     const turn = payload.mySide === 1 ? 'B' : 'W';
     const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
     const historyMoves = sanitizeKataGoMoves(payload.moves);
+    this.trace(
+      `req#${reqId} start queueMs=${startedAt - queuedAt} stones=${initialStones.length} ` +
+      `moves=${historyMoves.length} visits=${sanitizeKataGoVisits(payload.maxVisits)} ` +
+      `maxTime=${maxTime ?? -1} timeoutMs=${timeoutMs}`,
+    );
     const overrideSettings: Record<string, number> = {};
     if (maxTime) overrideSettings.maxTime = maxTime;
     const query = {
@@ -1157,7 +1321,9 @@ class KataGoAnalysisService {
     return new Promise<GoKataGoAnalyzeResponse>((resolve) => {
       const pending: KataGoPendingRequest = {
         id,
+        reqId,
         resolve,
+        queuedAt,
         startedAt,
         timeoutMs,
         enginePath: paths.exe,
@@ -1166,6 +1332,8 @@ class KataGoAnalysisService {
         timer: setTimeout(() => {
           if (!this.pending) return;
           const tail = this.stderrTail.slice(-5).join(' | ');
+          this.timeoutStreak += 1;
+          this.terminatePending('analysis-timeout');
           this.completePending({
             ok: false,
             ms: Date.now() - startedAt,
@@ -1174,7 +1342,10 @@ class KataGoAnalysisService {
             configPath: paths.config,
             error: tail ? `KataGo 分析超时：${tail}` : `KataGo 分析超时（${timeoutMs}ms）`,
           });
-          this.disposeProcess();
+          if (this.timeoutStreak >= 2) {
+            this.trace(`process-restart timeoutStreak=${this.timeoutStreak}`);
+            this.disposeProcess();
+          }
         }, timeoutMs + 1000),
       };
       this.pending = pending;
@@ -1197,7 +1368,11 @@ class KataGoAnalysisService {
 
   analyze(payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> {
     const reqId = ++this.seq;
-    const task = this.queue.then(() => this.runAnalyze(payload, reqId));
+    const queuedAt = Date.now();
+    this.latestReqId = reqId;
+    this.trace(`req#${reqId} enqueue`);
+    this.terminatePending('newer-position');
+    const task = this.queue.then(() => this.runAnalyze(payload, reqId, queuedAt));
     this.queue = task.then(() => undefined, () => undefined);
     return task;
   }
@@ -1212,6 +1387,16 @@ class KataGoAnalysisService {
         enginePath: paths.exe,
         modelPath: paths.model,
         configPath: paths.config,
+      });
+    }
+    if (this.pending) {
+      return Promise.resolve({
+        ok: true,
+        ms: 0,
+        suggestions: [],
+        enginePath: paths.ok ? paths.exe : undefined,
+        modelPath: paths.ok ? paths.model : undefined,
+        configPath: paths.ok ? paths.config : undefined,
       });
     }
     const board = Array.from({ length: 19 }, () => Array.from({ length: 19 }, () => 0));
@@ -1265,7 +1450,7 @@ function attemptReconnect(): void {
             if (message.type === 'system') {
               const rooms = extractRoomsFromSystem(message.content);
               if (rooms) {
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rooms, currentRoom);
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rememberRooms(rooms), currentRoom);
               }
               const usersSnapshot = extractUsersSnapshot(message.content);
               if (usersSnapshot) {
@@ -1273,8 +1458,13 @@ function attemptReconnect(): void {
               }
               const activeRoom = extractActiveRoom(message.content);
               if (activeRoom) {
-                currentRoom = activeRoom;
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, null, currentRoom);
+                pushRoomState(activeRoom);
+              }
+            }
+            if (message.room) {
+              rememberRooms([message.room]);
+              if (message.type === 'join' || message.type === 'leave') {
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, [...knownRooms], currentRoom);
               }
             }
             sendToRenderer(IPC_CHANNELS.CHAT_MESSAGE, message);
@@ -1447,10 +1637,34 @@ function setupIPC(): void {
     return true;
   });
 
+  ipcMain.handle(IPC_CHANNELS.LOAD_CHAT_HISTORY, (_event, identity: ChatHistoryIdentity) => {
+    return chatHistoryManager.load(identity);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SAVE_CHAT_HISTORY,
+    (_event, identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot) => {
+      return chatHistoryManager.save(identity, snapshot);
+    },
+  );
+
+  ipcMain.on(
+    IPC_CHANNELS.FLUSH_CHAT_HISTORY,
+    (event, identity: ChatHistoryIdentity, snapshot: ChatHistorySnapshot) => {
+      try {
+        event.returnValue = chatHistoryManager.save(identity, snapshot);
+      } catch (error) {
+        console.error('[ChatHistory] Failed to flush history:', error);
+        event.returnValue = false;
+      }
+    },
+  );
+
   // Connect
   ipcMain.handle(IPC_CHANNELS.CONNECT, async (_event, config: ConnectionConfig, nickname: string) => {
     currentNickname = nickname;
     currentRoom = 'default';
+    knownRooms = new Set<string>(['default']);
     lastConfig = config;
     reconnectAttempts = 0;
     if (reconnectTimer) {
@@ -1478,7 +1692,7 @@ function setupIPC(): void {
             if (message.type === 'system') {
               const rooms = extractRoomsFromSystem(message.content);
               if (rooms) {
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rooms, currentRoom);
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rememberRooms(rooms), currentRoom);
               }
               const usersSnapshot = extractUsersSnapshot(message.content);
               if (usersSnapshot) {
@@ -1486,8 +1700,13 @@ function setupIPC(): void {
               }
               const activeRoom = extractActiveRoom(message.content);
               if (activeRoom) {
-                currentRoom = activeRoom;
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, null, currentRoom);
+                pushRoomState(activeRoom);
+              }
+            }
+            if (message.room) {
+              rememberRooms([message.room]);
+              if (message.type === 'join' || message.type === 'leave') {
+                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, [...knownRooms], currentRoom);
               }
             }
             sendToRenderer(IPC_CHANNELS.CHAT_MESSAGE, message);
@@ -1499,6 +1718,8 @@ function setupIPC(): void {
         },
       );
 
+      pushRoomState('default');
+      sshManager.send(buildSendMessage(currentNickname, '/rooms'));
       return { success: true };
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : 'Connection failed';
@@ -1525,7 +1746,28 @@ function setupIPC(): void {
       return false;
     }
     const message = buildSendMessage(currentNickname, text);
-    return sshManager.send(message);
+    const ok = sshManager.send(message);
+    if (ok) {
+      const trimmed = text.trim();
+      const roomCommand = trimmed.match(/^\/(join|switch|part)\s+#?([a-zA-Z0-9_-]{1,32})/i);
+      if (roomCommand) {
+        const [, command, rawRoom] = roomCommand;
+        const roomName = normalizeRoomName(rawRoom);
+        if (roomName) {
+          if (command.toLowerCase() === 'part') {
+            knownRooms.delete(roomName);
+            if (currentRoom === roomName) {
+              currentRoom = 'default';
+            }
+            pushRoomState(currentRoom);
+          } else {
+            pushRoomState(roomName);
+          }
+          sshManager.send(buildSendMessage(currentNickname, '/rooms'));
+        }
+      }
+    }
+    return ok;
   });
 
   // Join room
@@ -1533,8 +1775,15 @@ function setupIPC(): void {
     if (!sshManager.isConnected()) {
       return false;
     }
-    const message = buildSendMessage(currentNickname, `/join ${room}`);
-    return sshManager.send(message);
+    const roomName = normalizeRoomName(room);
+    if (!roomName) return false;
+    const message = buildSendMessage(currentNickname, `/join ${roomName}`);
+    const ok = sshManager.send(message);
+    if (ok) {
+      pushRoomState(roomName);
+      sshManager.send(buildSendMessage(currentNickname, '/rooms'));
+    }
+    return ok;
   });
 
   // Switch room
@@ -1542,8 +1791,15 @@ function setupIPC(): void {
     if (!sshManager.isConnected()) {
       return false;
     }
-    const message = buildSendMessage(currentNickname, `/switch ${room}`);
-    return sshManager.send(message);
+    const roomName = normalizeRoomName(room);
+    if (!roomName) return false;
+    const message = buildSendMessage(currentNickname, `/switch ${roomName}`);
+    const ok = sshManager.send(message);
+    if (ok) {
+      pushRoomState(roomName);
+      sshManager.send(buildSendMessage(currentNickname, '/rooms'));
+    }
+    return ok;
   });
 
   // Request users

@@ -2,26 +2,41 @@ import React, { useState } from 'react';
 import { useChatStore } from '../store/chatStore';
 
 export default function RoomList() {
-  const { rooms, activeRoom, setActiveRoom, removeRoom } = useChatStore();
+  const { rooms, activeRoom, setActiveRoom, addRoom, removeRoom } = useChatStore();
   const [expanded, setExpanded] = useState(true);
   const [showJoinDialog, setShowJoinDialog] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
 
   const handleRoomClick = async (roomName: string) => {
+    if (roomName === activeRoom) return;
+    const previousRoom = activeRoom;
+    setActiveRoom(roomName);
     const ok = await window.api.switchRoom(roomName);
     if (ok) {
-      setActiveRoom(roomName);
       window.api.requestUsers();
+    } else {
+      setActiveRoom(previousRoom);
     }
   };
 
   const handleJoin = async () => {
-    const name = newRoomName.trim();
+    const name = newRoomName.trim().replace(/^#/, '');
     if (!name) return;
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(name)) {
+      return;
+    }
+    const previousRoom = activeRoom;
+    const existed = rooms.some((room) => room.name === name);
+    addRoom(name);
+    setActiveRoom(name);
     const ok = await window.api.joinRoom(name);
     if (ok) {
-      setActiveRoom(name);
       window.api.requestUsers();
+    } else {
+      if (!existed) {
+        removeRoom(name);
+      }
+      setActiveRoom(previousRoom);
     }
     setNewRoomName('');
     setShowJoinDialog(false);
