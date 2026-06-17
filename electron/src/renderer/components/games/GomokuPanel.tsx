@@ -2257,6 +2257,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     () => shownSuggestions.filter((s) => s.row >= 1 && s.row <= BOARD_SIZE && s.col >= 1 && s.col <= BOARD_SIZE),
     [shownSuggestions],
   );
+  const primarySuggestion = clickableSuggestions[0] ?? null;
 
   const renderedCells = useMemo(() => {
     if (!optimisticPick) return cells;
@@ -2398,9 +2399,14 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
               cell.stone === 'o' ? 'white' : '',
               cell.last ? 'last' : '',
               cell.optimistic ? 'optimistic' : '',
+              primarySuggestion?.row === cell.row && primarySuggestion?.col === cell.col ? 'suggested' : '',
             ]
               .filter(Boolean)
               .join(' ');
+            const suggestionTitle =
+              primarySuggestion?.row === cell.row && primarySuggestion?.col === cell.col
+                ? `；建议落点：${primarySuggestion.style}，${primarySuggestion.reason}`
+                : '';
 
             return (
               <button
@@ -2408,7 +2414,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                 className={cls}
                 onClick={() => onPickFast(cell.row, cell.col)}
                 disabled={!canPick}
-                title={`${cell.row},${cell.col}`}
+                title={`${cell.row},${cell.col}${suggestionTitle}`}
               >
                 {text}
               </button>

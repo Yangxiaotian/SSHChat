@@ -700,6 +700,7 @@ html, body, #root {
 }
 
 .gomoku-cell {
+  position: relative;
   height: 20px;
   border: 1px solid var(--vscode-border);
   background: #2c3036;
@@ -723,6 +724,23 @@ html, body, #root {
 .gomoku-cell.last {
   outline: 1px solid #f1b45c;
   outline-offset: -2px;
+}
+
+.gomoku-cell.suggested {
+  background: rgba(83, 112, 145, 0.2);
+}
+
+.gomoku-cell.suggested::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border: 1px solid #6f8baa;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.gomoku-cell.suggested.last::after {
+  border-color: #f1b45c;
 }
 
 .go-board-wrap {

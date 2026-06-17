@@ -402,3 +402,7 @@
 2026-06-12 09:20:37 Rapfi Gomoku fix: diagnosed weak defense as formal move path using incremental TURN state; direct full-board Rapfi blocks simple opponent four. Disabled incremental TURN for formal move service and changed ponder cache to provisional-only so high-time full-board analysis still runs.
 
 2026-06-12 09:44:24 Rapfi hybrid restore: re-enabled formal incremental TURN with safeguards. Default RAPFI_RULE changed 0->4 to match server renju-style gomoku. Formal move now forces full BOARD on tactical emergencies (any side has one-move win) and every 8 stones since last full sync, preserving speed while preventing drift. Verified npm run build and direct rule=4 Rapfi blocks opponent four.
+
+2026-06-17（五子棋建议点可视化）
+- 已完成：五子棋助手当前首选建议会在棋盘对应格显示 suggested 圆环，tooltip 展示建议理由；建议按钮仍可直接点击落子。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过；渲染端 tsc 仍受既有 i18n messages/en.ts 字面量类型问题阻塞。
