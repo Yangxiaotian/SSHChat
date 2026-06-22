@@ -406,3 +406,59 @@
 2026-06-17（五子棋建议点可视化）
 - 已完成：五子棋助手当前首选建议会在棋盘对应格显示 suggested 圆环，tooltip 展示建议理由；建议按钮仍可直接点击落子。
 - 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过；渲染端 tsc 仍受既有 i18n messages/en.ts 字面量类型问题阻塞。
+
+2026-06-17（Rapfi强度优先调整）
+- 诊断：trace 显示正式 move 使用 24~28s 预算但部分局面早停；ponder 仅用正式时间 35%/45%，且会占用后台算力。
+- 已调整：默认关闭 Rapfi 后台预判，改为对方真实落子后正式深算；正式 timeout/guard 上限提升；ponder hash 默认提升但默认不启用。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-17（Rapfi黑白/禁手语义修复）
+- 根因：Rapfi BOARD 之前把 1/2 编码成我方/对方，而不是绝对黑/白，可能导致连珠禁手与白方长连威胁语义错位。
+- 已修复：BOARD 发送改为 1=黑、2=白；主进程和前端胜负判断对齐服务端规则：黑方仅精确五连胜，白方五连及以上胜。
+- 已增强：对手真实强威胁/一步赢时，内置紧急防守优先级高于 Rapfi 普通返回点，避免白方强威胁被放过。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-17（白方双三/二步杀强制识别）
+- 用户反馈：执黑时对手白方形成双三/二步杀骨架，Rapfi 普通建议未明显防守。
+- 已增强：findUrgentDefenseMove 先查对手强制线交集防点；对手 setup kill / 二步杀存在时，内置强制防守优先级高于 Rapfi 普通返回点。
+- 说明：Rapfi 仍用于职业分析，但 UI 不再允许明显白方强威胁被普通返回点覆盖。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-17（Rapfi对四四/三三威胁无反应处理）
+- 结论：不能只依赖 Rapfi 普通返回点处理白方四四/三三/四三二步杀；需在 UI 助手层加入连珠威胁仲裁。
+- 已处理：显式区分双四、四三、双三/多线三，提升 urgentDefenseSeverity 和防守候选分数；对手二步杀/强制线交集防点优先级高于 Rapfi 普通建议。
+- 配合此前修复：Rapfi BOARD 发送已改为绝对黑白 1=黑/2=白，避免禁手/白方威胁语义错位。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-17（Rapfi输出解析修复）
+- 根因补充：parseMoveFromLine 之前会匹配任意包含 x,y 的搜索输出行，可能把候选/PV 坐标误当最终落子，导致强威胁局面 50ms 就提前返回。
+- 已修复：只接受整行 x,y 或 bestmove x,y 作为最终 move；alpha fallback 也只接受整行/明确 bestmove。
+- 新增日志：包含坐标但非最终格式的输出会记录 ignored-coordinate-line，便于确认是否还有候选行误读。
+- 验证：npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-17（Rapfi输出解析回归测试）
+- 已新增独立解析模块 electron/src/main/rapfi-output.ts，主进程和测试共用同一份解析逻辑。
+- 已新增 scripts/test-rapfi-output-parser.cjs，覆盖：最终 x,y / bestmove x,y 可解析；PV/candidate/info/搜索行里的坐标必须忽略。
+- 已新增 npm 脚本 test:rapfi-output。
+- 验证：npm run test:rapfi-output 通过；npx vite build 通过。
+
+2026-06-17（五子棋双建议点展示）
+- 已实现：棋盘同时展示两类建议点：建议1 Rapfi 原始建议（蓝色），建议2 规则仲裁/高优先级防守点（橙色）。
+- 如果两者一致，棋盘显示混合标记；如果不同，两个按钮均可点击落子，并展示各自原因。
+- 目的：保留 Rapfi 原始判断，透明展示规则仲裁为什么覆盖/不同，方便复盘。
+- 验证：npm run test:rapfi-output 通过；npx vite build 通过；npx tsc -p tsconfig.node.json --noEmit 通过。
+
+2026-06-18 Rapfi stability tuning: widened default_candidate_range to square4; disabled incremental TURN for first 12 stones so opening positions use full BOARD rebuild; verified npm run test:rapfi-output and node tsc compile pass. rapfi.db not present, database remains disabled.
+
+2026-06-18 Rapfi screenshot diagnosis: trace matched bad original suggestion 10,2 to incremental-turn runMs=47ms at 16 stones. Disabled incremental TURN for formal move service so user-facing Rapfi suggestions always use full BOARD rebuilds; parser test and node tsc pass.
+
+2026-06-18 Gomoku arbiter threat-chain analyzer: added explicit attack continuation scoring (current move -> follow-up four/dual-threat/open-three pressure) and preemptive defense scoring (opponent next forcing move -> future double-kill/intersection point). Integrated into root candidates, urgent defense, scoring, and suggestion reasons. Verified npm run test:rapfi-output, node tsc, and vite build pass.
+
+2026-06-18 Gomoku dual suggestion UI fix: arbiter suggestion now derives directly from internal forced-defense/result suggestions instead of shownSuggestions, which can be Rapfi-overridden. If Rapfi and arbiter match, UI says they agree instead of showing duplicate suggestion2. Verified vite build, node tsc, and rapfi parser test pass.
+
+2026-06-18 Gomoku advisor turn-gating fix: when it is not the user's turn, canPick is false, stale Rapfi suggestions are cleared, Rapfi/arbiter display suggestions are hidden, shownSuggestions becomes a wait message, and onPickFast exits early. Fixes black suggestions appearing/clickable while current side is white. Verified vite build, node tsc, and rapfi parser test pass.
+
+2026-06-22 Gomoku soul draft feature: added 15x15 soul point library, default-off localStorage switch in GomokuPanel, optional onSoulDraft callback that writes clicked move phrase to chat composer only when enabled, and InputBar '清空输入' button. Does not auto-send. Verified vite build, node tsc, and rapfi parser test pass.
+
+2026-06-22 Doushou game: added complete two-player Jungle/Doushou backend with 7x9 board, river/trap/den terrain, rat-elephant rule, lion/tiger river jump blocking, win by enemy den or eliminating pieces, undo support, Elo rating integration, aliases, help text, React DoushouPanel click-to-move UI, dark board styling, quick actions, and QA script coverage. Verified python unittest discover all tests: 84 passed, 2 skipped (python-chess missing); vite build passed; rapfi parser regression passed. Note: qa-game-panels-playwright currently times out at pre-existing Gomoku panel wait before reaching Doushou in this environment, so Doushou UI was compile-verified but not end-to-end Playwright-verified here.
+2026-06-22 Doushou final verification: fixed manual animal-name command path (e.g. 鼠 6 7) and added regression test. Verified Doushou tests 9 passed; full python unittest discover 85 ran OK with 2 python-chess skips; vite build passed again.

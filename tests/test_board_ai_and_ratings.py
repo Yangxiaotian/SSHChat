@@ -80,9 +80,9 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         go_profile = self.store.profile("go", "Alice")
         xiangqi_profile = self.store.profile("xiangqi", "Alice")
 
-        self.assertEqual(gomoku_profile["level"], "?????")
-        self.assertEqual(go_profile["level"], "10?")
-        self.assertEqual(xiangqi_profile["level"], "10?")
+        self.assertEqual(gomoku_profile["level"], "化神大圆满")
+        self.assertEqual(go_profile["level"], "10级")
+        self.assertEqual(xiangqi_profile["level"], "10级")
 
     def test_xiangqi_ai_practice_game_responds(self) -> None:
         player_conn = object()

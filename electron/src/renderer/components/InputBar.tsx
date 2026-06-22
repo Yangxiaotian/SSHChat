@@ -129,6 +129,12 @@ export default function InputBar() {
     await window.api.sendMessage(SHAKE_TOKEN);
   };
 
+  const clearComposer = () => {
+    setComposerText('');
+    setShowSuggestions(false);
+    inputRef.current?.focus();
+  };
+
   return (
     <div className="input-bar">
       <div className="input-wrapper" style={{ position: 'relative' }}>
@@ -163,6 +169,14 @@ export default function InputBar() {
           title={t('input.shakeTitle')}
         >
           {t('common.shake')}
+        </button>
+        <button
+          className="send-button secondary-button"
+          onClick={clearComposer}
+          disabled={!composerText}
+          title="清空当前输入框，不清聊天记录"
+        >
+          清空输入
         </button>
         <button
           className="send-button"

@@ -21,6 +21,7 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       m('newGo', '/game new go'),
       m('newXiangqi', '/game new xiangqi'),
       m('xiangqiAi', '/game new xiangqi ai normal'),
+      { label: locale === 'zh' ? '新开斗兽棋' : 'New Jungle', cmd: '/game new doushou' },
       m('newSanguo', '/game new sanguo'),
       m('newWerewolf', '/game new werewolf'),
       m('newHoldem', '/game new holdem'),
@@ -65,6 +66,17 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
     xiangqi: [
       m('show', '/game show'),
       m('rating', '/game rating xiangqi'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('undo', '/game undo'),
+      m('undoAccept', '/game undo accept'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    doushou: [
+      m('show', '/game show'),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating doushou' },
       m('join', '/game join'),
       m('seats', '/game seats'),
       m('undo', '/game undo'),
@@ -141,6 +153,9 @@ export const GameCommandFactory = {
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
     return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`, locale, 'xiangqi');
+  },
+  doushouCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
+    return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`, locale, 'doushou');
   },
   hostStart(locale: Locale, game?: GameKind): string {
     return buildGameMoveFromKey(locale, 'start');

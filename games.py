@@ -9545,6 +9545,481 @@ class MahjongGame:
         return ([], [f"{name} 离开，人数不足，麻将对局结束"], True)
 
 
+
+DOUSHOU_ROWS = 9
+DOUSHOU_COLS = 7
+DOUSHOU_RIVER = {(r, c) for r in range(3, 6) for c in (1, 2, 4, 5)}
+DOUSHOU_DENS = {"black": (0, 3), "red": (8, 3)}
+DOUSHOU_TRAPS = {
+    "black": {(0, 2), (0, 4), (1, 3)},
+    "red": {(8, 2), (8, 4), (7, 3)},
+}
+DOUSHOU_RANKS = {
+    "rat": 1,
+    "cat": 2,
+    "dog": 3,
+    "wolf": 4,
+    "leopard": 5,
+    "tiger": 6,
+    "lion": 7,
+    "elephant": 8,
+}
+DOUSHOU_CN = {
+    "rat": "鼠",
+    "cat": "猫",
+    "dog": "狗",
+    "wolf": "狼",
+    "leopard": "豹",
+    "tiger": "虎",
+    "lion": "狮",
+    "elephant": "象",
+}
+DOUSHOU_ALIASES = {
+    "鼠": "rat", "老鼠": "rat", "rat": "rat", "r": "rat",
+    "猫": "cat", "cat": "cat", "c": "cat",
+    "狗": "dog", "犬": "dog", "dog": "dog", "d": "dog",
+    "狼": "wolf", "wolf": "wolf", "w": "wolf",
+    "豹": "leopard", "leopard": "leopard", "p": "leopard",
+    "虎": "tiger", "tiger": "tiger", "t": "tiger",
+    "狮": "lion", "lion": "lion", "l": "lion",
+    "象": "elephant", "elephant": "elephant", "e": "elephant",
+}
+DOUSHOU_INITIAL = [
+    ("black", "lion", 0, 0),
+    ("black", "tiger", 0, 6),
+    ("black", "dog", 1, 1),
+    ("black", "cat", 1, 5),
+    ("black", "rat", 2, 0),
+    ("black", "leopard", 2, 2),
+    ("black", "wolf", 2, 4),
+    ("black", "elephant", 2, 6),
+    ("red", "elephant", 6, 0),
+    ("red", "wolf", 6, 2),
+    ("red", "leopard", 6, 4),
+    ("red", "rat", 6, 6),
+    ("red", "cat", 7, 1),
+    ("red", "dog", 7, 5),
+    ("red", "tiger", 8, 0),
+    ("red", "lion", 8, 6),
+]
+
+
+def _doushou_opponent(side: str) -> str:
+    return "black" if side == "red" else "red"
+
+
+def _doushou_side_zh(side: str) -> str:
+    return "红方" if side == "red" else "黑方"
+
+
+def _doushou_parse_coord(a: str, b: str | None = None) -> Optional[tuple[int, int]]:
+    raw = a.strip()
+    if b is None:
+        m = re.match(r"^\s*(\d+)\s*[,，:]\s*(\d+)\s*$", raw)
+        if not m:
+            return None
+        row, col = int(m.group(1)), int(m.group(2))
+    else:
+        if not a.strip().isdigit() or not b.strip().isdigit():
+            return None
+        row, col = int(a), int(b)
+    if 1 <= row <= DOUSHOU_ROWS and 1 <= col <= DOUSHOU_COLS:
+        return row - 1, col - 1
+    return None
+
+
+def _doushou_parse_move(raw: str) -> Optional[tuple[tuple[int, int] | None, tuple[int, int]]]:
+    parts = raw.replace("，", ",").split()
+    if len(parts) == 1:
+        # a compact target such as 4,3 is allowed only when selected by piece name is absent.
+        target = _doushou_parse_coord(parts[0])
+        if target:
+            return None, target
+    if len(parts) == 2:
+        target = _doushou_parse_coord(parts[0], parts[1])
+        if target:
+            return None, target
+        piece = DOUSHOU_ALIASES.get(parts[0].lower()) or DOUSHOU_ALIASES.get(parts[0])
+        target = _doushou_parse_coord(parts[1])
+        if piece and target:
+            return None, target
+    if len(parts) == 3:
+        piece = DOUSHOU_ALIASES.get(parts[0].lower()) or DOUSHOU_ALIASES.get(parts[0])
+        target = _doushou_parse_coord(parts[1], parts[2])
+        if piece and target:
+            return None, target
+    if len(parts) == 4:
+        src = _doushou_parse_coord(parts[0], parts[1])
+        dst = _doushou_parse_coord(parts[2], parts[3])
+        if src and dst:
+            return src, dst
+    if len(parts) == 2 and re.match(r"^\d+[,，]\d+$", parts[0]) and re.match(r"^\d+[,，]\d+$", parts[1]):
+        src = _doushou_parse_coord(parts[0])
+        dst = _doushou_parse_coord(parts[1])
+        if src and dst:
+            return src, dst
+    return None
+
+
+def _doushou_piece_token(piece: Optional[dict[str, str]], last: bool = False) -> str:
+    if piece is None:
+        return "!" if last else "·"
+    prefix = "+" if piece["side"] == "red" else "-"
+    return prefix + DOUSHOU_CN[piece["kind"]]
+
+
+def _doushou_terrain(row: int, col: int) -> str:
+    pos = (row, col)
+    if pos == DOUSHOU_DENS["black"]:
+        return "黑穴"
+    if pos == DOUSHOU_DENS["red"]:
+        return "红穴"
+    if pos in DOUSHOU_TRAPS["black"]:
+        return "黑陷"
+    if pos in DOUSHOU_TRAPS["red"]:
+        return "红陷"
+    if pos in DOUSHOU_RIVER:
+        return "河"
+    return ""
+
+
+class DoushouGame(BoardUndoMixin):
+    """斗兽棋：7x9，红方先手，无机器人。"""
+
+    name = "doushou"
+    first_seat_desc = "红方（先手）"
+    second_seat_desc = "黑方"
+    send_view_on_move = True
+
+    def __init__(self, red_conn, red_name: str, *, rating_store: Optional[GameRatingStore] = None) -> None:
+        self.red_conn = red_conn
+        self.red_name = red_name
+        self.black_conn = None
+        self.black_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self._turn = "red"
+        self._last: Optional[tuple[int, int]] = None
+        self._history: list[tuple[tuple[int, int], tuple[int, int], dict[str, str], Optional[dict[str, str]], str, Optional[tuple[int, int]]]] = []
+        self.board: list[list[Optional[dict[str, str]]]] = [[None for _ in range(DOUSHOU_COLS)] for _ in range(DOUSHOU_ROWS)]
+        self._reset_board()
+        self.join_blurb = "等另一位玩家用 /game join 加入；斗兽棋无机器人。"
+        self._undo_clear_pending()
+
+    def _reset_board(self) -> None:
+        self.board = [[None for _ in range(DOUSHOU_COLS)] for _ in range(DOUSHOU_ROWS)]
+        for side, kind, row, col in DOUSHOU_INITIAL:
+            self.board[row][col] = {"side": side, "kind": kind}
+        self._turn = "red"
+        self._last = None
+        self._history.clear()
+
+    def _seat_conn(self, side: str):
+        return self.red_conn if side == "red" else self.black_conn
+
+    def who_of(self, conn) -> Optional[str]:
+        if conn is self.red_conn:
+            return "red"
+        if conn is self.black_conn:
+            return "black"
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _name_of_side(self, side: str) -> str:
+        return self.red_name if side == "red" else (self.black_name or "黑方")
+
+    def _undo_has_moves(self) -> bool:
+        return bool(self._history)
+
+    def _undo_last_mover_conn(self):
+        if not self._history:
+            return None
+        return self._seat_conn(self._history[-1][2]["side"])
+
+    def _undo_opponent_conn(self, conn):
+        side = self.who_of(conn)
+        if side is None:
+            return None
+        return self._seat_conn(_doushou_opponent(side))
+
+    def _undo_player_name(self, conn) -> str:
+        side = self.who_of(conn)
+        if side == "red":
+            return self.red_name
+        if side == "black":
+            return self.black_name or "黑方"
+        return "?"
+
+    def _undo_pop_last_move(self) -> bool:
+        if not self._history:
+            return False
+        src, dst, piece, captured, prev_turn, prev_last = self._history.pop()
+        sr, sc = src
+        dr, dc = dst
+        self.board[sr][sc] = piece
+        self.board[dr][dc] = captured
+        self._turn = prev_turn
+        self._last = prev_last
+        return True
+
+    def _undo_turn_line(self) -> str:
+        return f"轮到 {_doushou_side_zh(self._turn)} {self._name_of_side(self._turn)} 行棋"
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(self.rating_store, self.name, [self.red_name, self.black_name])
+
+    def _settle_ratings(self, score_red: float) -> list[str]:
+        if not self.black_name:
+            return []
+        return _format_rating_result_lines(self.rating_store, self.name, self.red_name, self.black_name, score_red, ranked=True)
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["对局已结束，请先 /game new doushou 开新局。"], [], False)
+        if conn is self.red_conn:
+            return (["你已经是红方。"], [], False)
+        if self.black_conn is not None:
+            return ([f"黑方席位已被 {self.black_name} 占。"], [], False)
+        self.black_conn = conn
+        self.black_name = name
+        self.state = "playing"
+        return ([], [
+            f"{name} 加入为黑方，斗兽棋开始！",
+            f"红方（先手）：{self.red_name}    黑方：{self.black_name}",
+            "走法：先点己方棋子再点目标格；也可 /game move <起行> <起列> <终行> <终列>。",
+            "规则：大吃小，同级互吃；鼠吃象、象不能吃鼠；狮虎可跳河但河中有鼠会被挡；进对方兽穴获胜。",
+            self._undo_turn_line(),
+        ], False)
+
+    def _piece_can_capture(self, attacker: dict[str, str], target: dict[str, str], dst: tuple[int, int]) -> bool:
+        if attacker["side"] == target["side"]:
+            return False
+        ar = DOUSHOU_RANKS[attacker["kind"]]
+        tr = DOUSHOU_RANKS[target["kind"]]
+        if dst in DOUSHOU_TRAPS[attacker["side"]]:
+            tr = 0
+        if attacker["kind"] == "rat" and target["kind"] == "elephant":
+            return True
+        if attacker["kind"] == "elephant" and target["kind"] == "rat":
+            return False
+        # 河里的鼠不能无风险偷吃岸上的象。
+        if attacker["kind"] == "rat" and target["kind"] == "elephant" and dst not in DOUSHOU_RIVER:
+            return True
+        return ar >= tr
+
+    def _jump_target(self, src: tuple[int, int], dr: int, dc: int) -> Optional[tuple[int, int]]:
+        r, c = src[0] + dr, src[1] + dc
+        if not (0 <= r < DOUSHOU_ROWS and 0 <= c < DOUSHOU_COLS) or (r, c) not in DOUSHOU_RIVER:
+            return None
+        path = []
+        while 0 <= r < DOUSHOU_ROWS and 0 <= c < DOUSHOU_COLS and (r, c) in DOUSHOU_RIVER:
+            path.append((r, c))
+            r += dr
+            c += dc
+        if not (0 <= r < DOUSHOU_ROWS and 0 <= c < DOUSHOU_COLS):
+            return None
+        for pr, pc in path:
+            p = self.board[pr][pc]
+            if p is not None and p["kind"] == "rat":
+                return None
+        return r, c
+
+    def _legal_move_reason(self, side: str, src: tuple[int, int], dst: tuple[int, int]) -> tuple[bool, str]:
+        sr, sc = src
+        dr, dc = dst
+        if not (0 <= sr < DOUSHOU_ROWS and 0 <= sc < DOUSHOU_COLS and 0 <= dr < DOUSHOU_ROWS and 0 <= dc < DOUSHOU_COLS):
+            return False, "坐标超出棋盘。"
+        piece = self.board[sr][sc]
+        if piece is None:
+            return False, "起点没有棋子。"
+        if piece["side"] != side:
+            return False, "只能移动自己的棋子。"
+        if dst == DOUSHOU_DENS[side]:
+            return False, "不能进入自己的兽穴。"
+        target = self.board[dr][dc]
+        if target is not None and target["side"] == side:
+            return False, "目标格已有己方棋子。"
+        manhattan = abs(dr - sr) + abs(dc - sc)
+        is_jump = False
+        if manhattan != 1:
+            if piece["kind"] not in {"lion", "tiger"}:
+                return False, "普通动物每步只能上下左右走一格。"
+            if sr != dr and sc != dc:
+                return False, "狮虎只能横向或纵向跳河。"
+            step_r = 0 if sr == dr else (1 if dr > sr else -1)
+            step_c = 0 if sc == dc else (1 if dc > sc else -1)
+            jump = self._jump_target(src, step_r, step_c)
+            if jump != dst:
+                return False, "狮虎只有隔河直跳，且河中不能有鼠阻挡。"
+            is_jump = True
+        if dst in DOUSHOU_RIVER and piece["kind"] != "rat":
+            return False, "只有鼠可以进入河流。"
+        if is_jump and dst in DOUSHOU_RIVER:
+            return False, "狮虎跳河必须落到岸上。"
+        if target is not None and not self._piece_can_capture(piece, target, dst):
+            return False, f"{DOUSHOU_CN[piece['kind']]}不能吃{DOUSHOU_CN[target['kind']]}。"
+        return True, ""
+
+    def _find_unique_piece_move(self, side: str, kind: str, dst: tuple[int, int]) -> tuple[Optional[tuple[int, int]], str]:
+        matches = []
+        for r in range(DOUSHOU_ROWS):
+            for c in range(DOUSHOU_COLS):
+                p = self.board[r][c]
+                if p and p["side"] == side and p["kind"] == kind:
+                    ok, _ = self._legal_move_reason(side, (r, c), dst)
+                    if ok:
+                        matches.append((r, c))
+        if len(matches) == 1:
+            return matches[0], ""
+        if not matches:
+            return None, f"没有可移动到 ({dst[0] + 1},{dst[1] + 1}) 的{DOUSHOU_CN[kind]}。"
+        return None, "有多个同类棋子可到达，请改用起点+终点坐标。"
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["对局尚未开始，等黑方 /game join。"], [], False)
+        if self.state != "playing":
+            return (["对局已结束。"], [], False)
+        side = self.who_of(conn)
+        if side is None:
+            return (["你不是对局双方。"], [], False)
+        if side != self._turn:
+            return (["不是你的回合。"], [], False)
+        self._undo_clear_pending()
+
+        parts = raw.replace("，", ",").split()
+        parsed = _doushou_parse_move(raw)
+        src: Optional[tuple[int, int]] = None
+        dst: Optional[tuple[int, int]] = None
+        if parsed and parsed[0] is not None:
+            src, dst = parsed
+        elif len(parts) in {2, 3}:
+            piece_kind = DOUSHOU_ALIASES.get(parts[0].lower()) or DOUSHOU_ALIASES.get(parts[0])
+            target = _doushou_parse_coord(parts[1], parts[2]) if len(parts) == 3 else _doushou_parse_coord(parts[1])
+            if piece_kind and target:
+                src, msg = self._find_unique_piece_move(side, piece_kind, target)
+                if src is None:
+                    return ([msg], [], False)
+                dst = target
+        if src is None or dst is None:
+            return (["用法：/game move <起行> <起列> <终行> <终列>；例：7 7 6 7。也可先点棋子再点目标格。"], [], False)
+
+        ok, reason = self._legal_move_reason(side, src, dst)
+        if not ok:
+            return ([reason], [], False)
+        sr, sc = src
+        dr, dc = dst
+        piece = self.board[sr][sc]
+        assert piece is not None
+        captured = self.board[dr][dc]
+        prev_turn = self._turn
+        prev_last = self._last
+        self._history.append((src, dst, dict(piece), dict(captured) if captured else None, prev_turn, prev_last))
+        self.board[dr][dc] = piece
+        self.board[sr][sc] = None
+        self._last = dst
+
+        mover = self._name_of_side(side)
+        action = f"{_doushou_side_zh(side)} {mover} 走 {DOUSHOU_CN[piece['kind']]}：({sr + 1},{sc + 1}) -> ({dr + 1},{dc + 1})"
+        if captured:
+            action += f"，吃掉{_doushou_side_zh(captured['side'])}{DOUSHOU_CN[captured['kind']]}"
+        bcast = [action]
+
+        if dst == DOUSHOU_DENS[_doushou_opponent(side)]:
+            self.state = "ended"
+            bcast.append(f"对局结束：{_doushou_side_zh(side)} {mover} 攻入对方兽穴获胜！")
+            bcast.extend(self._settle_ratings(1.0 if side == "red" else 0.0))
+            return ([], bcast, True)
+
+        opponent = _doushou_opponent(side)
+        if not any(p and p["side"] == opponent for row in self.board for p in row):
+            self.state = "ended"
+            bcast.append(f"对局结束：{_doushou_side_zh(side)} {mover} 吃光对方棋子获胜！")
+            bcast.extend(self._settle_ratings(1.0 if side == "red" else 0.0))
+            return ([], bcast, True)
+
+        self._turn = opponent
+        bcast.append(self._undo_turn_line())
+        return ([], bcast, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["对局尚未开始或已结束，无需认负。"], [], False)
+        side = self.who_of(conn)
+        if side is None:
+            return (["你不是对局双方。"], [], False)
+        self.state = "ended"
+        red_score = 0.0 if side == "red" else 1.0
+        winner = _doushou_opponent(side)
+        return ([], [f"{_doushou_side_zh(side)} {name} 认负 — {_doushou_side_zh(winner)}胜", *self._settle_ratings(red_score)], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+        if self.who_of(conn) is None:
+            return (["你不是对局双方，无法终止。"], [], False)
+        if self.state == "playing":
+            return (["已开始的对局请用 /game resign 认负，不能 /game abort。"], [], False)
+        self.state = "ended"
+        return ([], [f"{name} 终止了斗兽棋对局（未开始）。"], True)
+
+    def seats(self) -> list[str]:
+        lines = [
+            f"doushou 对局状态：{self.state}",
+            f"  红方（先手）：{self.red_name}",
+            f"  黑方：{self.black_name or '(空席, 可 /game join)'}",
+        ]
+        lines.extend(self._rating_lines())
+        return lines
+
+    def _board_render(self) -> list[str]:
+        lines = ["斗兽棋棋盘（7列×9行，+红 -黑，!上一步）"]
+        lines.append("    1    2    3    4    5    6    7")
+        for r in range(DOUSHOU_ROWS):
+            cells = []
+            for c in range(DOUSHOU_COLS):
+                piece = self.board[r][c]
+                token = _doushou_piece_token(piece, self._last == (r, c))
+                terrain = _doushou_terrain(r, c)
+                if piece is None and terrain:
+                    token = terrain
+                cells.append(f"{token:^4}")
+            lines.append(f"{r + 1:>2} " + "".join(cells))
+        lines.append("图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列，左上为 1,1。")
+        if self._last is not None:
+            lines.append(f"上一步：({self._last[0] + 1}, {self._last[1] + 1})")
+        return lines
+
+    def show(self, conn=None) -> list[str]:
+        lines = [f"doushou 对局（{self.state}）  红：{self.red_name}   黑：{self.black_name or '空席'}"]
+        lines.extend(self._rating_lines())
+        lines.extend(self._board_render())
+        if self.state == "playing":
+            lines.append(self._undo_turn_line())
+        elif self.state == "waiting":
+            lines.append("等待黑方加入：/game join")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        side = self.who_of(conn)
+        if side is None:
+            return ([], [], False)
+        if conn is self.red_conn:
+            self.red_conn = None
+        if conn is self.black_conn:
+            self.black_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} 离开，斗兽棋对局取消。"], True)
+        if self.state == "playing":
+            self.state = "ended"
+            winner = _doushou_opponent(side)
+            red_score = 1.0 if winner == "red" else 0.0
+            return ([], [f"{_doushou_side_zh(side)} {name} 离开 — {_doushou_side_zh(winner)}胜", *self._settle_ratings(red_score)], True)
+        return ([], [], False)
+
 def create_game(
     game_name: str,
     creator_conn,
@@ -9586,6 +10061,14 @@ def create_game(
             rating_store=rating_store,
             ai_level=ai_level,
         )
+    if game_name == DoushouGame.name:
+        if options:
+            raise RuntimeError("doushou 暂不支持 AI 或额外开局参数。")
+        return DoushouGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
     cls = GAMES.get(game_name)
     if cls is None:
         raise RuntimeError(f"未知游戏：{game_name}")
@@ -9597,6 +10080,7 @@ GAMES = {
     GomokuGame.name: GomokuGame,
     GoGame.name: GoGame,
     XiangqiGame.name: XiangqiGame,
+    DoushouGame.name: DoushouGame,
     SanguoshaGame.name: SanguoshaGame,
     WerewolfGame.name: WerewolfGame,
     HoldemGame.name: HoldemGame,
@@ -9631,6 +10115,11 @@ GAME_ALIASES = {
     "mahjong": MahjongGame.name,
     "麻将": MahjongGame.name,
     "三国杀": SanguoshaGame.name,
+    "jungle": DoushouGame.name,
+    "junglechess": DoushouGame.name,
+    "doushouqi": DoushouGame.name,
+    "斗兽棋": DoushouGame.name,
+    "斗兽": DoushouGame.name,
 }
 
 
@@ -9655,10 +10144,10 @@ def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
 HELP_LINES = (
     "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
-    "（chess: 白；gomoku/go/xiangqi: 黑/黑/红先手；sanguo: 房主）。",
+    "（chess: 白；gomoku/go/xiangqi/doushou: 黑/黑/红/红先手；sanguo: 房主）。",
     "[*] /game new <名称> ai [easy|normal|hard]  棋类开启 AI 练习局（仅 chess/gomoku/xiangqi）；"
     "练习局不计入持久化积分。",
-    "[*] /game join             加入对局（chess/gomoku/go/xiangqi 为第二席；"
+    "[*] /game join             加入对局（chess/gomoku/go/xiangqi/doushou 为第二席；"
     "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
@@ -9667,13 +10156,14 @@ HELP_LINES = (
     "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
     "[*] /game move …           chess: SAN/UCI；gomoku/go: 行 列；go 可 pass 停一手；"
     "xiangqi: 棋谱（炮二平五、马2进3）或坐标四元组；"
+    "doushou: 坐标四元组（起行 起列 终行 终列）；"
     "sanguo: 军争版；等待时房主 开始；/game move 武将 查武将池；"
     "观星/蛊惑/断粮等技能见 /game show（别名 sgs/三国杀）。",
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
-    "（chess/gomoku/go/xiangqi；reject 拒绝，cancel 取消请求）。",
+    "（chess/gomoku/go/xiangqi/doushou；reject 拒绝，cancel 取消请求）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",

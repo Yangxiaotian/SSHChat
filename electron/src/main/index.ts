@@ -6,6 +6,7 @@ import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_pr
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
 import { ChatHistoryManager } from './chat-history-manager';
+import { parseRapfiFallbackMoveLine, parseRapfiMoveLine } from './rapfi-output';
 import { parseServerLine, extractRoomsFromSystem, extractActiveRoom, extractUsersSnapshot, buildSendMessage } from './chat-protocol';
 import {
   ConnectionConfig,
@@ -97,12 +98,12 @@ function defaultRapfiHashMb(): number {
   return 512;
 }
 
-const RAPFI_ANALYZE_DEFAULT_TIMEOUT_MS = intEnv('RAPFI_DEFAULT_TIMEOUT_MS', 8000, 1000, 60000);
-const RAPFI_ANALYZE_MAX_TIMEOUT_MS = intEnv('RAPFI_MAX_TIMEOUT_MS', 45000, 5000, 90000);
+const RAPFI_ANALYZE_DEFAULT_TIMEOUT_MS = intEnv('RAPFI_DEFAULT_TIMEOUT_MS', 12000, 1000, 90000);
+const RAPFI_ANALYZE_MAX_TIMEOUT_MS = intEnv('RAPFI_MAX_TIMEOUT_MS', 75000, 5000, 120000);
 const RAPFI_HASH_MB = intEnv('RAPFI_HASH_MB', defaultRapfiHashMb(), 128, 4096);
 const RAPFI_PONDER_HASH_MB = intEnv(
   'RAPFI_PONDER_HASH_MB',
-  Math.max(256, Math.min(1024, Math.floor(RAPFI_HASH_MB / 2))),
+  Math.max(512, Math.min(RAPFI_HASH_MB, 2048)),
   128,
   RAPFI_HASH_MB,
 );
@@ -237,39 +238,6 @@ function sanitizeTimeout(timeoutMs?: number): number {
   return Math.max(400, Math.min(RAPFI_ANALYZE_MAX_TIMEOUT_MS, Math.floor(timeoutMs!)));
 }
 
-function parseMoveFromLine(line: string): { row: number; col: number } | null {
-  const m = line.trim().match(/(?:bestmove\s+)?(-?\d+)\s*,\s*(-?\d+)/i);
-  if (!m) return null;
-  const x = Number(m[1]);
-  const y = Number(m[2]);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  if (x < 0 || x > 14 || y < 0 || y > 14) return null;
-  // protocol uses x,y with 0-based top-left origin; UI uses row,col in 1-based.
-  return { row: y + 1, col: x + 1 };
-}
-
-function parseAlphaMoveToken(token: string): { row: number; col: number } | null {
-  const m = token.trim().match(/^([A-Za-z])\s*(\d{1,2})$/);
-  if (!m) return null;
-  const file = m[1].toUpperCase();
-  const row = Number(m[2]);
-  if (!Number.isFinite(row) || row < 1 || row > 15) return null;
-  const col = file.charCodeAt(0) - 'A'.charCodeAt(0) + 1;
-  if (col < 1 || col > 15) return null;
-  return { row, col };
-}
-
-function parseFallbackMoveFromLine(line: string): { row: number; col: number } | null {
-  const direct = parseMoveFromLine(line);
-  if (direct) return direct;
-  const parts = line.trim().split(/\s+/);
-  for (const p of parts) {
-    const alpha = parseAlphaMoveToken(p);
-    if (alpha) return alpha;
-  }
-  return null;
-}
-
 function validateBoard15(board: number[][]): boolean {
   if (!Array.isArray(board) || board.length !== 15) return false;
   for (const row of board) {
@@ -339,7 +307,7 @@ function hasFiveOnBoard(board: number[][], side: 1 | -1): boolean {
           rr += dr;
           cc += dc;
         }
-        if (len >= 5) return true;
+        if (side === 1 ? len === 5 : len >= 5) return true;
       }
     }
   }
@@ -442,7 +410,10 @@ function buildRapfiBoardCommands(
     for (let c = 0; c < 15; c++) {
       const v = board[r][c];
       if (v === 0) continue;
-      const who = v === mySide ? 1 : 2;
+      // Piskvork/Rapfi BOARD uses absolute stone colors:
+      // 1 = black(first), 2 = white(second). Do not encode own/opponent here,
+      // otherwise Renju forbidden-move rules are evaluated from the wrong side.
+      const who = v === 1 ? 1 : 2;
       lines.push(`${c},${r},${who}`);
     }
   }
@@ -529,7 +500,7 @@ class RapfiEngineService {
     this.stdoutBuf = parts.pop() || '';
 
     for (const line of parts) {
-      const direct = parseMoveFromLine(line);
+      const direct = parseRapfiMoveLine(line);
       if (direct && this.pending) {
         this.trace(`req#${this.pending.reqId} stdout-move ${direct.row},${direct.col}`);
         this.completePending({
@@ -541,14 +512,17 @@ class RapfiEngineService {
         });
         return;
       }
+      if (this.pending && /\b-?\d+\s*,\s*-?\d+\b/.test(line)) {
+        this.trace(`req#${this.pending.reqId} ignored-coordinate-line ${JSON.stringify(line.trim().slice(0, 180))}`);
+      }
 
-      const fb = parseFallbackMoveFromLine(line);
+      const fb = parseRapfiFallbackMoveLine(line);
       if (fb && this.pending) this.pending.fallbackMove = fb;
     }
 
     // Some engines may flush bestmove without trailing newline; parse tail defensively.
     if (this.pending && this.stdoutBuf.trim()) {
-      const tailDirect = parseMoveFromLine(this.stdoutBuf);
+      const tailDirect = parseRapfiMoveLine(this.stdoutBuf);
       if (tailDirect) {
         this.trace(`req#${this.pending.reqId} stdout-tail-move ${tailDirect.row},${tailDirect.col}`);
         this.completePending({
@@ -561,7 +535,7 @@ class RapfiEngineService {
         this.stdoutBuf = '';
         return;
       }
-      const tailFallback = parseFallbackMoveFromLine(this.stdoutBuf);
+      const tailFallback = parseRapfiFallbackMoveLine(this.stdoutBuf);
       if (tailFallback) this.pending.fallbackMove = tailFallback;
     }
   }
@@ -699,11 +673,15 @@ class RapfiEngineService {
     let cmds: string[] = [];
 
     const tacticalReason = tacticalEmergencyReason(payload.board, payload.mySide);
+    // Opening is where plan quality matters most. Rebuild the full board in the
+    // first few plies instead of trusting incremental state from prior turns.
+    const needsOpeningFullBoard = stones <= 12;
     const needsPeriodicResync = this.lastFullBoardStones < 0 || stones - this.lastFullBoardStones >= 8;
     const canTryIncremental =
       this.allowIncremental &&
       requestMode !== 'ponder' &&
       !tacticalReason &&
+      !needsOpeningFullBoard &&
       !needsPeriodicResync &&
       this.inited &&
       this.lastEngineBoard !== null &&
@@ -733,6 +711,7 @@ class RapfiEngineService {
       cmdMode = 'full-board';
       if (!this.inited) cmdReason = 'cold-start';
       else if (tacticalReason) cmdReason = `tactical-full-board:${tacticalReason}`;
+      else if (needsOpeningFullBoard) cmdReason = 'opening-full-board';
       else if (needsPeriodicResync) cmdReason = 'periodic-resync';
       else if (requestMode === 'ponder') cmdReason = 'ponder-isolated-board';
       else if (this.lastEngineBoard === null) cmdReason = 'no-engine-board';
@@ -845,7 +824,10 @@ class RapfiEngineService {
   }
 }
 
-const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, true, true);
+// Formal user-facing suggestions must favor correctness over speed. Incremental
+// TURN can be fast, but when engine state drifts it may return a shallow move.
+// Keep formal analysis on full BOARD rebuilds; ponder can stay isolated.
+const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, false, false);
 const rapfiPonderService = new RapfiEngineService('ponder', RAPFI_PONDER_HASH_MB, false, false);
 
 async function analyzeGomokuByRapfi(payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> {

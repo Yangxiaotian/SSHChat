@@ -276,6 +276,30 @@ try {
 
   // 4) 三国杀
   await openByLines([
+    'doushou 对局（playing）  红：zouyu   黑：R1',
+    '斗兽棋棋盘（7列×9行，+红 -黑，!上一步）',
+    '    1    2    3    4    5    6    7',
+    ' 1 -狮   ·   黑陷  黑穴  黑陷   ·   -虎',
+    ' 2  ·   -狗   ·    ·    ·   -猫   ·',
+    ' 3 -鼠   ·   -豹   ·   -狼   ·   -象',
+    ' 4  ·    河   河   ·    河   河   ·',
+    ' 5  ·    河   河   ·    河   河   ·',
+    ' 6  ·    河   河   ·    河   河   ·',
+    ' 7 +象   ·   +狼   ·   +豹   ·   +鼠',
+    ' 8  ·   +猫   ·   红陷   ·   +狗   ·',
+    ' 9 +虎   ·   红陷  红穴  红陷   ·   +狮',
+    '轮到 红方 zouyu 行棋',
+  ], '斗兽棋棋盘');
+  await page.evaluate(() => {
+    // @ts-ignore
+    window.__qa.clearSent();
+  });
+  await page.locator('.doushou-cell[title*="7,7"]').click();
+  await page.locator('.doushou-cell[title*="6,7"]').click();
+  await assertSentIncludes('/game move 7 7 6 7');
+
+  // 5) 三国杀
+  await openByLines([
     'sanguo 状态：playing  玩家 3/6',
     '#1：zouyu',
     '#2：R1',
@@ -289,7 +313,7 @@ try {
   await page.locator('.game-interaction-panel .mini-btn:has-text("过")').first().click();
   await assertSentIncludes('/game move 过');
 
-  // 5) 狼人杀
+  // 6) 狼人杀
   await openByLines([
     'werewolf state: day',
     'alive: zouyu, R1, R2',
@@ -306,7 +330,7 @@ try {
   await page.locator('.game-interaction-panel .mini-btn:has-text("投票")').first().click();
   await assertSentIncludes('/game move vote R1');
 
-  // 6) 德州
+  // 7) 德州
   await openByLines([
     '德州扑克 对局',
     '德州扑克 状态：playing',
@@ -324,7 +348,7 @@ try {
   await page.locator('.game-interaction-panel .mini-btn:has-text("过牌")').first().click();
   await assertSentIncludes(['/game move check', '/game move 过牌']);
 
-  // 7) 炸金花
+  // 8) 炸金花
   await openByLines([
     '炸金花 对局',
     '炸金花 状态：playing',
@@ -342,7 +366,7 @@ try {
   await page.locator('.game-interaction-panel .mini-btn:has-text("比牌")').first().click();
   await assertSentIncludes(['/game move compare R1', '/game move 比牌 R1']);
 
-  // 8) 牛头王
+  // 9) 牛头王
   await openByLines([
     '牛头王 对局',
     '状态：进行中',

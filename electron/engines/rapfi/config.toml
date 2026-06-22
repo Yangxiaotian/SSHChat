@@ -21,7 +21,8 @@ message_mode = "normal"
 coord_conversion_mode = "none"
 
 # Default candidate range (Options are [square2, square2_line3, square3, square3_line4, square4, full_board])
-default_candidate_range = "square3_line4"
+# Use a wider stable range so defensive/off-axis threat points are less likely to be pruned.
+default_candidate_range = "square4"
 
 # Memory reserved for stuff other than hash table in max_memory option
 memory_reserved_mb = 0
