@@ -195,16 +195,16 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py"
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py"
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$u:$u" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh"
-  chmod 700 "$PREFIX/admin-add-user.sh"
+  chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 700 "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
 
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
@@ -222,9 +222,9 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py"
-  chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py"
+  chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
@@ -428,14 +428,16 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py chat.sh server.sh admin-add-user.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh federation-bridge.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 
 chmod +x \
   "$SCRIPT_DIR/chat.sh" \
   "$SCRIPT_DIR/server.sh" \
-  "$SCRIPT_DIR/admin-add-user.sh"
+  "$SCRIPT_DIR/admin-add-user.sh" \
+  "$SCRIPT_DIR/admin-add-peer.sh" \
+  "$SCRIPT_DIR/federation-bridge.sh"
 
 if ! command -v python3 &>/dev/null; then
   echo "error: python3 not found" >&2
@@ -500,9 +502,9 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$PREFIX/"
-cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$PREFIX/"
-chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
+chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
@@ -540,11 +542,35 @@ else
   cat >"$PREFIX/sshchat.env" <<EOF
 SSHCHAT_SERVER=$SERVER_IP
 SSHCHAT_PORT=$PORT
+SSHCHAT_FEDERATION_PORT=$((PORT + 1))
+SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
 SSHCHAT_ALERT_SOUND=auto
+# 联邦互联：互信节点用 admin-add-peer.sh 登记；同名用户/房间跨服合并。
+# 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
 EOF
+fi
+
+FED_DIR="$PREFIX/federation"
+mkdir -p "$FED_DIR"
+chmod 700 "$FED_DIR"
+if [[ ! -f "$FED_DIR/id_ed25519" ]]; then
+  ssh-keygen -t ed25519 -f "$FED_DIR/id_ed25519" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)" >/dev/null
+  echo "info: generated federation key $FED_DIR/id_ed25519.pub"
+fi
+if [[ "$CREATE_RUN_USER" -eq 1 ]] && ! is_darwin; then
+  FED_USER=sshchat-federation
+  if ! id "$FED_USER" &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
+    echo "info: created federation user $FED_USER (for inbound peer SSH)"
+  fi
+fi
+if [[ "$RUN_USER" != "root" ]]; then
+  chown -R "$RUN_USER:$RUN_USER" "$FED_DIR"
+  chmod 600 "$FED_DIR/id_ed25519" 2>/dev/null || true
+  chmod 644 "$FED_DIR/id_ed25519.pub" 2>/dev/null || true
 fi
 
 if [[ "$RESET_ALL_RATINGS" -eq 1 ]]; then
@@ -588,8 +614,8 @@ elif is_darwin; then
 else
   chown -R "$ROOT_OWN" "$PREFIX"
   chmod 755 "$PREFIX"
-  chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh"
-  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/client.py"
+  chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
 fi
 

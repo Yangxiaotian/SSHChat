@@ -24,6 +24,19 @@ class DisconnectedSeat:
         return f"DisconnectedSeat({self.nickname!r})"
 
 
+class FederatedSeat:
+    """Player seated on a peer SSHChat node (federated game)."""
+
+    __slots__ = ("node_id", "nickname")
+
+    def __init__(self, node_id: str, nickname: str) -> None:
+        self.node_id = (node_id or "").strip() or "?"
+        self.nickname = (nickname or "").strip() or "?"
+
+    def __repr__(self) -> str:
+        return f"FederatedSeat({self.node_id!r}, {self.nickname!r})"
+
+
 class GameSessionStore:
     def __init__(self, path: str) -> None:
         self.path = path

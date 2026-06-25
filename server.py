@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Optional
 
 import dict_lookup
+import federation
 import games
 import library
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
-from session_store import DisconnectedSeat, GameSessionStore
+from session_store import DisconnectedSeat, FederatedSeat, GameSessionStore
 
 DEFAULT_ROOM = "default"
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
@@ -65,6 +66,8 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# room -> node_id that owns authoritative game state (federation)
+room_game_authority: dict[str, str] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
@@ -80,6 +83,7 @@ _persist_timer: Optional[threading.Timer] = None
 _shutting_down = False
 _shutdown_requested = False
 _listen_socket: Optional[socket.socket] = None
+_fed_hub: Optional[federation.FederationHub] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -581,7 +585,7 @@ def _iter_game_conn_seats(game):
 
 
 def _conn_needs_seat_swap(conn) -> bool:
-    if conn is None or isinstance(conn, DisconnectedSeat):
+    if conn is None or isinstance(conn, (DisconnectedSeat, FederatedSeat)):
         return False
     if conn in clients:
         return True
@@ -790,7 +794,11 @@ def send_line(conn, text: str) -> None:
 def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -> None:
     """Deliver a private message to all matching nicks; echo status to sender."""
     targets = find_clients_by_nickname(target_nick)
-    if not targets:
+    hub = federation.get_hub()
+    remote_sent = False
+    if hub is not None and hub.enabled and hub.has_remote_user(target_nick):
+        remote_sent = hub.send_pm(target_nick, sender_name, text)
+    if not targets and not remote_sent:
         send_line(
             conn,
             f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
@@ -798,18 +806,21 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
         return
     for peer_conn, peer_name in targets:
         send_line(peer_conn, f"[PM from {sender_name}] {text}\n")
-    if len(targets) == 1:
+    if remote_sent and not targets:
+        send_line(conn, f"[*] PM → {target_nick} (federated)\n")
+    elif len(targets) == 1 and not remote_sent:
         only = targets[0][1]
         send_line(conn, f"[*] PM → {only}\n")
-    else:
+    elif targets or remote_sent:
         n = len(targets)
+        extra = " + federated peers" if remote_sent else ""
         send_line(
             conn,
-            f"[*] PM sent to {n} users matching {target_nick!r}\n",
+            f"[*] PM sent to {n} user(s) matching {target_nick!r}{extra}\n",
         )
 
 
-def find_clients_by_nickname(nick: str) -> list[tuple]:
+def find_clients_by_nickname(nick: str, *, local_only: bool = False) -> list[tuple]:
     """Return [(conn, display_name), ...] for online users matching nick (case-insensitive)."""
     key = nick.strip().lower()
     if not key:
@@ -1756,7 +1767,338 @@ def _handle_dict(conn, payload: str) -> None:
         send_line(conn, "[*] 词典查询失败，请稍后重试（详情见服务端日志）。\n")
 
 
-def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
+def _fed_snapshot_clients() -> list[dict[str, object]]:
+    with lock:
+        return [
+            {
+                "name": info["name"],
+                "rooms": sorted(info["rooms"]),
+                "current_room": info.get("current_room", DEFAULT_ROOM),
+            }
+            for info in clients.values()
+        ]
+
+
+def _local_node_id() -> str:
+    hub = federation.get_hub()
+    if hub is not None:
+        return hub.node_id
+    return os.environ.get("SSHCHAT_NODE_ID", "").strip() or socket.gethostname()
+
+
+def _local_conn_for_name_in_room_locked(name: str, room: str):
+    key = _nick_key(name)
+    if not key:
+        return None
+    for c in rooms.get(room, ()):
+        info = clients.get(c)
+        if info and info["name"].strip().lower() == key:
+            return c
+    return None
+
+
+def _remap_local_game_seats_locked(room: str, game) -> None:
+    for old_conn, seat_name in list(_iter_game_conn_seats(game)):
+        if isinstance(old_conn, FederatedSeat):
+            continue
+        if old_conn in clients and clients[old_conn]["name"] == seat_name:
+            continue
+        local = _local_conn_for_name_in_room_locked(seat_name, room)
+        if local is not None and local is not old_conn:
+            _replace_conn_refs(game, old_conn, local)
+
+
+def _route_game_private(room: str, conn, lines) -> None:
+    if not lines:
+        return
+    if conn in clients:
+        send_game_private(conn, room, lines)
+        return
+    if isinstance(conn, FederatedSeat):
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            hub.send_game_private_to(conn.node_id, room, conn.nickname, lines)
+
+
+def _federation_sync_game(room: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        auth = room_game_authority.get(room) or hub.node_id
+        if auth != hub.node_id:
+            return
+        room_game_authority[room] = hub.node_id
+        raw = _pickle_game_for_storage(game)
+    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"))
+
+
+def _federation_notify_game_end(room: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    auth = room_game_authority.pop(room, None) or hub.node_id
+    if auth == hub.node_id:
+        hub.end_game(room, hub.node_id)
+
+
+def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> None:
+    hub = federation.get_hub()
+    if hub is not None and authority == hub.node_id:
+        return
+    try:
+        game = pickle.loads(base64.b64decode(b64.encode("ascii")))
+    except Exception as e:
+        print(f"federation game sync skip room {room!r}: {e!r}")
+        return
+    _rebind_game_services(game)
+    with lock:
+        _remap_local_game_seats_locked(room, game)
+        room_games[room] = game
+        room_game_authority[room] = authority
+    _mark_sessions_dirty()
+    if getattr(game, "state", "ended") != "ended":
+        send_oriented_boards(room, game)
+        send_sanguo_hand_views(room, game)
+
+
+def _fed_on_game_end(room: str, authority: str) -> None:
+    hub = federation.get_hub()
+    if hub is not None and authority == hub.node_id:
+        return
+    with lock:
+        room_games.pop(room, None)
+        room_game_authority.pop(room, None)
+    _mark_sessions_dirty()
+
+
+def _fed_on_game_priv(room: str, to_name: str, lines: list[str]) -> None:
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    for conn, _ in targets:
+        send_game_private(conn, room, lines)
+
+
+def _fed_resolve_actor(room: str, game, player_node: str, name: str, sub: str):
+    local = _local_node_id()
+    if player_node == local:
+        conn = _local_conn_for_name_in_room_locked(name, room)
+        if conn is not None and sub != "join":
+            _resume_same_account_seat_locked(room, game, conn, name)
+        return conn
+    if sub == "join":
+        return FederatedSeat(player_node, name)
+    seat = _game_seat_conn_by_name(game, name)
+    if isinstance(seat, FederatedSeat) and seat.node_id == player_node:
+        return seat
+    return seat
+
+
+def _finish_game_action(
+    room: str,
+    game,
+    actor_conn,
+    priv,
+    bcast,
+    ended: bool,
+    *,
+    send_boards: bool = True,
+) -> None:
+    if bcast and hasattr(game, "finalize_broadcast"):
+        bcast = game.finalize_broadcast(bcast)
+    _route_game_private(room, actor_conn, priv)
+    drain = getattr(game, "drain_extra_privates", None)
+    if drain:
+        for peer_conn, extra in drain():
+            _route_game_private(room, peer_conn, extra)
+    if bcast:
+        broadcast_game(room, bcast)
+    if send_boards and (ended or getattr(game, "send_view_on_move", True)):
+        send_oriented_boards(room, game)
+    send_sanguo_hand_views(room, game)
+    _persist_after_game_change()
+    if ended:
+        with lock:
+            room_games.pop(room, None)
+        _federation_notify_game_end(room)
+    else:
+        _federation_sync_game(room)
+
+
+def _fed_execute_game_cmd(
+    _from_peer: str,
+    room: str,
+    player_node: str,
+    name: str,
+    sub: str,
+    rest: str,
+) -> None:
+    local = _local_node_id()
+    sub = sub.lower()
+    with lock:
+        if room_game_authority.get(room, local) != local:
+            return
+
+    if sub == "join":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                return
+            actor = _fed_resolve_actor(room, game, player_node, name, sub)
+            if isinstance(actor, FederatedSeat):
+                priv, bcast, _ = game.try_join(actor, name)
+            else:
+                resumed = _resume_same_account_seat_locked(room, game, actor, name)
+                if resumed:
+                    priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
+                    bcast = [f"{name} 从另一终端接管了本局操作。"]
+                else:
+                    priv, bcast, _ = game.try_join(actor, name)
+        _finish_game_action(room, game, actor, priv, bcast, False)
+        return
+
+    with lock:
+        game = room_games.get(room)
+        actor = _fed_resolve_actor(room, game, player_node, name, sub) if game else None
+
+    if sub == "move":
+        if game is None or actor is None:
+            return
+        try:
+            with lock:
+                resumed = _resume_same_account_seat_locked(room, game, actor, name)
+                priv, bcast, ended = game.try_move(actor, rest)
+                if not ended:
+                    extra = _nudge_game_bots_locked(game)
+                    if extra:
+                        bcast = list(bcast) + extra
+                        ended = getattr(game, "state", "ended") == "ended"
+        except Exception as e:
+            print(f"fed /game move failed: {e!r}")
+            return
+        if resumed:
+            priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
+        _finish_game_action(room, game, actor, priv, bcast, ended)
+        return
+
+    if sub == "resign":
+        if game is None or actor is None:
+            return
+        with lock:
+            resumed = _resume_same_account_seat_locked(room, game, actor, name)
+            priv, bcast, ended = game.resign(actor, name)
+            if not ended:
+                extra = _nudge_game_bots_locked(game)
+                if extra:
+                    bcast = list(bcast) + extra
+                    ended = getattr(game, "state", "ended") == "ended"
+        if resumed:
+            priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
+        _finish_game_action(room, game, actor, priv, bcast, ended)
+        return
+
+    if sub == "undo":
+        if game is None or actor is None or not hasattr(game, "request_undo"):
+            return
+        action = rest.lower()
+        with lock:
+            if action in ("accept", "同意", "ok", "yes"):
+                priv, bcast, _ = game.accept_undo(actor)
+            elif action in ("reject", "拒绝", "no"):
+                priv, bcast, _ = game.reject_undo(actor)
+            elif action in ("cancel", "取消"):
+                priv, bcast, _ = game.cancel_undo(actor)
+            else:
+                priv, bcast, _ = game.request_undo(actor)
+        _finish_game_action(room, game, actor, priv, bcast, False, send_boards=bool(bcast))
+        return
+
+    if sub == "abort":
+        if game is None or actor is None:
+            return
+        with lock:
+            resumed = _resume_same_account_seat_locked(room, game, actor, name)
+            priv, bcast, _ = game.abort(actor, name)
+        if resumed:
+            priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
+        _finish_game_action(room, game, actor, priv, bcast, False, send_boards=False)
+        return
+
+    if sub == "end":
+        if game is None:
+            return
+        with lock:
+            owner_conn = room_owners.get(room)
+            owner_name = clients[owner_conn]["name"] if owner_conn in clients else ""
+            if owner_name.strip().lower() != name.strip().lower():
+                return
+        with lock:
+            room_games.pop(room, None)
+        broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
+        _federation_notify_game_end(room)
+        _persist_after_game_change()
+
+
+def _should_forward_game(room: str, sub: str) -> bool:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return False
+    auth = room_game_authority.get(room)
+    if not auth:
+        return False
+    return auth != hub.node_id and sub in (
+        "join",
+        "move",
+        "resign",
+        "undo",
+        "abort",
+        "end",
+    )
+
+
+def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
+    broadcast_room(room, msg, via_federation_from=from_peer)
+
+
+def _fed_on_join_notice(room: str, msg: bytes) -> None:
+    broadcast_room(room, msg, skip_federation=True)
+
+
+def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    for peer_conn, _ in targets:
+        send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+
+
+def _ensure_federation_hub() -> None:
+    global _fed_hub
+    if _fed_hub is not None:
+        return
+    _fed_hub = federation.init_hub(
+        PORT,
+        lock,
+        _fed_on_room_msg,
+        _fed_on_join_notice,
+        _fed_on_pm,
+        _fed_snapshot_clients,
+        _fed_on_game_sync,
+        _fed_on_game_end,
+        _fed_execute_game_cmd,
+        _fed_on_game_priv,
+    )
+    _fed_hub.start()
+
+
+def broadcast_room(
+    room: str,
+    msg: bytes,
+    exclude_conn=None,
+    *,
+    skip_federation: bool = False,
+    via_federation_from: Optional[str] = None,
+) -> None:
     with lock:
         targets = [
             c
@@ -1772,6 +2114,10 @@ def broadcast_room(room: str, msg: bytes, exclude_conn=None) -> None:
             dead.append(c)
     for c in dead:
         remove_client(c)
+    if not skip_federation:
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            hub.broadcast_room(room, msg, exclude_node=via_federation_from)
 
 
 def remove_client(conn) -> None:
@@ -1873,9 +2219,20 @@ def remove_client(conn) -> None:
                             )
                         )
             _drop_game_if_room_empty_locked(room)
+    hub = federation.get_hub()
     for room in joined_rooms:
+        same_local = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
+        remote_same = (
+            hub is not None
+            and hub.enabled
+            and hub.same_name_in_room(room, name, bool(same_local))
+        )
+        if same_local or remote_same:
+            continue
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
         broadcast_room(room, leave_msg)
+        if hub is not None and hub.enabled:
+            hub.notify_leave(name, room)
     for room, lines in game_notices:
         broadcast_game(room, lines)
     try:
@@ -1932,6 +2289,9 @@ def handle_command(conn, payload: str) -> None:
                 f"[+] {name} joined #{new_room}\n".encode("utf-8"),
                 exclude_conn=conn,
             )
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled:
+                hub.notify_join(name, new_room)
             send_line(
                 conn,
                 f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
@@ -1975,6 +2335,9 @@ def handle_command(conn, payload: str) -> None:
                 send_line(conn, f"[*] Already active in #{target_room}\n")
                 return
             clients[conn]["current_room"] = target_room
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            hub.notify_switch(name, target_room)
         send_line(conn, f"[*] Switched from #{active} to #{target_room}\n")
         send_room_announcement_preview(conn, target_room)
         return
@@ -2068,10 +2431,19 @@ def handle_command(conn, payload: str) -> None:
                 clients[conn]["current_room"] = switched_to
         if game_bcast:
             broadcast_game(target_room, game_bcast)
-        broadcast_room(
-            target_room,
-            f"[!] {name} left #{target_room}\n".encode("utf-8"),
+        hub = federation.get_hub()
+        remote_same = (
+            hub is not None
+            and hub.enabled
+            and hub.same_name_in_room(target_room, name, bool(same_name_peer))
         )
+        if not same_name_peer and not remote_same:
+            broadcast_room(
+                target_room,
+                f"[!] {name} left #{target_room}\n".encode("utf-8"),
+            )
+            if hub is not None and hub.enabled:
+                hub.notify_leave(name, target_room)
         if switched_to:
             send_line(conn, f"[*] Left #{target_room}, switched to #{switched_to}\n")
         else:
@@ -2094,6 +2466,10 @@ def handle_command(conn, payload: str) -> None:
             members = sorted(
                 clients[c]["name"] for c in rooms.get(r, ()) if c in clients
             )
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            remote = hub.names_in_room(r)
+            members = sorted(set(members) | set(remote))
         send_line(
             conn,
             f"[*] #{r} ({len(members)}): {', '.join(members) if members else '(empty)'}\n",
@@ -2212,6 +2588,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     sub, _, rest = raw.partition(" ")
     sub = sub.lower()
     rest = rest.strip()
+
+    if _should_forward_game(room, sub):
+        hub = federation.get_hub()
+        auth = room_game_authority.get(room, "")
+        if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
+            return
+        send_line(conn, "[*] 无法连接对局所在节点，请稍后重试。\n")
+        return
 
     if sub == "list":
         with lock:
@@ -2344,6 +2728,9 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 send_line(conn, f"[*] 无法开局：{e}\n")
                 return
             room_games[room] = new_game
+            hub = federation.get_hub()
+            if hub is not None:
+                room_game_authority[room] = hub.node_id
         seat = getattr(new_game, "first_seat_desc", "第一席")
         join_hint = getattr(
             new_game,
@@ -2356,6 +2743,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         )
         send_oriented_boards(room, new_game)
         _persist_after_game_change()
+        _federation_sync_game(room)
         return
 
     if sub == "join":
@@ -2370,10 +2758,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 bcast = [f"{name} 从另一终端接管了本局操作。"]
             else:
                 priv, bcast, _ = game.try_join(conn, name)
-        send_game_private(conn, room, priv)
-        broadcast_game(room, bcast)
-        send_oriented_boards(room, game)
-        _persist_after_game_change()
+        _finish_game_action(room, game, conn, priv, bcast, False)
         return
 
     if sub == "seats":
@@ -2430,18 +2815,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             return
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
-        if bcast and hasattr(game, "finalize_broadcast"):
-            bcast = game.finalize_broadcast(bcast)
-        send_game_private(conn, room, priv)
-        drain = getattr(game, "drain_extra_privates", None)
-        if drain:
-            for peer_conn, extra in drain():
-                send_game_private(peer_conn, room, extra)
-        broadcast_game(room, bcast)
-        if ended or getattr(game, "send_view_on_move", True):
-            send_oriented_boards(room, game)
-        send_sanguo_hand_views(room, game)
-        _persist_after_game_change()
+        _finish_game_action(room, game, conn, priv, bcast, ended)
         return
 
     if sub == "resign":
@@ -2459,11 +2833,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
-        send_game_private(conn, room, priv)
-        broadcast_game(room, bcast)
-        if ended or getattr(game, "send_view_on_move", True):
-            send_oriented_boards(room, game)
-        _persist_after_game_change()
+        _finish_game_action(room, game, conn, priv, bcast, ended)
         return
 
     if sub == "undo":
@@ -2487,15 +2857,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 priv, bcast, _ = game.cancel_undo(conn)
             else:
                 priv, bcast, _ = game.request_undo(conn)
-        send_game_private(conn, room, priv)
-        drain = getattr(game, "drain_extra_privates", None)
-        if drain:
-            for peer_conn, extra in drain():
-                send_game_private(peer_conn, room, extra)
-        broadcast_game(room, bcast)
-        if bcast and hasattr(game, "supports_undo"):
-            send_oriented_boards(room, game)
-        _persist_after_game_change()
+        _finish_game_action(room, game, conn, priv, bcast, False, send_boards=bool(bcast))
         return
 
     if sub == "abort":
@@ -2508,9 +2870,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             priv, bcast, _ = game.abort(conn, name)
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
-        send_game_private(conn, room, priv)
-        broadcast_game(room, bcast)
-        _persist_after_game_change()
+        _finish_game_action(room, game, conn, priv, bcast, False, send_boards=False)
         return
 
     if sub == "pgn":
@@ -2542,6 +2902,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 room_owners[room] = conn
             room_games.pop(room, None)
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
+        _federation_notify_game_end(room)
         _persist_after_game_change()
         return
 
@@ -2599,6 +2960,7 @@ def handle_client(conn, addr) -> None:
         restored_from_session = False
         resumed_game_rooms: list[str] = []
         active_game_lines: list[str] = []
+        hub = federation.get_hub()
         with lock:
             same_name_peers = [
                 c
@@ -2622,6 +2984,11 @@ def handle_client(conn, addr) -> None:
                 if isinstance(previous_active, str) and previous_active:
                     active_room = previous_active
                 restored_from_session = True
+            if hub is not None and hub.enabled:
+                inherited_rooms.update(hub.rooms_for_name(name))
+                fed_active = hub.active_room_for_name(name)
+                if fed_active and active_room == DEFAULT_ROOM:
+                    active_room = fed_active
             inherited_rooms.add(DEFAULT_ROOM)
             if active_room not in inherited_rooms:
                 inherited_rooms.add(active_room)
@@ -2657,12 +3024,20 @@ def handle_client(conn, addr) -> None:
 
         join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
         broadcast_room(active_room, join_msg, exclude_conn=conn)
+        if hub is not None and hub.enabled:
+            for room in inherited_rooms:
+                hub.notify_join(name, room)
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
             f"/names /rooms /join /switch /msg /part /announce /game /news /dict /clear /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
+        if hub is not None and hub.enabled and hub.peer_count > 0:
+            send_line(
+                conn,
+                f"[*] 联邦网络已连接 {hub.peer_count} 个节点（同名用户/房间跨服合并）。\n",
+            )
         if same_name_peers:
             send_line(conn, "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n")
         elif restored_from_session:
@@ -2710,6 +3085,7 @@ def handle_client(conn, addr) -> None:
 def run_server() -> int:
     global _listen_socket, _shutdown_requested, _shutting_down
     _load_persisted_sessions()
+    _ensure_federation_hub()
 
     def _handle_shutdown_signal(signum, _frame) -> None:
         global _shutting_down, _shutdown_requested
@@ -2736,7 +3112,11 @@ def run_server() -> int:
     s.bind(("0.0.0.0", PORT))
     s.listen()
     _listen_socket = s
-    print(f"chat server started on port {PORT} (default room #{DEFAULT_ROOM})")
+    fed = federation.get_hub()
+    fed_note = ""
+    if fed is not None and fed.enabled:
+        fed_note = f", federation port {fed.port}"
+    print(f"chat server started on port {PORT} (default room #{DEFAULT_ROOM}){fed_note}")
 
     while not _shutdown_requested:
         try:
