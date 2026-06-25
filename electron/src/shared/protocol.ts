@@ -18,6 +18,17 @@ export interface ChatMessage {
   hidden?: boolean;
 }
 
+export interface ChatHistoryIdentity {
+  host: string;
+  chatPort?: number;
+  user: string;
+}
+
+export interface ChatHistorySnapshot {
+  rooms: Record<string, ChatMessage[]>;
+  roomNames?: string[];
+}
+
 export interface RoomInfo {
   name: string;
   isDefault: boolean;
@@ -104,6 +115,9 @@ export const IPC_CHANNELS = {
   SHAKE_WINDOW: 'chat:shake-window',
   SAVE_CONFIG: 'config:save',
   LOAD_CONFIG: 'config:load',
+  LOAD_CHAT_HISTORY: 'history:load',
+  SAVE_CHAT_HISTORY: 'history:save',
+  FLUSH_CHAT_HISTORY: 'history:flush',
 
   // Monitor
   GET_PROCESSES: 'monitor:get-processes',

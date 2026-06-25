@@ -551,6 +551,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   const katagoCacheRef = useRef<Map<string, AdvisorMove[]>>(new Map());
   const katagoEverOkRef = useRef(false);
   const katagoWarmupRef = useRef<{ started: boolean; ok: boolean }>({ started: false, ok: false });
+  const katagoPendingKeyRef = useRef('');
   const fallbackMoves = useMemo(
     () => (mySideNum ? fallbackGoSuggestions(matrix, mySideNum, koPoint) : []),
     [matrix, mySideNum, koPoint],
@@ -614,6 +615,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       setKataGoMoves([]);
       setKataGoError('');
       setKataGoPending(false);
+      katagoPendingKeyRef.current = '';
       setKataGoStartedAt(0);
       return;
     }
@@ -627,6 +629,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       setKataGoPending(false);
       setKataGoMoves([]);
       setKataGoError('');
+      katagoPendingKeyRef.current = '';
       setKataGoStartedAt(0);
       return;
     }
@@ -643,12 +646,14 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       return;
     }
 
-    if (katagoOkKeyRef.current === key || katagoPending) return;
+    if (katagoOkKeyRef.current === key) return;
+    if (katagoPending && katagoPendingKeyRef.current === key) return;
     if (katagoFailCooldownRef.current.key === key && Date.now() < katagoFailCooldownRef.current.until) return;
 
     const seq = katagoSeqRef.current + 1;
     katagoSeqRef.current = seq;
     setKataGoPending(true);
+    katagoPendingKeyRef.current = key;
     setKataGoStartedAt(Date.now());
     setKataGoStatusTick(Date.now());
     setKataGoError('');
@@ -722,6 +727,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       .finally(() => {
         if (katagoSeqRef.current === seq) {
           setKataGoPending(false);
+          katagoPendingKeyRef.current = '';
           setKataGoStartedAt(0);
         }
       });

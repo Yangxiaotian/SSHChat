@@ -63,6 +63,70 @@ def _dan_level(rating: int) -> str:
     return "12级"
 
 
+_GOMOKU_CULTIVATION_LEVELS: tuple[tuple[int, str], ...] = (
+    (4200, "道祖"),
+    (4000, "大罗大圆满"),
+    (3880, "大罗后期"),
+    (3760, "大罗中期"),
+    (3640, "大罗初期"),
+    (3520, "太乙大圆满"),
+    (3400, "太乙后期"),
+    (3280, "太乙中期"),
+    (3160, "太乙初期"),
+    (3040, "金仙大圆满"),
+    (2920, "金仙后期"),
+    (2800, "金仙中期"),
+    (2680, "金仙初期"),
+    (2560, "真仙大圆满"),
+    (2480, "真仙后期"),
+    (2400, "真仙中期"),
+    (2320, "真仙初期"),
+    (2240, "渡劫大圆满"),
+    (2160, "渡劫后期"),
+    (2080, "渡劫中期"),
+    (2000, "渡劫初期"),
+    (1920, "大乘大圆满"),
+    (1860, "大乘后期"),
+    (1800, "大乘中期"),
+    (1740, "大乘初期"),
+    (1680, "合体大圆满"),
+    (1620, "合体后期"),
+    (1560, "合体中期"),
+    (1500, "合体初期"),
+    (1440, "炼虚大圆满"),
+    (1380, "炼虚后期"),
+    (1320, "炼虚中期"),
+    (1260, "炼虚初期"),
+    (1200, "化神大圆满"),
+    (1160, "化神后期"),
+    (1120, "化神中期"),
+    (1080, "化神初期"),
+    (1040, "元婴大圆满"),
+    (1000, "元婴后期"),
+    (960, "元婴中期"),
+    (920, "元婴初期"),
+    (880, "结丹大圆满"),
+    (840, "结丹后期"),
+    (800, "结丹中期"),
+    (760, "结丹初期"),
+    (720, "筑基大圆满"),
+    (680, "筑基后期"),
+    (640, "筑基中期"),
+    (600, "筑基初期"),
+    (560, "炼气大圆满"),
+    (520, "炼气后期"),
+    (480, "炼气中期"),
+    (0, "炼气初期"),
+)
+
+
+def _gomoku_cultivation_level(rating: int) -> str:
+    for threshold, level in _GOMOKU_CULTIVATION_LEVELS:
+        if rating >= threshold:
+            return level
+    return "练气初期"
+
+
 def _fide_k(entry: dict[str, Any]) -> int:
     games = int(entry.get("games", 0))
     rating = int(entry.get("rating", 1200))
@@ -90,7 +154,7 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "scheme": "Elo",
         "initial": 1200,
         "floor": 1000,
-        "level_of": _dan_level,
+        "level_of": _gomoku_cultivation_level,
         "k_factor": _elo_k,
     },
     "go": {
@@ -101,6 +165,13 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "k_factor": _elo_k,
     },
     "xiangqi": {
+        "scheme": "Elo",
+        "initial": 1200,
+        "floor": 1000,
+        "level_of": _dan_level,
+        "k_factor": _elo_k,
+    },
+    "doushou": {
         "scheme": "Elo",
         "initial": 1200,
         "floor": 1000,

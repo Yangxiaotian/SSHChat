@@ -4,6 +4,7 @@ export type GameKind =
   | 'gomoku'
   | 'go'
   | 'xiangqi'
+  | 'doushou'
   | 'sanguo'
   | 'werewolf'
   | 'holdem'

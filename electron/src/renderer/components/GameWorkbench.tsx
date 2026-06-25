@@ -4,6 +4,7 @@ import ChessPanel from './games/ChessPanel';
 import GomokuPanel from './games/GomokuPanel';
 import GoPanel from './games/GoPanel';
 import XiangqiPanel from './games/XiangqiPanel';
+import DoushouPanel from './games/DoushouPanel';
 import HoldemPanel from './games/HoldemPanel';
 import ZjhPanel from './games/ZjhPanel';
 import SanguoPanel from './games/SanguoPanel';
@@ -19,6 +20,7 @@ function detectGameKind(text: string): GameKind {
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
   if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
   if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
+  if (t.includes('doushou') || t.includes('jungle') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
   if (t.includes('holdem') || t.includes('texas') || t.includes('poker') || t.includes('德州')) return 'holdem';
@@ -32,6 +34,7 @@ const cnToGameKind: Record<string, GameKind> = {
   '五子棋': 'gomoku',
   '围棋': 'go',
   '中国象棋': 'xiangqi',
+  '斗兽棋': 'doushou',
   '三国杀': 'sanguo',
   '狼人杀': 'werewolf',
   '德州扑克': 'holdem',
@@ -40,7 +43,7 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['chess', 'gomoku', 'go', 'xiangqi', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '围棋', '中国象棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['chess', 'gomoku', 'go', 'xiangqi', 'doushou', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '围棋', '中国象棋', '斗兽棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -87,6 +90,8 @@ function isLikelyGameLine(line: string): boolean {
   if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
   if (/^(红|黑|白)[:：]\s*\S+/.test(line.trim())) return true;
   if (/^红[:：]\s*\S+\s+黑[:：]\s*\S+/.test(line.trim())) return true;
+  if (/^doushou\s+对局|斗兽棋棋盘/.test(line.trim())) return true;
+  if (/^\s*[1-9]\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)(?:\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)){6}\s*$/.test(line)) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
   if (/^上一步[:：]/.test(line.trim())) return true;
@@ -98,6 +103,7 @@ function isLikelyGameLine(line: string): boolean {
     'gomoku',
     'go',
     'xiangqi',
+    'doushou',
     'holdem',
     'zjh',
     'niutou',
@@ -127,6 +133,7 @@ function isLikelyGameLine(line: string): boolean {
     '五子棋',
     '围棋',
     '中国象棋',
+    '斗兽棋',
     '德州扑克',
     '炸金花',
     '牛头王',
@@ -171,14 +178,17 @@ function hasFreshNoActiveGame(allLines: string[]): boolean {
 }
 
 function gameLabel(game: GameKind, locale: Locale): string {
+  if (game === 'doushou') return locale === 'zh' ? '斗兽棋' : 'Jungle';
   return translate(locale, `game.names.${game}`);
 }
 
 function gameMoveHint(game: GameKind, locale: Locale): string {
+  if (game === 'doushou') return locale === 'zh' ? '先点自己的动物，再点目标格移动或吃子。' : 'Select your animal, then select a target square.';
   return translate(locale, `game.hints.${game}`);
 }
 
 function gameTip(game: GameKind, locale: Locale): string {
+  if (game === 'doushou') return locale === 'zh' ? '斗兽棋：鼠可入河，狮虎可跳河，进入对方兽穴获胜。' : 'Jungle: rats enter rivers, lions/tigers jump rivers, entering enemy den wins.';
   return translate(locale, `game.tips.${game}`);
 }
 
@@ -402,7 +412,7 @@ function sanitizeBoard(raw: string): string {
 }
 
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode, status, users, nickname, locale } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, users, nickname, locale, setComposerText } = useChatStore();
   const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
@@ -545,9 +555,10 @@ export default function GameWorkbench() {
           </div>
 
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
-          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} />}
+          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} onSoulDraft={setComposerText} />}
           {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c, locale))} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc, locale))} />}
+          {game === 'doushou' && <DoushouPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.doushouCoordMove(fr, fc, tr, tc, locale))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}

@@ -9,6 +9,9 @@ if (!(window as any).api) {
   (window as any).api = {
     loadConfig: async () => null,
     saveConfig: async () => true,
+    loadChatHistory: async () => ({ rooms: {} }),
+    saveChatHistory: async () => true,
+    flushChatHistory: () => true,
     connect: async () => ({
       success: false,
       error: isElectronRuntime

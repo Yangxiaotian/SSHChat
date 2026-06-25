@@ -16,21 +16,80 @@ from typing import Any, Optional
 LIBRARY_EXTENSIONS = {".txt", ".pdf", ".epub"}
 LIBRARY_PAGE_CHARS = int(os.environ.get("SSHCHAT_LIBRARY_PAGE_CHARS", "2500"))
 LIBRARY_WRAP_WIDTH = int(os.environ.get("SSHCHAT_LIBRARY_WRAP", "88"))
+# Many mobile SSH terminals wrap by UTF-8 bytes (~80) not Unicode columns; keep
+# each emitted line under this byte budget so CJK chars are not split mid-codepoint.
+LIBRARY_WRAP_BYTES = int(os.environ.get("SSHCHAT_LIBRARY_WRAP_BYTES", "78"))
 LIBRARY_LIST_PREVIEW_CHARS = int(os.environ.get("SSHCHAT_LIBRARY_PREVIEW_CHARS", "400"))
+
+_BLOCK_HTML_TAGS = frozenset({
+    "p",
+    "div",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "aside",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "tr",
+    "table",
+    "blockquote",
+    "pre",
+    "figure",
+    "figcaption",
+    "dd",
+    "dt",
+})
+_SKIP_HTML_TAGS = frozenset({"script", "style", "head", "meta", "link", "svg"})
 
 
 class _HtmlTextExtractor(HTMLParser):
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(convert_charrefs=True)
         self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        lowered = tag.lower()
+        if lowered in _SKIP_HTML_TAGS:
+            self._skip_depth += 1
+        elif lowered in _BLOCK_HTML_TAGS:
+            self._append_break()
+        elif lowered == "br":
+            self._append_break()
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if lowered in _SKIP_HTML_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+        elif lowered in _BLOCK_HTML_TAGS:
+            self._append_break()
+
+    def _append_break(self) -> None:
+        if self._parts and not self._parts[-1].endswith("\n"):
+            self._parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        text = data.strip()
-        if text:
-            self._parts.append(text)
+        if self._skip_depth or not data:
+            return
+        if data.isspace():
+            if self._parts and not self._parts[-1].endswith((" ", "\n")):
+                self._parts.append(" ")
+            return
+        self._parts.append(data)
 
     def get_text(self) -> str:
-        return "\n".join(self._parts)
+        text = "".join(self._parts)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r" {2,}", " ", text)
+        return text.strip()
 
 
 def _html_to_text(html: str) -> str:
@@ -493,10 +552,35 @@ def search_book(
     return results
 
 
+def _wrap_page_lines_utf8_bytes(text: str, max_bytes: int) -> list[str]:
+    max_bytes = max(24, int(max_bytes))
+    lines: list[str] = []
+    for paragraph in re.split(r"\n+", text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        current: list[str] = []
+        current_bytes = 0
+        for ch in paragraph:
+            ch_bytes = len(ch.encode("utf-8"))
+            if current and current_bytes + ch_bytes > max_bytes:
+                lines.append("".join(current))
+                current = [ch]
+                current_bytes = ch_bytes
+            else:
+                current.append(ch)
+                current_bytes += ch_bytes
+        if current:
+            lines.append("".join(current))
+    return lines or ["（空白页）"]
+
+
 def wrap_page_lines(text: str, width: int = LIBRARY_WRAP_WIDTH) -> list[str]:
     text = (text or "").strip()
     if not text:
         return ["（空白页）"]
+    if LIBRARY_WRAP_BYTES > 0:
+        return _wrap_page_lines_utf8_bytes(text, LIBRARY_WRAP_BYTES)
     return textwrap.wrap(
         text,
         width=max(40, width),

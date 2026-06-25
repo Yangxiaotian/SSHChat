@@ -1,5 +1,13 @@
 # SSHChat
 
+## Update (2026-06 联邦聊天室)
+
+- **多服务器互联（联邦）**：多台独立部署的 SSHChat 可通过 `admin-add-peer.sh` 交换联邦公钥，组成更大的聊天网络。
+- **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同，视为同一人在多端登录（房间同步、不误报离线）。
+- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名跨节点合并；文字聊天、`/names`、`/msg` 私聊互通。
+- **跨服对局**：`/game` 由开局节点同步局面，远端玩家可 `/game join`、`/game move` 等。
+- 详见下方 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**；管理员可选步骤见 **[管理员怎么做 → 4. 联邦扩网](#4-联邦扩网可选)**。
+
 ## Update (2026-05-21 UI/UX)
 
 - 游戏工作台新增“智能行动提示卡”：
@@ -63,6 +71,8 @@
 
 适合想**少留一条「聊天软件」痕迹**、又愿意自己或朋友有一台服务器的人。聊天走你熟悉的密钥登录，没有单独的聊天账号密码。
 
+多台服务器之间还可通过 **联邦** 合并成更大的聊天网络（同名用户、同名房间跨服互通），见 [联邦网络](#联邦网络多服务器互联)。
+
 ---
 
 ## 用户怎么用（最简单）
@@ -110,6 +120,10 @@ sudo /opt/sshchat/admin-add-user.sh 用户名 ssh-ed25519 AAAA... 备注可选
 
 除 SSH 端口外，若聊天服务监听非本机回环，可能还需放行 **`sshchat.env` 里配置的聊天端口**（默认常见为 `12345`，与 SSH 端口不是同一个）。云厂商安全组里一并放行。
 
+### 4. 联邦扩网（可选）
+
+若你有**两台及以上** SSHChat 服务器，希望用户在不同机器上登录后仍处在**同一套聊天室**（同名房间合并、跨服私聊、跨服对局），在每台机器上各部署完成后，用 `admin-add-peer.sh` 互相登记联邦公钥。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
+
 **升级：** 在新版本仓库里再执行一次，**`--prefix` 与当初相同**，一般要加 **`--keep-env`** 保留你已改过的端口等配置：
 
 ```bash
@@ -135,6 +149,66 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
   ```bash
   sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-user-game-rating alice gomoku
   ```
+
+---
+
+## 联邦网络（多服务器互联）
+
+多台独立部署的 SSHChat 可通过 **SSH 互信** 组成更大的聊天网络。典型场景：服务器 A 上的 `userA`、服务器 B 上的 `userB` 各自用 `deploy.sh` 部署；双方把对方的 **联邦公钥** 登记到本机后，两台机器的聊天室在逻辑上合并。
+
+**行为约定：**
+
+- **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同（如都叫 `alice`），视为同一人在多端登录；会同步房间列表，离开/加入时不会误报「离线」（只要另一端还在线）。
+- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名在全网共享；任一节点发出的房间消息会广播到所有已连接节点上的同名房间。
+- **私聊与 /names**：`/msg alice …` 可投递到联邦网络中的在线 `alice`；`/names` 会列出当前房间内包括远端节点在内的昵称。
+
+**互信步骤（两台机器各执行一次，交换公钥）：**
+
+1. 升级部署（会生成 `federation/id_ed25519` 联邦密钥与 `sshchat-federation` 系统用户）：
+
+   ```bash
+   sudo ./deploy.sh --prefix /opt/sshchat --keep-env
+   ```
+
+2. 在 **服务器 A** 上登记 **服务器 B**（把 B 的联邦公钥与地址写入本机）：
+
+   ```bash
+   sudo /opt/sshchat/admin-add-peer.sh server-b b.example.com "$(cat /path/to/b-federation.pub)"
+   ```
+
+3. 在 **服务器 B** 上对称操作，使用 A 的公钥：
+
+   ```bash
+   sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /opt/sshchat/federation/id_ed25519.pub)"
+   ```
+
+4. 重启聊天服务（`systemctl restart sshchat` 或重新运行 `server.sh`）。
+
+5. **防火墙（若节点间无法直连）**：除 SSH 外，确保各节点能访问对端的 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1，如 `12346`），或仅依赖 SSH 隧道（`ssh -W`，默认走 22 端口，通常无需额外放行联邦端口）。
+
+脚本会：
+
+- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（强制命令走 `federation-bridge.sh` → 本机联邦端口）；
+- 更新 `federation/peers.json`，由本机主动发起 SSH 隧道（`ssh -W`）连到对方联邦端口。
+
+**查看本机联邦公钥：**
+
+```bash
+cat /opt/sshchat/federation/id_ed25519.pub
+```
+
+**环境变量（`sshchat.env`）：**
+
+| 变量 | 含义 |
+|------|------|
+| `SSHCHAT_NODE_ID` | 本节点唯一名（默认主机名） |
+| `SSHCHAT_FEDERATION_PORT` | 联邦 TCP 端口（默认聊天端口 +1） |
+| `SSHCHAT_FEDERATION_DISABLE=1` | 关闭联邦 |
+| `SSHCHAT_FEDERATION_PEERS` | 可选，覆盖 `federation/peers.json` 路径 |
+
+**说明：** 房间小游戏（`/game`）在联邦网络中由开局节点作为权威主机同步局面；跨服玩家以联邦席位入座，可正常 `/game join`、`/game move` 等。棋类积分仍按用户名在本机持久化。
+
+普通用户若要在多台服务器使用同一身份，请在各台机器上用 `admin-add-user.sh` 创建 **相同用户名** 并登记各自的 SSH 公钥（或同一公钥），再配合上述联邦互信即可。
 
 ---
 
@@ -403,6 +477,8 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 |------|------|
 | `deploy.sh` | 一键部署 |
 | `admin-add-user.sh` | 添加用户与公钥 |
+| `admin-add-peer.sh` | 登记联邦互信节点（多服扩网） |
+| `federation.py` / `federation-bridge.sh` | 服务器间联邦协议与 SSH 桥接 |
 | `server.py` / `client.py` | 服务端与终端客户端 |
 | `games.py` | 房间小游戏逻辑 |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |

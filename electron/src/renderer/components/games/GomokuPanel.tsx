@@ -1,10 +1,12 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { formatGomokuSoulDraft } from './gomokuSoul';
 
 type Props = {
   disabled: boolean;
   nickname: string;
   boardText: string;
   onPick: (row: number, col: number) => void;
+  onSoulDraft?: (text: string) => void;
 };
 
 type Stone = '.' | '#' | 'o';
@@ -58,6 +60,14 @@ type Threat = {
 };
 
 type Move = { r: number; c: number };
+
+type ThreatChainAnalysis = {
+  move: Move;
+  score: number;
+  reason: string;
+  style: string;
+  line?: string;
+};
 
 type Suggestion = {
   row: number;
@@ -153,6 +163,7 @@ const OFFTURN_NODE_BUDGET = 42000;
 const OFFTURN_MAX_DEPTH = 8;
 const ANALYSIS_STABLE_DELAY_MS = 140;
 const ANALYSIS_CACHE_LIMIT = 80;
+const RAPFI_ENABLE_PONDER = false;
 const OPENING_VARIATION_ANCHORS: Array<[number, number]> = [
   [8, 8], [8, 7], [7, 8], [8, 9], [9, 8],
   [7, 7], [7, 9], [9, 7], [9, 9],
@@ -410,7 +421,9 @@ function countDir(board: number[][], r: number, c: number, dr: number, dc: numbe
 function isWinByPlaced(board: number[][], r: number, c: number, side: number): boolean {
   for (const [dr, dc] of DIRS) {
     const total = 1 + countDir(board, r, c, dr, dc, side) + countDir(board, r, c, -dr, -dc, side);
-    if (total >= 5) return true;
+    // Server-side Renju rule: black only wins with exact five; overline is forbidden.
+    // White has no overline restriction and wins with five or more.
+    if (side === 1 ? total === 5 : total >= 5) return true;
   }
   return false;
 }
@@ -474,7 +487,11 @@ function urgentDefenseSeverity(t: Threat): number {
   if (t.five > 0) return 5;
   if (t.openFour > 0) return 4;
   if (t.closedFour > 0 || t.brokenFour > 0) return 3;
-  if (t.forks > 0 && t.openThree + t.brokenThree >= 2) return 2;
+  const fourPressure = t.openFour * 2 + t.closedFour + t.brokenFour;
+  const threePressure = t.openThree + t.brokenThree;
+  if (fourPressure >= 2) return 4; // 双四/多冲四
+  if (fourPressure >= 1 && threePressure >= 1) return 3; // 四三
+  if (t.forks > 0 || threePressure >= 2) return 2; // 双三/多线三
   return 0;
 }
 
@@ -488,7 +505,15 @@ function urgentDefenseLabel(t: Threat): { style: string; reason: string } {
   if (t.closedFour > 0 || t.brokenFour > 0) {
     return { style: '强制防守', reason: '对手三连/跳三已可转冲四，不能继续无脑走自己。' };
   }
-  return { style: '反制双威胁', reason: '对手可形成双三/多线威胁，先切断关键连接点。' };
+  const fourPressure = t.openFour * 2 + t.closedFour + t.brokenFour;
+  const threePressure = t.openThree + t.brokenThree;
+  if (fourPressure >= 2) {
+    return { style: '反制四四', reason: '对手可形成双四/多冲四，一手难防，必须先切断。' };
+  }
+  if (fourPressure >= 1 && threePressure >= 1) {
+    return { style: '反制四三', reason: '对手可形成四三强制杀，必须先破坏转换点。' };
+  }
+  return { style: '反制三三', reason: '对手可形成双三/多线三，先切断关键连接点。' };
 }
 
 function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | null {
@@ -496,6 +521,32 @@ function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | 
   if (immediateWinningPoints(board, mySide).length > 0) return null;
 
   const opp = -mySide;
+  const forcingIntersections = defenseIntersectionAgainstForcingStarts(board, opp, 4);
+  if (forcingIntersections.length > 0) {
+    const move = forcingIntersections[0];
+    return {
+      row: move.r + 1,
+      col: move.c + 1,
+      score: Number.MAX_SAFE_INTEGER - 1,
+      reason: '对手已经形成双三/多线做杀骨架，先落在强制线交集处打断后续杀链。',
+      style: '反制双三做杀',
+    };
+  }
+
+  const preemptive = analyzePreemptiveDefenseMoves(board, mySide, 4);
+  if (preemptive.length > 0) {
+    const p = preemptive[0];
+    if (p.score >= 520_000) {
+      return {
+        row: p.move.r + 1,
+        col: p.move.c + 1,
+        score: Number.MAX_SAFE_INTEGER - 2,
+        reason: p.reason,
+        style: p.style,
+      };
+    }
+  }
+
   const candidates: Move[] = [];
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
@@ -510,6 +561,16 @@ function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | 
     const threat = analyzeThreatAt(board, mv.r, mv.c, opp);
     const severity = urgentDefenseSeverity(threat);
     if (severity <= 0) continue;
+    const fourPressure = threat.openFour * 2 + threat.closedFour + threat.brokenFour;
+    const threePressure = threat.openThree + threat.brokenThree;
+    const forkPressureBonus =
+      fourPressure >= 2
+        ? 5_000_000
+        : fourPressure >= 1 && threePressure >= 1
+          ? 3_200_000
+          : threePressure >= 2 || threat.forks > 0
+            ? 1_800_000
+            : 0;
 
     board[mv.r][mv.c] = mySide;
     const remainingWins = immediateWinningPointsScoped(board, opp, 24).length;
@@ -519,6 +580,7 @@ function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | 
 
     const score =
       severity * 10_000_000 +
+      forkPressureBonus +
       threatScore(threat) * 8 +
       counterShape * 800 -
       remainingWins * 2_200_000 -
@@ -534,7 +596,7 @@ function findUrgentDefenseMove(board: number[][], mySide: number): Suggestion | 
     row: best.move.r + 1,
     col: best.move.c + 1,
     score: Number.MAX_SAFE_INTEGER - 1,
-    reason: `${label.reason}（安全兜底已覆盖引擎原始建议）`,
+    reason: `${label.reason}（Rapfi未返回时由内置兜底提供）`,
     style: label.style,
   };
 }
@@ -1154,6 +1216,125 @@ function setupKillMoves(board: number[][], side: number, probeLimit = 14): Move[
   return out;
 }
 
+function moveLabel(mv: Move): string {
+  return `${mv.r + 1},${mv.c + 1}`;
+}
+
+function sameMove(a: Move, b: Move): boolean {
+  return a.r === b.r && a.c === b.c;
+}
+
+function strongestThreatMove(board: number[][], side: number, limit = 10): { move: Move | null; threat: Threat; score: number } {
+  let best: { move: Move | null; threat: Threat; score: number } = { move: null, threat: emptyThreat(), score: 0 };
+  for (const mv of collectCandidates(board, side, limit, 1)) {
+    if (board[mv.r][mv.c] !== 0) continue;
+    const threat = analyzeThreatAt(board, mv.r, mv.c, side);
+    const score = threatScore(threat);
+    if (score > best.score) best = { move: mv, threat, score };
+  }
+  return best;
+}
+
+function analyzeAttackChainAfterMove(boardAfterMyMove: number[][], my: number, opp: number): ThreatChainAnalysis | null {
+  let best: ThreatChainAnalysis | null = null;
+  const nextMoves = uniqMoves([
+    ...setupKillMoves(boardAfterMyMove, my, 8),
+    ...forcingStartMoves(boardAfterMyMove, my, 8),
+    ...collectCandidates(boardAfterMyMove, my, 10, 1),
+  ]);
+
+  for (const second of nextMoves) {
+    if (boardAfterMyMove[second.r][second.c] !== 0) continue;
+    const secondThreat = analyzeThreatAt(boardAfterMyMove, second.r, second.c, my);
+    const secondFourPressure = secondThreat.openFour * 2 + secondThreat.closedFour + secondThreat.brokenFour;
+    const secondThreePressure = secondThreat.openThree + secondThreat.brokenThree;
+    if (secondFourPressure <= 0 && secondThreePressure < 2 && secondThreat.forks <= 0) continue;
+
+    boardAfterMyMove[second.r][second.c] = my;
+    const directWins = immediateWinningPointsScoped(boardAfterMyMove, my, 14);
+    const followKills = setupKillMoves(boardAfterMyMove, my, 8);
+    const follow = strongestThreatMove(boardAfterMyMove, my, 8);
+    const oppCounterWins = immediateWinningPointsScoped(boardAfterMyMove, opp, 10).length;
+    boardAfterMyMove[second.r][second.c] = 0;
+
+    const followThreePressure = follow.threat.openThree + follow.threat.brokenThree;
+    const followFourPressure = follow.threat.openFour * 2 + follow.threat.closedFour + follow.threat.brokenFour;
+    const score =
+      secondFourPressure * 260_000 +
+      secondThreePressure * 90_000 +
+      secondThreat.forks * 220_000 +
+      directWins.length * 520_000 +
+      followKills.length * 340_000 +
+      followFourPressure * 150_000 +
+      followThreePressure * 85_000 -
+      oppCounterWins * 420_000;
+
+    if (score <= 0) continue;
+    const style =
+      directWins.length > 0 || followKills.length > 0
+        ? '连续做杀'
+        : secondFourPressure > 0
+          ? '冲四转压'
+          : '双三续压';
+    const reason =
+      secondFourPressure > 0
+        ? `若对手不处理，此手后可接 ${moveLabel(second)} 冲四/活四，并继续制造${directWins.length > 0 ? '直接赢点' : followKills.length > 0 ? '双杀点' : '活三续压'}。`
+        : `若对手不处理，此手后可接 ${moveLabel(second)} 做出双三/多线威胁，逼迫对手进入被动防守。`;
+    const line = follow.move ? `${moveLabel(second)} -> ${moveLabel(follow.move)}` : moveLabel(second);
+    const analysis: ThreatChainAnalysis = { move: second, score, reason, style, line };
+    if (!best || analysis.score > best.score) best = analysis;
+  }
+
+  return best;
+}
+
+function analyzePreemptiveDefenseMoves(board: number[][], my: number, topN = 6): ThreatChainAnalysis[] {
+  const opp = -my;
+  const dangerStarts = uniqMoves([
+    ...setupKillMoves(board, opp, 10),
+    ...forcingStartMoves(board, opp, 10),
+    ...collectCandidates(board, opp, 10, 1),
+  ]).slice(0, 14);
+  const byPoint = new Map<string, ThreatChainAnalysis>();
+
+  for (const oppFirst of dangerStarts) {
+    if (board[oppFirst.r][oppFirst.c] !== 0) continue;
+    const firstThreat = analyzeThreatAt(board, oppFirst.r, oppFirst.c, opp);
+    const firstSeverity = forcingSeverityFromThreat(firstThreat);
+
+    board[oppFirst.r][oppFirst.c] = opp;
+    const oppWins = immediateWinningPointsScoped(board, opp, 14).length;
+    const oppKills = setupKillMoves(board, opp, 8).length;
+    const futureSeverity = bestForcingSeverity(board, opp);
+    const defensePoints = defenseIntersectionAgainstForcingStarts(board, opp, 4);
+    board[oppFirst.r][oppFirst.c] = 0;
+
+    if (oppWins === 0 && oppKills === 0 && futureSeverity < 2 && firstSeverity < 2) continue;
+    for (const d of defensePoints) {
+      if (board[d.r][d.c] !== 0) continue;
+      const key = `${d.r},${d.c}`;
+      const score =
+        firstSeverity * 180_000 +
+        futureSeverity * 260_000 +
+        oppWins * 480_000 +
+        oppKills * 360_000 +
+        directionalPotential(board, d.r, d.c, my) * 600;
+      const existing = byPoint.get(key);
+      const reason = `预判对手若下 ${moveLabel(oppFirst)}，下一步可能形成${oppWins > 0 ? '直接赢点' : oppKills > 0 ? '双杀点' : '强制杀链'}；现在先占 ${moveLabel(d)} 这个关键交叉点。`;
+      const merged: ThreatChainAnalysis = {
+        move: d,
+        score: (existing?.score ?? 0) + score,
+        reason: existing ? `${existing.reason} 同时还覆盖 ${moveLabel(oppFirst)} 后续杀链。` : reason,
+        style: '预判反制',
+        line: existing?.line ? `${existing.line} / ${moveLabel(oppFirst)}=>${moveLabel(d)}` : `${moveLabel(oppFirst)}=>${moveLabel(d)}`,
+      };
+      byPoint.set(key, merged);
+    }
+  }
+
+  return [...byPoint.values()].sort((a, b) => b.score - a.score).slice(0, topN);
+}
+
 function estimateWinSteps(board: number[][], side: number): number | null {
   if (immediateWinningPointsScoped(board, side, 20).length > 0) return 1;
   if (setupKillMoves(board, side, 12).length > 0) return 2;
@@ -1547,11 +1728,13 @@ function computeSuggestions(
   const oppImmediateWins = immediateWinningPoints(board, opp);
   const meSetupKills = setupKillMoves(board, my, 12);
   const oppSetupKills = setupKillMoves(board, opp, 12);
+  const preemptiveDefenseMoves = analyzePreemptiveDefenseMoves(board, my, 6);
   const rootCandidates = uniqMoves([
     ...oppImmediateWins,
     ...oppSetupKills,
     ...meImmediateWins,
     ...meSetupKills,
+    ...preemptiveDefenseMoves.map((x) => x.move),
     ...collectCandidates(board, my, 14, profile.width),
   ]);
   const targetDepth = myTurn ? chooseDepth(board, profile) : Math.min(OFFTURN_MAX_DEPTH, chooseDepth(board, profile));
@@ -1563,6 +1746,7 @@ function computeSuggestions(
   const baselineOppPressure = opponentPlan.pressure;
   const oppForcingStartsNow = forcingStartMoves(board, opp, 10);
   const forcingDefenseIntersectionNow = defenseIntersectionAgainstForcingStarts(board, opp, 3);
+  const preemptiveDefenseByKey = new Map(preemptiveDefenseMoves.map((x) => [`${x.move.r},${x.move.c}`, x]));
 
   const ctx: SearchCtx = {
     startMs: Date.now(),
@@ -1618,6 +1802,8 @@ function computeSuggestions(
     const continuation = guaranteedContinuation(board, my, opp);
     const oppReply = bestOpponentReply(board, opp);
     const tacticBonus = tacticBonusForMove(mv, board, myThreat, blockThreat, continuation, tacticPlan);
+    const attackChain = analyzeAttackChainAfterMove(board, my, opp);
+    const preemptiveDefense = preemptiveDefenseByKey.get(`${mv.r},${mv.c}`) || null;
     const myForcingSeverityAfter = meDirectWin ? 3 : bestForcingSeverity(board, my);
     const oppForcingSeverityAfter = bestForcingSeverity(board, opp);
     const survivingOppForcing = survivingForcingStarts(board, opp, oppForcingStartsNow);
@@ -1670,6 +1856,8 @@ function computeSuggestions(
       oppSetupAfter > 0 && !meDirectWin && meWinAfter < 2 ? 420_000 + oppSetupAfter * 160_000 : 0;
     const setupInitiativeBonus = createsMySetupNow ? 260_000 : 0;
     const proactiveThreatBonus = meWinAfter >= 2 ? 180_000 : 0;
+    const attackChainBonus = attackChain ? Math.min(720_000, Math.round(attackChain.score * 0.62)) : 0;
+    const preemptiveDefenseBonus = preemptiveDefense ? Math.min(1_050_000, Math.round(preemptiveDefense.score * 0.82)) : 0;
     const forcingSurvivalPenalty = survivingOppForcing > 0 ? survivingOppForcing * 150_000 : 0;
     const forcingIntersectionPenalty =
       forcingDefenseIntersectionNow.length > 0 && !inForcingDefenseIntersection && !meDirectWin
@@ -1734,6 +1922,8 @@ function computeSuggestions(
       -replyPenalty +
       setupInitiativeBonus +
       proactiveThreatBonus +
+      attackChainBonus +
+      preemptiveDefenseBonus +
       forcingIntersectionBonus +
       forcingRaceAdjust -
       forcingSurvivalPenalty -
@@ -1765,8 +1955,12 @@ function computeSuggestions(
             : `${info.reason}（该冲势尚未形成可靠续手，优先保布局压制）`
         : decision.immediateThreatPoints.length > 0 && !blocksImmediateWin
           ? `${info.reason}（该点未覆盖对手可赢点，已降权）`
-          : oppSetupKills.length > 0 && !blocksOppSetupNow
+        : oppSetupKills.length > 0 && !blocksOppSetupNow
             ? `${info.reason}（该点未覆盖对手二/三步杀链入口，已降权）`
+            : preemptiveDefense
+              ? `${preemptiveDefense.reason}（已按对手下一手双杀/强制链预判加权）`
+            : attackChain
+              ? `${info.reason}（${attackChain.reason}）`
             : forcingDefenseIntersectionNow.length > 0 && !inForcingDefenseIntersection && !meDirectWin
               ? `${info.reason}（该点不在强制线交集防点中，已降权）`
             : myForcingSeverityAfter < oppForcingSeverityAfter && !meDirectWin
@@ -1783,6 +1977,10 @@ function computeSuggestions(
       style:
         decision.immediateThreatPoints.length > 0 && blocksImmediateWin
           ? `${blockClass} / ${info.style}`
+          : preemptiveDefense
+            ? `${preemptiveDefense.style} / ${info.style}`
+            : attackChain
+              ? `${attackChain.style} / ${info.style}`
           : disruptionGain > 80_000
             ? `破局反制 / ${info.style}`
             : info.style,
@@ -1863,8 +2061,15 @@ function rememberLimited<K, V>(cache: Map<K, V>, key: K, value: V, limit: number
   }
 }
 
-export default function GomokuPanel({ disabled, nickname, boardText, onPick }: Props) {
-  const [strategy, setStrategy] = useState<StrategyId>('auto');
+export default function GomokuPanel({ disabled, nickname, boardText, onPick, onSoulDraft }: Props) {
+  const [strategy, setStrategy] = useState<StrategyId>('rapfi_external');
+  const [soulDraftEnabled, setSoulDraftEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sshchat:gomoku-soul-draft:v1') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [variationSeed, setVariationSeed] = useState<number>(() => Math.floor(Math.random() * 1_000_000));
   const [rapfiSuggestion, setRapfiSuggestion] = useState<{ row: number; col: number; ms: number; error?: string } | null>(null);
   const [rapfiPending, setRapfiPending] = useState<boolean>(false);
@@ -1888,6 +2093,14 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
   const [analysisMyTurn, setAnalysisMyTurn] = useState<boolean>(false);
   const [analysisPending, setAnalysisPending] = useState<boolean>(false);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('sshchat:gomoku-soul-draft:v1', soulDraftEnabled ? '1' : '0');
+    } catch {
+      // ignore storage failures
+    }
+  }, [soulDraftEnabled]);
+
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const turnInfo = useMemo(() => parseTurnInfo(boardText), [boardText]);
   const seats = useMemo(() => parseSeats(boardText), [boardText]);
@@ -1908,29 +2121,28 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
   }, [stoneN]);
 
   const myTurn = !!turnInfo.name && turnInfo.name === nickname;
-  const canPick = !disabled && boardWinner === null;
+  const canPick = !disabled && boardWinner === null && (!turnInfo.name || myTurn);
   const isHiddenMaster = nickname === 'zouyu';
   const hwThreads =
     typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
       ? Math.max(2, Math.floor(navigator.hardwareConcurrency))
       : 4;
   const rapfiTimeoutMs = useMemo(() => {
-    let base = 8500;
-    if (hwThreads <= 4) base = 6500;
-    else if (hwThreads <= 6) base = 9000;
-    else if (hwThreads <= 8) base = 13000;
-    else if (hwThreads <= 12) base = 18000;
-    else base = 22000;
+    let base = 12000;
+    if (hwThreads <= 4) base = 10000;
+    else if (hwThreads <= 6) base = 15000;
+    else if (hwThreads <= 8) base = 22000;
+    else if (hwThreads <= 12) base = 30000;
+    else base = 38000;
 
-    if (stoneN <= 10) base = Math.round(base * 1.55);
-    else if (stoneN <= 30) base = Math.round(base * 1.35);
-    else base = Math.round(base * 1.75);
-    if (!myTurn) base = Math.round(base * 0.9);
+    if (stoneN <= 10) base = Math.round(base * 1.8);
+    else if (stoneN <= 30) base = Math.round(base * 1.65);
+    else base = Math.round(base * 2.0);
 
-    return clamp(base, 6000, 38000);
-  }, [hwThreads, stoneN, myTurn]);
+    return clamp(base, 10000, 60000);
+  }, [hwThreads, stoneN]);
   const rapfiGuardTimeoutMs = useMemo(() => {
-    return clamp(rapfiTimeoutMs + 8000, 15000, 52000);
+    return clamp(rapfiTimeoutMs + 12000, 25000, 78000);
   }, [rapfiTimeoutMs]);
 
   useEffect(() => {
@@ -2017,22 +2229,12 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     if (!likelyMyTurn) {
       rapfiReqSeqRef.current += 1;
       setRapfiPending(false);
+      setRapfiSuggestion(null);
       rapfiInFlightKeyRef.current = '';
       return;
     }
 
-    const cachedPonder = rapfiPonderCacheRef.current.get(reqKey);
-    if (
-      cachedPonder &&
-      analysisMatrix[cachedPonder.row - 1]?.[cachedPonder.col - 1] === 0 &&
-      rapfiOkKeyRef.current !== reqKey &&
-      rapfiInFlightKeyRef.current !== reqKey
-    ) {
-      setRapfiSuggestion(cachedPonder);
-      rapfiOkKeyRef.current = reqKey;
-      rapfiFailCooldownRef.current = { key: '', until: 0 };
-      return;
-    }
+    // 后台预判只做缓存命中提示，不直接展示为正式建议；正式落点必须来自 move 服务。
     // 防止请求排队堆积：同一时刻仅允许一个Rapfi请求在飞行。
     // 期间若局面变化，先记录wanted key，等当前请求完成后再自动分析最新局面。
     if (rapfiPending) {
@@ -2055,6 +2257,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
 
     const seq = rapfiReqSeqRef.current + 1;
     rapfiReqSeqRef.current = seq;
+    setRapfiSuggestion(null);
     setRapfiPending(true);
 
     const guardTimeout = new Promise<never>((_, reject) => {
@@ -2103,6 +2306,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
   useEffect(() => {
     const canPonder =
       isHiddenMaster &&
+      RAPFI_ENABLE_PONDER &&
       strategy === 'rapfi_external' &&
       !!mySide &&
       !disabled &&
@@ -2218,10 +2422,54 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
         style: '终局检测',
       }];
     }
+    if (turnInfo.name && !myTurn) {
+      return [{
+        row: 0,
+        col: 0,
+        score: 0,
+        reason: `当前轮到 ${turnInfo.name} 落子，等待对手落子后再给你的下一手建议。`,
+        style: '等待对手',
+      }];
+    }
     const forcedDefense =
       mySideNum && analysisMatrix.length === BOARD_SIZE
         ? findUrgentDefenseMove(analysisMatrix, mySideNum)
         : null;
+    const directWins =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? immediateWinningPoints(analysisMatrix, mySideNum)
+        : [];
+    const oppDirectWins =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? immediateWinningPoints(analysisMatrix, -mySideNum)
+        : [];
+    const oppSetupThreats =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? setupKillMoves(analysisMatrix, -mySideNum, 16)
+        : [];
+    if (directWins.length > 0) {
+      return directWins.slice(0, 3).map((move, idx) => ({
+        row: move.r + 1,
+        col: move.c + 1,
+        score: Number.MAX_SAFE_INTEGER - idx,
+        reason: '我方下一手可直接连五，优先落下赢棋点，不再考虑对手威胁。',
+        style: '一步必胜',
+      }));
+    }
+    if (
+      forcedDefense &&
+      (
+        oppDirectWins.length > 0 ||
+        oppSetupThreats.length > 0 ||
+        result.decision.threatLevel === '高' ||
+        result.decision.threatLevel === '致命'
+      )
+    ) {
+      return [{
+        ...forcedDefense,
+        reason: `${forcedDefense.reason.replace('（Rapfi未返回时由内置兜底提供）', '')}（对手存在真实强威胁/二步杀，优先级高于Rapfi普通返回点）`,
+      }];
+    }
     if (
       strategy === 'rapfi_external' &&
       rapfiSuggestion &&
@@ -2231,33 +2479,130 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
       rapfiSuggestion.col >= 1 &&
       rapfiSuggestion.col <= BOARD_SIZE
     ) {
-      const rapfiCoversDefense =
-        !!forcedDefense &&
-        forcedDefense.row === rapfiSuggestion.row &&
-        forcedDefense.col === rapfiSuggestion.col;
-      if (forcedDefense && !rapfiCoversDefense) {
-        return [forcedDefense];
-      }
-      const threat = detectOpponentThreat(analysisMatrix, rapfiSuggestion.row, rapfiSuggestion.col, mySideNum || 1);
-      const reason = threat === 'defend'
-        ? `⚠ 紧急防守！对手有活三/冲四威胁（耗时${rapfiSuggestion.ms}ms）`
-        : forcedDefense
-          ? `${forcedDefense.reason}（Rapfi耗时${rapfiSuggestion.ms}ms）`
-        : `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`;
       return [{
         row: rapfiSuggestion.row,
         col: rapfiSuggestion.col,
         score: Number.MAX_SAFE_INTEGER,
-        reason,
-        style: threat === 'defend' || forcedDefense ? '紧急防守' : 'Rapfi职业引擎',
+        reason: `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`,
+        style: 'Rapfi职业引擎',
+      }];
+    }
+    if (strategy === 'rapfi_external' && !rapfiSuggestion?.error) {
+      return [{
+        row: 0,
+        col: 0,
+        score: 0,
+        reason: 'Rapfi 正在分析，本模式不使用内置兜底建议；请等待职业引擎返回。',
+        style: 'Rapfi分析中',
       }];
     }
     return forcedDefense ? [forcedDefense] : base;
-  }, [result.suggestions, rapfiSuggestion, strategy, analysisMatrix, mySide]);
+  }, [result.suggestions, result.decision.threatLevel, rapfiSuggestion, strategy, analysisMatrix, mySide, myTurn, turnInfo.name]);
   const clickableSuggestions = useMemo(
     () => shownSuggestions.filter((s) => s.row >= 1 && s.row <= BOARD_SIZE && s.col >= 1 && s.col <= BOARD_SIZE),
     [shownSuggestions],
   );
+  const rapfiDisplaySuggestion = useMemo<Suggestion | null>(() => {
+    if (
+      strategy !== 'rapfi_external' ||
+      (turnInfo.name && !myTurn) ||
+      !rapfiSuggestion ||
+      rapfiSuggestion.error ||
+      rapfiSuggestion.row < 1 ||
+      rapfiSuggestion.row > BOARD_SIZE ||
+      rapfiSuggestion.col < 1 ||
+      rapfiSuggestion.col > BOARD_SIZE
+    ) {
+      return null;
+    }
+    return {
+      row: rapfiSuggestion.row,
+      col: rapfiSuggestion.col,
+      score: Number.MAX_SAFE_INTEGER,
+      reason: `Rapfi原始建议（耗时${rapfiSuggestion.ms}ms）`,
+      style: 'Rapfi职业引擎',
+    };
+  }, [myTurn, rapfiSuggestion, strategy, turnInfo.name]);
+  const arbiterSuggestion = useMemo<Suggestion | null>(() => {
+    if (turnInfo.name && !myTurn) return null;
+    const mySideNum = mySide === '#' ? 1 : mySide === 'o' ? -1 : null;
+    const winner = analysisMatrix.length === BOARD_SIZE ? winnerOnBoard(analysisMatrix) : null;
+    if (winner !== null) {
+      return {
+        row: 0,
+        col: 0,
+        score: Number.MAX_SAFE_INTEGER,
+        reason: `${winner === 1 ? '黑方' : '白方'}已经连五，局面是终局；助手不会继续给下一手，请刷新/结束当前对局。`,
+        style: '终局检测',
+      };
+    }
+    const forcedDefense =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? findUrgentDefenseMove(analysisMatrix, mySideNum)
+        : null;
+    const directWins =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? immediateWinningPoints(analysisMatrix, mySideNum)
+        : [];
+    const oppDirectWins =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? immediateWinningPoints(analysisMatrix, -mySideNum)
+        : [];
+    const oppSetupThreats =
+      mySideNum && analysisMatrix.length === BOARD_SIZE
+        ? setupKillMoves(analysisMatrix, -mySideNum, 16)
+        : [];
+    if (directWins.length > 0) {
+      const move = directWins[0];
+      return {
+        row: move.r + 1,
+        col: move.c + 1,
+        score: Number.MAX_SAFE_INTEGER,
+        reason: '我方下一手可直接连五，优先落下赢棋点，不再考虑对手威胁。',
+        style: '一步必胜',
+      };
+    }
+    if (
+      forcedDefense &&
+      (
+        oppDirectWins.length > 0 ||
+        oppSetupThreats.length > 0 ||
+        result.decision.threatLevel === '高' ||
+        result.decision.threatLevel === '致命'
+      )
+    ) {
+      return {
+        ...forcedDefense,
+        reason: `${forcedDefense.reason.replace('（Rapfi未返回时由内置兜底提供）', '')}（对手存在真实强威胁/二步杀，优先级高于Rapfi普通返回点）`,
+      };
+    }
+    return forcedDefense ?? result.suggestions[0] ?? null;
+  }, [analysisMatrix, mySide, myTurn, result.decision.threatLevel, result.suggestions, turnInfo.name]);
+  const rapfiArbiterSame =
+    !!rapfiDisplaySuggestion &&
+    !!arbiterSuggestion &&
+    rapfiDisplaySuggestion.row === arbiterSuggestion.row &&
+    rapfiDisplaySuggestion.col === arbiterSuggestion.col;
+  const dualSuggestions = useMemo(() => {
+    const out: Array<Suggestion & { source: 'rapfi' | 'arbiter'; label: string }> = [];
+    if (rapfiDisplaySuggestion) {
+      out.push({ ...rapfiDisplaySuggestion, source: 'rapfi', label: '建议1 Rapfi' });
+    }
+    if (
+      arbiterSuggestion &&
+      (!rapfiDisplaySuggestion ||
+        arbiterSuggestion.row !== rapfiDisplaySuggestion.row ||
+        arbiterSuggestion.col !== rapfiDisplaySuggestion.col)
+    ) {
+      out.push({ ...arbiterSuggestion, source: 'arbiter', label: rapfiDisplaySuggestion ? '建议2 仲裁' : '建议1 仲裁' });
+    }
+    if (out.length === 0) {
+      for (const s of clickableSuggestions.slice(0, 2)) {
+        out.push({ ...s, source: 'arbiter', label: `建议${out.length + 1} 仲裁` });
+      }
+    }
+    return out;
+  }, [arbiterSuggestion, clickableSuggestions, rapfiDisplaySuggestion]);
 
   const renderedCells = useMemo(() => {
     if (!optimisticPick) return cells;
@@ -2275,10 +2620,14 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
   }, [cells, optimisticPick]);
 
   const onPickFast = (row: number, col: number) => {
+    if (!canPick) return;
     const r = row - 1;
     const c = col - 1;
     if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return;
     if (matrix[r][c] === 0) {
+      if (soulDraftEnabled) {
+        onSoulDraft?.(formatGomokuSoulDraft(row, col));
+      }
       const infer: Side | null = mySide ?? (turnInfo.side === '#' || turnInfo.side === 'o' ? turnInfo.side : null);
       if (infer) {
         const token = Date.now();
@@ -2317,6 +2666,14 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                     </option>
                   ))}
                 </select>
+                <label className="game-workbench-hint" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={soulDraftEnabled}
+                    onChange={(e) => setSoulDraftEnabled(e.target.checked)}
+                  />
+                  落子后写入棋魂句
+                </label>
               </div>
               <div className="game-advisor-detail" style={{ marginTop: 6 }}>
                 策略：{STRATEGIES.find((s) => s.id === result.strategy)?.label || '均衡控局'}｜
@@ -2336,7 +2693,9 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                   {boardWinner !== null
                     ? `终局：${boardWinner === 1 ? '黑方' : '白方'}已连五`
                     : analysisPending || rapfiPending
-                    ? '分析中...'
+                    ? '正式分析中...（等待 Rapfi move 结果）'
+                    : rapfiSuggestion && !rapfiSuggestion.error && rapfiPonderPending
+                      ? `已接入（${rapfiSuggestion.ms}ms），后台预判下一手...`
                     : rapfiPonderPending
                       ? '后台预判中...'
                     : rapfiSuggestion?.error
@@ -2346,27 +2705,42 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                         : '等待分析'}
                 </div>
               )}
+              {strategy === 'rapfi_external' && rapfiSuggestion && !rapfiSuggestion.error && (
+                <div className="game-advisor-detail" style={{ marginTop: 4 }}>
+                  Rapfi原始落子：第 {rapfiSuggestion.row} 行，第 {rapfiSuggestion.col} 列（耗时{rapfiSuggestion.ms}ms）
+                  {arbiterSuggestion &&
+                  arbiterSuggestion.row >= 1 &&
+                  arbiterSuggestion.col >= 1 &&
+                  (arbiterSuggestion.row !== rapfiSuggestion.row || arbiterSuggestion.col !== rapfiSuggestion.col)
+                    ? `；当前展示为更高优先级仲裁点：第 ${arbiterSuggestion.row} 行，第 ${arbiterSuggestion.col} 列`
+                    : rapfiArbiterSame
+                      ? '；仲裁与 Rapfi 一致'
+                      : '；当前展示采用 Rapfi 建议'}
+                </div>
+              )}
               <div className="game-chip-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                {clickableSuggestions.map((s, idx) => (
+                {dualSuggestions.map((s) => (
                   <button
-                    key={`${s.row}-${s.col}-${idx}`}
-                    className="mini-btn"
+                    key={`${s.source}-${s.row}-${s.col}`}
+                    className={`mini-btn gomoku-suggestion-btn ${s.source === 'rapfi' ? 'rapfi' : 'arbiter'}`}
                     disabled={!canPick}
                     onClick={() => onPickFast(s.row, s.col)}
                     title={`${s.style}：${s.reason}`}
                   >
-                    建议{idx + 1}：{s.row},{s.col}
+                    {s.label}：{s.row},{s.col}
                   </button>
                 ))}
               </div>
-              {shownSuggestions[0] && (
+              {(rapfiDisplaySuggestion || arbiterSuggestion) && (
                 <div className="game-advisor-detail" style={{ marginTop: 6 }}>
-                  {shownSuggestions[0].row >= 1 && shownSuggestions[0].col >= 1
-                    ? `当前首选：第 ${shownSuggestions[0].row} 行，第 ${shownSuggestions[0].col} 列。`
+                  {rapfiDisplaySuggestion
+                    ? `建议1 Rapfi：第 ${rapfiDisplaySuggestion.row} 行，第 ${rapfiDisplaySuggestion.col} 列。${rapfiDisplaySuggestion.reason}`
+                    : '建议1 Rapfi：等待引擎最终落子。'}
+                  {rapfiArbiterSame
+                    ? `｜仲裁：与 Rapfi 一致。战术：${arbiterSuggestion?.style}。理由：${arbiterSuggestion?.reason}`
+                    : arbiterSuggestion
+                    ? `｜建议2 仲裁：第 ${arbiterSuggestion.row} 行，第 ${arbiterSuggestion.col} 列。战术：${arbiterSuggestion.style}。理由：${arbiterSuggestion.reason}${arbiterSuggestion.predictedReply ? `（预计对手应手：${arbiterSuggestion.predictedReply}）` : ''}`
                     : ''}
-                  战术：{shownSuggestions[0].style}。理由：
-                  {shownSuggestions[0].reason}
-                  {shownSuggestions[0].predictedReply ? `（预计对手应手：${shownSuggestions[0].predictedReply}）` : ''}
                 </div>
               )}
             </>
@@ -2380,15 +2754,28 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
         {renderedCells.map((row) =>
           row.map((cell) => {
             const text = cell.stone === '#' ? '●' : cell.stone === 'o' ? '○' : '·';
+            const isRapfiPoint = rapfiDisplaySuggestion?.row === cell.row && rapfiDisplaySuggestion?.col === cell.col;
+            const isArbiterPoint = arbiterSuggestion?.row === cell.row && arbiterSuggestion?.col === cell.col;
             const cls = [
               'gomoku-cell',
               cell.stone === '#' ? 'black' : '',
               cell.stone === 'o' ? 'white' : '',
               cell.last ? 'last' : '',
               cell.optimistic ? 'optimistic' : '',
+              isRapfiPoint ? 'suggested-rapfi' : '',
+              isArbiterPoint ? 'suggested-arbiter' : '',
+              isRapfiPoint && isArbiterPoint ? 'suggested-both' : '',
             ]
               .filter(Boolean)
               .join(' ');
+            const suggestionTitle =
+              isRapfiPoint && isArbiterPoint
+                ? `；Rapfi与仲裁一致：${rapfiDisplaySuggestion?.reason}`
+                : isRapfiPoint
+                  ? `；Rapfi建议：${rapfiDisplaySuggestion?.reason}`
+                  : isArbiterPoint
+                    ? `；仲裁建议：${arbiterSuggestion?.style}，${arbiterSuggestion?.reason}`
+                    : '';
 
             return (
               <button
@@ -2396,7 +2783,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
                 className={cls}
                 onClick={() => onPickFast(cell.row, cell.col)}
                 disabled={!canPick}
-                title={`${cell.row},${cell.col}`}
+                title={`${cell.row},${cell.col}${suggestionTitle}`}
               >
                 {text}
               </button>
@@ -2407,4 +2794,6 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick }: P
     </div>
   );
 }
+
+
 

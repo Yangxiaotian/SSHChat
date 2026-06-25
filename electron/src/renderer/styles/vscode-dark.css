@@ -700,6 +700,7 @@ html, body, #root {
 }
 
 .gomoku-cell {
+  position: relative;
   height: 20px;
   border: 1px solid var(--vscode-border);
   background: #2c3036;
@@ -723,6 +724,49 @@ html, body, #root {
 .gomoku-cell.last {
   outline: 1px solid #f1b45c;
   outline-offset: -2px;
+}
+
+.gomoku-cell.suggested-rapfi {
+  background: rgba(83, 112, 145, 0.2);
+}
+
+.gomoku-cell.suggested-rapfi::after,
+.gomoku-cell.suggested-arbiter::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.gomoku-cell.suggested-rapfi::after {
+  border: 1px solid #6f8baa;
+}
+
+.gomoku-cell.suggested-arbiter {
+  background: rgba(176, 116, 56, 0.18);
+}
+
+.gomoku-cell.suggested-arbiter::before {
+  inset: 4px;
+  border: 1px solid #d79554;
+}
+
+.gomoku-cell.suggested-both {
+  background: linear-gradient(135deg, rgba(83, 112, 145, 0.22), rgba(176, 116, 56, 0.2));
+}
+
+.gomoku-cell.suggested-rapfi.last::after,
+.gomoku-cell.suggested-arbiter.last::before {
+  border-color: #f1b45c;
+}
+
+.gomoku-suggestion-btn.rapfi {
+  border-color: #6f8baa;
+}
+
+.gomoku-suggestion-btn.arbiter {
+  border-color: #d79554;
 }
 
 .go-board-wrap {
@@ -909,6 +953,97 @@ html, body, #root {
   outline: 1px solid #6f8baa;
   outline-offset: 1px;
   box-shadow: 0 0 0 2px rgba(111, 139, 170, 0.18);
+}
+
+.doushou-board {
+  display: grid;
+  grid-template-columns: repeat(7, 42px);
+  grid-template-rows: repeat(9, 42px);
+  gap: 2px;
+  width: max-content;
+  margin: 8px 0 10px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #343942;
+  background: linear-gradient(180deg, #25292f, #202329);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.doushou-cell {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #3b414b;
+  border-radius: 6px;
+  background: #292e35;
+  color: #aeb7c3;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.doushou-cell small {
+  font-size: 10px;
+  color: #87909d;
+}
+
+.doushou-cell.river {
+  background: linear-gradient(135deg, #1f3341, #24313b);
+  border-color: #365061;
+}
+
+.doushou-cell.trap {
+  background: linear-gradient(135deg, #342b2d, #292a2f);
+  border-color: #594348;
+}
+
+.doushou-cell.den {
+  background: linear-gradient(135deg, #3a3424, #2b2a25);
+  border-color: #665a3b;
+}
+
+.doushou-cell span {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 700;
+  border: 1px solid #59616d;
+  background: radial-gradient(circle at 32% 28%, #434a54, #252b33 70%);
+}
+
+.doushou-cell.red-piece span {
+  color: #e0aaa0;
+  border-color: #71504b;
+  background: radial-gradient(circle at 32% 28%, #5a4644, #30282a 72%);
+}
+
+.doushou-cell.black-piece span {
+  color: #c7d1dd;
+  border-color: #596779;
+  background: radial-gradient(circle at 32% 28%, #47515e, #252b34 72%);
+}
+
+.doushou-cell.own:not(:disabled) {
+  box-shadow: inset 0 0 0 1px rgba(111, 139, 170, 0.32);
+}
+
+.doushou-cell.selected {
+  outline: 2px solid #d79554;
+  outline-offset: -2px;
+}
+
+.doushou-cell.last {
+  box-shadow: inset 0 0 0 2px rgba(241, 180, 92, 0.55);
+}
+
+.doushou-cell:hover:not(:disabled) {
+  border-color: #6f8baa;
+  background-color: #303743;
 }
 
 .mini-btn {
@@ -1377,6 +1512,15 @@ html, body, #root {
 
 .send-button:hover {
   background-color: var(--vscode-button-hover);
+}
+
+.secondary-button {
+  background-color: var(--vscode-button-secondary);
+  color: var(--vscode-fg);
+}
+
+.secondary-button:hover {
+  background-color: var(--vscode-button-secondary-hover, var(--vscode-button-secondary));
 }
 
 .send-button:disabled {
