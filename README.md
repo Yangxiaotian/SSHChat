@@ -354,7 +354,7 @@ npm run build:portable
 - **`sanguo`（三国杀）**：房主 `/game move 开始` 开局；`/game move 武将` 查武将池；观星/蛊惑/断粮等技能见 `/game show`。
 - **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
 - **`holdem`（德州扑克）**：`start` 开始 \| `look` 看牌 \| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可 `bot <easy\|hard\|pro>` 加机器人。
-- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌积分不足时按剩余积分全压。
+- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
 - **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
 - **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
 

@@ -7465,6 +7465,16 @@ def _fmt_poker_cards(cards: list[str]) -> str:
         out.append(f"{_POKER_SUIT_ZH.get(s, s)}{_POKER_RANK_ZH.get(r, r)}")
     return " ".join(out)
 
+_ZJH_TYPE_ZH = {6: "豹子", 5: "顺金", 4: "金花", 3: "顺子", 2: "对子", 1: "单张"}
+
+
+def _zjh_is_special_235(cards: list[str]) -> bool:
+    vals = sorted(_ZJH_VALUES[c[0]] for c in cards)
+    if vals != [2, 3, 5]:
+        return False
+    return len({c[1] for c in cards}) == 3
+
+
 def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
     vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
     suits = [c[1] for c in cards]
@@ -7489,6 +7499,28 @@ def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
         kick = max(v for v in vals if v != pair)
         return (2, [pair, kick])
     return (1, vals)
+
+
+def _zjh_compare(cards_a: list[str], cards_b: list[str]) -> int:
+    """Return positive if a wins, negative if b wins, 0 if tie."""
+    ev_a = _zjh_eval3(cards_a)
+    ev_b = _zjh_eval3(cards_b)
+    if _zjh_is_special_235(cards_a) and ev_b[0] == 6:
+        return 1
+    if _zjh_is_special_235(cards_b) and ev_a[0] == 6:
+        return -1
+    if ev_a > ev_b:
+        return 1
+    if ev_a < ev_b:
+        return -1
+    return 0
+
+
+def _zjh_describe(cards: list[str]) -> str:
+    if _zjh_is_special_235(cards):
+        return f"{_fmt_poker_cards(cards)}（235特殊）"
+    cat, _tie = _zjh_eval3(cards)
+    return f"{_fmt_poker_cards(cards)}（{_ZJH_TYPE_ZH.get(cat, '单张')}）"
 
 
 
@@ -7521,7 +7553,7 @@ def _bot_level_zh(level: str) -> str:
 class ZhaJinHuaGame:
     name = "zjh"
     first_seat_desc = "房主"
-    join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始"
+    join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始；需机器人用 start bot 或 bot add"
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
         self.bot_names: set[str] = set()
@@ -7539,15 +7571,12 @@ class ZhaJinHuaGame:
         self.rng = random.Random()
     def _is_bot(self, name: str) -> bool:
         return name in self.bot_names
-    def _auto_add_bots(self) -> list[str]:
-        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
-        # 目标：尽量保证至少 3 个机器人（受 6 人总席位限制）。
-        # 例如：2真人 -> 3机器人；4真人 -> 2机器人（已满 6 人上限）。
-        target_bots = min(3, max(0, 6 - human))
-        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
-        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
+
+    def _add_bots(self, count: int) -> list[str]:
         added: list[str] = []
-        for _ in range(add_n):
+        for _ in range(max(0, count)):
+            if len(self.players) >= 6:
+                break
             idx = len(self.bot_names) + 1
             bn = f"R{idx}"
             while any(n == bn for _c, n in self.players):
@@ -7560,6 +7589,15 @@ class ZhaJinHuaGame:
             self.stacks.setdefault(bn, 1000)
             added.append(bn)
         return added
+
+    def _auto_add_bots(self) -> list[str]:
+        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
+        # 仅在使用 bot/机器人 参数开局时调用：尽量补到 3 个机器人（最多 6 人）。
+        target_bots = min(3, max(0, 6 - human))
+        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
+        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
+        return self._add_bots(add_n)
+
     def _bot_action(self, name: str) -> str:
         cat, tie = _zjh_eval3(self.cards[name])
         high = tie[0] if tie else 0
@@ -7567,11 +7605,12 @@ class ZhaJinHuaGame:
         mult = 2 if looked else 1
         stack = max(0, self.stacks.get(name, 0))
         to_call = self.current_bet * mult
+        compare_cost = self.current_bet * mult * 2
         # 加注是“加到当前注 + add”，支付金额是 new_bet * mult。
         max_add = max(0, (stack // mult) - self.current_bet)
         can_raise = max_add > 0
         can_call = stack >= to_call
-        can_compare = can_call and len([n for n in self._alive() if n != name]) > 0
+        can_compare = stack > 0 and len([n for n in self._alive() if n != name]) > 0
         if not can_call:
             return "fold"
 
@@ -7755,6 +7794,44 @@ class ZhaJinHuaGame:
             self.turn_idx = (self.turn_idx + 1) % len(self.players)
             if self.players[self.turn_idx][1] in alive:
                 return
+    def _can_continue_session(self) -> bool:
+        if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
+            return False
+        return len([n for _c, n in self.players if self.stacks.get(n, 0) > 0]) >= 2
+
+    def _deal_hand(self) -> list[str]:
+        self.state = "playing"
+        self.folded.clear()
+        self.looked.clear()
+        self.cards.clear()
+        self.turn_idx = 0
+        self.pot = 0
+        self.current_bet = 1
+        deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
+        self.rng.shuffle(deck)
+        for _c, n in self.players:
+            if self.stacks.get(n, 0) <= 0:
+                continue
+            self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
+            self.stacks.setdefault(n, 1000)
+            if self.stacks[n] > 0:
+                self.stacks[n] -= 1
+                self.pot += 1
+        self._pick_next_actor_from_start()
+        out = ["炸金花已开始，默认闷牌；先看牌后可见手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
+        if self.bot_names:
+            out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
+        out.extend(self._run_bots())
+        return out
+
+    def _begin_next_hand(self) -> list[str]:
+        if not self._can_continue_session():
+            self.state = "ended"
+            return ["有玩家积分已耗尽或人数不足，炸金花对局结束。"]
+        out = ["—— 自动开始下一局 ——"]
+        out.extend(self._deal_hand())
+        return out
+
     def _finish_if_one(self) -> Optional[list[str]]:
         remaining = self._not_folded()
         if len(remaining) != 1:
@@ -7764,30 +7841,18 @@ class ZhaJinHuaGame:
         self.stacks[w] += gain
         self.pot = 0
         self.current_bet = 1
-        self.state = "ended"
-        return [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
-    def _start(self) -> list[str]:
-        self._auto_add_bots()
+        out = [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
+        out.extend(self._begin_next_hand())
+        return out
+
+    def _start(self, with_bots: bool = False) -> list[str]:
+        if with_bots:
+            self._auto_add_bots()
         if len(self.players) < 2:
             return ["至少需要 2 名玩家才能开始。"]
         if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
             return ["有玩家积分已耗尽。请重开游戏重置为1000积分。"]
-        self.state = "playing"
-        self.folded.clear(); self.looked.clear(); self.cards.clear()
-        self.turn_idx = 0; self.pot = 0; self.current_bet = 1
-        deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
-        self.rng.shuffle(deck)
-        for _c, n in self.players:
-            self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
-            self.stacks.setdefault(n, 1000)
-            if self.stacks[n] > 0:
-                self.stacks[n] -= 1; self.pot += 1
-        self._pick_next_actor_from_start()
-        out = ["炸金花已开始，默认闷牌；先看牌后可见手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
-        if self.bot_names:
-            out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
-        out.extend(self._run_bots())
-        return out
+        return self._deal_hand()
     def try_join(self, conn, name: str) -> GameResult:
         if self.state != "waiting": return (["对局已开始，无法加入。"], [], False)
         if len(self.players) >= 6: return (["炸金花最多 6 人。"], [], False)
@@ -7811,22 +7876,36 @@ class ZhaJinHuaGame:
         }.get(cmd, cmd)
         if cmd == "bot":
             if conn is not self.players[0][0]:
-                return (["只有房主可以设置机器人难度。"], [], False)
-            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
-                return (["用法：/game move bot <easy|hard|pro>"], [], False)
-            self.bot_level = parts[1].lower()
+                return (["只有房主可以设置机器人。"], [], False)
+            if len(parts) < 2:
+                return (["用法：/game move bot <easy|hard|pro>  或  bot add [人数]"], [], False)
+            sub = parts[1].lower()
+            if sub == "add":
+                if self.state != "waiting":
+                    return (["只能在等待开始阶段添加机器人。"], [], False)
+                n = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 1
+                if n <= 0:
+                    return (["添加人数必须大于 0。"], [], False)
+                added = self._add_bots(n)
+                if not added:
+                    return (["无法添加更多机器人（已满 6 人）。"], [], False)
+                return ([], [f"已添加机器人：{', '.join(added)}（难度={_bot_level_zh(self.bot_level)}）"], False)
+            if sub not in ("easy", "hard", "pro"):
+                return (["用法：/game move bot <easy|hard|pro>  或  bot add [人数]"], [], False)
+            self.bot_level = sub
             return ([], [f"机器人难度已设为：{_bot_level_zh(self.bot_level)}"], False)
         if cmd == "start":
             if self.state == "playing": return (["对局已经开始。"], [], False)
             if conn is not self.players[0][0]: return (["只有房主可以开始对局。"], [], False)
-            return ([], self._start(), False)
+            with_bots = len(parts) >= 2 and parts[1].lower() in ("bot", "bots", "withbots", "机器人")
+            return ([], self._start(with_bots=with_bots), False)
         if self.state != "playing": return (["当前不是进行中状态。"], [], False)
         if actor in self.folded:
             bcast = self.nudge_bots()
             return (["你已经弃牌。"], bcast, self.state == "ended")
         done = self._finish_if_one()
         if done:
-            return ([], done, True)
+            return ([], done, self.state == "ended")
         if self.stacks.get(actor, 0) <= 0: return (["你已无可用积分，无法继续操作。"], [], False)
         current = self.players[self.turn_idx][1]
         if actor != current: return ([f"还没轮到你，当前轮到：{current}"], [], False)
@@ -7849,20 +7928,31 @@ class ZhaJinHuaGame:
             if not target: return (["目标不存在。"], [], False)
             if target == actor: return (["不能和自己比牌。"], [], False)
             if target not in self._alive(): return (["目标玩家当前不可比牌。"], [], False)
-            pay = min(self.stacks[actor], cost)
+            compare_cost = self.current_bet * mult * 2
+            pay = min(self.stacks[actor], compare_cost)
             if pay <= 0:
                 return (["你已无可用积分，无法继续操作。"], [], False)
             self.stacks[actor] -= pay; self.pot += pay
-            me = _zjh_eval3(self.cards[actor]); tg = _zjh_eval3(self.cards[target])
-            loser = target if me > tg else actor; winner = actor if me > tg else target
+            cmp = _zjh_compare(self.cards[actor], self.cards[target])
+            if cmp > 0:
+                winner, loser = actor, target
+            elif cmp < 0:
+                winner, loser = target, actor
+            else:
+                winner, loser = target, actor
             self.folded.add(loser)
-            if pay < cost:
-                bcast.append(f"{actor} 积分不足（需 {cost}，实付 {pay}）发起全压比牌")
-            bcast.append(f"{actor} 与 {target} 比牌：{winner} 胜出，{loser} 弃牌")
+            if pay < compare_cost:
+                bcast.append(f"{actor} 积分不足（需 {compare_cost}，实付 {pay}）发起全压比牌")
+            bcast.append(
+                f"{actor} 与 {target} 比牌："
+                f"{actor} {_zjh_describe(self.cards[actor])} vs "
+                f"{target} {_zjh_describe(self.cards[target])}，"
+                f"{winner} 胜出，{loser} 弃牌"
+            )
             self._advance()
         else: return (["可用操作：开始、看牌、跟注、加注、弃牌、比牌。"], [], False)
         done = self._finish_if_one()
-        if done: return ([], bcast + done, True)
+        if done: return ([], bcast + done, self.state == "ended")
         if not self._bot_running:
             bcast.extend(self._run_bots())
         bcast.append(f"底池={self.pot}，当前注={self.current_bet}，轮到：{self.players[self.turn_idx][1]}")
@@ -7876,7 +7966,7 @@ class ZhaJinHuaGame:
         for i, (_c, n) in enumerate(self.players, start=1):
             tag = "已弃牌" if n in self.folded else "存活"; looked = "，已看牌" if n in self.looked else ""
             lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{looked}")
-        if self.state == "waiting": lines.append("房主可用 /game move start 开始")
+        if self.state == "waiting": lines.append("房主可用 /game move start 开始；需机器人时用 start bot 或 bot add")
         if self.state == "playing": lines.append(f"轮到：{self.players[self.turn_idx][1]}")
         return lines
     def show(self, conn=None, full: bool = False) -> list[str]:
@@ -7908,7 +7998,7 @@ class ZhaJinHuaGame:
                 if alive and self.players[self.turn_idx][1] not in alive:
                     self._advance()
         done = self._finish_if_one() if self.state == "playing" else None
-        if done: return ([], [f"{name} 离开"] + done, True)
+        if done: return ([], [f"{name} 离开"] + done, self.state == "ended")
         return ([], [f"{name} 离开了炸金花对局"], False)
 
 
@@ -10173,7 +10263,10 @@ HELP_LINES = (
     "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
-    "比牌 compare <昵称> | 弃牌 fold；比牌积分不足时按剩余积分全压支付。",
+    "比牌 compare <昵称> | 弃牌 fold；比牌费用为当前单注两倍（看牌后再翻倍）；"
+    "牌型：豹子>顺金>金花>顺子>对子>单张，花色不同235可胜豹子；"
+    "同牌型相等时主动比牌者负；每局结束自动发下一局；"
+    "需机器人时用 start bot 或 bot add [人数]；bot <easy|hard|pro> 设难度。",
     "[*] mahjong（麻将）4 人局：人数不足时 start 自动补 AI；房主可 bot <easy|hard|pro> 调难度。",
     "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
     "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",

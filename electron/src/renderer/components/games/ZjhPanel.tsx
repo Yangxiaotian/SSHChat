@@ -179,6 +179,7 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
 
       <div className="game-chip-row">
         <span className="game-workbench-hint">{t('game.zjh.botLevel')}</span>
+        <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot || !isWaiting} onClick={() => onCmd('bot add')}>{t('game.zjh.botAdd')}</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot easy')}>Easy</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot hard')}>Hard</button>
         <button className={`mini-btn ${canTuneBot ? 'ready' : ''}`} disabled={disabled || !canTuneBot} onClick={() => onCmd('bot pro')}>Pro</button>

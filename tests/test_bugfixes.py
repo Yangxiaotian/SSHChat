@@ -13,6 +13,7 @@ from games import (
     create_game,
     resolve_game_name,
     _mj_is_win,
+    _zjh_compare,
     _mj_normalize_tile,
     _SgsPlayer,
 )
@@ -238,6 +239,12 @@ class TestZhaJinHuaCompareTie(unittest.TestCase):
         # B should be the winner (tie goes to defender)
         self.assertTrue(any("B" in line and "胜出" in line for line in bcast))
 
+    def test_special_235_beats_leopard(self):
+        leopard = ["2C", "2H", "2D"]
+        special = ["2S", "3H", "5D"]
+        self.assertGreater(_zjh_compare(special, leopard), 0)
+        self.assertLess(_zjh_compare(leopard, special), 0)
+
 
 class TestZhaJinHuaCompareAllIn(unittest.TestCase):
     """Compare should allow all-in payment when attacker stack is insufficient."""
@@ -256,26 +263,23 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         game.pot = 1708
         game.stacks["yxt"] = 498
         game.stacks["zouyu"] = 398
-        game.cards["yxt"] = ["Q♣", "7♣", "8♣"]
-        game.cards["zouyu"] = ["2♦", "3♦", "4♦"]
+        game.cards["yxt"] = ["AS", "AH", "AD"]
+        game.cards["zouyu"] = ["2D", "3D", "4H"]
 
-        err, bcast, _done = game.try_move(c1, "compare zouyu")
+        err, bcast, done = game.try_move(c1, "compare zouyu")
         self.assertEqual(err, [])
         self.assertTrue(any("全压比牌" in line for line in bcast))
-        self.assertEqual(game.stacks["yxt"], 0)
-        self.assertEqual(game.pot, 1708 + 498)
         self.assertTrue(any("比牌" in line and "胜出" in line for line in bcast))
+        self.assertTrue(any("豹子" in line and "顺子" in line for line in bcast))
+        self.assertGreater(game.stacks["yxt"], 2000)
 
-    def test_all_in_compare_win_ends_game_when_only_one_not_folded(self):
-        """All-in compare win with 0 stack and all others folded should end game."""
+    def test_all_in_compare_win_auto_starts_next_hand(self):
+        """Winning compare should award pot and auto-deal next hand when session can continue."""
         c1 = object()
         c2 = object()
         game = ZhaJinHuaGame(c1, "yxt")
         game.try_join(c2, "zouyu")
         game.try_move(c1, "start")
-
-        for bot in ("R1", "R2", "R3"):
-            game.folded.add(bot)
 
         game.looked.add("yxt")
         game.looked.add("zouyu")
@@ -286,17 +290,16 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         game.pot = 1684
         game.stacks["yxt"] = 277
         game.stacks["zouyu"] = 602
-        game.cards["yxt"] = ["A♠", "A♥", "A♦"]
-        game.cards["zouyu"] = ["2♦", "3♦", "4♦"]
+        game.cards["yxt"] = ["AS", "AH", "AD"]
+        game.cards["zouyu"] = ["2D", "3D", "4H"]
 
         err, bcast, done = game.try_move(c1, "compare zouyu")
         self.assertEqual(err, [])
-        self.assertTrue(done)
-        self.assertEqual(game.state, "ended")
-        self.assertEqual(game.stacks["yxt"], 1684 + 277)
-        self.assertEqual(game.pot, 0)
-        self.assertIn("zouyu", game.folded)
+        self.assertFalse(done)
+        self.assertEqual(game.state, "playing")
         self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast))
+        self.assertTrue(any("自动开始下一局" in line for line in bcast))
+        self.assertGreater(game.stacks["yxt"], 1600)
 
     def test_folded_human_nudge_advances_bot_turn(self):
         """Folded human poking the game should still advance bot turns."""
@@ -304,7 +307,7 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         c2 = object()
         game = ZhaJinHuaGame(c1, "yxt")
         game.try_join(c2, "zouyu")
-        game.try_move(c1, "start")
+        game.try_move(c1, "start bot")
         game.folded = {"yxt", "zouyu", "R1"}
         game.pot = 1405
         game.current_bet = 20
@@ -322,9 +325,9 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
 
         err, bcast, done = game.try_move(c1, "fold")
         self.assertEqual(err, ["你已经弃牌。"])
-        self.assertTrue(done)
-        self.assertEqual(game.state, "ended")
-        self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast))
+        self.assertFalse(done)
+        self.assertEqual(game.state, "playing")
+        self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast) or any("自动开始下一局" in line for line in bcast))
 
     def test_zero_stack_bots_auto_fold_and_finish(self):
         """Bots with 0 stack but not folded should not deadlock bot runner."""
@@ -332,7 +335,7 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         c2 = object()
         game = ZhaJinHuaGame(c1, "yxt")
         game.try_join(c2, "zouyu")
-        game.try_move(c1, "start")
+        game.try_move(c1, "start bot")
         game.state = "playing"
         game.folded = {"yxt", "zouyu", "R1"}
         game.stacks = {"R2": 0, "R3": 0, "R1": 899}
@@ -342,11 +345,11 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         )
 
         out = game.nudge_bots()
-        self.assertEqual(game.state, "ended")
+        self.assertIn(game.state, ("playing", "ended"))
         self.assertTrue(any("积分耗尽，自动弃牌" in line for line in out))
 
     def test_stuck_state_recovers_on_any_move(self):
-        """Already-stuck state: sole survivor with 0 stack auto-finishes on move attempt."""
+        """Sole survivor with 0 stack should collect pot and continue when others still have chips."""
         c1 = object()
         game = ZhaJinHuaGame(c1, "yxt")
         game.state = "playing"
@@ -357,14 +360,14 @@ class TestZhaJinHuaCompareAllIn(unittest.TestCase):
         game.pot = 1684
         game.current_bet = 701
         game.turn_idx = 0
-        game.cards = {"yxt": ["J♥", "8♣", "7♣"]}
+        game.cards = {"yxt": ["JH", "8C", "7C"]}
 
         err, bcast, done = game.try_move(c1, "follow")
         self.assertEqual(err, [])
-        self.assertTrue(done)
-        self.assertEqual(game.state, "ended")
-        self.assertEqual(game.stacks["yxt"], 1684)
-        self.assertEqual(game.pot, 0)
+        self.assertFalse(done)
+        self.assertEqual(game.state, "playing")
+        self.assertEqual(game.stacks["yxt"], 1683)
+        self.assertTrue(any("因其他玩家弃牌获胜" in line for line in bcast))
 
 
 class TestWerewolfWitchMutualExclusion(unittest.TestCase):

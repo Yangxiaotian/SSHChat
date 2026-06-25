@@ -267,6 +267,7 @@ export const zhMessages = {
       compare: '比牌',
       raiseAmount: '加注金额',
       botLevel: '机器人难度',
+      botAdd: '加机器人',
       noTarget: '当前没有可比牌目标，请先等待其他玩家/机器人入局并存活。',
       hostOnly: '仅房主可发牌开始。',
       alreadyPlaying: '当前对局进行中，无法重复发牌。',
