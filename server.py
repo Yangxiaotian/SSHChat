@@ -199,7 +199,7 @@ HELP_LINES = (
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
     "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
-    "[*] /library search <关键词>    在当前书中按关键词检索并跳转（别名：find / 搜索 / 检索）。\n",
+    "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
@@ -1436,18 +1436,29 @@ def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     )
 
 
-def _send_library_catalog(conn, user: str) -> None:
+def _send_library_catalog(conn, user: str, query: str = "") -> None:
     lib_dir = _library_dir()
     send_line(conn, "[*] --- 图书馆 ---\n")
     if not lib_dir.is_dir():
         send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
         send_line(conn, "[*] 请将 epub / txt / pdf 放入该目录后重试。\n")
         return
-    books = library.list_books(lib_dir)
-    if not books:
+    catalog = library.list_books(lib_dir)
+    if not catalog:
         send_line(conn, f"[*] 目录为空：{lib_dir}\n")
         send_line(conn, "[*] 支持格式：.epub、.txt、.pdf\n")
         return
+    query = (query or "").strip()
+    books = library.search_catalog(catalog, query) if query else catalog
+    if query:
+        send_line(
+            conn,
+            f"[*] 查找「{query}」，共 {len(books)} 本（全库 {len(catalog)} 本）。\n",
+        )
+        if not books:
+            send_line(conn, "[*] 未找到匹配的图书，请换关键词重试。\n")
+            send_line(conn, "[*] 用 /library 查看全部书目。\n")
+            return
     user_marks = library_bookmarks.list_for_user(user)
     for entry in books:
         mark = user_marks.get(entry.name)
@@ -1457,6 +1468,8 @@ def _send_library_catalog(conn, user: str) -> None:
             f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
         )
     send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    if len(catalog) > 10:
+        send_line(conn, "[*] 查找：/library find <关键词>\n")
     send_line(conn, "[*] 我的书签：/library bookmarks\n")
 
 
@@ -1509,6 +1522,7 @@ def _handle_library(conn, payload: str) -> None:
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
         send_line(conn, "[*]   /library                         书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
         send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
@@ -1644,12 +1658,12 @@ def _handle_library(conn, payload: str) -> None:
     if head in {"search", "find", "搜索", "查找", "检索"}:
         query = raw.split(None, 1)[1].strip() if len(parts) >= 2 else ""
         if not query:
-            send_line(conn, "[*] 用法：/library search <关键词>\n")
+            send_line(conn, "[*] 用法：/library find <关键词>（查找书目）或打开书后 search <关键词>（书内检索）\n")
             return
         with lock:
             session = library_reading.get(conn)
         if not session:
-            send_line(conn, "[*] 请先用 /library open <序号> 打开图书，再搜索。\n")
+            _send_library_catalog(conn, user, query)
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))

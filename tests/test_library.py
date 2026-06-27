@@ -82,6 +82,23 @@ class TestLibraryTxt(unittest.TestCase):
         self.assertIsNone(library.resolve_book(self.lib_dir, "../etc/passwd", catalog))
         self.assertIsNone(library.resolve_book(self.lib_dir, "foo/bar.txt", catalog))
 
+    def test_search_catalog_by_name_and_ext(self) -> None:
+        (self.lib_dir / "红楼梦.epub").write_text("x", encoding="utf-8")
+        (self.lib_dir / "三国演义.txt").write_text("y", encoding="utf-8")
+        (self.lib_dir / "notes.pdf").write_bytes(b"%PDF-1.4\n")
+        catalog = library.list_books(self.lib_dir)
+        self.assertEqual(len(library.search_catalog(catalog, "红楼")), 1)
+        self.assertEqual(library.search_catalog(catalog, "红楼")[0].name, "红楼梦.epub")
+        self.assertEqual(len(library.search_catalog(catalog, "pdf")), 1)
+        self.assertEqual(len(library.search_catalog(catalog, "三国 txt")), 1)
+        self.assertEqual(library.search_catalog(catalog, "missing"), [])
+
+    def test_search_catalog_empty_query_returns_all(self) -> None:
+        (self.lib_dir / "a.txt").write_text("x", encoding="utf-8")
+        catalog = library.list_books(self.lib_dir)
+        self.assertEqual(library.search_catalog(catalog, ""), catalog)
+        self.assertEqual(library.search_catalog(catalog, "   "), catalog)
+
 
 class TestLibraryHtml(unittest.TestCase):
     def test_html_to_text(self) -> None:

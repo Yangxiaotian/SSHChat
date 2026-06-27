@@ -190,6 +190,20 @@ def list_books(library_dir: Path) -> list[BookEntry]:
     return entries
 
 
+def search_catalog(catalog: list[BookEntry], query: str) -> list[BookEntry]:
+    """Filter *catalog* by filename/extension keywords (case-insensitive, all terms must match)."""
+    query = (query or "").strip().lower()
+    if not query:
+        return list(catalog)
+    terms = query.split()
+    results: list[BookEntry] = []
+    for entry in catalog:
+        haystack = f"{entry.name} {entry.ext}".lower()
+        if all(term in haystack for term in terms):
+            results.append(entry)
+    return results
+
+
 def resolve_book(library_dir: Path, token: str, catalog: list[BookEntry]) -> Optional[BookEntry]:
     token = (token or "").strip()
     if not token:

@@ -1819,6 +1819,32 @@ html, body, #root {
   flex-wrap: wrap;
 }
 
+.library-search {
+  margin-bottom: 10px;
+}
+
+.library-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--vscode-fg);
+  background: var(--vscode-input-bg, var(--vscode-hover));
+  border: 1px solid var(--vscode-border);
+  border-radius: 3px;
+}
+
+.library-search-input:focus {
+  outline: 1px solid var(--vscode-accent, #007acc);
+  border-color: var(--vscode-accent, #007acc);
+}
+
+.library-search-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--vscode-text-secondary);
+}
+
 .library-reader {
   margin-bottom: 16px;
   padding: 10px;

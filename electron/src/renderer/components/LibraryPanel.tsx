@@ -1,13 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore } from '../store/chatStore';
 import type { LibraryBookItem } from '../lib/libraryMessages';
 
 export default function LibraryPanel() {
   const { libraryView } = useChatStore();
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
   const readerBodyRef = useRef<HTMLDivElement>(null);
 
   const { books, bookmarks, reading } = libraryView;
+
+  const filteredBooks = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return books;
+    const terms = q.split(/\s+/);
+    return books.filter((item) => {
+      const haystack = `${item.name} ${item.format}`.toLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    });
+  }, [books, query]);
+
+  const showSearch = books.length > 10;
 
   useEffect(() => {
     const el = readerBodyRef.current;
@@ -63,6 +76,23 @@ export default function LibraryPanel() {
         <button className="mini-btn" onClick={handleShowBookmarks}>My Bookmarks</button>
       </div>
 
+      {showSearch && (
+        <div className="library-search">
+          <input
+            type="search"
+            className="library-search-input"
+            placeholder="按书名或格式查找…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query.trim() && (
+            <div className="library-search-meta">
+              找到 {filteredBooks.length} / {books.length} 本
+            </div>
+          )}
+        </div>
+      )}
+
       {reading && (
         <div className="library-reader">
           <div className="library-reader-header">
@@ -84,9 +114,11 @@ export default function LibraryPanel() {
 
       {books.length === 0 ? (
         <div className="library-empty">No books loaded. Click refresh to fetch catalog.</div>
+      ) : filteredBooks.length === 0 ? (
+        <div className="library-empty">No books match your search.</div>
       ) : (
         <div className="library-list">
-          {books.map((item) => (
+          {filteredBooks.map((item) => (
             <div key={item.id} className="library-item">
               <button className="library-item-main" onClick={() => handleOpen(item)}>
                 <div className="library-item-meta">
