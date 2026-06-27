@@ -108,6 +108,9 @@ try {
     const api = {
       loadConfig: async () => ({ host: '127.0.0.1', user: 'zouyu', sshPort: 22, chatPort: 12345 }),
       saveConfig: async () => true,
+      loadChatHistory: async () => ({ version: 1, rooms: {}, roomNames: ['default'] }),
+      saveChatHistory: async () => true,
+      flushChatHistory: () => true,
       connect: async () => ({ success: true }),
       disconnect: async () => true,
       isConnected: async () => true,
@@ -187,7 +190,7 @@ try {
   await page.waitForTimeout(500);
   console.log('[qa] page loaded');
 
-  const cancelBtn = page.locator('button:has-text("Cancel")').first();
+  const cancelBtn = page.locator('button:has-text("取消"), button:has-text("Cancel")').first();
   if (await cancelBtn.isVisible().catch(() => false)) {
     await cancelBtn.click();
   }
@@ -224,7 +227,14 @@ try {
       window.__qa.emitSystemLines(payload.lines);
     }, { lines });
     await page.waitForTimeout(250);
-    await page.locator(`.game-interaction-title:has-text("${titleText}")`).first().waitFor({ state: 'visible', timeout: 10000 });
+    try {
+      await page.locator(`.game-interaction-title:has-text("${titleText}")`).first().waitFor({ state: 'visible', timeout: 10000 });
+    } catch (error) {
+      await page.screenshot({ path: path.resolve(artifactsDir, 'game-panels-qa-failure.png'), fullPage: true });
+      console.log('[qa] visible text:', (await page.locator('body').innerText()).slice(0, 3000));
+      console.log('[qa] captured errors:', errors.join('\n'));
+      throw error;
+    }
     console.log(`[qa] board ready -> ${titleText}`);
   };
 
@@ -272,7 +282,7 @@ try {
   });
   await page.locator('.xiangqi-cell[title="10,1"]').click();
   await page.locator('.xiangqi-cell[title="9,1"]').click();
-  await assertSentIncludes('/game move 10 1 9 1');
+  await assertSentIncludes('/game move coord 10 1 9 1');
 
   // 4) 三国杀
   await openByLines([

@@ -96,6 +96,38 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         profile = self.store.profile("xiangqi", "Alice")
         self.assertEqual(profile["games"], 0)
 
+    def test_xiangqi_absolute_coord_moves_support_client_clicks(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+
+        err_red, _bcast_red, _ = game.try_move(red_conn, "coord 10 1 9 1")
+        self.assertEqual(err_red, [])
+        self.assertEqual(game.board[8][0], 5)
+        self.assertEqual(game.board[9][0], 0)
+
+        err_black, _bcast_black, _ = game.try_move(black_conn, "coord 1 1 2 1")
+        self.assertEqual(err_black, [])
+        self.assertEqual(game.board[1][0], -5)
+        self.assertEqual(game.board[0][0], 0)
+
+    def test_xiangqi_flying_general_is_reported_as_check(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+        game.board = [[0 for _ in range(9)] for _ in range(10)]
+        game.board[0][4] = -1
+        game.board[9][4] = 1
+        game._turn = 1
+
+        lines = game.show(red_conn)
+
+        self.assertTrue(any("被将军" in line for line in lines))
+
     def test_server_reset_rating_flags_reset_store(self) -> None:
         server.rating_store = self.store
         self.store.record_result("gomoku", "Alice", "Bob", 1.0)

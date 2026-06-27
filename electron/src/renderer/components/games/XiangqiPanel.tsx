@@ -10,6 +10,8 @@ type Props = {
 type Piece = {
   row: number;
   col: number;
+  actualRow: number;
+  actualCol: number;
   symbol: string;
   isRed: boolean;
 };
@@ -32,6 +34,15 @@ type AssistantResult = {
   nodes: number;
   ms: number;
   note: string;
+};
+
+type ParsedBoard = {
+  pieces: Map<string, Piece>;
+  board: number[][];
+  pieceCount: number;
+  flipped: boolean;
+  toActual: (displayRow: number, displayCol: number) => { row: number; col: number };
+  toDisplay: (actualRow: number, actualCol: number) => { row: number; col: number };
 };
 
 const ROWS = 10;
@@ -104,10 +115,19 @@ function parseSeatInfo(boardText: string): { redName: string; blackName: string 
   return { redName: '', blackName: '' };
 }
 
-function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<string, Piece>; board: number[][]; pieceCount: number } {
+function parseBoard(boardText: string, turnSide: Side | null): ParsedBoard {
   const pieces = new Map<string, Piece>();
   const board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
-  if (!boardText.trim()) return { pieces, board, pieceCount: 0 };
+  const flipped = boardText.includes('己方在下方');
+  const toActual = (displayRow: number, displayCol: number) => ({
+    row: flipped ? ROWS + 1 - displayRow : displayRow,
+    col: flipped ? COLS + 1 - displayCol : displayCol,
+  });
+  const toDisplay = (actualRow: number, actualCol: number) => ({
+    row: flipped ? ROWS + 1 - actualRow : actualRow,
+    col: flipped ? COLS + 1 - actualCol : actualCol,
+  });
+  if (!boardText.trim()) return { pieces, board, pieceCount: 0, flipped, toActual, toDisplay };
 
   let rowNum = 1;
   const lastMoverSide = turnSide ? ((-turnSide) as Side) : null;
@@ -133,11 +153,13 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
   }
 
   for (const row of boardRows) {
-    const targetRow = row.row ?? rowNum;
-    rowNum = Math.max(rowNum + 1, targetRow + 1);
-    if (targetRow < 1 || targetRow > ROWS) continue;
+    const displayRow = row.row ?? rowNum;
+    rowNum = Math.max(rowNum + 1, displayRow + 1);
+    if (displayRow < 1 || displayRow > ROWS) continue;
     const rowTokens = row.tokens;
     for (let c = 0; c < COLS; c += 1) {
+      const displayCol = c + 1;
+      const actual = toActual(displayRow, displayCol);
       const cell = rowTokens[c];
       if (cell === '·' || cell === '*') continue;
       const match = cell.match(/^([+\-!])(.*)$/);
@@ -154,20 +176,21 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
         if (RED_UNIQUE.has(symbol)) isRed = true;
         else if (BLACK_UNIQUE.has(symbol)) isRed = false;
         else if (lastMoverSide) isRed = lastMoverSide === RED;
-        else isRed = targetRow >= 6;
+        else isRed = actual.row >= 6;
       }
 
-      const colNum = c + 1;
-              pieces.set(`${targetRow}-${colNum}`, {
-                row: targetRow,
-                col: colNum,
-                symbol,
+      pieces.set(`${displayRow}-${displayCol}`, {
+        row: displayRow,
+        col: displayCol,
+        actualRow: actual.row,
+        actualCol: actual.col,
+        symbol,
         isRed,
       });
 
       const pt = pieceTypeFromSymbol(symbol);
       if (pt) {
-        board[targetRow - 1][colNum - 1] = (isRed ? RED : BLACK) * pt;
+        board[actual.row - 1][actual.col - 1] = (isRed ? RED : BLACK) * pt;
       }
     }
   }
@@ -179,7 +202,7 @@ function parseBoard(boardText: string, turnSide: Side | null): { pieces: Map<str
     }
   }
 
-  return { pieces, board, pieceCount };
+  return { pieces, board, pieceCount, flipped, toActual, toDisplay };
 }
 
 function pieceSide(cell: number): Side | 0 {
@@ -335,7 +358,7 @@ function isAttacked(board: number[][], row: number, col: number, bySide: Side): 
       for (const [tr, tc] of caps) {
         if (tr === row && tc === col) return true;
       }
-      if (pieceType(board[r][c]) === PT.K && c === col && Math.abs(r - row) > 1) {
+      if (pieceType(board[r][c]) === PT.K && board[row][col] === -bySide * PT.K && c === col && Math.abs(r - row) > 1) {
         const lo = Math.min(r, row);
         const hi = Math.max(r, row);
         let blocked = false;
@@ -612,7 +635,7 @@ function palaceLines(cell: number, pad: number): string {
 }
 
 export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: Props) {
-  const [from, setFrom] = useState<{ r: number; c: number } | null>(null);
+  const [from, setFrom] = useState<{ row: number; col: number; displayRow: number; displayCol: number } | null>(null);
   const [strategy, setStrategy] = useState<StrategyId>('pro_balance');
 
   const turn = useMemo(() => parseTurnInfo(boardText), [boardText]);
@@ -730,7 +753,8 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
             const col = cIx + 1;
             const key = `${row}-${col}`;
             const piece = parsed.pieces.get(key);
-            const selected = from?.r === row && from?.c === col;
+            const selected = from?.displayRow === row && from?.displayCol === col;
+            const actual = parsed.toActual(row, col);
 
             return (
               <button
@@ -743,16 +767,21 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
                   if (!from) {
                     if (!piece) return;
                     if (mySide && piece.isRed !== (mySide === RED)) return;
-                    setFrom({ r: row, c: col });
+                    setFrom({
+                      row: piece.actualRow,
+                      col: piece.actualCol,
+                      displayRow: row,
+                      displayCol: col,
+                    });
                     return;
                   }
 
-                  if (from.r === row && from.c === col) {
+                  if (from.displayRow === row && from.displayCol === col) {
                     setFrom(null);
                     return;
                   }
 
-                  onMove(from.r, from.c, row, col);
+                  onMove(from.row, from.col, actual.row, actual.col);
                   setFrom(null);
                 }}
                 disabled={!canPlay}

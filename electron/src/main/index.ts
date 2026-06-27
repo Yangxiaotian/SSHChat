@@ -108,6 +108,12 @@ const RAPFI_PONDER_HASH_MB = intEnv(
   RAPFI_HASH_MB,
 );
 const RAPFI_THREADS = intEnv('RAPFI_THREADS', 0, 0, 128);
+const RAPFI_PONDER_THREADS = intEnv(
+  'RAPFI_PONDER_THREADS',
+  Math.max(1, Math.min(2, Math.floor(os.cpus().length / 4))),
+  1,
+  16,
+);
 const RAPFI_MAX_DEPTH = intEnv('RAPFI_MAX_DEPTH', 99, 8, 200);
 const RAPFI_RULE = intEnv('RAPFI_RULE', 4, 0, 6);
 let resolvedRapfiExecutableCache: string | null | undefined;
@@ -393,13 +399,14 @@ function buildRapfiBoardCommands(
   inited: boolean,
   hashMb: number,
   forceRestart = false,
+  threadCount = RAPFI_THREADS,
 ): string[] {
   const lines: string[] = [];
   if (!inited) {
     lines.push('START 15');
     lines.push(`INFO hash_size ${hashMb * 1024}`);
-    if (RAPFI_THREADS > 0) {
-      lines.push(`INFO thread_num ${RAPFI_THREADS}`);
+    if (threadCount > 0) {
+      lines.push(`INFO thread_num ${threadCount}`);
     }
   } else if (forceRestart) {
     lines.push('RESTART');
@@ -459,6 +466,7 @@ class RapfiEngineService {
     private readonly hashMb: number,
     private readonly allowIncremental: boolean,
     private readonly rememberEngineBoard: boolean,
+    private readonly threadCount = RAPFI_THREADS,
   ) {}
 
   private trace(msg: string): void {
@@ -707,7 +715,15 @@ class RapfiEngineService {
     if (cmds.length === 0) {
       // 回退整盘重建：处理开局、悔棋、多步差分、跨端续玩、执子变化等情况。
       const forceRestart = this.inited;
-      cmds = buildRapfiBoardCommands(payload.board, payload.mySide, timeoutMs, this.inited, this.hashMb, forceRestart);
+      cmds = buildRapfiBoardCommands(
+        payload.board,
+        payload.mySide,
+        timeoutMs,
+        this.inited,
+        this.hashMb,
+        forceRestart,
+        this.threadCount,
+      );
       cmdMode = 'full-board';
       if (!this.inited) cmdReason = 'cold-start';
       else if (tacticalReason) cmdReason = `tactical-full-board:${tacticalReason}`;
@@ -827,8 +843,8 @@ class RapfiEngineService {
 // Formal user-facing suggestions must favor correctness over speed. Incremental
 // TURN can be fast, but when engine state drifts it may return a shallow move.
 // Keep formal analysis on full BOARD rebuilds; ponder can stay isolated.
-const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, false, false);
-const rapfiPonderService = new RapfiEngineService('ponder', RAPFI_PONDER_HASH_MB, false, false);
+const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, false, false, RAPFI_THREADS);
+const rapfiPonderService = new RapfiEngineService('ponder', RAPFI_PONDER_HASH_MB, false, false, RAPFI_PONDER_THREADS);
 
 async function analyzeGomokuByRapfi(payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> {
   return payload.mode === 'ponder' ? rapfiPonderService.analyze(payload) : rapfiService.analyze(payload);

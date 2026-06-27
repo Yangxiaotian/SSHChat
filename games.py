@@ -293,7 +293,7 @@ def _xq_terminal_score(board: list[list[int]], side: int, root_side: int) -> Opt
     in_check = king is not None and _xq_is_attacked(board, king[0], king[1], -side)
     if in_check:
         return -200000 if side == root_side else 200000
-    return 0
+    return -120000 if side == root_side else 120000
 
 
 def _xq_order_moves(board: list[list[int]], moves: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
@@ -1927,6 +1927,13 @@ class GoGame(BoardUndoMixin):
             return None
         return "KataGo手顺：" + "; ".join(moves)
 
+    def _can_show_katago_moves_line(self, conn) -> bool:
+        if conn is self.black_conn:
+            return self.black_name == "zouyu"
+        if conn is self.white_conn:
+            return self.white_name == "zouyu"
+        return False
+
     def _undo_has_moves(self) -> bool:
         return bool(self._history)
 
@@ -2134,7 +2141,7 @@ class GoGame(BoardUndoMixin):
             kr, kc = self._ko_point
             lines.append(f"劫点：第 {kr + 1} 行，第 {kc + 1} 列，不能立刻回提。")
         moves_line = self._katago_moves_line()
-        if moves_line:
+        if moves_line and self._can_show_katago_moves_line(conn):
             lines.append(moves_line)
         if self.state == "playing":
             lines.append(self._turn_line())
@@ -2631,9 +2638,9 @@ def _xq_is_attacked(
             if (row, col) in _xq_gen_pseudo(board, r, c, captures_only=True):
                 return True
             if _xq_piece_type(board[r][c]) == _XQ_K:
-                # 将帅对脸时同列无子隔也可视为被“照面”
+                # 将帅对脸时，同列无子隔的对方将/帅视为被“照面”。
                 if (
-                    board[row][col] == by_side * _XQ_K
+                    board[row][col] == -by_side * _XQ_K
                     and c == col
                     and abs(r - row) > 1
                 ):
@@ -2689,12 +2696,36 @@ def _xq_parse_coord_move(
     return (fr - 1, fc, tr - 1, tc)
 
 
+def _xq_parse_absolute_coord_move(raw: str) -> Optional[tuple[int, int, int, int]]:
+    t = raw.strip().lower().replace(",", " ")
+    if not t.startswith(("coord ", "坐标 ")):
+        return None
+    parts = t.split()
+    if len(parts) != 5:
+        return None
+    try:
+        fr, fc, tr, tc = (int(x) for x in parts[1:])
+    except ValueError:
+        return None
+    if not (
+        1 <= fr <= XIANGQI_ROWS
+        and 1 <= tr <= XIANGQI_ROWS
+        and 1 <= fc <= XIANGQI_COLS
+        and 1 <= tc <= XIANGQI_COLS
+    ):
+        return None
+    return (fr - 1, fc - 1, tr - 1, tc - 1)
+
+
 def _xq_parse_move(
     raw: str, side: int, board: list[list[int]]
 ) -> Optional[tuple[int, int, int, int]]:
     t = raw.strip()
     if not t:
         return None
+    coord_abs = _xq_parse_absolute_coord_move(t)
+    if coord_abs is not None:
+        return coord_abs
     coord = _xq_parse_coord_move(t, side)
     if coord is not None:
         return coord
@@ -2955,8 +2986,8 @@ class XiangqiGame(BoardUndoMixin):
                 bcast.append(f"对局结束：黑方 {self.black_name} 将死获胜！")
                 bcast.extend(self._settle_ratings(0.0))
             else:
-                bcast.append("对局结束：双方无合法着法，和棋。")
-                bcast.extend(self._settle_ratings(0.5))
+                bcast.append(f"对局结束：红方 {self.red_name} 无合法着法，黑方困毙获胜！")
+                bcast.extend(self._settle_ratings(0.0))
             return bcast
         suffix = "（被将军）" if in_check else ""
         bcast.append(f"轮到 红方 {self.red_name} 走子{suffix}")
@@ -3066,8 +3097,10 @@ class XiangqiGame(BoardUndoMixin):
                 bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
                 bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
             else:
-                bcast.append("对局结束：双方无合法着法，和棋。")
-                bcast.extend(self._settle_ratings(0.5))
+                loser = self.red_name if self._turn == _XQ_RED else self.black_name
+                loser_color = "红" if self._turn == _XQ_RED else "黑"
+                bcast.append(f"对局结束：{loser_color}方 {loser} 无合法着法，{color}方困毙获胜！")
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
             return ([], bcast, True)
 
         if self._is_ai_turn():

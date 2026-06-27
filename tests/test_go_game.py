@@ -13,11 +13,11 @@ class GoGameTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _started(self) -> tuple[GoGame, object, object]:
+    def _started(self, black_name: str = "Alice", white_name: str = "Bob") -> tuple[GoGame, object, object]:
         black = object()
         white = object()
-        game = GoGame(black, "Alice", rating_store=self.store)
-        err, _bcast, _ = game.try_join(white, "Bob")
+        game = GoGame(black, black_name, rating_store=self.store)
+        err, _bcast, _ = game.try_join(white, white_name)
         self.assertEqual(err, [])
         return game, black, white
 
@@ -92,26 +92,45 @@ class GoGameTests(unittest.TestCase):
 
         self.assertTrue(any("劫点：第 5 行，第 6 列" in line for line in lines))
 
-    def test_show_exposes_katago_move_history(self) -> None:
+    def test_show_hides_katago_move_history_from_regular_users(self) -> None:
         game, black, white = self._started()
         self.assertEqual(game.try_move(black, "4 4")[0], [])
         self.assertEqual(game.try_move(white, "16 16")[0], [])
         self.assertEqual(game.try_move(black, "pass")[0], [])
 
-        lines = game.show()
+        no_conn_lines = game.show()
+        black_lines = game.show(black)
+        white_lines = game.show(white)
+
+        self.assertFalse(any("KataGo手顺" in line for line in no_conn_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in black_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in white_lines))
+
+    def test_show_exposes_katago_move_history_only_to_zouyu(self) -> None:
+        game, black, white = self._started(black_name="zouyu", white_name="Bob")
+        spectator = object()
+        self.assertEqual(game.try_move(black, "4 4")[0], [])
+        self.assertEqual(game.try_move(white, "16 16")[0], [])
+        self.assertEqual(game.try_move(black, "pass")[0], [])
+
+        zouyu_lines = game.show(black)
+        white_lines = game.show(white)
+        spectator_lines = game.show(spectator)
 
         self.assertTrue(
-            any("KataGo手顺：B D16; W Q4; B pass" in line for line in lines)
+            any("KataGo手顺：B D16; W Q4; B pass" in line for line in zouyu_lines)
         )
+        self.assertFalse(any("KataGo手顺" in line for line in white_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in spectator_lines))
 
     def test_undo_rewinds_katago_move_history(self) -> None:
-        game, black, white = self._started()
+        game, black, white = self._started(black_name="zouyu", white_name="Bob")
         self.assertEqual(game.try_move(black, "4 4")[0], [])
         self.assertEqual(game.try_move(white, "16 16")[0], [])
 
         game.request_undo(white)
         game.accept_undo(black)
-        lines = game.show()
+        lines = game.show(black)
 
         self.assertTrue(any("KataGo手顺：B D16" in line for line in lines))
         self.assertFalse(any("W Q4" in line for line in lines))
