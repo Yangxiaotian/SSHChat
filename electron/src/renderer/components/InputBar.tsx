@@ -24,7 +24,9 @@ export default function InputBar() {
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
+  const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const sendingRef = useRef(false);
   const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
   const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
@@ -100,6 +102,7 @@ export default function InputBar() {
   };
 
   const handleSend = async () => {
+    if (sendingRef.current) return;
     const trimmed = composerText.trim();
     if (!trimmed) return;
 
@@ -110,11 +113,19 @@ export default function InputBar() {
       return;
     }
 
-    await window.api.sendMessage(trimmed);
-    const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);
-    persistHistory(next);
-    setComposerText('');
-    setShowSuggestions(false);
+    sendingRef.current = true;
+    setIsSending(true);
+    try {
+      const ok = await window.api.sendMessage(trimmed);
+      if (!ok) return;
+      const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);
+      persistHistory(next);
+      setComposerText('');
+      setShowSuggestions(false);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
   };
 
   const handleSuggestionClick = (value: string, source: 'command' | 'history') => {
@@ -160,7 +171,7 @@ export default function InputBar() {
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder={isConnected ? t('input.placeholder', { room: activeRoom }) : t('input.notConnected')}
-          disabled={!isConnected}
+          disabled={!isConnected || isSending}
         />
         <button
           className="send-button"
@@ -181,7 +192,7 @@ export default function InputBar() {
         <button
           className="send-button"
           onClick={handleSend}
-          disabled={!isConnected || !composerText.trim()}
+          disabled={!isConnected || isSending || !composerText.trim()}
         >
           {t('common.send')}
         </button>

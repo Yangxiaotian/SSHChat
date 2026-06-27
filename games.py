@@ -1785,7 +1785,11 @@ def _go_try_play(
             grid[cr][cc] = opp
         return False, "禁入点：该手为自杀手。", [], ko_point
 
-    next_ko = captured[0] if len(captured) == 1 and len(own_group) == 1 else None
+    next_ko = (
+        captured[0]
+        if len(captured) == 1 and len(own_group) == 1 and len(own_libs) == 1
+        else None
+    )
     return True, "", captured, next_ko
 
 

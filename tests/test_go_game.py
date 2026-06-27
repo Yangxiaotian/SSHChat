@@ -57,6 +57,55 @@ class GoGameTests(unittest.TestCase):
         self.assertTrue(any("自杀" in line for line in err))
         self.assertEqual(game.grid[1][1], 0)
 
+    def test_true_ko_retake_is_rejected(self) -> None:
+        game, black, white = self._started()
+        game.grid = [[0 for _ in range(19)] for _ in range(19)]
+        # A real simple-ko shape: black at 4,4 captures one white stone at 4,3,
+        # and the new black stone has exactly one liberty, so immediate retake is illegal.
+        for row, col, stone in [
+            (3, 3, 1),
+            (3, 4, 2),
+            (4, 2, 1),
+            (4, 3, 2),
+            (4, 5, 2),
+            (5, 3, 1),
+            (5, 4, 2),
+        ]:
+            game.grid[row - 1][col - 1] = stone
+        game._turn = 1
+
+        err_black, _bcast_black, _ = game.try_move(black, "4 4")
+        err_white, _bcast_white, _ = game.try_move(white, "4 3")
+
+        self.assertEqual(err_black, [])
+        self.assertTrue(any("劫点" in line for line in err_white))
+        self.assertEqual(game.grid[3][2], 0)
+        self.assertEqual(game.grid[3][3], 1)
+
+    def test_non_ko_single_capture_allows_next_move_on_captured_point(self) -> None:
+        game, black, white = self._started()
+        game.grid = [[0 for _ in range(19)] for _ in range(19)]
+        # Single capture, but the newly placed black stone has more than one liberty.
+        # This is not a ko; white may legally play the captured point next.
+        for row, col, stone in [
+            (3, 4, 2),
+            (4, 2, 1),
+            (4, 3, 2),
+            (4, 4, 1),
+            (4, 5, 2),
+            (5, 3, 1),
+            (5, 4, 2),
+        ]:
+            game.grid[row - 1][col - 1] = stone
+        game._turn = 1
+
+        err_black, _bcast_black, _ = game.try_move(black, "3 3")
+        err_white, _bcast_white, _ = game.try_move(white, "4 3")
+
+        self.assertEqual(err_black, [])
+        self.assertEqual(err_white, [])
+        self.assertEqual(game.grid[3][2], 2)
+
     def test_two_passes_end_and_record_rating(self) -> None:
         game, black, white = self._started()
         err1, b1, done1 = game.try_move(black, "pass")
