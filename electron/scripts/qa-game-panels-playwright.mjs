@@ -284,6 +284,51 @@ try {
   await page.locator('.xiangqi-cell[title="9,1"]').click();
   await assertSentIncludes('/game move coord 10 1 9 1');
 
+  await openByLines([
+    'xiangqi 对局（playing）  红：yxt   黑：zouyu',
+    '轮到 黑方 zouyu 走子',
+    '   一  二  三  四  五  六  七  八  九    ← 红方纵线 一…九',
+    '  图例：+红  -黑  !上一步  ·空  （请用等宽字体）',
+    '   +车 +马 +相 +仕 +帅 +仕 +相 +马 +车',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   ·   *   ·   ·   !炮 ·   ·   +炮 ·',
+    '   +兵 ·   +兵 ·   +兵 ·   +兵 ·   +兵',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '               楚河汉界',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   -卒 ·   -卒 ·   -卒 ·   -卒 ·   -卒',
+    '   ·   -炮 ·   ·   ·   ·   ·   -炮 ·',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   -车 -马 -象 -士 -将 -士 -象 -马 -车',
+    '   9   8   7   6   5   4   3   2   1     ← 黑方纵线 9…1（从右向左为 1～9）',
+    '  上一步：炮二平五',
+  ], '中国象棋棋盘');
+  await page.evaluate(() => {
+    // @ts-ignore
+    window.__qa.clearSent();
+  });
+  await page.locator('.xiangqi-cell[title="10,1"]').click();
+  await page.locator('.xiangqi-cell[title="9,1"]').click();
+  await assertSentIncludes('/game move coord 1 9 2 9');
+  await page.evaluate(() => {
+    // @ts-ignore
+    window.__qa.clearSent();
+  });
+  const firstXiangqiSuggestion = page
+    .locator('.game-advisor:has(.game-advisor-title:has-text("象棋职业助手")) button:has-text("建议1")')
+    .first();
+  if (await firstXiangqiSuggestion.isVisible().catch(() => false)) {
+    await firstXiangqiSuggestion.click();
+    const sent = await page.evaluate(() => {
+      // @ts-ignore
+      return window.__qa.getSent();
+    });
+    assert(
+      sent.some((msg) => /^\/game move coord [1-4] /.test(msg)),
+      `黑方建议没有使用真实黑方起点坐标；实际: ${JSON.stringify(sent)}`,
+    );
+  }
+
   // 4) 三国杀
   await openByLines([
     'doushou 对局（playing）  红：zouyu   黑：R1',

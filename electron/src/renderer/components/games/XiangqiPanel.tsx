@@ -115,10 +115,13 @@ function parseSeatInfo(boardText: string): { redName: string; blackName: string 
   return { redName: '', blackName: '' };
 }
 
-function parseBoard(boardText: string, turnSide: Side | null): ParsedBoard {
+function parseBoard(boardText: string, turnSide: Side | null, viewerIsBlack: boolean): ParsedBoard {
   const pieces = new Map<string, Piece>();
   const board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
-  const flipped = boardText.includes('己方在下方');
+  const flipped =
+    viewerIsBlack ||
+    boardText.includes('己方在下方') ||
+    /黑方纵线\s*9[.…、,\s]*8[.…、,\s]*7|黑方纵线\s*9…1/.test(boardText);
   const toActual = (displayRow: number, displayCol: number) => ({
     row: flipped ? ROWS + 1 - displayRow : displayRow,
     col: flipped ? COLS + 1 - displayCol : displayCol,
@@ -558,6 +561,12 @@ function moveLabel(m: Move): string {
   return `${m.fr + 1},${m.fc + 1} -> ${m.tr + 1},${m.tc + 1}`;
 }
 
+function moveDisplayLabel(m: Move, parsed: ParsedBoard): string {
+  const from = parsed.toDisplay(m.fr + 1, m.fc + 1);
+  const to = parsed.toDisplay(m.tr + 1, m.tc + 1);
+  return `${from.row},${from.col} -> ${to.row},${to.col}`;
+}
+
 function buildAssistant(
   board: number[][],
   mySide: Side,
@@ -640,7 +649,8 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   const turn = useMemo(() => parseTurnInfo(boardText), [boardText]);
   const seats = useMemo(() => parseSeatInfo(boardText), [boardText]);
-  const parsed = useMemo(() => parseBoard(boardText, turn.side), [boardText, turn.side]);
+  const viewerIsBlack = seats.blackName === nickname;
+  const parsed = useMemo(() => parseBoard(boardText, turn.side, viewerIsBlack), [boardText, turn.side, viewerIsBlack]);
 
   const myTurn = !!turn.name && turn.name === nickname;
   const canPlay = !disabled && (!turn.name || myTurn);
@@ -713,9 +723,9 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
                     className={`mini-btn ${(canPlay && myTurn) ? 'ready' : ''}`}
                     disabled={disabled || !canPlay || !myTurn}
                     onClick={() => onMove(mv.fr + 1, mv.fc + 1, mv.tr + 1, mv.tc + 1)}
-                    title={`评分 ${mv.score}`}
+                    title={`真实坐标：${moveLabel(mv)}；评分 ${mv.score}`}
                   >
-                    建议{idx + 1}: {moveLabel(mv)}
+                    建议{idx + 1}: {moveDisplayLabel(mv, parsed)}
                   </button>
                 ))}
               </div>
