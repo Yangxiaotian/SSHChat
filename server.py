@@ -198,6 +198,7 @@ HELP_LINES = (
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
     "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
+    "[*] /lib             /library 的简写。\n",
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
     "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
@@ -1494,7 +1495,12 @@ def _send_library_bookmarks(conn, user: str) -> None:
 
 
 def _handle_library(conn, payload: str) -> None:
-    raw = payload[len("/library") :].strip()
+    if payload.startswith("/library"):
+        raw = payload[len("/library") :].strip()
+    elif payload.startswith("/lib"):
+        raw = payload[len("/lib") :].strip()
+    else:
+        raw = payload.strip()
     lib_dir = _library_dir()
     user = _client_name(conn)
 
@@ -1521,7 +1527,7 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library                         书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
         send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
         send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
@@ -1705,6 +1711,12 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*] 未找到图书：{token}\n")
             send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
             return
+        if entry.ext == "pdf" or entry.size_bytes >= 2 * 1024 * 1024:
+            send_line(
+                conn,
+                f"[*] 正在加载 [{entry.ext.upper()}] {entry.name}，"
+                "首次打开可能需要十几秒，请稍候…\n",
+            )
         try:
             doc = _get_cached_book(entry.path)
         except Exception as exc:
@@ -2568,7 +2580,7 @@ def handle_command(conn, payload: str) -> None:
             send_line(conn, "[*] 新闻命令处理失败，请稍后重试（详情见服务端日志）。\n")
         return
 
-    if cmd == "/library":
+    if cmd in {"/library", "/lib"}:
         try:
             _handle_library(conn, payload)
         except Exception as e:

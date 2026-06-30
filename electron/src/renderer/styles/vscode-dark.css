@@ -2229,7 +2229,8 @@ html, body, #root {
   border-radius: 0 0 3px 3px;
 }
 
-.command-item:hover {
+.command-item:hover,
+.command-item.active {
   background-color: var(--vscode-selection);
 }
 
