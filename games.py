@@ -549,6 +549,49 @@ def _choose_gomoku_ai_move(grid: list[list[int]], who: int, level: str) -> tuple
     return best_move or (GOMOKU_SIZE // 2, GOMOKU_SIZE // 2)
 
 
+_UNDO_ACTION_ALIASES: dict[str, str] = {
+    "accept": "accept",
+    "同意": "accept",
+    "ok": "accept",
+    "yes": "accept",
+    "acc": "accept",
+    "y": "accept",
+    "reject": "reject",
+    "拒绝": "reject",
+    "no": "reject",
+    "rej": "reject",
+    "n": "reject",
+    "cancel": "cancel",
+    "取消": "cancel",
+    "can": "cancel",
+}
+
+_UNDO_ACTION_HINT = (
+    "悔棋子命令用法：/game undo accept | reject | cancel"
+    "（简写 acc / rej / can）"
+)
+
+
+def parse_undo_action(rest: str) -> tuple[Optional[str], Optional[str]]:
+    """Map /game undo 后的参数；返回 (action, error)。
+
+    action 为 request | accept | reject | cancel；error 非空时表示无法识别。
+    """
+    token = (rest or "").strip().lower()
+    if not token:
+        return "request", None
+    if token in _UNDO_ACTION_ALIASES:
+        return _UNDO_ACTION_ALIASES[token], None
+    matches = {
+        action
+        for key, action in _UNDO_ACTION_ALIASES.items()
+        if key.startswith(token) or token.startswith(key)
+    }
+    if len(matches) == 1:
+        return matches.pop(), None
+    return None, _UNDO_ACTION_HINT
+
+
 class BoardUndoMixin:
     """悔棋：上一步走子方 /game undo，对方 /game undo accept。"""
 
@@ -10290,7 +10333,7 @@ HELP_LINES = (
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
-    "（chess/gomoku/go/xiangqi/doushou；reject 拒绝，cancel 取消请求）。",
+    "（chess/gomoku/go/xiangqi/doushou；简写 acc / rej / can；reject 拒绝，cancel 取消请求）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",

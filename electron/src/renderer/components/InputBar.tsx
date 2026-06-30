@@ -34,12 +34,26 @@ function longestCommonPrefix(values: string[]): string {
   return prefix;
 }
 
+const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
+
 function buildSuggestions(
   value: string,
   commands: { name: string; desc: string }[],
   history: string[],
   recentLabel: string,
 ): SuggestionItem[] {
+  const gameUndoPrefix = '/game undo';
+  if (value.toLowerCase().startsWith(gameUndoPrefix)) {
+    const tail = value.slice(gameUndoPrefix.length).trimStart().toLowerCase();
+    return GAME_UNDO_ACTIONS.filter(
+      (action) => !tail || action.startsWith(tail) || (tail.length >= 2 && action.startsWith(tail)),
+    ).map((action) => ({
+      value: `${gameUndoPrefix} ${action}`,
+      desc: 'undo action',
+      source: 'command' as const,
+    }));
+  }
+
   if (value.startsWith('/') && !value.includes(' ')) {
     const lower = value.toLowerCase();
     return commands
@@ -106,8 +120,13 @@ export default function InputBar() {
     const merged = buildSuggestions(value, commands, history, t('common.recentInput')).slice(0, 10);
     setSuggestions(merged);
     setActiveSuggestion(0);
-    const inCommandMode = value.startsWith('/') && !value.includes(' ');
-    setShowSuggestions(inCommandMode ? merged.length > 0 : merged.length > 0 && value.trim().length > 0);
+    const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
+    const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
+    setShowSuggestions(
+      isTopLevelCommand || isGameUndoCommand
+        ? merged.length > 0
+        : merged.length > 0 && value.trim().length > 0,
+    );
     return merged;
   };
 
@@ -126,7 +145,11 @@ export default function InputBar() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     const value = e.currentTarget.value;
 
-    if (e.key === 'Tab' && value.startsWith('/') && !value.includes(' ')) {
+    const canTabComplete =
+      (value.startsWith('/') && !value.includes(' ')) ||
+      value.toLowerCase().startsWith('/game undo');
+
+    if (e.key === 'Tab' && canTabComplete) {
       e.preventDefault();
       const items = refreshSuggestions(value);
       const cmdItems = items.filter((item) => item.source === 'command');

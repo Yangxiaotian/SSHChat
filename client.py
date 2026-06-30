@@ -127,6 +127,10 @@ _SUBCOMMANDS_BY_CMD = {
     "/dict": sorted(_DICT_SUBCOMMANDS),
 }
 
+_NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("/game", "undo"): ("accept", "reject", "cancel"),
+}
+
 
 class SSHChatCommandCompleter(Completer):
     """Prefix-complete top-level /commands and nested subcommands."""
@@ -143,14 +147,24 @@ class SSHChatCommandCompleter(Completer):
                     yield Completion(cmd, start_position=-len(prefix))
             return
 
+        parts = text.split()
         if not text.endswith(" "):
-            parts = text.split()
             if len(parts) == 1:
                 prefix = parts[0]
                 for cmd in _TOP_COMMANDS:
                     if cmd.startswith(prefix):
                         yield Completion(cmd, start_position=-len(prefix))
                 return
+            if len(parts) >= 3:
+                cmd = parts[0].lower()
+                sub = parts[1].lower()
+                prefix = parts[-1].lower()
+                nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
+                for item in nested:
+                    if item.startswith(prefix):
+                        yield Completion(item, start_position=-len(parts[-1]))
+                if nested:
+                    return
             cmd = parts[0].lower()
             sub_prefix = parts[-1]
             for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
@@ -158,7 +172,16 @@ class SSHChatCommandCompleter(Completer):
                     yield Completion(sub, start_position=-len(sub_prefix))
             return
 
-        cmd = text.rstrip().split()[0].lower()
+        parts = text.rstrip().split()
+        if len(parts) >= 2:
+            cmd = parts[0].lower()
+            sub = parts[1].lower()
+            nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
+            if nested:
+                for item in nested:
+                    yield Completion(item + " ", start_position=0)
+                return
+        cmd = parts[0].lower()
         for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
             yield Completion(sub + " ", start_position=0)
 

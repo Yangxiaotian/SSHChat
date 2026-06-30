@@ -2028,13 +2028,16 @@ def _fed_execute_game_cmd(
     if sub == "undo":
         if game is None or actor is None or not hasattr(game, "request_undo"):
             return
-        action = rest.lower()
+        undo_action, undo_err = games.parse_undo_action(rest)
+        if undo_err:
+            _route_game_private(room, actor, [undo_err])
+            return
         with lock:
-            if action in ("accept", "同意", "ok", "yes"):
+            if undo_action == "accept":
                 priv, bcast, _ = game.accept_undo(actor)
-            elif action in ("reject", "拒绝", "no"):
+            elif undo_action == "reject":
                 priv, bcast, _ = game.reject_undo(actor)
-            elif action in ("cancel", "取消"):
+            elif undo_action == "cancel":
                 priv, bcast, _ = game.cancel_undo(actor)
             else:
                 priv, bcast, _ = game.request_undo(actor)
@@ -2874,12 +2877,15 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     "[*] 当前对局不支持悔棋（仅 chess、gomoku、xiangqi）。\n",
                 )
                 return
-            action = rest.lower()
-            if action in ("accept", "同意", "ok", "yes"):
+            undo_action, undo_err = games.parse_undo_action(rest)
+            if undo_err:
+                send_line(conn, f"[*] {undo_err}\n")
+                return
+            if undo_action == "accept":
                 priv, bcast, _ = game.accept_undo(conn)
-            elif action in ("reject", "拒绝", "no"):
+            elif undo_action == "reject":
                 priv, bcast, _ = game.reject_undo(conn)
-            elif action in ("cancel", "取消"):
+            elif undo_action == "cancel":
                 priv, bcast, _ = game.cancel_undo(conn)
             else:
                 priv, bcast, _ = game.request_undo(conn)
