@@ -94,6 +94,8 @@ Options:
                          Reset one user's persisted rating for one game before restart
   --pip-index-url URL  Override pip index (e.g. https://pypi.tuna.tsinghua.edu.cn/simple); also reads
                        \$SSHCHAT_PIP_INDEX_URL / \$PIP_INDEX_URL (sudo strips env unless -E)
+  Env: SSHCHAT_SKIP_PIP_UPGRADE=1  Skip upgrading pip before requirements (not recommended; old pip
+                       may fail pymupdf hash checks after PyPI wheel republish)
   -h, --help         This help
 
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
@@ -528,9 +530,11 @@ else
   echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
 fi
 
-# Upgrading pip downloads a large wheel; skip by default on low-disk / constrained /tmp setups.
-if [[ "${SSHCHAT_UPGRADE_PIP:-0}" == "1" ]]; then
-  "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
+# Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
+# republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
+if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
+  echo "info: upgrading pip in $PREFIX/venv"
+  "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
 fi
 "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" -r "$SCRIPT_DIR/requirements-server.txt"
 rm -rf "$DEPLOY_TMP"
