@@ -13,11 +13,11 @@ class GoGameTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _started(self) -> tuple[GoGame, object, object]:
+    def _started(self, black_name: str = "Alice", white_name: str = "Bob") -> tuple[GoGame, object, object]:
         black = object()
         white = object()
-        game = GoGame(black, "Alice", rating_store=self.store)
-        err, _bcast, _ = game.try_join(white, "Bob")
+        game = GoGame(black, black_name, rating_store=self.store)
+        err, _bcast, _ = game.try_join(white, white_name)
         self.assertEqual(err, [])
         return game, black, white
 
@@ -57,6 +57,55 @@ class GoGameTests(unittest.TestCase):
         self.assertTrue(any("自杀" in line for line in err))
         self.assertEqual(game.grid[1][1], 0)
 
+    def test_true_ko_retake_is_rejected(self) -> None:
+        game, black, white = self._started()
+        game.grid = [[0 for _ in range(19)] for _ in range(19)]
+        # A real simple-ko shape: black at 4,4 captures one white stone at 4,3,
+        # and the new black stone has exactly one liberty, so immediate retake is illegal.
+        for row, col, stone in [
+            (3, 3, 1),
+            (3, 4, 2),
+            (4, 2, 1),
+            (4, 3, 2),
+            (4, 5, 2),
+            (5, 3, 1),
+            (5, 4, 2),
+        ]:
+            game.grid[row - 1][col - 1] = stone
+        game._turn = 1
+
+        err_black, _bcast_black, _ = game.try_move(black, "4 4")
+        err_white, _bcast_white, _ = game.try_move(white, "4 3")
+
+        self.assertEqual(err_black, [])
+        self.assertTrue(any("劫点" in line for line in err_white))
+        self.assertEqual(game.grid[3][2], 0)
+        self.assertEqual(game.grid[3][3], 1)
+
+    def test_non_ko_single_capture_allows_next_move_on_captured_point(self) -> None:
+        game, black, white = self._started()
+        game.grid = [[0 for _ in range(19)] for _ in range(19)]
+        # Single capture, but the newly placed black stone has more than one liberty.
+        # This is not a ko; white may legally play the captured point next.
+        for row, col, stone in [
+            (3, 4, 2),
+            (4, 2, 1),
+            (4, 3, 2),
+            (4, 4, 1),
+            (4, 5, 2),
+            (5, 3, 1),
+            (5, 4, 2),
+        ]:
+            game.grid[row - 1][col - 1] = stone
+        game._turn = 1
+
+        err_black, _bcast_black, _ = game.try_move(black, "3 3")
+        err_white, _bcast_white, _ = game.try_move(white, "4 3")
+
+        self.assertEqual(err_black, [])
+        self.assertEqual(err_white, [])
+        self.assertEqual(game.grid[3][2], 2)
+
     def test_two_passes_end_and_record_rating(self) -> None:
         game, black, white = self._started()
         err1, b1, done1 = game.try_move(black, "pass")
@@ -92,26 +141,45 @@ class GoGameTests(unittest.TestCase):
 
         self.assertTrue(any("劫点：第 5 行，第 6 列" in line for line in lines))
 
-    def test_show_exposes_katago_move_history(self) -> None:
+    def test_show_hides_katago_move_history_from_regular_users(self) -> None:
         game, black, white = self._started()
         self.assertEqual(game.try_move(black, "4 4")[0], [])
         self.assertEqual(game.try_move(white, "16 16")[0], [])
         self.assertEqual(game.try_move(black, "pass")[0], [])
 
-        lines = game.show()
+        no_conn_lines = game.show()
+        black_lines = game.show(black)
+        white_lines = game.show(white)
+
+        self.assertFalse(any("KataGo手顺" in line for line in no_conn_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in black_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in white_lines))
+
+    def test_show_exposes_katago_move_history_only_to_zouyu(self) -> None:
+        game, black, white = self._started(black_name="zouyu", white_name="Bob")
+        spectator = object()
+        self.assertEqual(game.try_move(black, "4 4")[0], [])
+        self.assertEqual(game.try_move(white, "16 16")[0], [])
+        self.assertEqual(game.try_move(black, "pass")[0], [])
+
+        zouyu_lines = game.show(black)
+        white_lines = game.show(white)
+        spectator_lines = game.show(spectator)
 
         self.assertTrue(
-            any("KataGo手顺：B D16; W Q4; B pass" in line for line in lines)
+            any("KataGo手顺：B D16; W Q4; B pass" in line for line in zouyu_lines)
         )
+        self.assertFalse(any("KataGo手顺" in line for line in white_lines))
+        self.assertFalse(any("KataGo手顺" in line for line in spectator_lines))
 
     def test_undo_rewinds_katago_move_history(self) -> None:
-        game, black, white = self._started()
+        game, black, white = self._started(black_name="zouyu", white_name="Bob")
         self.assertEqual(game.try_move(black, "4 4")[0], [])
         self.assertEqual(game.try_move(white, "16 16")[0], [])
 
         game.request_undo(white)
         game.accept_undo(black)
-        lines = game.show()
+        lines = game.show(black)
 
         self.assertTrue(any("KataGo手顺：B D16" in line for line in lines))
         self.assertFalse(any("W Q4" in line for line in lines))

@@ -269,6 +269,7 @@ export const enMessages: MessageTree = {
       compare: 'Compare',
       raiseAmount: 'Raise amount',
       botLevel: 'Bot level',
+      botAdd: 'Add bot',
       noTarget: 'No compare target yet — wait for other players/bots.',
       hostOnly: 'Host only.',
       alreadyPlaying: 'Game already in progress.',

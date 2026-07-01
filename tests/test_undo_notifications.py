@@ -1,6 +1,23 @@
 import unittest
 
-from games import GomokuGame
+from games import GomokuGame, parse_undo_action
+
+
+class TestUndoActionParse(unittest.TestCase):
+    def test_acc_maps_to_accept(self) -> None:
+        action, err = parse_undo_action("acc")
+        self.assertIsNone(err)
+        self.assertEqual(action, "accept")
+
+    def test_partial_accept_prefix(self) -> None:
+        action, err = parse_undo_action("acce")
+        self.assertIsNone(err)
+        self.assertEqual(action, "accept")
+
+    def test_unknown_reports_hint(self) -> None:
+        action, err = parse_undo_action("foobar")
+        self.assertIsNone(action)
+        self.assertIn("accept", err or "")
 
 
 class TestUndoNotifications(unittest.TestCase):

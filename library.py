@@ -190,6 +190,20 @@ def list_books(library_dir: Path) -> list[BookEntry]:
     return entries
 
 
+def search_catalog(catalog: list[BookEntry], query: str) -> list[BookEntry]:
+    """Filter *catalog* by filename/extension keywords (case-insensitive, all terms must match)."""
+    query = (query or "").strip().lower()
+    if not query:
+        return list(catalog)
+    terms = query.split()
+    results: list[BookEntry] = []
+    for entry in catalog:
+        haystack = f"{entry.name} {entry.ext}".lower()
+        if all(term in haystack for term in terms):
+            results.append(entry)
+    return results
+
+
 def resolve_book(library_dir: Path, token: str, catalog: list[BookEntry]) -> Optional[BookEntry]:
     token = (token or "").strip()
     if not token:
@@ -213,6 +227,13 @@ def _load_txt(path: Path) -> BookDocument:
     data = path.read_text(encoding="utf-8", errors="replace")
     pages = _split_pages(data, LIBRARY_PAGE_CHARS)
     return BookDocument(title=path.stem, pages=pages, source_path=path)
+
+
+def _pdf_cjk_spacing_penalty(text: str) -> int:
+    """Penalize layout-mode artifacts that insert spaces between CJK glyphs."""
+    if not text:
+        return 0
+    return len(re.findall(r"[\u4e00-\u9fff]\s+[\u4e00-\u9fff]", text))
 
 
 def _pdf_text_quality(text: str) -> tuple[int, int, int]:
@@ -239,6 +260,7 @@ def _pdf_text_quality(text: str) -> tuple[int, int, int]:
             penalty += 6
         elif code < 0x80 and not ch.isprintable():
             penalty += 4
+    penalty += _pdf_cjk_spacing_penalty(text) * 4
     return (cjk, readable - penalty, len(text.strip()))
 
 
@@ -374,18 +396,26 @@ def _extract_pdf_page_text_pymupdf_dict(page: object) -> str:
 
 def _extract_pdf_page_text_pymupdf(page: object) -> str:
     candidates: list[str] = []
-    for kwargs in ({}, {"sort": True}):
-        try:
-            text = page.get_text("text", **kwargs) or ""  # type: ignore[union-attr]
-        except TypeError:
-            try:
-                text = page.get_text("text") or ""  # type: ignore[union-attr]
-            except Exception:
-                text = ""
-        except Exception:
-            text = ""
-        if text.strip():
-            candidates.append(text)
+    unsorted = ""
+    try:
+        unsorted = page.get_text("text") or ""  # type: ignore[union-attr]
+    except Exception:
+        unsorted = ""
+    if unsorted.strip():
+        candidates.append(unsorted)
+    try:
+        sorted_text = page.get_text("text", sort=True) or ""  # type: ignore[union-attr]
+    except TypeError:
+        sorted_text = ""
+    except Exception:
+        sorted_text = ""
+    if sorted_text.strip():
+        # sort=True can scramble multi-column pages; only keep when clearly better.
+        if (
+            not unsorted.strip()
+            or _pdf_text_quality(sorted_text) > _pdf_text_quality(unsorted)
+        ):
+            candidates.append(sorted_text)
     for extractor in (
         _extract_pdf_page_text_pymupdf_blocks,
         _extract_pdf_page_text_pymupdf_dict,
@@ -442,11 +472,20 @@ def _load_pdf_pypdf(path: Path) -> BookDocument:
 
 
 def _load_pdf(path: Path) -> BookDocument:
+    compare_engines = os.environ.get("SSHCHAT_PDF_COMPARE_ENGINES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     pymupdf_doc: Optional[BookDocument] = None
     try:
         pymupdf_doc = _load_pdf_pymupdf(path)
     except Exception:
         pymupdf_doc = None
+    if pymupdf_doc is not None and not compare_engines:
+        if _pdf_document_quality(pymupdf_doc.pages)[1] > 0:
+            return pymupdf_doc
+    pypdf_doc: Optional[BookDocument] = None
     try:
         pypdf_doc = _load_pdf_pypdf(path)
     except Exception:
@@ -459,11 +498,20 @@ def _load_pdf(path: Path) -> BookDocument:
         return pymupdf_doc
     pymupdf_score = _pdf_document_quality(pymupdf_doc.pages)
     pypdf_score = _pdf_document_quality(pypdf_doc.pages)
+    # PyMuPDF preserves top-to-bottom reading order better for CJK textbooks.
     if pypdf_score > pymupdf_score:
+        pym_readable = pymupdf_score[1]
+        pyp_readable = pypdf_score[1]
+        if pym_readable > 0 and pyp_readable <= int(pym_readable * 1.12):
+            return pymupdf_doc
         return pypdf_doc
     if pypdf_score == pymupdf_score and sum(len(p) for p in pypdf_doc.pages) > sum(
         len(p) for p in pymupdf_doc.pages
     ):
+        pym_readable = pymupdf_score[1]
+        pyp_readable = pypdf_score[1]
+        if pym_readable > 0 and pyp_readable <= int(pym_readable * 1.12):
+            return pymupdf_doc
         return pypdf_doc
     return pymupdf_doc
 

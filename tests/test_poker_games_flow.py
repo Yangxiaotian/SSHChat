@@ -117,8 +117,10 @@ class PokerGamesFlowTests(unittest.TestCase):
 
     def test_zjh_starts_blind_and_reveals_after_look(self):
         host_conn = object()
+        peer_conn = object()
         game = ZhaJinHuaGame(host_conn, "host")
         game.rng.seed(5)
+        game.try_join(peer_conn, "peer")
 
         err_start, _b_start, _ = game.try_move(host_conn, "start")
         self.assertEqual(err_start, [])
@@ -129,6 +131,30 @@ class PokerGamesFlowTests(unittest.TestCase):
         self.assertEqual(err_look, [])
         lines2 = game.show(host_conn)
         self.assertTrue(any(line.startswith("你的手牌：") and "闷牌中" not in line for line in lines2))
+
+    def test_zjh_two_humans_start_without_auto_bots(self):
+        host_conn = object()
+        peer_conn = object()
+        game = ZhaJinHuaGame(host_conn, "host")
+        game.try_join(peer_conn, "peer")
+
+        err_start, b_start, _ = game.try_move(host_conn, "start")
+        self.assertEqual(err_start, [])
+        self.assertEqual(game.state, "playing")
+        self.assertEqual(len(game.players), 2)
+        self.assertEqual(len(game.bot_names), 0)
+        self.assertFalse(any("机器人：" in line for line in b_start))
+
+    def test_zjh_start_bot_adds_robots(self):
+        host_conn = object()
+        peer_conn = object()
+        game = ZhaJinHuaGame(host_conn, "host")
+        game.try_join(peer_conn, "peer")
+
+        err_start, b_start, _ = game.try_move(host_conn, "start bot")
+        self.assertEqual(err_start, [])
+        self.assertGreaterEqual(len(game.bot_names), 1)
+        self.assertTrue(any("机器人：" in line for line in b_start))
 
     def test_holdem_starts_blind_and_reveals_after_look(self):
         host_conn = object()

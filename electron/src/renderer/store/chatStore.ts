@@ -212,6 +212,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const roomMessages = messages.get(message.room) || [];
+    if (roomMessages.some((item) => item.id === message.id)) {
+      return;
+    }
+    if (
+      (message.type === 'chat' || message.type === 'pm')
+      && roomMessages.some((item) =>
+        item.type === message.type
+        && item.sender === message.sender
+        && item.content === message.content
+        && Math.abs(message.timestamp - item.timestamp) <= 2000,
+      )
+    ) {
+      return;
+    }
     const MAX_MESSAGES = 1200;
     const trimmed = roomMessages.length >= MAX_MESSAGES ? roomMessages.slice(-MAX_MESSAGES + 1) : roomMessages;
     const newMessages = new Map(messages);

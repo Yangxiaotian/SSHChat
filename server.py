@@ -198,8 +198,9 @@ HELP_LINES = (
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
     "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
+    "[*] /lib             /library 的简写。\n",
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
-    "[*] /library search <关键词>    在当前书中按关键词检索并跳转（别名：find / 搜索 / 检索）。\n",
+    "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*] /help          显示本说明。\n",
     "[*]\n",
@@ -259,15 +260,34 @@ def broadcast_game(room: str, lines) -> None:
     broadcast_room(room, _format_game_lines(room, lines))
 
 
+def _viewer_name_for_conn(conn) -> str | None:
+    info = clients.get(conn)
+    if not info:
+        return None
+    name = (info.get("name") or "").strip()
+    return name or None
+
+
+def _game_show_for_conn(game, conn) -> list[str]:
+    """Per-connection board view; chess/xiangqi flip by seated side, not conn identity."""
+    viewer_name = _viewer_name_for_conn(conn)
+    if viewer_name and getattr(game, "name", "") in {"chess", "xiangqi"}:
+        try:
+            return game.show(conn, viewer_name=viewer_name)
+        except TypeError:
+            pass
+    try:
+        return game.show(conn)
+    except TypeError:
+        return game.show()
+
+
 def send_oriented_boards(room: str, game) -> None:
     """Send full board view; chess/xiangqi second seat sees flipped board (己方在下)."""
     with lock:
         targets = [c for c in list(rooms.get(room, ())) if c in clients]
     for conn in targets:
-        try:
-            lines = game.show(conn)
-        except TypeError:
-            lines = game.show()
+        lines = _game_show_for_conn(game, conn)
         if lines:
             send_game_private(conn, room, lines)
 
@@ -1436,18 +1456,29 @@ def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     )
 
 
-def _send_library_catalog(conn, user: str) -> None:
+def _send_library_catalog(conn, user: str, query: str = "") -> None:
     lib_dir = _library_dir()
     send_line(conn, "[*] --- 图书馆 ---\n")
     if not lib_dir.is_dir():
         send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
         send_line(conn, "[*] 请将 epub / txt / pdf 放入该目录后重试。\n")
         return
-    books = library.list_books(lib_dir)
-    if not books:
+    catalog = library.list_books(lib_dir)
+    if not catalog:
         send_line(conn, f"[*] 目录为空：{lib_dir}\n")
         send_line(conn, "[*] 支持格式：.epub、.txt、.pdf\n")
         return
+    query = (query or "").strip()
+    books = library.search_catalog(catalog, query) if query else catalog
+    if query:
+        send_line(
+            conn,
+            f"[*] 查找「{query}」，共 {len(books)} 本（全库 {len(catalog)} 本）。\n",
+        )
+        if not books:
+            send_line(conn, "[*] 未找到匹配的图书，请换关键词重试。\n")
+            send_line(conn, "[*] 用 /library 查看全部书目。\n")
+            return
     user_marks = library_bookmarks.list_for_user(user)
     for entry in books:
         mark = user_marks.get(entry.name)
@@ -1457,6 +1488,8 @@ def _send_library_catalog(conn, user: str) -> None:
             f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
         )
     send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    if len(catalog) > 10:
+        send_line(conn, "[*] 查找：/library find <关键词>\n")
     send_line(conn, "[*] 我的书签：/library bookmarks\n")
 
 
@@ -1481,7 +1514,12 @@ def _send_library_bookmarks(conn, user: str) -> None:
 
 
 def _handle_library(conn, payload: str) -> None:
-    raw = payload[len("/library") :].strip()
+    if payload.startswith("/library"):
+        raw = payload[len("/library") :].strip()
+    elif payload.startswith("/lib"):
+        raw = payload[len("/lib") :].strip()
+    else:
+        raw = payload.strip()
     lib_dir = _library_dir()
     user = _client_name(conn)
 
@@ -1508,7 +1546,8 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library                         书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
         send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
@@ -1644,12 +1683,12 @@ def _handle_library(conn, payload: str) -> None:
     if head in {"search", "find", "搜索", "查找", "检索"}:
         query = raw.split(None, 1)[1].strip() if len(parts) >= 2 else ""
         if not query:
-            send_line(conn, "[*] 用法：/library search <关键词>\n")
+            send_line(conn, "[*] 用法：/library find <关键词>（查找书目）或打开书后 search <关键词>（书内检索）\n")
             return
         with lock:
             session = library_reading.get(conn)
         if not session:
-            send_line(conn, "[*] 请先用 /library open <序号> 打开图书，再搜索。\n")
+            _send_library_catalog(conn, user, query)
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))
@@ -1691,6 +1730,12 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*] 未找到图书：{token}\n")
             send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
             return
+        if entry.ext == "pdf" or entry.size_bytes >= 2 * 1024 * 1024:
+            send_line(
+                conn,
+                f"[*] 正在加载 [{entry.ext.upper()}] {entry.name}，"
+                "首次打开可能需要十几秒，请稍候…\n",
+            )
         try:
             doc = _get_cached_book(entry.path)
         except Exception as exc:
@@ -1798,8 +1843,13 @@ def _local_conn_for_name_in_room_locked(name: str, room: str):
 
 
 def _remap_local_game_seats_locked(room: str, game) -> None:
+    local_node = _local_node_id()
     for old_conn, seat_name in list(_iter_game_conn_seats(game)):
         if isinstance(old_conn, FederatedSeat):
+            if old_conn.node_id == local_node:
+                local = _local_conn_for_name_in_room_locked(seat_name, room)
+                if local is not None:
+                    _replace_conn_refs(game, old_conn, local)
             continue
         if old_conn in clients and clients[old_conn]["name"] == seat_name:
             continue
@@ -2002,13 +2052,16 @@ def _fed_execute_game_cmd(
     if sub == "undo":
         if game is None or actor is None or not hasattr(game, "request_undo"):
             return
-        action = rest.lower()
+        undo_action, undo_err = games.parse_undo_action(rest)
+        if undo_err:
+            _route_game_private(room, actor, [undo_err])
+            return
         with lock:
-            if action in ("accept", "同意", "ok", "yes"):
+            if undo_action == "accept":
                 priv, bcast, _ = game.accept_undo(actor)
-            elif action in ("reject", "拒绝", "no"):
+            elif undo_action == "reject":
                 priv, bcast, _ = game.reject_undo(actor)
-            elif action in ("cancel", "取消"):
+            elif undo_action == "cancel":
                 priv, bcast, _ = game.cancel_undo(actor)
             else:
                 priv, bcast, _ = game.request_undo(actor)
@@ -2554,7 +2607,7 @@ def handle_command(conn, payload: str) -> None:
             send_line(conn, "[*] 新闻命令处理失败，请稍后重试（详情见服务端日志）。\n")
         return
 
-    if cmd == "/library":
+    if cmd in {"/library", "/lib"}:
         try:
             _handle_library(conn, payload)
         except Exception as e:
@@ -2781,10 +2834,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 if getattr(game, "name", "") == "sanguo":
                     lines = game.show(conn, full=full_help)
                 else:
-                    try:
-                        lines = game.show(conn)
-                    except TypeError:
-                        lines = game.show()
+                    lines = _game_show_for_conn(game, conn)
                 if resumed:
                     lines = ["已检测到同账号旧终端席位，已自动续玩接管。"] + lines
                 nudge = getattr(game, "nudge_bots", None)
@@ -2848,12 +2898,15 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     "[*] 当前对局不支持悔棋（仅 chess、gomoku、xiangqi）。\n",
                 )
                 return
-            action = rest.lower()
-            if action in ("accept", "同意", "ok", "yes"):
+            undo_action, undo_err = games.parse_undo_action(rest)
+            if undo_err:
+                send_line(conn, f"[*] {undo_err}\n")
+                return
+            if undo_action == "accept":
                 priv, bcast, _ = game.accept_undo(conn)
-            elif action in ("reject", "拒绝", "no"):
+            elif undo_action == "reject":
                 priv, bcast, _ = game.reject_undo(conn)
-            elif action in ("cancel", "取消"):
+            elif undo_action == "cancel":
                 priv, bcast, _ = game.cancel_undo(conn)
             else:
                 priv, bcast, _ = game.request_undo(conn)
@@ -3009,10 +3062,7 @@ def handle_client(conn, addr) -> None:
                     resumed_game_rooms.append(room)
             active_game = room_games.get(active_room)
             if active_game is not None and getattr(active_game, "state", "ended") != "ended":
-                try:
-                    active_game_lines = active_game.show(conn)
-                except TypeError:
-                    active_game_lines = active_game.show()
+                active_game_lines = _game_show_for_conn(active_game, conn)
                 if active_room in resumed_game_rooms:
                     active_game_lines = ["已自动续玩接管旧终端席位。"] + active_game_lines
             room_labels = [

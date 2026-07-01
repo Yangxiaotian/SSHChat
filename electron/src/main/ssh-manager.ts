@@ -15,6 +15,7 @@ export class SSHManager {
   private tcpSocket: net.Socket | null = null;
   private onData: ((data: Buffer) => void) | null = null;
   private onEnd: (() => void) | null = null;
+  private generation = 0;
   private readonly ansiCsiRe = /\x1b\[[\d;?]*[A-Za-z]/g;
   private readonly ansiCsiExtRe = /[\u001b\u009b]\[[0-?]*[ -/]*[@-~]/g;
   private readonly oscRe = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
@@ -32,6 +33,8 @@ export class SSHManager {
     onDataCallback: (data: Buffer) => void,
     onEndCallback: () => void,
   ): Promise<void> {
+    this.closeExisting();
+    const generation = ++this.generation;
     this.onData = onDataCallback;
     this.onEnd = onEndCallback;
 
@@ -59,14 +62,23 @@ export class SSHManager {
       }
 
       this.ssh.on('ready', () => {
+        if (generation !== this.generation) return;
         onStatus('ssh-connected');
 
         const chatPort = config.chatPort || 12345;
         this.ssh!.forwardOut('127.0.0.1', 0, '127.0.0.1', chatPort, (err, stream) => {
+          if (generation !== this.generation) {
+            stream?.destroy();
+            return;
+          }
           if (err) {
             // Fallback for forced-command / no-port-forwarding servers:
             // use interactive shell channel (same behavior as legacy GUI client).
             this.ssh!.shell((shellErr, shellStream) => {
+              if (generation !== this.generation) {
+                shellStream?.destroy();
+                return;
+              }
               if (shellErr) {
                 onError(`Port forwarding failed: ${err.message}; shell fallback failed: ${shellErr.message}`);
                 reject(shellErr);
@@ -77,7 +89,7 @@ export class SSHManager {
               this.transportMode = 'shell';
               onStatus('connected');
 
-              this.bindStream(shellStream, onDataCallback, onEndCallback, onError);
+              this.bindStream(shellStream, generation, onDataCallback, onEndCallback, onError);
               resolve();
             });
             return;
@@ -89,19 +101,21 @@ export class SSHManager {
 
           // Send nickname as first line (server handshake)
           stream.write(nickname + '\n');
-          this.bindStream(stream, onDataCallback, onEndCallback, onError);
+          this.bindStream(stream, generation, onDataCallback, onEndCallback, onError);
 
           resolve();
         });
       });
 
       this.ssh.on('error', (err: Error) => {
+        if (generation !== this.generation) return;
         onError(`SSH error: ${err.message}`);
         reject(err);
       });
 
       let ended = false;
       const guardedEnd = () => {
+        if (generation !== this.generation) return;
         if (ended) return;
         ended = true;
         onEndCallback();
@@ -115,6 +129,7 @@ export class SSHManager {
 
   private bindStream(
     stream: ClientChannel,
+    generation: number,
     onDataCallback: (data: Buffer) => void,
     onEndCallback: () => void,
     onError: SSHErrorCallback,
@@ -122,6 +137,7 @@ export class SSHManager {
     const decoder = new StringDecoder('utf8');
     let buffer = '';
     stream.on('data', (data: Buffer) => {
+      if (generation !== this.generation || stream !== this.stream) return;
       // Use StringDecoder to preserve multibyte UTF-8 characters across chunk boundaries.
       buffer += decoder.write(data);
       const lines = buffer.split('\n');
@@ -139,6 +155,7 @@ export class SSHManager {
     });
 
     stream.on('end', () => {
+      if (generation !== this.generation || stream !== this.stream) return;
       const rest = decoder.end();
       if (rest) {
         const cleaned = this.cleanLine(rest);
@@ -150,8 +167,28 @@ export class SSHManager {
     });
 
     stream.on('error', (err: Error) => {
+      if (generation !== this.generation || stream !== this.stream) return;
       onError(`Stream error: ${err.message}`);
     });
+  }
+
+  private closeExisting(): void {
+    if (this.stream) {
+      this.stream.removeAllListeners();
+      this.stream.destroy();
+      this.stream = null;
+    }
+    if (this.ssh) {
+      this.ssh.removeAllListeners();
+      this.ssh.end();
+      this.ssh = null;
+    }
+    if (this.tcpSocket) {
+      this.tcpSocket.removeAllListeners();
+      this.tcpSocket.destroy();
+      this.tcpSocket = null;
+    }
+    this.transportMode = null;
   }
 
   private cleanLine(raw: string): string {
@@ -211,15 +248,8 @@ export class SSHManager {
   }
 
   disconnect(): void {
-    if (this.stream) {
-      this.stream.close();
-      this.stream = null;
-    }
-    if (this.ssh) {
-      this.ssh.end();
-      this.ssh = null;
-    }
-    this.transportMode = null;
+    this.generation += 1;
+    this.closeExisting();
   }
 
   isConnected(): boolean {

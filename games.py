@@ -293,7 +293,7 @@ def _xq_terminal_score(board: list[list[int]], side: int, root_side: int) -> Opt
     in_check = king is not None and _xq_is_attacked(board, king[0], king[1], -side)
     if in_check:
         return -200000 if side == root_side else 200000
-    return 0
+    return -120000 if side == root_side else 120000
 
 
 def _xq_order_moves(board: list[list[int]], moves: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
@@ -354,10 +354,21 @@ def _xq_negamax(
     return best
 
 
-def _choose_xq_ai_move(board: list[list[int]], side: int, level: str):
+def _choose_xq_ai_move(
+    board: list[list[int]],
+    side: int,
+    level: str,
+    ply_log: Optional[list[dict]] = None,
+):
     depth = _XQ_AI_DEPTH.get(level, 2)
     width = _XQ_AI_WIDTH.get(level, 10)
     legal = _xq_order_moves(board, _xq_legal_moves(board, side))[:width]
+    if ply_log is not None:
+        legal = [
+            m
+            for m in legal
+            if not _xq_would_lose_on_repetition(board, ply_log, side, *m)
+        ] or legal
     best_move = None
     best_score = -10**9
     for move in legal:
@@ -547,6 +558,49 @@ def _choose_gomoku_ai_move(grid: list[list[int]], who: int, level: str) -> tuple
             best_score = score
             best_move = (row, col)
     return best_move or (GOMOKU_SIZE // 2, GOMOKU_SIZE // 2)
+
+
+_UNDO_ACTION_ALIASES: dict[str, str] = {
+    "accept": "accept",
+    "同意": "accept",
+    "ok": "accept",
+    "yes": "accept",
+    "acc": "accept",
+    "y": "accept",
+    "reject": "reject",
+    "拒绝": "reject",
+    "no": "reject",
+    "rej": "reject",
+    "n": "reject",
+    "cancel": "cancel",
+    "取消": "cancel",
+    "can": "cancel",
+}
+
+_UNDO_ACTION_HINT = (
+    "悔棋子命令用法：/game undo accept | reject | cancel"
+    "（简写 acc / rej / can）"
+)
+
+
+def parse_undo_action(rest: str) -> tuple[Optional[str], Optional[str]]:
+    """Map /game undo 后的参数；返回 (action, error)。
+
+    action 为 request | accept | reject | cancel；error 非空时表示无法识别。
+    """
+    token = (rest or "").strip().lower()
+    if not token:
+        return "request", None
+    if token in _UNDO_ACTION_ALIASES:
+        return _UNDO_ACTION_ALIASES[token], None
+    matches = {
+        action
+        for key, action in _UNDO_ACTION_ALIASES.items()
+        if key.startswith(token) or token.startswith(key)
+    }
+    if len(matches) == 1:
+        return matches.pop(), None
+    return None, _UNDO_ACTION_HINT
 
 
 class BoardUndoMixin:
@@ -864,12 +918,21 @@ class ChessGame(BoardUndoMixin):
     def is_seated(self, conn) -> bool:
         return self.color_of(conn) is not None
 
-    def _viewer_flip(self, conn) -> bool:
-        return conn is not None and conn is self.black_conn
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self.color_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.white_name:
+                side = _chess.WHITE
+            elif vn == self.black_name:
+                side = _chess.BLACK
+        return side == _chess.BLACK
 
-    def _board_render(self, conn=None) -> list[str]:
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         return _render_board(
-            self.board, last_move=self._last_move, flip=self._viewer_flip(conn)
+            self.board,
+            last_move=self._last_move,
+            flip=self._viewer_flip(conn, viewer_name=viewer_name),
         )
 
     def _is_ai_game(self) -> bool:
@@ -1072,13 +1135,13 @@ class ChessGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def show(self, conn=None) -> list[str]:
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [
             f"chess 对局（{self.state}）  白：{self.white_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render(conn))
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             color = self.board.turn
             who = self.white_name if color == _chess.WHITE else self.black_name
@@ -1785,7 +1848,11 @@ def _go_try_play(
             grid[cr][cc] = opp
         return False, "禁入点：该手为自杀手。", [], ko_point
 
-    next_ko = captured[0] if len(captured) == 1 and len(own_group) == 1 else None
+    next_ko = (
+        captured[0]
+        if len(captured) == 1 and len(own_group) == 1 and len(own_libs) == 1
+        else None
+    )
     return True, "", captured, next_ko
 
 
@@ -1926,6 +1993,13 @@ class GoGame(BoardUndoMixin):
         if not moves:
             return None
         return "KataGo手顺：" + "; ".join(moves)
+
+    def _can_show_katago_moves_line(self, conn) -> bool:
+        if conn is self.black_conn:
+            return self.black_name == "zouyu"
+        if conn is self.white_conn:
+            return self.white_name == "zouyu"
+        return False
 
     def _undo_has_moves(self) -> bool:
         return bool(self._history)
@@ -2134,7 +2208,7 @@ class GoGame(BoardUndoMixin):
             kr, kc = self._ko_point
             lines.append(f"劫点：第 {kr + 1} 行，第 {kc + 1} 列，不能立刻回提。")
         moves_line = self._katago_moves_line()
-        if moves_line:
+        if moves_line and self._can_show_katago_moves_line(conn):
             lines.append(moves_line)
         if self.state == "playing":
             lines.append(self._turn_line())
@@ -2631,9 +2705,9 @@ def _xq_is_attacked(
             if (row, col) in _xq_gen_pseudo(board, r, c, captures_only=True):
                 return True
             if _xq_piece_type(board[r][c]) == _XQ_K:
-                # 将帅对脸时同列无子隔也可视为被“照面”
+                # 将帅对脸时，同列无子隔的对方将/帅视为被“照面”。
                 if (
-                    board[row][col] == by_side * _XQ_K
+                    board[row][col] == -by_side * _XQ_K
                     and c == col
                     and abs(r - row) > 1
                 ):
@@ -2689,16 +2763,220 @@ def _xq_parse_coord_move(
     return (fr - 1, fc, tr - 1, tc)
 
 
+def _xq_parse_absolute_coord_move(raw: str) -> Optional[tuple[int, int, int, int]]:
+    t = raw.strip().lower().replace(",", " ")
+    if not t.startswith(("coord ", "坐标 ")):
+        return None
+    parts = t.split()
+    if len(parts) != 5:
+        return None
+    try:
+        fr, fc, tr, tc = (int(x) for x in parts[1:])
+    except ValueError:
+        return None
+    if not (
+        1 <= fr <= XIANGQI_ROWS
+        and 1 <= tr <= XIANGQI_ROWS
+        and 1 <= fc <= XIANGQI_COLS
+        and 1 <= tc <= XIANGQI_COLS
+    ):
+        return None
+    return (fr - 1, fc - 1, tr - 1, tc - 1)
+
+
 def _xq_parse_move(
     raw: str, side: int, board: list[list[int]]
 ) -> Optional[tuple[int, int, int, int]]:
     t = raw.strip()
     if not t:
         return None
+    coord_abs = _xq_parse_absolute_coord_move(t)
+    if coord_abs is not None:
+        return coord_abs
     coord = _xq_parse_coord_move(t, side)
     if coord is not None:
         return coord
     return _xq_parse_notation(t, side, board)
+
+
+def _xq_position_key(
+    board: list[list[int]], turn: int
+) -> tuple[tuple[tuple[int, ...], ...], int]:
+    return (tuple(tuple(row) for row in board), turn)
+
+
+def _xq_in_check(board: list[list[int]], defender: int) -> bool:
+    k = _xq_king_pos(board, defender)
+    return k is not None and _xq_is_attacked(board, k[0], k[1], -defender)
+
+
+def _xq_chased_squares(board: list[list[int]], attacker: int) -> frozenset[tuple[int, int]]:
+    out: set[tuple[int, int]] = set()
+    for r in range(XIANGQI_ROWS):
+        for c in range(XIANGQI_COLS):
+            cell = board[r][c]
+            if cell == 0 or _xq_piece_side(cell) == attacker:
+                continue
+            if _xq_piece_type(cell) == _XQ_K:
+                continue
+            if _xq_is_attacked(board, r, c, attacker):
+                out.add((r, c))
+    return frozenset(out)
+
+
+def _xq_analyze_ply(
+    board_before: list[list[int]],
+    board_after: list[list[int]],
+    mover: int,
+) -> dict[str, object]:
+    opp = -mover
+    check = _xq_in_check(board_after, opp)
+    chase_targets: frozenset[tuple[int, int]] = frozenset()
+    if not check:
+        chase_targets = _xq_chased_squares(board_after, mover)
+    return {"check": check, "chase_targets": chase_targets}
+
+
+def _xq_is_perpetual_chase(side_plies: list[dict]) -> bool:
+    if not side_plies:
+        return False
+    if any(p["check"] or not p["chase_targets"] for p in side_plies):
+        return False
+    tracked: Optional[tuple[int, int]] = None
+    for ply in side_plies:
+        bb = ply["board_before"]
+        mover = ply["mover"]
+        if tracked is None:
+            tracked = next(iter(ply["chase_targets"]))
+            continue
+        tr, tc = tracked
+        if (
+            bb[tr][tc] != 0
+            and _xq_piece_side(bb[tr][tc]) == -mover
+            and (tr, tc) in ply["chase_targets"]
+        ):
+            continue
+        found = False
+        for r, c in ply["chase_targets"]:
+            if bb[r][c] != 0 and _xq_piece_side(bb[r][c]) == -mover:
+                tracked = (r, c)
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def _xq_classify_side_cycle(side_plies: list[dict]) -> str:
+    if not side_plies:
+        return "idle"
+    if all(p["check"] for p in side_plies):
+        return "perpetual_check"
+    if _xq_is_perpetual_chase(side_plies):
+        return "perpetual_chase"
+    if all(not p["check"] and not p["chase_targets"] for p in side_plies):
+        return "idle"
+    return "mixed"
+
+
+def _xq_side_plies_in_cycle(
+    ply_log: list[dict], start_idx: int, end_idx: int, side: int
+) -> list[dict]:
+    return [
+        ply_log[i]
+        for i in range(start_idx + 1, end_idx + 1)
+        if ply_log[i]["mover"] == side
+    ]
+
+
+def _xq_adjudicate_repetition(
+    ply_log: list[dict], i_first: int, i_last: int
+) -> tuple[str, float]:
+    """Return (broadcast line, score_red) when a position repeats for the 3rd time."""
+    red_plies = _xq_side_plies_in_cycle(ply_log, i_first, i_last, _XQ_RED)
+    black_plies = _xq_side_plies_in_cycle(ply_log, i_first, i_last, _XQ_BLACK)
+    rpat = _xq_classify_side_cycle(red_plies)
+    bpat = _xq_classify_side_cycle(black_plies)
+
+    def lose(side: int, reason: str) -> tuple[str, float]:
+        color = "红" if side == _XQ_RED else "黑"
+        score = 0.0 if side == _XQ_RED else 1.0
+        return (f"对局结束：{color}方{reason}，三次循环局面不变着判负。", score)
+
+    if rpat == "perpetual_check" and bpat != "perpetual_check":
+        return lose(_XQ_RED, "长将")
+    if bpat == "perpetual_check" and rpat != "perpetual_check":
+        return lose(_XQ_BLACK, "长将")
+    if rpat == "perpetual_check" and bpat == "perpetual_check":
+        return ("对局结束：双方长将，和棋。", 0.5)
+    if rpat == "perpetual_check" and bpat == "perpetual_chase":
+        return lose(_XQ_RED, "长将")
+    if bpat == "perpetual_check" and rpat == "perpetual_chase":
+        return lose(_XQ_BLACK, "长将")
+    if rpat == "perpetual_chase" and bpat == "idle":
+        return lose(_XQ_RED, "长捉")
+    if bpat == "perpetual_chase" and rpat == "idle":
+        return lose(_XQ_BLACK, "长捉")
+    if rpat == "perpetual_chase" and bpat == "perpetual_chase":
+        return ("对局结束：双方长捉，和棋。", 0.5)
+    if rpat == "idle" and bpat == "idle":
+        return ("对局结束：循环局面双方无照打，和棋。", 0.5)
+    if rpat in ("perpetual_check", "perpetual_chase") and bpat == "mixed":
+        return lose(_XQ_RED, "长将" if rpat == "perpetual_check" else "长捉")
+    if bpat in ("perpetual_check", "perpetual_chase") and rpat == "mixed":
+        return lose(_XQ_BLACK, "长将" if bpat == "perpetual_check" else "长捉")
+    return ("对局结束：循环局面双方须变着，和棋。", 0.5)
+
+
+def _xq_repetition_verdict(ply_log: list[dict]) -> Optional[tuple[str, float]]:
+    if not ply_log:
+        return None
+    key = ply_log[-1]["key"]
+    indices = [i for i, p in enumerate(ply_log) if p["key"] == key]
+    if len(indices) < 3:
+        return None
+    return _xq_adjudicate_repetition(ply_log, indices[0], indices[-1])
+
+
+def _xq_record_ply(
+    ply_log: list[dict],
+    board_before: list[list[int]],
+    board_after: list[list[int]],
+    mover: int,
+) -> Optional[tuple[str, float]]:
+    info = _xq_analyze_ply(board_before, board_after, mover)
+    ply_log.append(
+        {
+            "key": _xq_position_key(board_after, -mover),
+            "mover": mover,
+            "check": info["check"],
+            "chase_targets": info["chase_targets"],
+            "board_before": board_before,
+        }
+    )
+    return _xq_repetition_verdict(ply_log)
+
+
+def _xq_would_lose_on_repetition(
+    board: list[list[int]],
+    ply_log: list[dict],
+    side: int,
+    fr: int,
+    fc: int,
+    tr: int,
+    tc: int,
+) -> bool:
+    board_before = _xq_copy(board)
+    board_after = _xq_copy(board)
+    _xq_apply(board_after, fr, fc, tr, tc)
+    trial = list(ply_log)
+    verdict = _xq_record_ply(trial, board_before, board_after, side)
+    if verdict is None:
+        return False
+    _msg, score_red = verdict
+    if side == _XQ_RED:
+        return score_red == 0.0
+    return score_red == 1.0
 
 
 def _xq_move_label(
@@ -2803,6 +3081,7 @@ class XiangqiGame(BoardUndoMixin):
                 Optional[str],
             ]
         ] = []
+        self._xq_ply_log: list[dict] = []
         self.join_blurb = (
             f"{self.ai_name} 执黑，练习局立即开始；本局不计入持久化积分。"
             if ai_level
@@ -2836,6 +3115,8 @@ class XiangqiGame(BoardUndoMixin):
         if not self._history:
             return False
         self._history.pop()
+        if self._xq_ply_log:
+            self._xq_ply_log.pop()
         if self._history:
             snap = self._history[-1]
             self.board = [row[:] for row in snap[0]]
@@ -2851,7 +3132,66 @@ class XiangqiGame(BoardUndoMixin):
             self._last_to = None
             self._last_mover_side = None
             self._last_notation = None
+            self._xq_ply_log.clear()
         return True
+
+    def _xq_commit_move(
+        self, side: int, fr: int, fc: int, tr: int, tc: int, label: str
+    ) -> tuple[list[str], bool]:
+        """Apply a half-move; return (broadcast lines, ended)."""
+        board_before = _xq_copy(self.board)
+        captured = self.board[tr][tc]
+        _xq_apply(self.board, fr, fc, tr, tc)
+        self._last_from = (fr, fc)
+        self._last_to = (tr, tc)
+        self._last_mover_side = side
+        self._last_notation = label
+        self._turn = -side
+        self._history.append(self._xq_snapshot())
+
+        mover = self.red_name if side == _XQ_RED else self.black_name
+        color = "红" if side == _XQ_RED else "黑"
+        bcast = [f"{color}方 {mover} 走 {label}"]
+
+        verdict = _xq_record_ply(self._xq_ply_log, board_before, self.board, side)
+        if verdict is not None:
+            self.state = "ended"
+            msg, score_red = verdict
+            bcast.append(msg)
+            bcast.extend(self._settle_ratings(score_red))
+            return bcast, True
+
+        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
+            self.state = "ended"
+            bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
+            bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            return bcast, True
+
+        opp_moves = _xq_legal_moves(self.board, self._turn)
+        opp_k = _xq_king_pos(self.board, self._turn)
+        in_check = (
+            opp_k is not None
+            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], side)
+        )
+        if not opp_moves:
+            self.state = "ended"
+            if in_check:
+                bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            else:
+                loser = self.red_name if self._turn == _XQ_RED else self.black_name
+                loser_color = "红" if self._turn == _XQ_RED else "黑"
+                bcast.append(
+                    f"对局结束：{loser_color}方 {loser} 无合法着法，{color}方困毙获胜！"
+                )
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            return bcast, True
+
+        next_name = self.red_name if self._turn == _XQ_RED else self.black_name
+        next_color = "红" if self._turn == _XQ_RED else "黑"
+        suffix = "（将军）" if in_check else ""
+        bcast.append(f"轮到 {next_color}方 {next_name} 走子{suffix}")
+        return bcast, False
 
     def _undo_turn_line(self) -> str:
         nm = self.red_name if self._turn == _XQ_RED else self.black_name
@@ -2884,16 +3224,23 @@ class XiangqiGame(BoardUndoMixin):
     def is_seated(self, conn) -> bool:
         return self._side_of(conn) is not None
 
-    def _viewer_flip(self, conn) -> bool:
-        return conn is not None and conn is self.black_conn
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self._side_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.red_name:
+                side = _XQ_RED
+            elif vn == self.black_name:
+                side = _XQ_BLACK
+        return side == _XQ_BLACK
 
-    def _board_render(self, conn=None) -> list[str]:
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         return _xq_render(
             self.board,
             last_from=self._last_from,
             last_to=self._last_to,
             last_notation=self._last_notation,
-            flip=self._viewer_flip(conn),
+            flip=self._viewer_flip(conn, viewer_name=viewer_name),
         )
 
     def _is_ai_game(self) -> bool:
@@ -2923,43 +3270,18 @@ class XiangqiGame(BoardUndoMixin):
         )
 
     def _run_ai_turn(self) -> list[str]:
-        move = _choose_xq_ai_move(self.board, _XQ_BLACK, self.ai_level or "normal")
+        move = _choose_xq_ai_move(
+            self.board,
+            _XQ_BLACK,
+            self.ai_level or "normal",
+            self._xq_ply_log,
+        )
         if move is None:
             self.state = "ended"
             return ["对局结束：AI 无合法着法。", *self._settle_ratings(0.5)]
         fr, fc, tr, tc = move
         label = _xq_move_label(self.board, fr, fc, tr, tc, _XQ_BLACK)
-        captured = self.board[tr][tc]
-        _xq_apply(self.board, fr, fc, tr, tc)
-        self._last_from = (fr, fc)
-        self._last_to = (tr, tc)
-        self._last_mover_side = _XQ_BLACK
-        self._last_notation = label
-        self._history.append(self._xq_snapshot())
-        bcast = [f"黑方 {self.black_name} 走 {label}"]
-        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
-            self.state = "ended"
-            bcast.append(f"对局结束：黑方 {self.black_name} 获胜（将死）！")
-            bcast.extend(self._settle_ratings(0.0))
-            return bcast
-        self._turn = _XQ_RED
-        opp_moves = _xq_legal_moves(self.board, self._turn)
-        opp_k = _xq_king_pos(self.board, self._turn)
-        in_check = (
-            opp_k is not None
-            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], _XQ_BLACK)
-        )
-        if not opp_moves:
-            self.state = "ended"
-            if in_check:
-                bcast.append(f"对局结束：黑方 {self.black_name} 将死获胜！")
-                bcast.extend(self._settle_ratings(0.0))
-            else:
-                bcast.append("对局结束：双方无合法着法，和棋。")
-                bcast.extend(self._settle_ratings(0.5))
-            return bcast
-        suffix = "（被将军）" if in_check else ""
-        bcast.append(f"轮到 红方 {self.red_name} 走子{suffix}")
+        bcast, ended = self._xq_commit_move(_XQ_BLACK, fr, fc, tr, tc, label)
         return bcast
 
     def nudge_bots(self) -> list[str]:
@@ -2994,6 +3316,7 @@ class XiangqiGame(BoardUndoMixin):
             "走子：/game move <棋谱>  例：炮二平五、马2进3",
             "  也可用坐标：/game move 8 二 8 五（行 1～10；红列 九…一/黑列 1～9）",
             "  同线双子用 前/后；棋盘 +红 -黑 !上一步",
+            "  循环局面：三次重复时，长将/长捉不变着判负（竞赛规则）",
             f"轮到 红方 {self.red_name} 走子",
         ]
         return ([], bcast, False)
@@ -3035,49 +3358,25 @@ class XiangqiGame(BoardUndoMixin):
             return (["该走法不合法（蹩马腿、塞象眼、出九宫、照面等）。"], [], False)
 
         label = _xq_move_label(self.board, fr, fc, tr, tc, side)
-        captured = self.board[tr][tc]
-        _xq_apply(self.board, fr, fc, tr, tc)
-        self._last_from = (fr, fc)
-        self._last_to = (tr, tc)
-        self._last_mover_side = side
-        self._last_notation = label
-        self._history.append(self._xq_snapshot())
+        if _xq_would_lose_on_repetition(self.board, self._xq_ply_log, side, fr, fc, tr, tc):
+            color = "红" if side == _XQ_RED else "黑"
+            return (
+                [
+                    f"此着会形成第三次循环局面且{color}方须变着"
+                    "（长将/长捉不变着按竞赛规则判负），请改走他处。"
+                ],
+                [],
+                False,
+            )
 
-        mover = self.red_name if side == _XQ_RED else self.black_name
-        color = "红" if side == _XQ_RED else "黑"
-        bcast = [f"{color}方 {mover} 走 {label}"]
-
-        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
-            self.state = "ended"
-            bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
-            bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
-            return ([], bcast, True)
-
-        self._turn = -side
-        opp_moves = _xq_legal_moves(self.board, self._turn)
-        opp_k = _xq_king_pos(self.board, self._turn)
-        in_check = (
-            opp_k is not None
-            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], side)
-        )
-        if not opp_moves:
-            self.state = "ended"
-            if in_check:
-                bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
-                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
-            else:
-                bcast.append("对局结束：双方无合法着法，和棋。")
-                bcast.extend(self._settle_ratings(0.5))
+        bcast, ended = self._xq_commit_move(side, fr, fc, tr, tc, label)
+        if ended:
             return ([], bcast, True)
 
         if self._is_ai_turn():
             bcast.extend(self._run_ai_turn())
             return ([], bcast, self.state == "ended")
 
-        next_name = self.red_name if self._turn == _XQ_RED else self.black_name
-        next_color = "红" if self._turn == _XQ_RED else "黑"
-        suffix = "（将军）" if in_check else ""
-        bcast.append(f"轮到 {next_color}方 {next_name} 走子{suffix}")
         return ([], bcast, False)
 
     def resign(self, conn, name: str) -> GameResult:
@@ -3114,13 +3413,13 @@ class XiangqiGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def show(self, conn=None) -> list[str]:
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [
             f"xiangqi 对局（{self.state}）  红：{self.red_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render(conn))
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             nm = self.red_name if self._turn == _XQ_RED else self.black_name
             color = "红" if self._turn == _XQ_RED else "黑"
@@ -7465,6 +7764,16 @@ def _fmt_poker_cards(cards: list[str]) -> str:
         out.append(f"{_POKER_SUIT_ZH.get(s, s)}{_POKER_RANK_ZH.get(r, r)}")
     return " ".join(out)
 
+_ZJH_TYPE_ZH = {6: "豹子", 5: "顺金", 4: "金花", 3: "顺子", 2: "对子", 1: "单张"}
+
+
+def _zjh_is_special_235(cards: list[str]) -> bool:
+    vals = sorted(_ZJH_VALUES[c[0]] for c in cards)
+    if vals != [2, 3, 5]:
+        return False
+    return len({c[1] for c in cards}) == 3
+
+
 def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
     vals = sorted((_ZJH_VALUES[c[0]] for c in cards), reverse=True)
     suits = [c[1] for c in cards]
@@ -7489,6 +7798,28 @@ def _zjh_eval3(cards: list[str]) -> tuple[int, list[int]]:
         kick = max(v for v in vals if v != pair)
         return (2, [pair, kick])
     return (1, vals)
+
+
+def _zjh_compare(cards_a: list[str], cards_b: list[str]) -> int:
+    """Return positive if a wins, negative if b wins, 0 if tie."""
+    ev_a = _zjh_eval3(cards_a)
+    ev_b = _zjh_eval3(cards_b)
+    if _zjh_is_special_235(cards_a) and ev_b[0] == 6:
+        return 1
+    if _zjh_is_special_235(cards_b) and ev_a[0] == 6:
+        return -1
+    if ev_a > ev_b:
+        return 1
+    if ev_a < ev_b:
+        return -1
+    return 0
+
+
+def _zjh_describe(cards: list[str]) -> str:
+    if _zjh_is_special_235(cards):
+        return f"{_fmt_poker_cards(cards)}（235特殊）"
+    cat, _tie = _zjh_eval3(cards)
+    return f"{_fmt_poker_cards(cards)}（{_ZJH_TYPE_ZH.get(cat, '单张')}）"
 
 
 
@@ -7521,7 +7852,7 @@ def _bot_level_zh(level: str) -> str:
 class ZhaJinHuaGame:
     name = "zjh"
     first_seat_desc = "房主"
-    join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始"
+    join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始；需机器人用 start bot 或 bot add"
     def __init__(self, host_conn, host_name: str) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
         self.bot_names: set[str] = set()
@@ -7539,15 +7870,12 @@ class ZhaJinHuaGame:
         self.rng = random.Random()
     def _is_bot(self, name: str) -> bool:
         return name in self.bot_names
-    def _auto_add_bots(self) -> list[str]:
-        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
-        # 目标：尽量保证至少 3 个机器人（受 6 人总席位限制）。
-        # 例如：2真人 -> 3机器人；4真人 -> 2机器人（已满 6 人上限）。
-        target_bots = min(3, max(0, 6 - human))
-        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
-        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
+
+    def _add_bots(self, count: int) -> list[str]:
         added: list[str] = []
-        for _ in range(add_n):
+        for _ in range(max(0, count)):
+            if len(self.players) >= 6:
+                break
             idx = len(self.bot_names) + 1
             bn = f"R{idx}"
             while any(n == bn for _c, n in self.players):
@@ -7560,6 +7888,15 @@ class ZhaJinHuaGame:
             self.stacks.setdefault(bn, 1000)
             added.append(bn)
         return added
+
+    def _auto_add_bots(self) -> list[str]:
+        human = sum(1 for c, n in self.players if c is not None and n not in self.bot_names)
+        # 仅在使用 bot/机器人 参数开局时调用：尽量补到 3 个机器人（最多 6 人）。
+        target_bots = min(3, max(0, 6 - human))
+        seated_bots = sum(1 for _c, n in self.players if n in self.bot_names)
+        add_n = min(max(0, target_bots - seated_bots), 6 - len(self.players))
+        return self._add_bots(add_n)
+
     def _bot_action(self, name: str) -> str:
         cat, tie = _zjh_eval3(self.cards[name])
         high = tie[0] if tie else 0
@@ -7567,11 +7904,12 @@ class ZhaJinHuaGame:
         mult = 2 if looked else 1
         stack = max(0, self.stacks.get(name, 0))
         to_call = self.current_bet * mult
+        compare_cost = self.current_bet * mult * 2
         # 加注是“加到当前注 + add”，支付金额是 new_bet * mult。
         max_add = max(0, (stack // mult) - self.current_bet)
         can_raise = max_add > 0
         can_call = stack >= to_call
-        can_compare = can_call and len([n for n in self._alive() if n != name]) > 0
+        can_compare = stack > 0 and len([n for n in self._alive() if n != name]) > 0
         if not can_call:
             return "fold"
 
@@ -7755,6 +8093,44 @@ class ZhaJinHuaGame:
             self.turn_idx = (self.turn_idx + 1) % len(self.players)
             if self.players[self.turn_idx][1] in alive:
                 return
+    def _can_continue_session(self) -> bool:
+        if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
+            return False
+        return len([n for _c, n in self.players if self.stacks.get(n, 0) > 0]) >= 2
+
+    def _deal_hand(self) -> list[str]:
+        self.state = "playing"
+        self.folded.clear()
+        self.looked.clear()
+        self.cards.clear()
+        self.turn_idx = 0
+        self.pot = 0
+        self.current_bet = 1
+        deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
+        self.rng.shuffle(deck)
+        for _c, n in self.players:
+            if self.stacks.get(n, 0) <= 0:
+                continue
+            self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
+            self.stacks.setdefault(n, 1000)
+            if self.stacks[n] > 0:
+                self.stacks[n] -= 1
+                self.pot += 1
+        self._pick_next_actor_from_start()
+        out = ["炸金花已开始，默认闷牌；先看牌后可见手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
+        if self.bot_names:
+            out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
+        out.extend(self._run_bots())
+        return out
+
+    def _begin_next_hand(self) -> list[str]:
+        if not self._can_continue_session():
+            self.state = "ended"
+            return ["有玩家积分已耗尽或人数不足，炸金花对局结束。"]
+        out = ["—— 自动开始下一局 ——"]
+        out.extend(self._deal_hand())
+        return out
+
     def _finish_if_one(self) -> Optional[list[str]]:
         remaining = self._not_folded()
         if len(remaining) != 1:
@@ -7764,30 +8140,18 @@ class ZhaJinHuaGame:
         self.stacks[w] += gain
         self.pot = 0
         self.current_bet = 1
-        self.state = "ended"
-        return [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
-    def _start(self) -> list[str]:
-        self._auto_add_bots()
+        out = [f"{w} 因其他玩家弃牌获胜，底池 +{gain}"]
+        out.extend(self._begin_next_hand())
+        return out
+
+    def _start(self, with_bots: bool = False) -> list[str]:
+        if with_bots:
+            self._auto_add_bots()
         if len(self.players) < 2:
             return ["至少需要 2 名玩家才能开始。"]
         if any(self.stacks.get(n, 0) <= 0 for _c, n in self.players):
             return ["有玩家积分已耗尽。请重开游戏重置为1000积分。"]
-        self.state = "playing"
-        self.folded.clear(); self.looked.clear(); self.cards.clear()
-        self.turn_idx = 0; self.pot = 0; self.current_bet = 1
-        deck = [f"{r}{s}" for r in _ZJH_RANKS for s in _ZJH_SUITS]
-        self.rng.shuffle(deck)
-        for _c, n in self.players:
-            self.cards[n] = [deck.pop(), deck.pop(), deck.pop()]
-            self.stacks.setdefault(n, 1000)
-            if self.stacks[n] > 0:
-                self.stacks[n] -= 1; self.pot += 1
-        self._pick_next_actor_from_start()
-        out = ["炸金花已开始，默认闷牌；先看牌后可见手牌。", f"底池={self.pot}", f"轮到：{self.players[self.turn_idx][1]}"]
-        if self.bot_names:
-            out.append(f"机器人：{', '.join(sorted(self.bot_names))}（难度={_bot_level_zh(self.bot_level)}）")
-        out.extend(self._run_bots())
-        return out
+        return self._deal_hand()
     def try_join(self, conn, name: str) -> GameResult:
         if self.state != "waiting": return (["对局已开始，无法加入。"], [], False)
         if len(self.players) >= 6: return (["炸金花最多 6 人。"], [], False)
@@ -7811,22 +8175,36 @@ class ZhaJinHuaGame:
         }.get(cmd, cmd)
         if cmd == "bot":
             if conn is not self.players[0][0]:
-                return (["只有房主可以设置机器人难度。"], [], False)
-            if len(parts) < 2 or parts[1].lower() not in ("easy", "hard", "pro"):
-                return (["用法：/game move bot <easy|hard|pro>"], [], False)
-            self.bot_level = parts[1].lower()
+                return (["只有房主可以设置机器人。"], [], False)
+            if len(parts) < 2:
+                return (["用法：/game move bot <easy|hard|pro>  或  bot add [人数]"], [], False)
+            sub = parts[1].lower()
+            if sub == "add":
+                if self.state != "waiting":
+                    return (["只能在等待开始阶段添加机器人。"], [], False)
+                n = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 1
+                if n <= 0:
+                    return (["添加人数必须大于 0。"], [], False)
+                added = self._add_bots(n)
+                if not added:
+                    return (["无法添加更多机器人（已满 6 人）。"], [], False)
+                return ([], [f"已添加机器人：{', '.join(added)}（难度={_bot_level_zh(self.bot_level)}）"], False)
+            if sub not in ("easy", "hard", "pro"):
+                return (["用法：/game move bot <easy|hard|pro>  或  bot add [人数]"], [], False)
+            self.bot_level = sub
             return ([], [f"机器人难度已设为：{_bot_level_zh(self.bot_level)}"], False)
         if cmd == "start":
             if self.state == "playing": return (["对局已经开始。"], [], False)
             if conn is not self.players[0][0]: return (["只有房主可以开始对局。"], [], False)
-            return ([], self._start(), False)
+            with_bots = len(parts) >= 2 and parts[1].lower() in ("bot", "bots", "withbots", "机器人")
+            return ([], self._start(with_bots=with_bots), False)
         if self.state != "playing": return (["当前不是进行中状态。"], [], False)
         if actor in self.folded:
             bcast = self.nudge_bots()
             return (["你已经弃牌。"], bcast, self.state == "ended")
         done = self._finish_if_one()
         if done:
-            return ([], done, True)
+            return ([], done, self.state == "ended")
         if self.stacks.get(actor, 0) <= 0: return (["你已无可用积分，无法继续操作。"], [], False)
         current = self.players[self.turn_idx][1]
         if actor != current: return ([f"还没轮到你，当前轮到：{current}"], [], False)
@@ -7849,20 +8227,31 @@ class ZhaJinHuaGame:
             if not target: return (["目标不存在。"], [], False)
             if target == actor: return (["不能和自己比牌。"], [], False)
             if target not in self._alive(): return (["目标玩家当前不可比牌。"], [], False)
-            pay = min(self.stacks[actor], cost)
+            compare_cost = self.current_bet * mult * 2
+            pay = min(self.stacks[actor], compare_cost)
             if pay <= 0:
                 return (["你已无可用积分，无法继续操作。"], [], False)
             self.stacks[actor] -= pay; self.pot += pay
-            me = _zjh_eval3(self.cards[actor]); tg = _zjh_eval3(self.cards[target])
-            loser = target if me > tg else actor; winner = actor if me > tg else target
+            cmp = _zjh_compare(self.cards[actor], self.cards[target])
+            if cmp > 0:
+                winner, loser = actor, target
+            elif cmp < 0:
+                winner, loser = target, actor
+            else:
+                winner, loser = target, actor
             self.folded.add(loser)
-            if pay < cost:
-                bcast.append(f"{actor} 积分不足（需 {cost}，实付 {pay}）发起全压比牌")
-            bcast.append(f"{actor} 与 {target} 比牌：{winner} 胜出，{loser} 弃牌")
+            if pay < compare_cost:
+                bcast.append(f"{actor} 积分不足（需 {compare_cost}，实付 {pay}）发起全压比牌")
+            bcast.append(
+                f"{actor} 与 {target} 比牌："
+                f"{actor} {_zjh_describe(self.cards[actor])} vs "
+                f"{target} {_zjh_describe(self.cards[target])}，"
+                f"{winner} 胜出，{loser} 弃牌"
+            )
             self._advance()
         else: return (["可用操作：开始、看牌、跟注、加注、弃牌、比牌。"], [], False)
         done = self._finish_if_one()
-        if done: return ([], bcast + done, True)
+        if done: return ([], bcast + done, self.state == "ended")
         if not self._bot_running:
             bcast.extend(self._run_bots())
         bcast.append(f"底池={self.pot}，当前注={self.current_bet}，轮到：{self.players[self.turn_idx][1]}")
@@ -7876,7 +8265,7 @@ class ZhaJinHuaGame:
         for i, (_c, n) in enumerate(self.players, start=1):
             tag = "已弃牌" if n in self.folded else "存活"; looked = "，已看牌" if n in self.looked else ""
             lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{looked}")
-        if self.state == "waiting": lines.append("房主可用 /game move start 开始")
+        if self.state == "waiting": lines.append("房主可用 /game move start 开始；需机器人时用 start bot 或 bot add")
         if self.state == "playing": lines.append(f"轮到：{self.players[self.turn_idx][1]}")
         return lines
     def show(self, conn=None, full: bool = False) -> list[str]:
@@ -7908,7 +8297,7 @@ class ZhaJinHuaGame:
                 if alive and self.players[self.turn_idx][1] not in alive:
                     self._advance()
         done = self._finish_if_one() if self.state == "playing" else None
-        if done: return ([], [f"{name} 离开"] + done, True)
+        if done: return ([], [f"{name} 离开"] + done, self.state == "ended")
         return ([], [f"{name} 离开了炸金花对局"], False)
 
 
@@ -10161,9 +10550,10 @@ HELP_LINES = (
     "观星/蛊惑/断粮等技能见 /game show（别名 sgs/三国杀）。",
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
+    "[*] 象棋按竞赛规则：三次循环局面时，长将/长捉不变着判负；双方无照打可和棋。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
-    "（chess/gomoku/go/xiangqi/doushou；reject 拒绝，cancel 取消请求）。",
+    "（chess/gomoku/go/xiangqi/doushou；简写 acc / rej / can；reject 拒绝，cancel 取消请求）。",
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",
@@ -10173,7 +10563,10 @@ HELP_LINES = (
     "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
     "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
-    "比牌 compare <昵称> | 弃牌 fold；比牌积分不足时按剩余积分全压支付。",
+    "比牌 compare <昵称> | 弃牌 fold；比牌费用为当前单注两倍（看牌后再翻倍）；"
+    "牌型：豹子>顺金>金花>顺子>对子>单张，花色不同235可胜豹子；"
+    "同牌型相等时主动比牌者负；每局结束自动发下一局；"
+    "需机器人时用 start bot 或 bot add [人数]；bot <easy|hard|pro> 设难度。",
     "[*] mahjong（麻将）4 人局：人数不足时 start 自动补 AI；房主可 bot <easy|hard|pro> 调难度。",
     "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
     "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",

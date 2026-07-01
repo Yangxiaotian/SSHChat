@@ -152,7 +152,7 @@ export const GameCommandFactory = {
     return GameCommandFactory.move(`${row} ${col}`, locale, 'go');
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
-    return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`, locale, 'xiangqi');
+    return GameCommandFactory.move(`coord ${fr} ${fc} ${tr} ${tc}`, locale, 'xiangqi');
   },
   doushouCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
     return GameCommandFactory.move(`${fr} ${fc} ${tr} ${tc}`, locale, 'doushou');

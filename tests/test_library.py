@@ -1,4 +1,5 @@
 """Tests for library book listing and pagination."""
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +83,23 @@ class TestLibraryTxt(unittest.TestCase):
         self.assertIsNone(library.resolve_book(self.lib_dir, "../etc/passwd", catalog))
         self.assertIsNone(library.resolve_book(self.lib_dir, "foo/bar.txt", catalog))
 
+    def test_search_catalog_by_name_and_ext(self) -> None:
+        (self.lib_dir / "红楼梦.epub").write_text("x", encoding="utf-8")
+        (self.lib_dir / "三国演义.txt").write_text("y", encoding="utf-8")
+        (self.lib_dir / "notes.pdf").write_bytes(b"%PDF-1.4\n")
+        catalog = library.list_books(self.lib_dir)
+        self.assertEqual(len(library.search_catalog(catalog, "红楼")), 1)
+        self.assertEqual(library.search_catalog(catalog, "红楼")[0].name, "红楼梦.epub")
+        self.assertEqual(len(library.search_catalog(catalog, "pdf")), 1)
+        self.assertEqual(len(library.search_catalog(catalog, "三国 txt")), 1)
+        self.assertEqual(library.search_catalog(catalog, "missing"), [])
+
+    def test_search_catalog_empty_query_returns_all(self) -> None:
+        (self.lib_dir / "a.txt").write_text("x", encoding="utf-8")
+        catalog = library.list_books(self.lib_dir)
+        self.assertEqual(library.search_catalog(catalog, ""), catalog)
+        self.assertEqual(library.search_catalog(catalog, "   "), catalog)
+
 
 class TestLibraryHtml(unittest.TestCase):
     def test_html_to_text(self) -> None:
@@ -134,7 +152,62 @@ class TestLibraryPdfExtract(unittest.TestCase):
         self.assertEqual(library._extract_pdf_page_text_pypdf(page), "plain text")
         self.assertGreaterEqual(len(page.calls), 1)
 
-    def test_load_pdf_prefers_pymupdf_for_chinese(self) -> None:
+    def test_pdf_text_quality_penalizes_spaced_cjk(self) -> None:
+        continuous = "软件工程概述主要在选择题、论文题中都有考察。"
+        spaced = "软 件 工 程 概 述 主 要 在 选 择 题 、 论 文 题 中 都 有 考 察 。"
+        self.assertGreater(
+            library._pdf_text_quality(continuous),
+            library._pdf_text_quality(spaced),
+        )
+
+    def test_pick_best_pdf_text_prefers_continuous_cjk(self) -> None:
+        continuous = "1.软件工程概述（重点）\n1.1.软件工程相关定义（次重点）\n1.2.软件开发方法（重点）"
+        spaced = "1 . 2 . 软 件 开 发 方 法\n1 . 1 . 软 件 工 程 相 关 定 义\n1 . 软 件 工 程 概 述"
+        chosen = library._pick_best_pdf_text([spaced, continuous])
+        self.assertEqual(chosen, continuous)
+
+    def test_load_pdf_skips_pypdf_when_pymupdf_succeeds(self) -> None:
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("pymupdf not installed")
+        path = Path(self.tmp.name) / "fast.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "中文正文", fontsize=12, fontname="china-s")
+        doc.save(path)
+        doc.close()
+
+        calls: list[str] = []
+        orig_pypdf = library._load_pdf_pypdf
+        orig_pymupdf = library._load_pdf_pymupdf
+
+        def _track_pypdf(p: Path) -> library.BookDocument:
+            calls.append("pypdf")
+            return orig_pypdf(p)
+
+        def _track_pymupdf(p: Path) -> library.BookDocument:
+            calls.append("pymupdf")
+            return orig_pymupdf(p)
+
+        old_compare = os.environ.get("SSHCHAT_PDF_COMPARE_ENGINES")
+        os.environ["SSHCHAT_PDF_COMPARE_ENGINES"] = "0"
+        try:
+            library._load_pdf_pypdf = _track_pypdf  # type: ignore[assignment]
+            library._load_pdf_pymupdf = _track_pymupdf  # type: ignore[assignment]
+            loaded = library._load_pdf(path)
+        finally:
+            library._load_pdf_pypdf = orig_pypdf  # type: ignore[assignment]
+            library._load_pdf_pymupdf = orig_pymupdf  # type: ignore[assignment]
+            if old_compare is None:
+                os.environ.pop("SSHCHAT_PDF_COMPARE_ENGINES", None)
+            else:
+                os.environ["SSHCHAT_PDF_COMPARE_ENGINES"] = old_compare
+
+        self.assertIn("中文正文", "\n".join(loaded.pages))
+        self.assertEqual(calls, ["pymupdf"])
+
+    def test_load_pdf_prefers_pymupdf_reading_order(self) -> None:
         try:
             import fitz
         except ImportError:

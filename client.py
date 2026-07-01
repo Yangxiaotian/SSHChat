@@ -9,6 +9,7 @@ import threading
 from collections import deque
 from datetime import datetime
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -41,6 +42,151 @@ _XQ_RED_MARK = re.compile(r"\{\{R\}\}(.*?)\{\{/R\}\}")
 _XQ_BLACK_MARK = re.compile(r"\{\{B\}\}(.*?)\{\{/B\}\}")
 _RAW_ANSI_INLINE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
 _MANGLED_CSI_INLINE = re.compile(r"\?\[[\d;?]*[A-Za-z]")
+
+_LIBRARY_SUBCOMMANDS = {
+    "open": None,
+    "read": None,
+    "next": None,
+    "n": None,
+    "prev": None,
+    "p": None,
+    "page": None,
+    "find": None,
+    "search": None,
+    "bookmarks": None,
+    "bookmark": None,
+    "reset": None,
+    "close": None,
+    "info": None,
+    "help": None,
+}
+
+_GAME_SUBCOMMANDS = {
+    "help": None,
+    "list": None,
+    "new": None,
+    "join": None,
+    "show": None,
+    "move": None,
+    "resign": None,
+    "undo": None,
+    "abort": None,
+    "end": None,
+    "on": None,
+    "off": None,
+    "seats": None,
+    "rating": None,
+    "pgn": None,
+}
+
+_NEWS_SUBCOMMANDS = {
+    "中文": None,
+    "国际": None,
+    "科技": None,
+    "all": None,
+    "detail": None,
+    "详情": None,
+    "fetch": None,
+    "全文": None,
+}
+
+_DICT_SUBCOMMANDS = {
+    "en": None,
+    "cn": None,
+    "hh": None,
+    "help": None,
+    "英": None,
+    "中": None,
+    "汉": None,
+}
+
+_TOP_COMMANDS = (
+    "/help",
+    "/names",
+    "/users",
+    "/rooms",
+    "/join",
+    "/switch",
+    "/part",
+    "/msg",
+    "/announce",
+    "/game",
+    "/news",
+    "/library",
+    "/lib",
+    "/dict",
+    "/clear",
+    "/cls",
+)
+
+_SUBCOMMANDS_BY_CMD = {
+    "/game": sorted(_GAME_SUBCOMMANDS),
+    "/news": sorted(_NEWS_SUBCOMMANDS),
+    "/library": sorted(_LIBRARY_SUBCOMMANDS),
+    "/lib": sorted(_LIBRARY_SUBCOMMANDS),
+    "/dict": sorted(_DICT_SUBCOMMANDS),
+}
+
+_NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("/game", "undo"): ("accept", "reject", "cancel"),
+}
+
+
+class SSHChatCommandCompleter(Completer):
+    """Prefix-complete top-level /commands and nested subcommands."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+
+        if " " not in text:
+            prefix = text
+            for cmd in _TOP_COMMANDS:
+                if cmd.startswith(prefix):
+                    yield Completion(cmd, start_position=-len(prefix))
+            return
+
+        parts = text.split()
+        if not text.endswith(" "):
+            if len(parts) == 1:
+                prefix = parts[0]
+                for cmd in _TOP_COMMANDS:
+                    if cmd.startswith(prefix):
+                        yield Completion(cmd, start_position=-len(prefix))
+                return
+            if len(parts) >= 3:
+                cmd = parts[0].lower()
+                sub = parts[1].lower()
+                prefix = parts[-1].lower()
+                nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
+                for item in nested:
+                    if item.startswith(prefix):
+                        yield Completion(item, start_position=-len(parts[-1]))
+                if nested:
+                    return
+            cmd = parts[0].lower()
+            sub_prefix = parts[-1]
+            for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
+                if sub.startswith(sub_prefix):
+                    yield Completion(sub, start_position=-len(sub_prefix))
+            return
+
+        parts = text.rstrip().split()
+        if len(parts) >= 2:
+            cmd = parts[0].lower()
+            sub = parts[1].lower()
+            nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
+            if nested:
+                for item in nested:
+                    yield Completion(item + " ", start_position=0)
+                return
+        cmd = parts[0].lower()
+        for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
+            yield Completion(sub + " ", start_position=0)
+
+
+_COMMAND_COMPLETER = SSHChatCommandCompleter()
 
 
 def _terminal_size() -> Size:
@@ -340,8 +486,9 @@ def main():
     print(
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
-        "/announce  /game  /news  /news fetch <类> <号>  /dict  /clear  /help"
+        "/announce  /game  /news  /news fetch <类> <号>  /dict  /library (/lib)  /clear  /help"
     )
+    print("Tip: type / then press Tab to complete commands (like a shell).")
     print(
         f"Alerts (SSHCHAT_ALERT={_ALERT}): beep | notify | all | none — "
         "peer chat lines only"
@@ -363,6 +510,8 @@ def main():
         # prompt_toolkit then prints a noisy WARNING on each prompt without this.
         ptk_session = PromptSession(
             output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
+            completer=_COMMAND_COMPLETER,
+            complete_while_typing=True,
         )
         with patch_stdout():
             while True:

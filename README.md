@@ -87,7 +87,7 @@
 
    连上后会进入聊天界面，不是平时那种可随便执行命令的 shell（由服务器配置决定）。
 
-4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/game`、`/news`、`/library`、`/dict`、`/clear`。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
+4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/game`、`/news`、`/library`（简写 `/lib`）、`/dict`、`/clear`。终端客户端输入 `/` 后按 **Tab** 可补全命令（类似 Linux shell）。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
 
 ---
 
@@ -294,6 +294,7 @@ npm run build:portable
 | `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
 | `/game help` | 查看房间小游戏用法 |
 | `/library` | 列出图书馆书目（epub / txt / pdf）；每人自带书签，翻页自动保存 |
+| `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
 | `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续）；`next` / `prev` / `page` 翻页 |
 | `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
 | `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
@@ -354,7 +355,7 @@ npm run build:portable
 - **`sanguo`（三国杀）**：房主 `/game move 开始` 开局；`/game move 武将` 查武将池；观星/蛊惑/断粮等技能见 `/game show`。
 - **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
 - **`holdem`（德州扑克）**：`start` 开始 \| `look` 看牌 \| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可 `bot <easy\|hard\|pro>` 加机器人。
-- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌积分不足时按剩余积分全压。
+- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
 - **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
 - **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
 
@@ -394,11 +395,11 @@ npm run build:portable
 
 ### 图书馆
 
-服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / pdf** 图书文件。
+服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / pdf** 图书文件。PDF 优先用 PyMuPDF 提取正文，并过滤「逐字空格」类乱序排版，避免章节标题（如 1 → 1.1 → 1.2）顺序颠倒。**首次打开大型 PDF** 服务端需解析并缓存，约需十几秒，期间会提示「正在加载…」；再次打开同一本书会即时显示。
 
 | 命令 | 说明 |
 |------|------|
-| `/library` | 书目列表（含你的书签进度） |
+| `/library` 或 `/lib` | 书目列表（含你的书签进度） |
 | `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续） |
 | `/library next` / `prev` | 翻页（自动存书签） |
 | `/library page <页码>` | 跳到指定页 |
@@ -407,6 +408,11 @@ npm run build:portable
 | `/library close` | 结束阅读（保留书签） |
 
 Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。
+
+### 命令补全
+
+- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library` 与 `/lib` 及常用子命令），行为类似 Linux shell。
+- **Electron 图形客户端**：输入框输入 `/` 后出现命令提示，按 **Tab** 补全当前高亮项，**↑/↓** 切换候选项。
 
 ### RSS 新闻
 

@@ -1,5 +1,13 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { formatGomokuSoulDraft } from './gomokuSoul';
+import {
+  continuityCacheKey,
+  freshPonderReply,
+  matchContinuityBranch,
+  mergeContinuityMoves,
+  type ContinuityPlan,
+  type PonderReply,
+} from './gomokuContinuity';
 
 type Props = {
   disabled: boolean;
@@ -163,7 +171,9 @@ const OFFTURN_NODE_BUDGET = 42000;
 const OFFTURN_MAX_DEPTH = 8;
 const ANALYSIS_STABLE_DELAY_MS = 140;
 const ANALYSIS_CACHE_LIMIT = 80;
-const RAPFI_ENABLE_PONDER = false;
+const RAPFI_ENABLE_PONDER = true;
+const RAPFI_PONDER_BRANCH_LIMIT = 3;
+const RAPFI_PONDER_CACHE_MAX_AGE_MS = 120_000;
 const OPENING_VARIATION_ANCHORS: Array<[number, number]> = [
   [8, 8], [8, 7], [7, 8], [8, 9], [9, 8],
   [7, 7], [7, 9], [9, 7], [9, 9],
@@ -2071,7 +2081,15 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
     }
   });
   const [variationSeed, setVariationSeed] = useState<number>(() => Math.floor(Math.random() * 1_000_000));
-  const [rapfiSuggestion, setRapfiSuggestion] = useState<{ row: number; col: number; ms: number; error?: string } | null>(null);
+  const [rapfiSuggestion, setRapfiSuggestion] = useState<{
+    row: number;
+    col: number;
+    ms: number;
+    error?: string;
+    provisional?: boolean;
+    branchRank?: number;
+    verificationFailed?: string;
+  } | null>(null);
   const [rapfiPending, setRapfiPending] = useState<boolean>(false);
   const [rapfiPonderPending, setRapfiPonderPending] = useState<boolean>(false);
   const [optimisticPick, setOptimisticPick] = useState<{ row: number; col: number; side: Side; token: number } | null>(null);
@@ -2084,7 +2102,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
   const rapfiWantedKeyRef = useRef<string>('');
   const rapfiPonderKeyRef = useRef<string>('');
   const rapfiPonderDoneKeyRef = useRef<string>('');
-  const rapfiPonderCacheRef = useRef<Map<string, { row: number; col: number; ms: number }>>(new Map());
+  const rapfiPonderCacheRef = useRef<Map<string, PonderReply>>(new Map());
+  const rapfiContinuityPlanRef = useRef<ContinuityPlan | null>(null);
   const optimisticTimerRef = useRef<number | null>(null);
   const prevStoneCountRef = useRef<number>(0);
   const analysisCacheRef = useRef<Map<string, EngineResult>>(new Map());
@@ -2116,6 +2135,9 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
     // 新局检测：从中后盘回到接近空盘时切换开局变体，避免每局同套路。
     if (stoneN <= 1 && prev >= 6) {
       setVariationSeed((Math.floor(Math.random() * 1_000_000) + Date.now()) % 1_000_000);
+      rapfiPonderCacheRef.current.clear();
+      rapfiContinuityPlanRef.current = null;
+      rapfiPonderDoneKeyRef.current = '';
     }
     prevStoneCountRef.current = stoneN;
   }, [stoneN]);
@@ -2204,6 +2226,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
       rapfiOkKeyRef.current = '';
       rapfiInFlightKeyRef.current = '';
       rapfiWantedKeyRef.current = '';
+      rapfiPonderCacheRef.current.clear();
+      rapfiContinuityPlanRef.current = null;
       return;
     }
 
@@ -2223,7 +2247,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
       return;
     }
     const likelyMyTurn = analysisMyTurn || (!turnInfo.name && isSideTurnByMatrix(analysisMatrix, mySideNum));
-    const reqKey = `${analysisSignature}|${mySide}|1|${strategy}`;
+    const reqKey = continuityCacheKey(analysisSignature, mySide, strategy);
     rapfiWantedKeyRef.current = reqKey;
 
     if (!likelyMyTurn) {
@@ -2255,9 +2279,27 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
     rapfiLastKeyRef.current = reqKey;
     rapfiInFlightKeyRef.current = reqKey;
 
+    const cachedReply = freshPonderReply(
+      rapfiPonderCacheRef.current,
+      reqKey,
+      Date.now(),
+      RAPFI_PONDER_CACHE_MAX_AGE_MS,
+    );
+    const matchedBranch = matchContinuityBranch(rapfiContinuityPlanRef.current, analysisSignature);
+
     const seq = rapfiReqSeqRef.current + 1;
     rapfiReqSeqRef.current = seq;
-    setRapfiSuggestion(null);
+    setRapfiSuggestion(
+      cachedReply
+        ? {
+            row: cachedReply.row,
+            col: cachedReply.col,
+            ms: cachedReply.ms,
+            provisional: true,
+            branchRank: matchedBranch?.rank ?? cachedReply.branchRank,
+          }
+        : null,
+    );
     setRapfiPending(true);
 
     const guardTimeout = new Promise<never>((_, reject) => {
@@ -2277,22 +2319,45 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         if (rapfiReqSeqRef.current !== seq) return;
         const r = resp as { ok: boolean; row?: number; col?: number; ms: number; error?: string };
         if (resp.ok && resp.row && resp.col) {
-          setRapfiSuggestion({ row: r.row!, col: r.col!, ms: r.ms });
+          setRapfiSuggestion({ row: r.row!, col: r.col!, ms: r.ms, provisional: false });
           rapfiOkKeyRef.current = reqKey;
           rapfiFailCooldownRef.current = { key: '', until: 0 };
+          rapfiPonderCacheRef.current.delete(reqKey);
         } else {
-          setRapfiSuggestion({ row: 0, col: 0, ms: r.ms || 0, error: r.error || 'Rapfi未返回可用坐标' });
+          setRapfiSuggestion(
+            cachedReply
+              ? {
+                  row: cachedReply.row,
+                  col: cachedReply.col,
+                  ms: cachedReply.ms,
+                  provisional: true,
+                  branchRank: cachedReply.branchRank,
+                  verificationFailed: r.error || 'Rapfi未返回可用坐标',
+                }
+              : { row: 0, col: 0, ms: r.ms || 0, error: r.error || 'Rapfi未返回可用坐标' },
+          );
           rapfiFailCooldownRef.current = { key: reqKey, until: Date.now() + 2500 };
         }
       })
       .catch((err: unknown) => {
         if (rapfiReqSeqRef.current !== seq) return;
-        setRapfiSuggestion({
-          row: 0,
-          col: 0,
-          ms: 0,
-          error: err instanceof Error ? err.message : 'Rapfi调用失败',
-        });
+        setRapfiSuggestion(
+          cachedReply
+            ? {
+                row: cachedReply.row,
+                col: cachedReply.col,
+                ms: cachedReply.ms,
+                provisional: true,
+                branchRank: cachedReply.branchRank,
+                verificationFailed: err instanceof Error ? err.message : 'Rapfi调用失败',
+              }
+            : {
+                row: 0,
+                col: 0,
+                ms: 0,
+                error: err instanceof Error ? err.message : 'Rapfi调用失败',
+              },
+        );
         rapfiFailCooldownRef.current = { key: reqKey, until: Date.now() + 2500 };
       })
       .finally(() => {
@@ -2321,7 +2386,6 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
 
     const ponderKey = `${analysisSignature}|${mySide}|${strategy}`;
     if (
-      rapfiPonderPending ||
       !!rapfiPonderKeyRef.current ||
       rapfiPonderDoneKeyRef.current === ponderKey
     ) {
@@ -2335,8 +2399,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
 
     const mySideNum: 1 | -1 = mySide === '#' ? 1 : -1;
     const opponentSideNum: 1 | -1 = mySideNum === 1 ? -1 : 1;
-    const opponentTimeoutMs = clamp(Math.round(rapfiTimeoutMs * 0.35), 2500, 12000);
-    const replyTimeoutMs = clamp(Math.round(rapfiTimeoutMs * 0.45), 3000, 16000);
+    const opponentTimeoutMs = clamp(Math.round(rapfiTimeoutMs * 0.22), 2200, 9000);
+    const plannedAt = Date.now();
 
     const withGuard = <T,>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
       return Promise.race([
@@ -2357,30 +2421,80 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         }),
         opponentTimeoutMs,
       );
-      if (!opponentResp.ok || !opponentResp.row || !opponentResp.col) return;
       if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
-      const predictedBoard = matrixWithMove(analysisMatrix, opponentResp.row, opponentResp.col, opponentSideNum);
-      if (!predictedBoard) return;
-
-      const replyResp = await withGuard(
-        window.api.analyzeGomokuRapfi({
-          board: predictedBoard,
-          mySide: mySideNum,
-          timeoutMs: replyTimeoutMs,
-          mode: 'ponder',
-        }),
-        replyTimeoutMs,
+      const primaryMove =
+        opponentResp.ok && opponentResp.row && opponentResp.col
+          ? { row: opponentResp.row, col: opponentResp.col }
+          : null;
+      const tacticalMoves = uniqMoves([
+        ...immediateWinningPoints(analysisMatrix, opponentSideNum),
+        ...setupKillMoves(analysisMatrix, opponentSideNum, 12),
+        ...forcingStartMoves(analysisMatrix, opponentSideNum, 10),
+        ...collectCandidates(analysisMatrix, opponentSideNum, 12, 1),
+      ]).map((move) => ({ row: move.r + 1, col: move.c + 1 }));
+      const candidates = mergeContinuityMoves(
+        primaryMove,
+        tacticalMoves,
+        RAPFI_PONDER_BRANCH_LIMIT,
       );
-      if (!replyResp.ok || !replyResp.row || !replyResp.col) return;
-      if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
 
-      const predictedSig = signatureOfMatrix(predictedBoard);
-      const hitKey = `${predictedSig}|${mySide}|1|${strategy}`;
-      rememberLimited(rapfiPonderCacheRef.current, hitKey, {
-        row: replyResp.row,
-        col: replyResp.col,
-        ms: opponentResp.ms + replyResp.ms,
-      }, 24);
+      const plan: ContinuityPlan = {
+        baseSignature: analysisSignature,
+        mySide: mySideNum,
+        createdAt: plannedAt,
+        branches: [],
+      };
+      for (let i = 0; i < candidates.length; i++) {
+        const move = candidates[i];
+        const predictedBoard = matrixWithMove(analysisMatrix, move.row, move.col, opponentSideNum);
+        if (!predictedBoard) continue;
+        plan.branches.push({
+          predictedSignature: signatureOfMatrix(predictedBoard),
+          opponent: move,
+          rank: i + 1,
+        });
+      }
+      rapfiContinuityPlanRef.current = plan;
+
+      for (const branch of plan.branches) {
+        if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
+        const predictedBoard = matrixWithMove(
+          analysisMatrix,
+          branch.opponent.row,
+          branch.opponent.col,
+          opponentSideNum,
+        );
+        if (!predictedBoard) continue;
+        const replyRatio = branch.rank === 1 ? 0.30 : branch.rank === 2 ? 0.18 : 0.14;
+        const replyTimeoutMs = clamp(
+          Math.round(rapfiTimeoutMs * replyRatio),
+          branch.rank === 1 ? 2800 : 2200,
+          branch.rank === 1 ? 11000 : branch.rank === 2 ? 7000 : 5500,
+        );
+        const replyResp = await withGuard(
+          window.api.analyzeGomokuRapfi({
+            board: predictedBoard,
+            mySide: mySideNum,
+            timeoutMs: replyTimeoutMs,
+            mode: 'ponder',
+          }),
+          replyTimeoutMs,
+        );
+        if (rapfiPonderSeqRef.current !== seq || rapfiPonderKeyRef.current !== ponderKey) return;
+        if (!replyResp.ok || !replyResp.row || !replyResp.col) continue;
+
+        branch.reply = { row: replyResp.row, col: replyResp.col };
+        branch.replyMs = replyResp.ms;
+        const hitKey = continuityCacheKey(branch.predictedSignature, mySide, strategy);
+        rememberLimited(rapfiPonderCacheRef.current, hitKey, {
+          row: replyResp.row,
+          col: replyResp.col,
+          ms: replyResp.ms,
+          opponent: branch.opponent,
+          branchRank: branch.rank,
+          plannedAt,
+        }, 36);
+      }
     };
 
     run()
@@ -2394,6 +2508,13 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
           setRapfiPonderPending(false);
         }
       });
+
+    return () => {
+      if (rapfiPonderKeyRef.current !== ponderKey) return;
+      rapfiPonderSeqRef.current += 1;
+      rapfiPonderKeyRef.current = '';
+      setRapfiPonderPending(false);
+    };
   }, [
     analysisSignature,
     analysisMatrix,
@@ -2405,8 +2526,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
     turnInfo.name,
     myTurn,
     rapfiPending,
-    rapfiPonderPending,
     rapfiTimeoutMs,
+    variationSeed,
   ]);
 
   const shownSuggestions = useMemo(() => {
@@ -2483,8 +2604,12 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         row: rapfiSuggestion.row,
         col: rapfiSuggestion.col,
         score: Number.MAX_SAFE_INTEGER,
-        reason: `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`,
-        style: 'Rapfi职业引擎',
+        reason: rapfiSuggestion.provisional
+          ? rapfiSuggestion.verificationFailed
+            ? `连续计划预判命中（分支${rapfiSuggestion.branchRank || 1}）；正式复核失败，暂用预判结果。`
+            : `连续计划预判命中（分支${rapfiSuggestion.branchRank || 1}，耗时${rapfiSuggestion.ms}ms），正式全盘深算仍在复核。`
+          : `Rapfi建议落子（耗时${rapfiSuggestion.ms}ms）`,
+        style: rapfiSuggestion.provisional ? '连续计划预判' : 'Rapfi职业引擎',
       }];
     }
     if (strategy === 'rapfi_external' && !rapfiSuggestion?.error) {
@@ -2519,8 +2644,10 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
       row: rapfiSuggestion.row,
       col: rapfiSuggestion.col,
       score: Number.MAX_SAFE_INTEGER,
-      reason: `Rapfi原始建议（耗时${rapfiSuggestion.ms}ms）`,
-      style: 'Rapfi职业引擎',
+      reason: rapfiSuggestion.provisional
+        ? `Rapfi预判分支${rapfiSuggestion.branchRank || 1}（耗时${rapfiSuggestion.ms}ms，正式复核中）`
+        : `Rapfi原始建议（耗时${rapfiSuggestion.ms}ms）`,
+      style: rapfiSuggestion.provisional ? '连续计划预判' : 'Rapfi职业引擎',
     };
   }, [myTurn, rapfiSuggestion, strategy, turnInfo.name]);
   const arbiterSuggestion = useMemo<Suggestion | null>(() => {
@@ -2692,8 +2819,14 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
                   Rapfi状态：
                   {boardWinner !== null
                     ? `终局：${boardWinner === 1 ? '黑方' : '白方'}已连五`
-                    : analysisPending || rapfiPending
+                    : analysisPending
                     ? '正式分析中...（等待 Rapfi move 结果）'
+                    : rapfiPending && rapfiSuggestion?.provisional
+                      ? `预判命中分支${rapfiSuggestion.branchRank || 1}，正式全盘复核中...`
+                    : rapfiPending
+                      ? '正式分析中...（等待 Rapfi move 结果）'
+                    : rapfiSuggestion?.provisional && rapfiSuggestion.verificationFailed
+                      ? `正式复核失败，暂用预判分支${rapfiSuggestion.branchRank || 1}`
                     : rapfiSuggestion && !rapfiSuggestion.error && rapfiPonderPending
                       ? `已接入（${rapfiSuggestion.ms}ms），后台预判下一手...`
                     : rapfiPonderPending
@@ -2707,7 +2840,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
               )}
               {strategy === 'rapfi_external' && rapfiSuggestion && !rapfiSuggestion.error && (
                 <div className="game-advisor-detail" style={{ marginTop: 4 }}>
-                  Rapfi原始落子：第 {rapfiSuggestion.row} 行，第 {rapfiSuggestion.col} 列（耗时{rapfiSuggestion.ms}ms）
+                  {rapfiSuggestion.provisional ? 'Rapfi预判落子' : 'Rapfi原始落子'}：第 {rapfiSuggestion.row} 行，第 {rapfiSuggestion.col} 列（耗时{rapfiSuggestion.ms}ms）
                   {arbiterSuggestion &&
                   arbiterSuggestion.row >= 1 &&
                   arbiterSuggestion.col >= 1 &&

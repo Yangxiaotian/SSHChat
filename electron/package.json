@@ -20,7 +20,8 @@
     "build:unpack": "vite build && tsc -p tsconfig.node.json && electron-builder --dir",
     "build:portable": "vite build && tsc -p tsconfig.node.json && electron-builder --win dir && powershell -ExecutionPolicy Bypass -File scripts/make-portable.ps1",
     "preview": "vite preview",
-    "test:rapfi-output": "tsc -p tsconfig.node.json && node scripts/test-rapfi-output-parser.cjs"
+    "test:rapfi-output": "tsc -p tsconfig.node.json && node scripts/test-rapfi-output-parser.cjs",
+    "test:gomoku-continuity": "node scripts/test-gomoku-continuity.cjs"
   },
   "dependencies": {
     "@tensorflow-models/coco-ssd": "^2.2.3",
