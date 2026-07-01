@@ -115,13 +115,14 @@ function parseSeatInfo(boardText: string): { redName: string; blackName: string 
   return { redName: '', blackName: '' };
 }
 
-function parseBoard(boardText: string, turnSide: Side | null, viewerIsBlack: boolean): ParsedBoard {
+function parseBoard(boardText: string, turnSide: Side | null, viewerSide: Side | null): ParsedBoard {
   const pieces = new Map<string, Piece>();
   const board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
   const flipped =
-    viewerIsBlack ||
-    boardText.includes('己方在下方') ||
-    /黑方纵线\s*9[.…、,\s]*8[.…、,\s]*7|黑方纵线\s*9…1/.test(boardText);
+    viewerSide === BLACK ||
+    (viewerSide === null &&
+      (boardText.includes('己方在下方') ||
+        /黑方纵线\s*9[.…、,\s]*8[.…、,\s]*7|黑方纵线\s*9…1/.test(boardText)));
   const toActual = (displayRow: number, displayCol: number) => ({
     row: flipped ? ROWS + 1 - displayRow : displayRow,
     col: flipped ? COLS + 1 - displayCol : displayCol,
@@ -649,8 +650,12 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   const turn = useMemo(() => parseTurnInfo(boardText), [boardText]);
   const seats = useMemo(() => parseSeatInfo(boardText), [boardText]);
-  const viewerIsBlack = seats.blackName === nickname;
-  const parsed = useMemo(() => parseBoard(boardText, turn.side, viewerIsBlack), [boardText, turn.side, viewerIsBlack]);
+  const viewerSide: Side | null = useMemo(() => {
+    if (seats.redName && seats.redName === nickname) return RED;
+    if (seats.blackName && seats.blackName === nickname) return BLACK;
+    return null;
+  }, [seats.redName, seats.blackName, nickname]);
+  const parsed = useMemo(() => parseBoard(boardText, turn.side, viewerSide), [boardText, turn.side, viewerSide]);
 
   const myTurn = !!turn.name && turn.name === nickname;
   const canPlay = !disabled && (!turn.name || myTurn);

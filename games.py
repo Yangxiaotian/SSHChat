@@ -354,10 +354,21 @@ def _xq_negamax(
     return best
 
 
-def _choose_xq_ai_move(board: list[list[int]], side: int, level: str):
+def _choose_xq_ai_move(
+    board: list[list[int]],
+    side: int,
+    level: str,
+    ply_log: Optional[list[dict]] = None,
+):
     depth = _XQ_AI_DEPTH.get(level, 2)
     width = _XQ_AI_WIDTH.get(level, 10)
     legal = _xq_order_moves(board, _xq_legal_moves(board, side))[:width]
+    if ply_log is not None:
+        legal = [
+            m
+            for m in legal
+            if not _xq_would_lose_on_repetition(board, ply_log, side, *m)
+        ] or legal
     best_move = None
     best_score = -10**9
     for move in legal:
@@ -907,12 +918,21 @@ class ChessGame(BoardUndoMixin):
     def is_seated(self, conn) -> bool:
         return self.color_of(conn) is not None
 
-    def _viewer_flip(self, conn) -> bool:
-        return conn is not None and conn is self.black_conn
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self.color_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.white_name:
+                side = _chess.WHITE
+            elif vn == self.black_name:
+                side = _chess.BLACK
+        return side == _chess.BLACK
 
-    def _board_render(self, conn=None) -> list[str]:
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         return _render_board(
-            self.board, last_move=self._last_move, flip=self._viewer_flip(conn)
+            self.board,
+            last_move=self._last_move,
+            flip=self._viewer_flip(conn, viewer_name=viewer_name),
         )
 
     def _is_ai_game(self) -> bool:
@@ -1115,13 +1135,13 @@ class ChessGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def show(self, conn=None) -> list[str]:
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [
             f"chess 对局（{self.state}）  白：{self.white_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render(conn))
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             color = self.board.turn
             who = self.white_name if color == _chess.WHITE else self.black_name
@@ -2779,6 +2799,186 @@ def _xq_parse_move(
     return _xq_parse_notation(t, side, board)
 
 
+def _xq_position_key(
+    board: list[list[int]], turn: int
+) -> tuple[tuple[tuple[int, ...], ...], int]:
+    return (tuple(tuple(row) for row in board), turn)
+
+
+def _xq_in_check(board: list[list[int]], defender: int) -> bool:
+    k = _xq_king_pos(board, defender)
+    return k is not None and _xq_is_attacked(board, k[0], k[1], -defender)
+
+
+def _xq_chased_squares(board: list[list[int]], attacker: int) -> frozenset[tuple[int, int]]:
+    out: set[tuple[int, int]] = set()
+    for r in range(XIANGQI_ROWS):
+        for c in range(XIANGQI_COLS):
+            cell = board[r][c]
+            if cell == 0 or _xq_piece_side(cell) == attacker:
+                continue
+            if _xq_piece_type(cell) == _XQ_K:
+                continue
+            if _xq_is_attacked(board, r, c, attacker):
+                out.add((r, c))
+    return frozenset(out)
+
+
+def _xq_analyze_ply(
+    board_before: list[list[int]],
+    board_after: list[list[int]],
+    mover: int,
+) -> dict[str, object]:
+    opp = -mover
+    check = _xq_in_check(board_after, opp)
+    chase_targets: frozenset[tuple[int, int]] = frozenset()
+    if not check:
+        chase_targets = _xq_chased_squares(board_after, mover)
+    return {"check": check, "chase_targets": chase_targets}
+
+
+def _xq_is_perpetual_chase(side_plies: list[dict]) -> bool:
+    if not side_plies:
+        return False
+    if any(p["check"] or not p["chase_targets"] for p in side_plies):
+        return False
+    tracked: Optional[tuple[int, int]] = None
+    for ply in side_plies:
+        bb = ply["board_before"]
+        mover = ply["mover"]
+        if tracked is None:
+            tracked = next(iter(ply["chase_targets"]))
+            continue
+        tr, tc = tracked
+        if (
+            bb[tr][tc] != 0
+            and _xq_piece_side(bb[tr][tc]) == -mover
+            and (tr, tc) in ply["chase_targets"]
+        ):
+            continue
+        found = False
+        for r, c in ply["chase_targets"]:
+            if bb[r][c] != 0 and _xq_piece_side(bb[r][c]) == -mover:
+                tracked = (r, c)
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def _xq_classify_side_cycle(side_plies: list[dict]) -> str:
+    if not side_plies:
+        return "idle"
+    if all(p["check"] for p in side_plies):
+        return "perpetual_check"
+    if _xq_is_perpetual_chase(side_plies):
+        return "perpetual_chase"
+    if all(not p["check"] and not p["chase_targets"] for p in side_plies):
+        return "idle"
+    return "mixed"
+
+
+def _xq_side_plies_in_cycle(
+    ply_log: list[dict], start_idx: int, end_idx: int, side: int
+) -> list[dict]:
+    return [
+        ply_log[i]
+        for i in range(start_idx + 1, end_idx + 1)
+        if ply_log[i]["mover"] == side
+    ]
+
+
+def _xq_adjudicate_repetition(
+    ply_log: list[dict], i_first: int, i_last: int
+) -> tuple[str, float]:
+    """Return (broadcast line, score_red) when a position repeats for the 3rd time."""
+    red_plies = _xq_side_plies_in_cycle(ply_log, i_first, i_last, _XQ_RED)
+    black_plies = _xq_side_plies_in_cycle(ply_log, i_first, i_last, _XQ_BLACK)
+    rpat = _xq_classify_side_cycle(red_plies)
+    bpat = _xq_classify_side_cycle(black_plies)
+
+    def lose(side: int, reason: str) -> tuple[str, float]:
+        color = "红" if side == _XQ_RED else "黑"
+        score = 0.0 if side == _XQ_RED else 1.0
+        return (f"对局结束：{color}方{reason}，三次循环局面不变着判负。", score)
+
+    if rpat == "perpetual_check" and bpat != "perpetual_check":
+        return lose(_XQ_RED, "长将")
+    if bpat == "perpetual_check" and rpat != "perpetual_check":
+        return lose(_XQ_BLACK, "长将")
+    if rpat == "perpetual_check" and bpat == "perpetual_check":
+        return ("对局结束：双方长将，和棋。", 0.5)
+    if rpat == "perpetual_check" and bpat == "perpetual_chase":
+        return lose(_XQ_RED, "长将")
+    if bpat == "perpetual_check" and rpat == "perpetual_chase":
+        return lose(_XQ_BLACK, "长将")
+    if rpat == "perpetual_chase" and bpat == "idle":
+        return lose(_XQ_RED, "长捉")
+    if bpat == "perpetual_chase" and rpat == "idle":
+        return lose(_XQ_BLACK, "长捉")
+    if rpat == "perpetual_chase" and bpat == "perpetual_chase":
+        return ("对局结束：双方长捉，和棋。", 0.5)
+    if rpat == "idle" and bpat == "idle":
+        return ("对局结束：循环局面双方无照打，和棋。", 0.5)
+    if rpat in ("perpetual_check", "perpetual_chase") and bpat == "mixed":
+        return lose(_XQ_RED, "长将" if rpat == "perpetual_check" else "长捉")
+    if bpat in ("perpetual_check", "perpetual_chase") and rpat == "mixed":
+        return lose(_XQ_BLACK, "长将" if bpat == "perpetual_check" else "长捉")
+    return ("对局结束：循环局面双方须变着，和棋。", 0.5)
+
+
+def _xq_repetition_verdict(ply_log: list[dict]) -> Optional[tuple[str, float]]:
+    if not ply_log:
+        return None
+    key = ply_log[-1]["key"]
+    indices = [i for i, p in enumerate(ply_log) if p["key"] == key]
+    if len(indices) < 3:
+        return None
+    return _xq_adjudicate_repetition(ply_log, indices[0], indices[-1])
+
+
+def _xq_record_ply(
+    ply_log: list[dict],
+    board_before: list[list[int]],
+    board_after: list[list[int]],
+    mover: int,
+) -> Optional[tuple[str, float]]:
+    info = _xq_analyze_ply(board_before, board_after, mover)
+    ply_log.append(
+        {
+            "key": _xq_position_key(board_after, -mover),
+            "mover": mover,
+            "check": info["check"],
+            "chase_targets": info["chase_targets"],
+            "board_before": board_before,
+        }
+    )
+    return _xq_repetition_verdict(ply_log)
+
+
+def _xq_would_lose_on_repetition(
+    board: list[list[int]],
+    ply_log: list[dict],
+    side: int,
+    fr: int,
+    fc: int,
+    tr: int,
+    tc: int,
+) -> bool:
+    board_before = _xq_copy(board)
+    board_after = _xq_copy(board)
+    _xq_apply(board_after, fr, fc, tr, tc)
+    trial = list(ply_log)
+    verdict = _xq_record_ply(trial, board_before, board_after, side)
+    if verdict is None:
+        return False
+    _msg, score_red = verdict
+    if side == _XQ_RED:
+        return score_red == 0.0
+    return score_red == 1.0
+
+
 def _xq_move_label(
     board: list[list[int]], fr: int, fc: int, tr: int, tc: int, side: int
 ) -> str:
@@ -2881,6 +3081,7 @@ class XiangqiGame(BoardUndoMixin):
                 Optional[str],
             ]
         ] = []
+        self._xq_ply_log: list[dict] = []
         self.join_blurb = (
             f"{self.ai_name} 执黑，练习局立即开始；本局不计入持久化积分。"
             if ai_level
@@ -2914,6 +3115,8 @@ class XiangqiGame(BoardUndoMixin):
         if not self._history:
             return False
         self._history.pop()
+        if self._xq_ply_log:
+            self._xq_ply_log.pop()
         if self._history:
             snap = self._history[-1]
             self.board = [row[:] for row in snap[0]]
@@ -2929,7 +3132,66 @@ class XiangqiGame(BoardUndoMixin):
             self._last_to = None
             self._last_mover_side = None
             self._last_notation = None
+            self._xq_ply_log.clear()
         return True
+
+    def _xq_commit_move(
+        self, side: int, fr: int, fc: int, tr: int, tc: int, label: str
+    ) -> tuple[list[str], bool]:
+        """Apply a half-move; return (broadcast lines, ended)."""
+        board_before = _xq_copy(self.board)
+        captured = self.board[tr][tc]
+        _xq_apply(self.board, fr, fc, tr, tc)
+        self._last_from = (fr, fc)
+        self._last_to = (tr, tc)
+        self._last_mover_side = side
+        self._last_notation = label
+        self._turn = -side
+        self._history.append(self._xq_snapshot())
+
+        mover = self.red_name if side == _XQ_RED else self.black_name
+        color = "红" if side == _XQ_RED else "黑"
+        bcast = [f"{color}方 {mover} 走 {label}"]
+
+        verdict = _xq_record_ply(self._xq_ply_log, board_before, self.board, side)
+        if verdict is not None:
+            self.state = "ended"
+            msg, score_red = verdict
+            bcast.append(msg)
+            bcast.extend(self._settle_ratings(score_red))
+            return bcast, True
+
+        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
+            self.state = "ended"
+            bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
+            bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            return bcast, True
+
+        opp_moves = _xq_legal_moves(self.board, self._turn)
+        opp_k = _xq_king_pos(self.board, self._turn)
+        in_check = (
+            opp_k is not None
+            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], side)
+        )
+        if not opp_moves:
+            self.state = "ended"
+            if in_check:
+                bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            else:
+                loser = self.red_name if self._turn == _XQ_RED else self.black_name
+                loser_color = "红" if self._turn == _XQ_RED else "黑"
+                bcast.append(
+                    f"对局结束：{loser_color}方 {loser} 无合法着法，{color}方困毙获胜！"
+                )
+                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+            return bcast, True
+
+        next_name = self.red_name if self._turn == _XQ_RED else self.black_name
+        next_color = "红" if self._turn == _XQ_RED else "黑"
+        suffix = "（将军）" if in_check else ""
+        bcast.append(f"轮到 {next_color}方 {next_name} 走子{suffix}")
+        return bcast, False
 
     def _undo_turn_line(self) -> str:
         nm = self.red_name if self._turn == _XQ_RED else self.black_name
@@ -2962,16 +3224,23 @@ class XiangqiGame(BoardUndoMixin):
     def is_seated(self, conn) -> bool:
         return self._side_of(conn) is not None
 
-    def _viewer_flip(self, conn) -> bool:
-        return conn is not None and conn is self.black_conn
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self._side_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.red_name:
+                side = _XQ_RED
+            elif vn == self.black_name:
+                side = _XQ_BLACK
+        return side == _XQ_BLACK
 
-    def _board_render(self, conn=None) -> list[str]:
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         return _xq_render(
             self.board,
             last_from=self._last_from,
             last_to=self._last_to,
             last_notation=self._last_notation,
-            flip=self._viewer_flip(conn),
+            flip=self._viewer_flip(conn, viewer_name=viewer_name),
         )
 
     def _is_ai_game(self) -> bool:
@@ -3001,43 +3270,18 @@ class XiangqiGame(BoardUndoMixin):
         )
 
     def _run_ai_turn(self) -> list[str]:
-        move = _choose_xq_ai_move(self.board, _XQ_BLACK, self.ai_level or "normal")
+        move = _choose_xq_ai_move(
+            self.board,
+            _XQ_BLACK,
+            self.ai_level or "normal",
+            self._xq_ply_log,
+        )
         if move is None:
             self.state = "ended"
             return ["对局结束：AI 无合法着法。", *self._settle_ratings(0.5)]
         fr, fc, tr, tc = move
         label = _xq_move_label(self.board, fr, fc, tr, tc, _XQ_BLACK)
-        captured = self.board[tr][tc]
-        _xq_apply(self.board, fr, fc, tr, tc)
-        self._last_from = (fr, fc)
-        self._last_to = (tr, tc)
-        self._last_mover_side = _XQ_BLACK
-        self._last_notation = label
-        self._history.append(self._xq_snapshot())
-        bcast = [f"黑方 {self.black_name} 走 {label}"]
-        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
-            self.state = "ended"
-            bcast.append(f"对局结束：黑方 {self.black_name} 获胜（将死）！")
-            bcast.extend(self._settle_ratings(0.0))
-            return bcast
-        self._turn = _XQ_RED
-        opp_moves = _xq_legal_moves(self.board, self._turn)
-        opp_k = _xq_king_pos(self.board, self._turn)
-        in_check = (
-            opp_k is not None
-            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], _XQ_BLACK)
-        )
-        if not opp_moves:
-            self.state = "ended"
-            if in_check:
-                bcast.append(f"对局结束：黑方 {self.black_name} 将死获胜！")
-                bcast.extend(self._settle_ratings(0.0))
-            else:
-                bcast.append(f"对局结束：红方 {self.red_name} 无合法着法，黑方困毙获胜！")
-                bcast.extend(self._settle_ratings(0.0))
-            return bcast
-        suffix = "（被将军）" if in_check else ""
-        bcast.append(f"轮到 红方 {self.red_name} 走子{suffix}")
+        bcast, ended = self._xq_commit_move(_XQ_BLACK, fr, fc, tr, tc, label)
         return bcast
 
     def nudge_bots(self) -> list[str]:
@@ -3072,6 +3316,7 @@ class XiangqiGame(BoardUndoMixin):
             "走子：/game move <棋谱>  例：炮二平五、马2进3",
             "  也可用坐标：/game move 8 二 8 五（行 1～10；红列 九…一/黑列 1～9）",
             "  同线双子用 前/后；棋盘 +红 -黑 !上一步",
+            "  循环局面：三次重复时，长将/长捉不变着判负（竞赛规则）",
             f"轮到 红方 {self.red_name} 走子",
         ]
         return ([], bcast, False)
@@ -3113,51 +3358,25 @@ class XiangqiGame(BoardUndoMixin):
             return (["该走法不合法（蹩马腿、塞象眼、出九宫、照面等）。"], [], False)
 
         label = _xq_move_label(self.board, fr, fc, tr, tc, side)
-        captured = self.board[tr][tc]
-        _xq_apply(self.board, fr, fc, tr, tc)
-        self._last_from = (fr, fc)
-        self._last_to = (tr, tc)
-        self._last_mover_side = side
-        self._last_notation = label
-        self._history.append(self._xq_snapshot())
+        if _xq_would_lose_on_repetition(self.board, self._xq_ply_log, side, fr, fc, tr, tc):
+            color = "红" if side == _XQ_RED else "黑"
+            return (
+                [
+                    f"此着会形成第三次循环局面且{color}方须变着"
+                    "（长将/长捉不变着按竞赛规则判负），请改走他处。"
+                ],
+                [],
+                False,
+            )
 
-        mover = self.red_name if side == _XQ_RED else self.black_name
-        color = "红" if side == _XQ_RED else "黑"
-        bcast = [f"{color}方 {mover} 走 {label}"]
-
-        if captured != 0 and _xq_piece_type(captured) == _XQ_K:
-            self.state = "ended"
-            bcast.append(f"对局结束：{color}方 {mover} 获胜（将死）！")
-            bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
-            return ([], bcast, True)
-
-        self._turn = -side
-        opp_moves = _xq_legal_moves(self.board, self._turn)
-        opp_k = _xq_king_pos(self.board, self._turn)
-        in_check = (
-            opp_k is not None
-            and _xq_is_attacked(self.board, opp_k[0], opp_k[1], side)
-        )
-        if not opp_moves:
-            self.state = "ended"
-            if in_check:
-                bcast.append(f"对局结束：{color}方 {mover} 将死获胜！")
-                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
-            else:
-                loser = self.red_name if self._turn == _XQ_RED else self.black_name
-                loser_color = "红" if self._turn == _XQ_RED else "黑"
-                bcast.append(f"对局结束：{loser_color}方 {loser} 无合法着法，{color}方困毙获胜！")
-                bcast.extend(self._settle_ratings(1.0 if side == _XQ_RED else 0.0))
+        bcast, ended = self._xq_commit_move(side, fr, fc, tr, tc, label)
+        if ended:
             return ([], bcast, True)
 
         if self._is_ai_turn():
             bcast.extend(self._run_ai_turn())
             return ([], bcast, self.state == "ended")
 
-        next_name = self.red_name if self._turn == _XQ_RED else self.black_name
-        next_color = "红" if self._turn == _XQ_RED else "黑"
-        suffix = "（将军）" if in_check else ""
-        bcast.append(f"轮到 {next_color}方 {next_name} 走子{suffix}")
         return ([], bcast, False)
 
     def resign(self, conn, name: str) -> GameResult:
@@ -3194,13 +3413,13 @@ class XiangqiGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def show(self, conn=None) -> list[str]:
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [
             f"xiangqi 对局（{self.state}）  红：{self.red_name}   "
             f"黑：{self.black_name or '空席'}"
         ]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render(conn))
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             nm = self.red_name if self._turn == _XQ_RED else self.black_name
             color = "红" if self._turn == _XQ_RED else "黑"
@@ -10331,6 +10550,7 @@ HELP_LINES = (
     "观星/蛊惑/断粮等技能见 /game show（别名 sgs/三国杀）。",
     "[*] xiangqi 也可用别名 cchess 开局。",
     "[*] 棋盘 +红 -黑 !上一步；马/象/士进退按纵线朝棋盘中线为进。",
+    "[*] 象棋按竞赛规则：三次循环局面时，长将/长捉不变着判负；双方无照打可和棋。",
     "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
     "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
     "（chess/gomoku/go/xiangqi/doushou；简写 acc / rej / can；reject 拒绝，cancel 取消请求）。",

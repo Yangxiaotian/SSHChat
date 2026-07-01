@@ -260,15 +260,34 @@ def broadcast_game(room: str, lines) -> None:
     broadcast_room(room, _format_game_lines(room, lines))
 
 
+def _viewer_name_for_conn(conn) -> str | None:
+    info = clients.get(conn)
+    if not info:
+        return None
+    name = (info.get("name") or "").strip()
+    return name or None
+
+
+def _game_show_for_conn(game, conn) -> list[str]:
+    """Per-connection board view; chess/xiangqi flip by seated side, not conn identity."""
+    viewer_name = _viewer_name_for_conn(conn)
+    if viewer_name and getattr(game, "name", "") in {"chess", "xiangqi"}:
+        try:
+            return game.show(conn, viewer_name=viewer_name)
+        except TypeError:
+            pass
+    try:
+        return game.show(conn)
+    except TypeError:
+        return game.show()
+
+
 def send_oriented_boards(room: str, game) -> None:
     """Send full board view; chess/xiangqi second seat sees flipped board (己方在下)."""
     with lock:
         targets = [c for c in list(rooms.get(room, ())) if c in clients]
     for conn in targets:
-        try:
-            lines = game.show(conn)
-        except TypeError:
-            lines = game.show()
+        lines = _game_show_for_conn(game, conn)
         if lines:
             send_game_private(conn, room, lines)
 
@@ -1824,8 +1843,13 @@ def _local_conn_for_name_in_room_locked(name: str, room: str):
 
 
 def _remap_local_game_seats_locked(room: str, game) -> None:
+    local_node = _local_node_id()
     for old_conn, seat_name in list(_iter_game_conn_seats(game)):
         if isinstance(old_conn, FederatedSeat):
+            if old_conn.node_id == local_node:
+                local = _local_conn_for_name_in_room_locked(seat_name, room)
+                if local is not None:
+                    _replace_conn_refs(game, old_conn, local)
             continue
         if old_conn in clients and clients[old_conn]["name"] == seat_name:
             continue
@@ -2810,10 +2834,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 if getattr(game, "name", "") == "sanguo":
                     lines = game.show(conn, full=full_help)
                 else:
-                    try:
-                        lines = game.show(conn)
-                    except TypeError:
-                        lines = game.show()
+                    lines = _game_show_for_conn(game, conn)
                 if resumed:
                     lines = ["已检测到同账号旧终端席位，已自动续玩接管。"] + lines
                 nudge = getattr(game, "nudge_bots", None)
@@ -3041,10 +3062,7 @@ def handle_client(conn, addr) -> None:
                     resumed_game_rooms.append(room)
             active_game = room_games.get(active_room)
             if active_game is not None and getattr(active_game, "state", "ended") != "ended":
-                try:
-                    active_game_lines = active_game.show(conn)
-                except TypeError:
-                    active_game_lines = active_game.show()
+                active_game_lines = _game_show_for_conn(active_game, conn)
                 if active_room in resumed_game_rooms:
                     active_game_lines = ["已自动续玩接管旧终端席位。"] + active_game_lines
             room_labels = [
