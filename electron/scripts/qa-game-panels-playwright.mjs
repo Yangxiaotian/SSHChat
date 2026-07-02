@@ -329,6 +329,33 @@ try {
     );
   }
 
+  await openByLines([
+    'xiangqi 对局（playing）  红：yxt   黑：zouyu',
+    '轮到 黑方 zouyu 走子',
+    '   1   2   3   4   5   6   7   8   9     ← 黑方 1～9',
+    '  图例：+红  -黑  !上一步  ·空  （请用等宽字体）',
+    '   ·   ·   ·   -将 ·   -士 -象 ·   ·',
+    '   ·   ·   ·   ·   -士 +车 ·   ·   ·',
+    '   ·   ·   ·   ·   ·   -炮 ·   ·   ·',
+    '   +车 ·   ·   ·   ·   ·   *   ·   -卒',
+    '   ·   ·   ·   ·   ·   ·   !卒 ·   ·',
+    '               楚河汉界',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   ·   ·   ·   ·   ·   -车 ·   ·   ·',
+    '   ·   ·   ·   ·   ·   +仕 ·   ·   ·',
+    '   ·   ·   ·   ·   ·   +帅 ·   ·   ·',
+    '   ·   ·   ·   ·   ·   +仕 ·   ·   ·',
+    '   九  八  七  六  五  四  三  二  一    ← 红方纵线 九…一（右为一）',
+    '  上一步：卒7进1',
+  ], '中国象棋棋盘');
+  await page.evaluate(() => {
+    // @ts-ignore
+    window.__qa.clearSent();
+  });
+  await page.locator('.xiangqi-cell[title="1,4"]').click();
+  await page.locator('.xiangqi-cell[title="1,5"]').click();
+  await assertSentIncludes('/game move coord 1 4 1 5');
+
   // 4) 三国杀
   await openByLines([
     'doushou 对局（playing）  红：zouyu   黑：R1',

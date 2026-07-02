@@ -124,6 +124,69 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertEqual(game.board[1][0], -5)
         self.assertEqual(game.board[0][0], 0)
 
+    def test_xiangqi_old_session_without_ply_log_keeps_moving(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+        delattr(game, "_xq_ply_log")
+
+        err_red, _bcast_red, _ = game.try_move(red_conn, "coord 10 1 9 1")
+
+        self.assertEqual(err_red, [])
+        self.assertTrue(hasattr(game, "_xq_ply_log"))
+        self.assertEqual(len(game._xq_ply_log), 1)
+
+    def test_xiangqi_old_session_with_bad_ply_log_type_keeps_moving(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+        game._xq_ply_log = ["old-label"]
+
+        err_red, _bcast_red, _ = game.try_move(red_conn, "coord 10 1 9 1")
+
+        self.assertEqual(err_red, [])
+        self.assertEqual(len(game._xq_ply_log), 1)
+        self.assertIsInstance(game._xq_ply_log[0], dict)
+
+    def test_server_runtime_compat_repairs_old_xiangqi_before_move(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+        delattr(game, "_xq_ply_log")
+
+        server._ensure_game_runtime_compat(game)
+        err_red, _bcast_red, _ = game.try_move(red_conn, "coord 10 1 9 1")
+
+        self.assertEqual(err_red, [])
+        self.assertTrue(hasattr(game, "_xq_ply_log"))
+        self.assertEqual(len(game._xq_ply_log), 1)
+
+    def test_xiangqi_black_top_absolute_coord_move_is_legal(self) -> None:
+        red_conn = object()
+        black_conn = object()
+        game = XiangqiGame(red_conn, "Alice", rating_store=self.store)
+        err_join, _bcast_join, _ = game.try_join(black_conn, "Bob")
+        self.assertEqual(err_join, [])
+        game.board = [[0 for _ in range(9)] for _ in range(10)]
+        game.board[0][3] = -1
+        game.board[0][5] = -2
+        game.board[0][6] = -3
+        game.board[1][4] = -2
+        game.board[9][4] = 1
+        game._turn = -1
+
+        err_black, _bcast_black, _ = game.try_move(black_conn, "coord 1 4 1 5")
+
+        self.assertEqual(err_black, [])
+        self.assertEqual(game.board[0][4], -1)
+        self.assertEqual(game.board[0][3], 0)
+
     def test_xiangqi_flying_general_is_reported_as_check(self) -> None:
         red_conn = object()
         black_conn = object()

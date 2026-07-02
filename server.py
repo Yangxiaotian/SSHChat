@@ -637,6 +637,23 @@ def _pickle_game_for_storage(game) -> bytes:
 def _rebind_game_services(game) -> None:
     if hasattr(game, "rating_store"):
         game.rating_store = rating_store
+    if getattr(game, "name", "") == "xiangqi":
+        log = getattr(game, "_xq_ply_log", None)
+        if not isinstance(log, list) or any(not isinstance(item, dict) for item in log):
+            game._xq_ply_log = []
+        hist = getattr(game, "_history", None)
+        if isinstance(hist, list) and len(game._xq_ply_log) > len(hist):
+            game._xq_ply_log = game._xq_ply_log[: len(hist)]
+    ensure = getattr(game, "_ensure_compat_state", None)
+    if callable(ensure):
+        ensure()
+
+
+def _ensure_game_runtime_compat(game) -> None:
+    """Repair active game objects created by older code before dispatching actions."""
+    if game is None:
+        return
+    _rebind_game_services(game)
 
 
 def _nudge_game_bots_locked(game) -> list[str]:
@@ -2019,6 +2036,7 @@ def _fed_execute_game_cmd(
         try:
             with lock:
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
+                _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(actor, rest)
                 if not ended:
                     extra = _nudge_game_bots_locked(game)
@@ -2853,6 +2871,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     send_line(conn, "[*] 本房没有进行中的对局。\n")
                     return
                 resumed = _resume_same_account_seat_locked(room, game, conn, name)
+                _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(conn, rest)
                 if not ended:
                     extra = _nudge_game_bots_locked(game)

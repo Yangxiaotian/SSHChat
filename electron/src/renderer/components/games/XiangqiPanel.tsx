@@ -118,11 +118,17 @@ function parseSeatInfo(boardText: string): { redName: string; blackName: string 
 function parseBoard(boardText: string, turnSide: Side | null, viewerSide: Side | null): ParsedBoard {
   const pieces = new Map<string, Piece>();
   const board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+  const selfBottom = boardText.includes('己方在下方');
+  const redTopBlackBottom =
+    /红方.*[一二三四五六七八九]/.test(boardText) &&
+    /黑方.*9[.…、,\s]*8[.…、,\s]*7|黑方.*9…1|黑方.*从右向左为\s*1～9/.test(boardText);
+  const blackTopRedBottom =
+    /黑方.*1[.…、,\s]*2[.…、,\s]*3|黑方.*1～9/.test(boardText) &&
+    /红方.*九[.…、,\s]*八[.…、,\s]*七|红方.*九…一|红方.*右为一/.test(boardText);
   const flipped =
-    viewerSide === BLACK ||
-    (viewerSide === null &&
-      (boardText.includes('己方在下方') ||
-        /黑方纵线\s*9[.…、,\s]*8[.…、,\s]*7|黑方纵线\s*9…1/.test(boardText)));
+    selfBottom ||
+    redTopBlackBottom ||
+    (!blackTopRedBottom && viewerSide === BLACK);
   const toActual = (displayRow: number, displayCol: number) => ({
     row: flipped ? ROWS + 1 - displayRow : displayRow,
     col: flipped ? COLS + 1 - displayCol : displayCol,

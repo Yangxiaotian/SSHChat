@@ -3089,7 +3089,23 @@ class XiangqiGame(BoardUndoMixin):
         )
         self._undo_clear_pending()
 
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._ensure_compat_state()
+
+    def _ensure_compat_state(self) -> None:
+        """Keep active Xiangqi games saved by older builds compatible."""
+        if not hasattr(self, "_xq_ply_log") or not isinstance(self._xq_ply_log, list):
+            self._xq_ply_log = []
+        elif any(not isinstance(item, dict) for item in self._xq_ply_log):
+            self._xq_ply_log = []
+        if not hasattr(self, "_history") or not isinstance(self._history, list):
+            self._history = []
+        if len(self._xq_ply_log) > len(self._history):
+            self._xq_ply_log = self._xq_ply_log[: len(self._history)]
+
     def _undo_has_moves(self) -> bool:
+        self._ensure_compat_state()
         return bool(self._history)
 
     def _undo_last_mover_conn(self):
@@ -3112,6 +3128,7 @@ class XiangqiGame(BoardUndoMixin):
         return "?"
 
     def _undo_pop_last_move(self) -> bool:
+        self._ensure_compat_state()
         if not self._history:
             return False
         self._history.pop()
@@ -3139,6 +3156,7 @@ class XiangqiGame(BoardUndoMixin):
         self, side: int, fr: int, fc: int, tr: int, tc: int, label: str
     ) -> tuple[list[str], bool]:
         """Apply a half-move; return (broadcast lines, ended)."""
+        self._ensure_compat_state()
         board_before = _xq_copy(self.board)
         captured = self.board[tr][tc]
         _xq_apply(self.board, fr, fc, tr, tc)
@@ -3205,6 +3223,7 @@ class XiangqiGame(BoardUndoMixin):
         return f"轮到 {color}方 {nm} 走子{suffix}"
 
     def _xq_snapshot(self) -> tuple:
+        self._ensure_compat_state()
         return (
             [row[:] for row in self.board],
             self._turn,
@@ -3235,6 +3254,7 @@ class XiangqiGame(BoardUndoMixin):
         return side == _XQ_BLACK
 
     def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
+        self._ensure_compat_state()
         return _xq_render(
             self.board,
             last_from=self._last_from,
@@ -3270,6 +3290,7 @@ class XiangqiGame(BoardUndoMixin):
         )
 
     def _run_ai_turn(self) -> list[str]:
+        self._ensure_compat_state()
         move = _choose_xq_ai_move(
             self.board,
             _XQ_BLACK,
@@ -3291,6 +3312,7 @@ class XiangqiGame(BoardUndoMixin):
         return self._run_ai_turn()
 
     def try_join(self, conn, name: str) -> GameResult:
+        self._ensure_compat_state()
         if self.state == "ended":
             return (
                 [f"对局已结束，请先 /game new {self.name} 开新局。"],
@@ -3322,6 +3344,7 @@ class XiangqiGame(BoardUndoMixin):
         return ([], bcast, False)
 
     def try_move(self, conn, raw: str) -> GameResult:
+        self._ensure_compat_state()
         if self.state == "waiting":
             return (["对局尚未开始，等黑方 /game join。"], [], False)
         if self.state != "playing":
