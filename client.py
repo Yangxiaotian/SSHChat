@@ -421,11 +421,71 @@ def _is_my_turn_line(payload: str, my_name: str) -> bool:
     return bool(m and m.group(1).strip() == my_name)
 
 
+def _is_game_error_line(payload: str) -> bool:
+    """Game command errors must always be visible in DND mode."""
+    t = payload.strip()
+    if not t:
+        return False
+    markers = (
+        "不是你的回合",
+        "无法",
+        "用法：",
+        "用法:",
+        "错误",
+        "非法",
+        "无效",
+        "失败",
+        "未知",
+        "未进行",
+        "未开始",
+    )
+    return any(m in t for m in markers)
+
+
+def _is_dnd_game_action_command(cmd: str) -> bool:
+    lower = cmd.strip().lower()
+    if not lower.startswith("/game"):
+        return False
+    parts = lower.split(None, 2)
+    if len(parts) < 2:
+        return False
+    action = parts[1]
+    action_subs = frozenset(
+        (
+            "move",
+            "play",
+            "pass",
+            "resign",
+            "fold",
+            "call",
+            "raise",
+            "check",
+            "bet",
+            "allin",
+            "弃牌",
+            "跟注",
+            "加注",
+            "过牌",
+            "看牌",
+            "比牌",
+            "受击",
+            "拼点",
+        )
+    )
+    return action in action_subs
+
+
+def _dnd_print_game_action_ack() -> None:
+    print("[*] 走子已提交（勿扰模式隐藏局面更新）\n", end="", flush=True)
+
+
 def _dnd_system_action(payload: str, my_name: str) -> str | None:
     """
     Return None to show normally, '' to suppress, 'turn_hint' for compact turn line.
     """
     if not _dnd_enabled() or _game_bypass_active():
+        return None
+    if _is_game_error_line(payload):
         return None
     if _is_reading_content_line(payload):
         return None
@@ -489,9 +549,13 @@ def _prepare_outgoing(msg: str) -> bool:
     if _try_handle_local_command(msg):
         return False
     lower = msg.strip().lower()
+    if lower in ("/clear", "/cls"):
+        _terminal_hard_clear()
     if lower.startswith("/game"):
         if not _dnd_enabled() or _is_dnd_game_read_command(lower):
             _note_game_command()
+        elif _is_dnd_game_action_command(lower):
+            _dnd_print_game_action_ack()
     return True
 
 
@@ -737,8 +801,7 @@ def _clear_terminal_with_prompt_sync() -> None:
             async def _clear_in_prompt() -> None:
                 app.renderer.clear()
 
-            asyncio.run_coroutine_threadsafe(_clear_in_prompt(), app.loop).result(timeout=2)
-            return
+            asyncio.run_coroutine_threadsafe(_clear_in_prompt(), app.loop).result(timeout=1)
     except Exception:
         pass
     _raw_terminal_clear()

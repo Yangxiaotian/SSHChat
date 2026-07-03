@@ -111,6 +111,30 @@ class ClientDndTest(unittest.TestCase):
         self.assertTrue(client_mod._is_my_turn_line(turn, "alice"))
         self.assertEqual(client_mod._dnd_system_action(turn, "alice"), "turn_hint")
 
+    def test_game_error_not_suppressed_in_dnd(self) -> None:
+        self.assertIsNone(client_mod._dnd_system_action("不是你的回合。", "alice"))
+        self.assertIsNone(client_mod._dnd_system_action("无法识别走法 'x9'。", "alice"))
+
+    def test_dnd_game_action_command_detection(self) -> None:
+        self.assertTrue(client_mod._is_dnd_game_action_command("/game move 8 8"))
+        self.assertTrue(client_mod._is_dnd_game_action_command("/game fold"))
+        self.assertFalse(client_mod._is_dnd_game_action_command("/game show"))
+
+    def test_clear_command_triggers_local_clear(self) -> None:
+        calls: list[str] = []
+
+        def _fake_clear() -> None:
+            calls.append("clear")
+
+        original = client_mod._terminal_hard_clear
+        client_mod._terminal_hard_clear = _fake_clear
+        try:
+            self.assertTrue(client_mod._prepare_outgoing("/cls"))
+            self.assertTrue(client_mod._prepare_outgoing("/clear"))
+        finally:
+            client_mod._terminal_hard_clear = original
+        self.assertEqual(calls, ["clear", "clear"])
+
     def test_dnd_subcommand_completion(self) -> None:
         from prompt_toolkit.document import Document
 
