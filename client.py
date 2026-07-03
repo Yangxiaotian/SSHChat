@@ -443,6 +443,81 @@ def _is_game_error_line(payload: str) -> bool:
     return any(m in t for m in markers)
 
 
+def _is_game_command_feedback_line(payload: str) -> bool:
+    """Command outcomes and status lines must stay visible in DND mode."""
+    if _is_game_error_line(payload):
+        return True
+    t = payload.strip()
+    if not t:
+        return False
+    markers = (
+        "已有进行",
+        "没有进行",
+        "席位",
+        "已经是",
+        "你不是",
+        "加入为",
+        "加入了",
+        "开了一局",
+        "无法开局",
+        "未上线",
+        "请先",
+        "只有房主",
+        "检测到你在",
+        "已自动续玩",
+        "从另一终端",
+        "对局开始",
+        "可 /game join",
+        "可 /game show",
+        "AI 练习局",
+        "已在本房",
+        "执行失败",
+        "对局已结束",
+        "等待白方",
+        "等待黑方",
+        "等另一位玩家",
+    )
+    return any(m in t for m in markers)
+
+
+def _is_dnd_game_session_command(cmd: str) -> bool:
+    lower = cmd.strip().lower()
+    if not lower.startswith("/game"):
+        return False
+    parts = lower.split(None, 2)
+    if len(parts) < 2:
+        return False
+    return parts[1] in frozenset(
+        (
+            "join",
+            "new",
+            "end",
+            "resign",
+            "abort",
+            "undo",
+            "leave",
+            "sit",
+            "stand",
+        )
+    )
+
+
+def _dnd_print_game_session_ack(cmd: str) -> None:
+    lower = cmd.strip().lower()
+    parts = lower.split(None, 2)
+    action = parts[1] if len(parts) >= 2 else ""
+    hints = {
+        "join": "加入对局请求已发送（勿扰模式隐藏棋盘；结果见下方提示）",
+        "new": "开局请求已发送（勿扰模式隐藏棋盘；结果见下方提示）",
+        "end": "结束对局请求已发送",
+        "resign": "认输请求已发送",
+        "abort": "中止对局请求已发送",
+        "undo": "悔棋请求已发送",
+    }
+    hint = hints.get(action, "游戏命令已发送")
+    print(f"[*] {hint}\n", end="", flush=True)
+
+
 def _is_dnd_game_action_command(cmd: str) -> bool:
     lower = cmd.strip().lower()
     if not lower.startswith("/game"):
@@ -486,7 +561,7 @@ def _dnd_system_action(payload: str, my_name: str) -> str | None:
     """
     if not _dnd_enabled() or _game_bypass_active():
         return None
-    if _is_game_error_line(payload):
+    if _is_game_command_feedback_line(payload):
         return None
     if _is_reading_content_line(payload):
         return None
@@ -556,6 +631,8 @@ def _prepare_outgoing(msg: str) -> bool:
     if lower.startswith("/game"):
         if not _dnd_enabled() or _is_dnd_game_read_command(lower):
             _note_game_command()
+        elif _is_dnd_game_session_command(lower):
+            _dnd_print_game_session_ack(lower)
         elif _is_dnd_game_action_command(lower):
             _dnd_print_game_action_ack()
     return True

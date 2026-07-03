@@ -115,6 +115,23 @@ class ClientDndTest(unittest.TestCase):
         self.assertIsNone(client_mod._dnd_system_action("不是你的回合。", "alice"))
         self.assertIsNone(client_mod._dnd_system_action("无法识别走法 'x9'。", "alice"))
 
+    def test_game_join_and_new_feedback_not_suppressed(self) -> None:
+        lines = (
+            "本房已有进行中的对局（gomoku/playing）；/game end 由房主结束或先等当前局结束。",
+            "白方席位已被 bob 占。",
+            "你已经是黑方。",
+            "本房没有进行中的对局；用 /game new chess 开局。",
+            "alice 加入为白方，对局开始！",
+            "bob 开了一局 gomoku（黑方），等另一位玩家用 /game join 加入。",
+        )
+        for line in lines:
+            self.assertIsNone(client_mod._dnd_system_action(line, "alice"), msg=line)
+
+    def test_dnd_game_session_command_detection(self) -> None:
+        self.assertTrue(client_mod._is_dnd_game_session_command("/game join"))
+        self.assertTrue(client_mod._is_dnd_game_session_command("/game new gomoku"))
+        self.assertFalse(client_mod._is_dnd_game_session_command("/game move 8 8"))
+
     def test_dnd_game_action_command_detection(self) -> None:
         self.assertTrue(client_mod._is_dnd_game_action_command("/game move 8 8"))
         self.assertTrue(client_mod._is_dnd_game_action_command("/game fold"))
