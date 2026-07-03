@@ -128,6 +128,10 @@ try {
       killProcess: async () => true,
       minimizeWindow: async () => true,
       closeApp: async () => true,
+      analyzeGomokuRapfi: async () => ({ ok: false, ms: 0, error: 'Browser preview mode' }),
+      analyzeGoKataGo: async () => ({ ok: false, ms: 0, suggestions: [], error: 'Browser preview mode' }),
+      warmupGoKataGo: async () => ({ ok: false, ms: 0, suggestions: [], error: 'Browser preview mode' }),
+      analyzeXiangqiPikafish: async () => ({ ok: false, ms: 0, error: 'Browser preview mode' }),
       onChatMessage: (cb) => {
         listeners.chat.push(cb);
         return () => {};
@@ -283,6 +287,34 @@ try {
   await page.locator('.xiangqi-cell[title="10,1"]').click();
   await page.locator('.xiangqi-cell[title="9,1"]').click();
   await assertSentIncludes('/game move coord 10 1 9 1');
+
+  await openByLines([
+    'xiangqi 对局（playing）  红：zouyu   黑：yxt',
+    '积分体系：Elo；积分跨房间共享。',
+    '   1   2   3   4   5   6   7   8   9     ← 黑方 1～9',
+    '  图例：+红  -黑  !上一步  ·空  （请用等宽字体）',
+    '   ·   ·   -象 ·   -将 -士 -象 -车 ·',
+    '   ·   ·   ·   ·   -士 ·   ·   ·   ·',
+    '   ·   ·   -马 ·   -炮 ·   ·   -炮 ·',
+    '   -卒 ·   -卒 ·   ·   ·   -卒 ·   -卒',
+    '   ·   ·   ·   ·   *   ·   ·   ·   ·',
+    '               楚河汉界',
+    '   ·   ·   +兵 ·   ·   ·   +兵 ·   ·',
+    '   +兵 ·   ·   ·   !车 ·   ·   ·   +兵',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   +车 +马 +相 +仕 +帅 +仕 +相 +马 +车',
+    '   九  八  七  六  五  四  三  二  一    ← 红方纵线 九…一（右为一）',
+    '  上一步：车5进2',
+    '轮到 红方 zouyu 走子（被将军）',
+  ], '中国象棋棋盘');
+  await page.evaluate(() => {
+    // @ts-ignore
+    window.__qa.clearSent();
+  });
+  await page.locator('.xiangqi-cell[title="6,3"]').click();
+  await page.locator('.xiangqi-cell[title="5,3"]').click();
+  await assertSentIncludes('/game move coord 6 3 5 3');
 
   await openByLines([
     'xiangqi 对局（playing）  红：yxt   黑：zouyu',

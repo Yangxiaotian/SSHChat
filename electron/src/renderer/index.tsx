@@ -28,6 +28,7 @@ if (!(window as any).api) {
     notifyAttention: async () => true,
     shakeWindow: async () => true,
     warmupGoKataGo: async () => ({ ok: false, ms: 0, error: 'Browser preview mode' }),
+    analyzeXiangqiPikafish: async () => ({ ok: false, ms: 0, error: 'Browser preview mode' }),
     onChatMessage: () => noopUnsub,
     onRoomUpdate: () => noopUnsub,
     onUserUpdate: () => noopUnsub,

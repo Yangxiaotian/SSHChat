@@ -9,6 +9,8 @@ import {
   GomokuRapfiAnalyzeResponse,
   GoKataGoAnalyzeRequest,
   GoKataGoAnalyzeResponse,
+  XiangqiPikafishAnalyzeRequest,
+  XiangqiPikafishAnalyzeResponse,
   ProcessInfo,
   RoomInfo,
 } from '../../shared/protocol';
@@ -63,6 +65,7 @@ declare global {
       analyzeGomokuRapfi: (payload: GomokuRapfiAnalyzeRequest) => Promise<GomokuRapfiAnalyzeResponse>;
       analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest) => Promise<GoKataGoAnalyzeResponse>;
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
+      analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;

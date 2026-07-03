@@ -17,6 +17,8 @@ import {
   GoKataGoAnalyzeRequest,
   GoKataGoAnalyzeResponse,
   GoKataGoSuggestion,
+  XiangqiPikafishAnalyzeRequest,
+  XiangqiPikafishAnalyzeResponse,
   ChatHistoryIdentity,
   ChatHistorySnapshot,
 } from '../shared/protocol';
@@ -124,6 +126,25 @@ let resolvedKataGoPathsCache:
   | { ok: true; exe: string; model: string; config: string }
   | { ok: false; error: string }
   | undefined;
+function defaultPikafishThreads(): number {
+  const logical = os.cpus().length || 1;
+  if (logical <= 4) return Math.max(1, logical - 1);
+  if (logical <= 8) return Math.max(2, logical - 2);
+  return Math.max(4, Math.min(10, logical - 2));
+}
+
+function defaultPikafishHashMb(): number {
+  const totalGb = os.totalmem() / 1024 / 1024 / 1024;
+  if (totalGb >= 48) return 2048;
+  if (totalGb >= 24) return 1024;
+  if (totalGb >= 12) return 768;
+  return 384;
+}
+
+const PIKAFISH_DEFAULT_TIMEOUT_MS = intEnv('PIKAFISH_TIMEOUT_MS', 8000, 1500, 30000);
+const PIKAFISH_THREADS = intEnv('PIKAFISH_THREADS', defaultPikafishThreads(), 1, 128);
+const PIKAFISH_HASH_MB = intEnv('PIKAFISH_HASH_MB', defaultPikafishHashMb(), 16, 8192);
+let resolvedPikafishExecutableCache: string | null | undefined;
 
 function withKataGoConfigValue(text: string, key: string, value: string): string {
   const line = `${key} = ${value}`;
@@ -237,6 +258,378 @@ function resolveRapfiExecutable(): string | null {
   }
   resolvedRapfiExecutableCache = null;
   return null;
+}
+
+function probePikafishExecutable(p: string): boolean {
+  try {
+    const evalFile = findPikafishEvalFile(p);
+    const r = spawnSync(p, [], {
+      cwd: path.dirname(p),
+      input: `uci\n${evalFile ? `setoption name EvalFile value ${evalFile}\n` : ''}isready\nquit\n`,
+      encoding: 'utf8',
+      timeout: 6000,
+      windowsHide: true,
+    });
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`.toLowerCase();
+    return !r.error && out.includes('uciok') && out.includes('readyok');
+  } catch {
+    return false;
+  }
+}
+
+function resolvePikafishExecutable(): string | null {
+  if (resolvedPikafishExecutableCache !== undefined) return resolvedPikafishExecutableCache;
+  const envPath = process.env.PIKAFISH_PATH;
+  const appDir = path.dirname(app.getPath('exe'));
+  const resourcesDir = process.resourcesPath || path.join(appDir, 'resources');
+  const projectDir = path.resolve(__dirname, '../../..');
+  const exeNames = [
+    'pikafish-avxvnni.exe',
+    'pikafish-avx2.exe',
+    'pikafish-bmi2.exe',
+    'pikafish-sse41-popcnt.exe',
+    'pikafish-vnni512.exe',
+    'pikafish-avx512icl.exe',
+    'pikafish-avx512.exe',
+    'pikafish.exe',
+    'Pikafish.exe',
+    'pikafish-modern.exe',
+    'pikafish-x86-64.exe',
+  ];
+  const exeRank = new Map(exeNames.map((name, idx) => [name.toLowerCase(), idx]));
+  const dirs = [
+    path.join(resourcesDir, 'engines', 'pikafish'),
+    path.join(resourcesDir, 'engines', 'Pikafish'),
+    path.join(resourcesDir, 'pikafish'),
+    path.join(resourcesDir, 'Pikafish'),
+    path.join(appDir, 'engines', 'pikafish'),
+    path.join(appDir, 'engines', 'Pikafish'),
+    path.join(appDir, 'Pikafish-engine'),
+    path.join(appDir, 'pikafish'),
+    path.join(appDir, 'Pikafish'),
+    path.join(projectDir, 'electron', 'engines', 'pikafish'),
+    path.join(projectDir, 'electron', 'engines', 'Pikafish'),
+    path.join(projectDir, 'engines', 'pikafish'),
+    path.join(projectDir, 'engines', 'Pikafish'),
+    path.join(projectDir, 'third_party', 'pikafish'),
+    path.join(projectDir, 'third_party', 'Pikafish'),
+    path.join(projectDir, 'pikafish'),
+    path.join(projectDir, 'Pikafish'),
+  ];
+  const candidates = [
+    envPath || '',
+    ...dirs.flatMap((dir) => exeNames.map((n) => path.join(dir, n))),
+  ].filter(Boolean);
+
+  const discovered: string[] = [];
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const stack = [dir];
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        for (const name of fs.readdirSync(cur)) {
+          const full = path.join(cur, name);
+          const st = fs.statSync(full);
+          if (st.isDirectory()) {
+            const rel = path.relative(dir, full).split(path.sep);
+            if (rel.length <= 2) stack.push(full);
+            continue;
+          }
+          if (/pikafish.*\.exe$/i.test(name)) discovered.push(full);
+        }
+      }
+    } catch {
+      // ignore unreadable search dirs
+    }
+  }
+
+  discovered.sort((a, b) => {
+    const ar = exeRank.get(path.basename(a).toLowerCase()) ?? 999;
+    const br = exeRank.get(path.basename(b).toLowerCase()) ?? 999;
+    if (ar !== br) return ar - br;
+    return a.localeCompare(b);
+  });
+  candidates.push(...discovered);
+
+  for (const p of Array.from(new Set(candidates))) {
+    if (!rapfiExeExists(p)) continue;
+    if (envPath && p === envPath) {
+      resolvedPikafishExecutableCache = p;
+      return p;
+    }
+    if (probePikafishExecutable(p)) {
+      resolvedPikafishExecutableCache = p;
+      return p;
+    }
+  }
+  resolvedPikafishExecutableCache = null;
+  return null;
+}
+
+function sanitizePikafishTimeout(timeoutMs?: number): number {
+  if (!Number.isFinite(timeoutMs)) return PIKAFISH_DEFAULT_TIMEOUT_MS;
+  return Math.max(1500, Math.min(30000, Math.floor(timeoutMs!)));
+}
+
+function validateXiangqiBoard10(board: number[][]): boolean {
+  if (!Array.isArray(board) || board.length !== 10) return false;
+  for (const row of board) {
+    if (!Array.isArray(row) || row.length !== 9) return false;
+    for (const v of row) {
+      if (!Number.isInteger(v) || v < -7 || v > 7) return false;
+    }
+  }
+  return true;
+}
+
+function xiangqiPieceToFen(cell: number): string {
+  const red = cell > 0;
+  const pt = Math.abs(cell);
+  const map: Record<number, string> = {
+    1: 'k',
+    2: 'a',
+    3: 'b',
+    4: 'n',
+    5: 'r',
+    6: 'c',
+    7: 'p',
+  };
+  const ch = map[pt] || '';
+  return red ? ch.toUpperCase() : ch;
+}
+
+function xiangqiBoardToFen(board: number[][], side: 1 | -1): string {
+  const rows = board.map((row) => {
+    let out = '';
+    let empty = 0;
+    for (const cell of row) {
+      if (cell === 0) {
+        empty += 1;
+        continue;
+      }
+      if (empty) {
+        out += String(empty);
+        empty = 0;
+      }
+      out += xiangqiPieceToFen(cell);
+    }
+    if (empty) out += String(empty);
+    return out || '9';
+  });
+  return `${rows.join('/')} ${side === 1 ? 'w' : 'b'} - - 0 1`;
+}
+
+function parsePikafishMove(raw: string): XiangqiPikafishAnalyzeResponse['move'] | null {
+  const m = raw.trim().match(/^([a-i])([0-9])([a-i])([0-9])$/i);
+  if (!m) return null;
+  const fc = m[1].toLowerCase().charCodeAt(0) - 96;
+  const fr = 10 - Number(m[2]);
+  const tc = m[3].toLowerCase().charCodeAt(0) - 96;
+  const tr = 10 - Number(m[4]);
+  if (fr < 1 || fr > 10 || tr < 1 || tr > 10 || fc < 1 || fc > 9 || tc < 1 || tc > 9) return null;
+  return { fr, fc, tr, tc, raw };
+}
+
+function findPikafishEvalFile(enginePath: string): string | null {
+  const roots = [
+    path.dirname(enginePath),
+    path.dirname(path.dirname(enginePath)),
+  ];
+  for (const root of roots) {
+    try {
+      const p = path.join(root, 'pikafish.nnue');
+      if (rapfiExeExists(p)) return p;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+function appendPikafishLog(line: string): void {
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'pikafish.log');
+    if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) {
+      fs.renameSync(file, path.join(dir, 'pikafish.old.log'));
+    }
+    fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`, 'utf8');
+  } catch {
+    // Logging must never break the engine call.
+  }
+}
+
+function analyzeXiangqiByPikafish(payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> {
+  const startedAt = Date.now();
+  const enginePath = resolvePikafishExecutable();
+  if (!enginePath) {
+    appendPikafishLog('resolve=missing');
+    return Promise.resolve({
+      ok: false,
+      ms: Date.now() - startedAt,
+      error: '未找到 Pikafish 可执行文件。请放到 engines/pikafish/pikafish.exe，或设置 PIKAFISH_PATH。',
+    });
+  }
+  if (!validateXiangqiBoard10(payload.board)) {
+    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, enginePath, error: '象棋棋盘数据非法（要求10x9）。' });
+  }
+  if (payload.side !== 1 && payload.side !== -1) {
+    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, enginePath, error: '执子参数非法。' });
+  }
+
+  const timeoutMs = sanitizePikafishTimeout(payload.timeoutMs);
+  const fen = xiangqiBoardToFen(payload.board, payload.side);
+  appendPikafishLog(`start exe="${enginePath}" side=${payload.side} timeoutMs=${timeoutMs} threads=${PIKAFISH_THREADS} hashMb=${PIKAFISH_HASH_MB} fen="${fen}"`);
+
+  return new Promise((resolve) => {
+    let proc: ChildProcessWithoutNullStreams | null = null;
+    let stdoutBuf = '';
+    let stderrTail = '';
+    let done = false;
+    let phase: 'boot' | 'uci' | 'ready' | 'newgame' | 'search' = 'boot';
+    let lastInfo = '';
+    let searchStartedAt = 0;
+    let stopSent = false;
+    let stopTimer: NodeJS.Timeout | undefined;
+
+    const writeLines = (lines: string[]) => {
+      if (!proc || proc.killed) return;
+      proc.stdin.write(`${lines.join('\n')}\n`);
+    };
+
+    const finish = (resp: XiangqiPikafishAnalyzeResponse) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (stopTimer) clearTimeout(stopTimer);
+      try {
+        if (proc && !proc.killed) proc.kill();
+      } catch {
+        // ignore
+      }
+      appendPikafishLog(`finish ok=${resp.ok ? 1 : 0} phase=${phase} ms=${resp.ms} move=${resp.move?.raw || ''} error="${resp.error || ''}" lastInfo="${lastInfo}"`);
+      resolve(resp);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        ms: Date.now() - startedAt,
+        enginePath,
+        error: stderrTail
+          ? `Pikafish 超时（阶段：${phase}）：${stderrTail}`
+          : `Pikafish 超时（阶段：${phase}，${timeoutMs}ms；已请求停止：${stopSent ? '是' : '否'}；最近信息：${lastInfo || '无'}）`,
+      });
+    }, timeoutMs + 12000);
+
+    try {
+      proc = spawn(enginePath, [], { cwd: path.dirname(enginePath), stdio: 'pipe', windowsHide: true });
+    } catch (err) {
+      finish({
+        ok: false,
+        ms: Date.now() - startedAt,
+        enginePath,
+        error: `Pikafish 启动失败：${err instanceof Error ? err.message : 'spawn failed'}`,
+      });
+      return;
+    }
+
+    proc.stdout.setEncoding('utf8');
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk: string) => {
+      stderrTail = `${stderrTail}\n${chunk}`.split(/\r?\n/).slice(-6).join(' | ').trim();
+    });
+    proc.stdout.on('data', (chunk: string) => {
+      stdoutBuf += chunk;
+      const lines = stdoutBuf.split(/\r?\n/);
+      stdoutBuf = lines.pop() || '';
+      for (const line of lines) {
+        const text = line.trim();
+        if (!text) continue;
+        if (/^(info|string|id|option)\b/i.test(text)) {
+          lastInfo = text.slice(0, 260);
+        }
+        if (/^uciok\b/i.test(text) && phase === 'uci') {
+          phase = 'ready';
+          const evalFile = findPikafishEvalFile(enginePath);
+          writeLines([
+            ...(evalFile ? [`setoption name EvalFile value ${evalFile}`] : []),
+            `setoption name Threads value ${PIKAFISH_THREADS}`,
+            `setoption name Hash value ${PIKAFISH_HASH_MB}`,
+            'setoption name MultiPV value 1',
+            'setoption name Move Overhead value 30',
+            'setoption name UCI_ShowWDL value true',
+            'setoption name NumaPolicy value auto',
+            'isready',
+          ]);
+          continue;
+        }
+        if (/^readyok\b/i.test(text) && phase === 'ready') {
+          phase = 'newgame';
+          writeLines([
+            'ucinewgame',
+            'isready',
+          ]);
+          continue;
+        }
+        if (/^readyok\b/i.test(text) && phase === 'newgame') {
+          phase = 'search';
+          searchStartedAt = Date.now();
+          stopTimer = setTimeout(() => {
+            if (done || phase !== 'search' || !proc || proc.killed) return;
+            stopSent = true;
+            appendPikafishLog(`stop phase=search elapsed=${Date.now() - searchStartedAt} timeoutMs=${timeoutMs} lastInfo="${lastInfo}"`);
+            try {
+              proc.stdin.write('stop\n');
+            } catch {
+              // The normal guard will report a timeout if stdin is already closed.
+            }
+          }, timeoutMs + 1200);
+          writeLines([
+            `position fen ${fen}`,
+            `go movetime ${timeoutMs}`,
+          ]);
+          continue;
+        }
+        const best = text.match(/^bestmove\s+(\S+)/i);
+        if (!best) continue;
+        const move = parsePikafishMove(best[1]);
+        finish({
+          ok: !!move,
+          ms: Date.now() - startedAt,
+          enginePath,
+          move: move || undefined,
+          error: move ? undefined : `Pikafish 返回了无法识别的着法：${best[1]}（最近信息：${lastInfo || '无'}）`,
+        });
+        return;
+      }
+    });
+    proc.on('error', (err) => {
+      finish({ ok: false, ms: Date.now() - startedAt, enginePath, error: `Pikafish 运行错误：${err.message}` });
+    });
+    proc.on('close', () => {
+      finish({
+        ok: false,
+        ms: Date.now() - startedAt,
+        enginePath,
+        error: stderrTail || `Pikafish 进程已退出但没有返回 bestmove（阶段：${phase}，搜索耗时：${searchStartedAt ? Date.now() - searchStartedAt : 0}ms，最近信息：${lastInfo || '无'}）。`,
+      });
+    });
+
+    try {
+      phase = 'uci';
+      writeLines(['uci']);
+    } catch (err) {
+      finish({
+        ok: false,
+        ms: Date.now() - startedAt,
+        enginePath,
+        error: `Pikafish 发送命令失败：${err instanceof Error ? err.message : 'stdin write failed'}`,
+      });
+    }
+  });
 }
 
 function sanitizeTimeout(timeoutMs?: number): number {
@@ -1956,6 +2349,11 @@ function setupIPC(): void {
   });
   ipcMain.handle(IPC_CHANNELS.GO_KATAGO_WARMUP, async () => {
     return warmupGoByKataGo();
+  });
+
+  // Xiangqi: Pikafish external engine analysis
+  ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, payload: XiangqiPikafishAnalyzeRequest) => {
+    return analyzeXiangqiByPikafish(payload);
   });
 }
 

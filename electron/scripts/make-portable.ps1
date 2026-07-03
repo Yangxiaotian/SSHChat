@@ -40,6 +40,14 @@ if (Test-Path $repoRapfiDir) {
   Copy-Item -Path (Join-Path $repoRapfiDir "*") -Destination $portableRapfiDir -Recurse -Force
 }
 
+# Optional external Xiangqi engine bundle (Pikafish).
+$repoPikafishDir = Join-Path $PSScriptRoot "..\engines\Pikafish"
+$portablePikafishDir = Join-Path $appDir "engines\Pikafish"
+if (Test-Path $repoPikafishDir) {
+  New-Item -ItemType Directory -Path $portablePikafishDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $repoPikafishDir "*") -Destination $portablePikafishDir -Recurse -Force
+}
+
 $psLauncher = @'
 $ErrorActionPreference = "Stop"
 

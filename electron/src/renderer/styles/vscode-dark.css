@@ -911,6 +911,7 @@ html, body, #root {
   background: linear-gradient(180deg, #282b30, #22252a);
   border: 1px solid #343942;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+  overflow: visible;
 }
 
 .xiangqi-board-lines {
@@ -919,6 +920,7 @@ html, body, #root {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 0;
 }
 
 .xiangqi-board-lines line,
@@ -939,12 +941,18 @@ html, body, #root {
   color: rgba(132, 143, 158, 0.38);
   pointer-events: none;
   user-select: none;
+  z-index: 1;
 }
 
 .xiangqi-piece {
   position: absolute;
   width: 34px;
   height: 34px;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1px solid #4a515c;
@@ -958,6 +966,7 @@ html, body, #root {
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.22);
+  z-index: 2;
 }
 
 .xiangqi-piece.black-piece {
@@ -976,6 +985,7 @@ html, body, #root {
   box-shadow: none;
   color: transparent;
   border-radius: 50%;
+  z-index: 3;
 }
 
 .xiangqi-piece.selected {

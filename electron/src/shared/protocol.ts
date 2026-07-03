@@ -91,6 +91,26 @@ export interface GoKataGoAnalyzeResponse {
   error?: string;
 }
 
+export interface XiangqiPikafishAnalyzeRequest {
+  board: number[][];
+  side: 1 | -1;
+  timeoutMs?: number;
+}
+
+export interface XiangqiPikafishAnalyzeResponse {
+  ok: boolean;
+  ms: number;
+  move?: {
+    fr: number;
+    fc: number;
+    tr: number;
+    tc: number;
+    raw: string;
+  };
+  enginePath?: string;
+  error?: string;
+}
+
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 // IPC Channel names
@@ -131,6 +151,9 @@ export const IPC_CHANNELS = {
   // Go external engine
   GO_KATAGO_ANALYZE: 'go:katago-analyze',
   GO_KATAGO_WARMUP: 'go:katago-warmup',
+
+  // Xiangqi external engine
+  XIANGQI_PIKAFISH_ANALYZE: 'xiangqi:pikafish-analyze',
 } as const;
 
 // Special message tokens

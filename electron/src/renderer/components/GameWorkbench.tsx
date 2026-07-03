@@ -16,11 +16,11 @@ import { buildGameMove, t as translate, type Locale } from '../i18n';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
+  if (t.includes('doushou') || t.includes('jungle') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
+  if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
   if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
   if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
-  if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
-  if (t.includes('doushou') || t.includes('jungle') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
   if (t.includes('holdem') || t.includes('texas') || t.includes('poker') || t.includes('德州')) return 'holdem';
@@ -43,7 +43,7 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['chess', 'gomoku', 'go', 'xiangqi', 'doushou', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '国际象棋', '五子棋', '围棋', '中国象棋', '斗兽棋', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -420,6 +420,20 @@ function sanitizeBoard(raw: string): string {
   return out.join('\n').trim();
 }
 
+function isCompleteXiangqiBoard(board: string): boolean {
+  if (!board.trim()) return false;
+  const tokenRe = /(?:[+\-!][^\s]{1,2}|[·*])/g;
+  let rowCount = 0;
+  for (const rawLine of board.split('\n')) {
+    const tokens = rawLine.trim().match(tokenRe);
+    if (!tokens || tokens.length < 9) continue;
+    if (tokens.slice(0, 9).every((t) => t === '·' || t === '*' || /^[+\-!]/.test(t))) {
+      rowCount += 1;
+    }
+  }
+  return rowCount >= 10 && /楚河汉界/.test(board);
+}
+
 export default function GameWorkbench() {
   const { messages, activeRoom, privacyMode, status, users, nickname, locale, doNotDisturb, setComposerText } = useChatStore();
   const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
@@ -456,7 +470,18 @@ export default function GameWorkbench() {
     () => buildAdvisor(locale, game, board, systemLines, nickname),
     [locale, game, board, systemLines, nickname],
   );
-  const cleanBoard = useMemo(() => sanitizeBoard(board), [board]);
+  const rawCleanBoard = useMemo(() => sanitizeBoard(board), [board]);
+  const stableBoardRef = useRef<{ game: GameKind; board: string }>({ game: 'none', board: '' });
+  let cleanBoard = rawCleanBoard;
+  if (game === 'xiangqi') {
+    if (isCompleteXiangqiBoard(rawCleanBoard)) {
+      stableBoardRef.current = { game, board: rawCleanBoard };
+    } else if (stableBoardRef.current.game === 'xiangqi' && stableBoardRef.current.board) {
+      cleanBoard = stableBoardRef.current.board;
+    }
+  } else if (game !== stableBoardRef.current.game) {
+    stableBoardRef.current = { game, board: rawCleanBoard };
+  }
   const hasBoard = cleanBoard.length > 0;
   const playerStats = useMemo(() => extractPlayerStats(cleanBoard, locale), [cleanBoard, locale]);
   const quickActions = useMemo(() => getQuickByGame(locale, game), [locale, game]);

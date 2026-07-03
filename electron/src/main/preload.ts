@@ -9,6 +9,8 @@ import {
   GomokuRapfiAnalyzeResponse,
   GoKataGoAnalyzeRequest,
   GoKataGoAnalyzeResponse,
+  XiangqiPikafishAnalyzeRequest,
+  XiangqiPikafishAnalyzeResponse,
   ChatHistoryIdentity,
   ChatHistorySnapshot,
 } from '../shared/protocol';
@@ -86,6 +88,9 @@ const api = {
   },
   warmupGoKataGo: (): Promise<GoKataGoAnalyzeResponse> => {
     return ipcRenderer.invoke(IPC_CHANNELS.GO_KATAGO_WARMUP);
+  },
+  analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, payload);
   },
 
   // Event listeners

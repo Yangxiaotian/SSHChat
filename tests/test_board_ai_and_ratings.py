@@ -8,6 +8,7 @@ from games import (
     XiangqiGame,
     _xq_adjudicate_repetition,
     _xq_copy,
+    _choose_xq_ai_move,
     _xq_initial_board,
     _xq_position_key,
     _xq_repetition_verdict,
@@ -106,6 +107,18 @@ class BoardAiAndRatingsTests(unittest.TestCase):
         self.assertTrue(any("AI-" in line for line in bcast))
         profile = self.store.profile("xiangqi", "Alice")
         self.assertEqual(profile["games"], 0)
+
+    def test_xiangqi_hard_ai_prefers_winning_major_capture(self) -> None:
+        board = [[0 for _ in range(9)] for _ in range(10)]
+        board[0][4] = -1
+        board[9][4] = 1
+        board[5][4] = -7
+        board[4][4] = -5
+        board[4][0] = 5
+
+        move = _choose_xq_ai_move(board, -1, "hard", [])
+
+        self.assertEqual(move, (4, 4, 4, 0))
 
     def test_xiangqi_absolute_coord_moves_support_client_clicks(self) -> None:
         red_conn = object()

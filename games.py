@@ -250,8 +250,8 @@ def _choose_chess_ai_move(board, level: str):
     return best_move
 
 
-_XQ_AI_DEPTH = {"easy": 1, "normal": 2, "hard": 2}
-_XQ_AI_WIDTH = {"easy": 6, "normal": 10, "hard": 14}
+_XQ_AI_DEPTH = {"easy": 1, "normal": 3, "hard": 4}
+_XQ_AI_WIDTH = {"easy": 6, "normal": 14, "hard": 24}
 
 
 def _xq_piece_value(cell: int, row: int) -> int:
@@ -292,8 +292,8 @@ def _xq_terminal_score(board: list[list[int]], side: int, root_side: int) -> Opt
     king = _xq_king_pos(board, side)
     in_check = king is not None and _xq_is_attacked(board, king[0], king[1], -side)
     if in_check:
-        return -200000 if side == root_side else 200000
-    return -120000 if side == root_side else 120000
+        return -200000
+    return -120000
 
 
 def _xq_order_moves(board: list[list[int]], moves: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
@@ -304,9 +304,77 @@ def _xq_order_moves(board: list[list[int]], moves: list[tuple[int, int, int, int
         score = 0
         if captured != 0:
             score += 1000 + _xq_piece_value(captured, tr) - _xq_piece_value(attacker, fr)
+        if _xq_gives_check(board, move, _xq_piece_side(attacker) or _XQ_RED):
+            score += 700
         return (score, -fr)
 
     return sorted(moves, key=key, reverse=True)
+
+
+def _xq_gives_check(
+    board: list[list[int]],
+    move: tuple[int, int, int, int],
+    side: int,
+) -> bool:
+    nb = _xq_apply_copy(board, move)
+    opp = -side
+    king = _xq_king_pos(nb, opp)
+    return king is not None and _xq_is_attacked(nb, king[0], king[1], side)
+
+
+def _xq_is_mate_move(
+    board: list[list[int]],
+    move: tuple[int, int, int, int],
+    side: int,
+) -> bool:
+    nb = _xq_apply_copy(board, move)
+    opp = -side
+    king = _xq_king_pos(nb, opp)
+    return king is not None and _xq_is_attacked(nb, king[0], king[1], side) and not _xq_legal_moves(nb, opp)
+
+
+def _xq_tactical_moves(
+    board: list[list[int]],
+    side: int,
+) -> list[tuple[int, int, int, int]]:
+    moves = [
+        m
+        for m in _xq_legal_moves(board, side)
+        if board[m[2]][m[3]] != 0 or _xq_gives_check(board, m, side)
+    ]
+    return _xq_order_moves(board, moves)[:14]
+
+
+def _xq_quiescence(
+    board: list[list[int]],
+    side: int,
+    alpha: int,
+    beta: int,
+    root_side: int,
+    qdepth: int,
+) -> int:
+    score = _xq_evaluate(board)
+    stand = score if side == _XQ_RED else -score
+    if stand >= beta:
+        return beta
+    if stand > alpha:
+        alpha = stand
+    if qdepth <= 0:
+        return alpha
+    for move in _xq_tactical_moves(board, side):
+        value = -_xq_quiescence(
+            _xq_apply_copy(board, move),
+            -side,
+            -beta,
+            -alpha,
+            root_side,
+            qdepth - 1,
+        )
+        if value >= beta:
+            return beta
+        if value > alpha:
+            alpha = value
+    return alpha
 
 
 def _xq_apply_copy(
@@ -331,8 +399,7 @@ def _xq_negamax(
     if terminal is not None:
         return terminal
     if depth <= 0:
-        score = _xq_evaluate(board)
-        return score if root_side == _XQ_RED else -score
+        return _xq_quiescence(board, side, alpha, beta, root_side, 3)
     best = -10**9
     legal = _xq_order_moves(board, _xq_legal_moves(board, side))[:width]
     for move in legal:
@@ -372,15 +439,18 @@ def _choose_xq_ai_move(
     best_move = None
     best_score = -10**9
     for move in legal:
-        score = -_xq_negamax(
-            _xq_apply_copy(board, move),
-            -side,
-            depth - 1,
-            -10**9,
-            10**9,
-            side,
-            width,
-        )
+        if _xq_is_mate_move(board, move, side):
+            score = 950000
+        else:
+            score = -_xq_negamax(
+                _xq_apply_copy(board, move),
+                -side,
+                depth - 1,
+                -10**9,
+                10**9,
+                side,
+                width,
+            )
         if score > best_score:
             best_score = score
             best_move = move
@@ -3375,8 +3445,17 @@ class XiangqiGame(BoardUndoMixin):
         legal = _xq_legal_moves(self.board, side)
         if (fr, fc, tr, tc) not in legal:
             if self.board[fr][fc] == 0:
+                print(
+                    "xiangqi invalid move: empty source "
+                    f"user_side={side} raw={raw!r} parsed={(fr + 1, fc + 1, tr + 1, tc + 1)}"
+                )
                 return (["起点无子。"], [], False)
             if _xq_piece_side(self.board[fr][fc]) != side:
+                print(
+                    "xiangqi invalid move: opponent source "
+                    f"user_side={side} raw={raw!r} parsed={(fr + 1, fc + 1, tr + 1, tc + 1)} "
+                    f"cell={self.board[fr][fc]}"
+                )
                 return (["不能移动对方的棋子。"], [], False)
             return (["该走法不合法（蹩马腿、塞象眼、出九宫、照面等）。"], [], False)
 
