@@ -328,6 +328,9 @@ def _is_game_flood_line(payload: str) -> bool:
         "己方在下方",
         "楚河汉界",
         "图例：",
+        "等宽字体",
+        "被将军",
+        "将军）",
     )
     return any(k.lower() in t for k in keywords)
 
@@ -349,13 +352,40 @@ def _is_game_context_line(payload: str) -> bool:
         return True
     if re.match(r"^(黑|白|红)[：:]", t):
         return True
+    if re.match(r"^(红|黑|白)方\s+\S+\s+走\s+", t):
+        return True
+    if re.match(r"^[+\-!·]", t) and len(t) > 6:
+        return True
+    if "←" in t and re.search(r"(红|黑|白)方", t):
+        return True
+    if "纵线" in t and "方" in t:
+        return True
     if re.match(r"^[+\-!·*]", t) and ("楚河" in t or len(t) > 12):
         return True
     if re.match(r"^(alive|players|votes|state|street)[:：]", t, re.I):
         return True
     if re.match(r"^row\d+[:：]", t, re.I) or re.match(r"^第[1-4]行", t):
         return True
-    if "方走 " in t or "方 走 " in t or "落子" in t or "走子" in t:
+    if "方走 " in t or "方 走 " in t or "走子" in t or "行棋" in t:
+        return True
+    if re.search(r"方\s+\S+\s+落子", t) or re.search(r"方\s+\S+\s+停一手", t):
+        return True
+    if re.search(r"[♔♕♖♗♘♙♚♛♜♝♞♟]", payload):
+        return True
+    if re.match(r"^[a-h](?:\s+[a-h]){7}\s*$", t):
+        return True
+    if re.match(
+        r"^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b",
+        t,
+    ):
+        return True
+    if re.match(r"^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)", t):
+        return True
+    if t.startswith("劫点") or "闷牌" in t or "已弃牌" in t or "已看牌" in t:
+        return True
+    if "当前回合" in t or "牌堆" in t or "军争" in t:
+        return True
+    if "【" in t and "】" in t:
         return True
     return False
 
@@ -366,7 +396,7 @@ def _parse_turn_name(payload: str) -> str:
         if re.match(r"^(turn|轮到)[:：]", trimmed, re.I):
             name = re.sub(r"^(turn|轮到)[:：]\s*", "", trimmed, flags=re.I).strip()
             return name.split()[0] if name else ""
-        m = re.match(r"^轮到\s+(?:黑|白|红)方\s+(\S+)", trimmed)
+        m = re.match(r"^轮到\s+(?:黑|白|红)(?:方)?\s+(\S+)", trimmed)
         if m:
             return re.split(r"[（(]", m.group(1))[0].strip()
     return ""

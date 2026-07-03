@@ -17,11 +17,31 @@ function isGameFloodMessage(content: string): boolean {
 
   if (
     /^\d+\s*,\s*\d+$/.test(t) ||
+    /^\d{1,2}\s+(?:[.#o●○·#]\s+){4,}/i.test(raw) ||
     /^\d{1,2}\s+(?:[.#o●○·]\s+){8,}[.#o●○·]\s*$/i.test(raw) ||
     /^(?:\d{1,2}\s+){8,}\d{1,2}\s*$/.test(raw) ||
     /^((row|turn|state|pot|street|current_bet)\s*[:=])/.test(t) ||
     /^#\d+\s+[^:：]+[:：]/.test(raw) ||
-    /^-\s+\S+\s+\((alive|out)\)/i.test(raw)
+    /^-\s+\S+\s+\((alive|out)\)/i.test(raw) ||
+    /^\s+\d+(?:\s+\d+){4,}\s*$/.test(raw) ||
+    /^(红|黑|白)方\s+\S+\s+走\s+/.test(raw) ||
+    /^[+\-!·].{6,}/.test(raw) ||
+    /←.*(红|黑|白)方/.test(raw) ||
+    /图例[：:]/.test(raw) ||
+    /楚河汉界/.test(raw) ||
+    /等宽字体/.test(raw) ||
+    /积分体系/.test(raw) ||
+    /对局[（(]/.test(raw) ||
+    /^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b/.test(t) ||
+    /^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)/.test(raw) ||
+    /[♔♕♖♗♘♙♚♛♜♝♞♟]/.test(raw) ||
+    /^\s+[a-h](?:\s+[a-h]){7}\s*$/i.test(raw) ||
+    /方\s+\S+\s+落子/.test(raw) ||
+    /方\s+\S+\s+停一手/.test(raw) ||
+    /^劫点/.test(raw) ||
+    /闷牌|已弃牌|已看牌|当前回合|牌堆|军争/.test(raw) ||
+    (/【/.test(raw) && /】/.test(raw)) ||
+    /行棋/.test(raw)
   ) {
     return true;
   }
@@ -41,6 +61,7 @@ function isGameFloodMessage(content: string): boolean {
     '当前注：',
     '落子：',
     '走子：',
+    '走子',
     '轮到：',
     '轮到 黑',
     '轮到 白',
@@ -49,7 +70,6 @@ function isGameFloodMessage(content: string): boolean {
     '轮到 白方',
     '轮到 红方',
     'gomoku',
-    'go',
     '围棋',
     'chess',
     'xiangqi',
@@ -58,6 +78,17 @@ function isGameFloodMessage(content: string): boolean {
     'niutou',
     'sanguo',
     'werewolf',
+    'doushou',
+    '斗兽棋',
+    '国际象棋',
+    '五子棋',
+    '中国象棋',
+    '上一步',
+    '己方在下方',
+    '行棋',
+    '落子',
+    'mahjong',
+    '麻将',
   ];
 
   return keywords.some((k) => t.includes(k.toLowerCase()));
