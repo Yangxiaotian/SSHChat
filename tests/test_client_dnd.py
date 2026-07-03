@@ -120,7 +120,7 @@ class ClientDndTest(unittest.TestCase):
         self.assertTrue(client_mod._is_dnd_game_action_command("/game fold"))
         self.assertFalse(client_mod._is_dnd_game_action_command("/game show"))
 
-    def test_clear_command_triggers_local_clear(self) -> None:
+    def test_clear_command_is_local(self) -> None:
         calls: list[str] = []
 
         def _fake_clear() -> None:
@@ -129,11 +129,25 @@ class ClientDndTest(unittest.TestCase):
         original = client_mod._terminal_hard_clear
         client_mod._terminal_hard_clear = _fake_clear
         try:
-            self.assertTrue(client_mod._prepare_outgoing("/cls"))
-            self.assertTrue(client_mod._prepare_outgoing("/clear"))
+            self.assertFalse(client_mod._prepare_outgoing("/cls"))
+            self.assertFalse(client_mod._prepare_outgoing("/clear"))
         finally:
             client_mod._terminal_hard_clear = original
         self.assertEqual(calls, ["clear", "clear"])
+
+    def test_write_real_clear_csi_uses_underlying_stdout(self) -> None:
+        import io
+
+        raw = io.BytesIO()
+        real = io.TextIOWrapper(raw, encoding="ascii", newline="\n")
+        real.isatty = lambda: True  # type: ignore[attr-defined]
+        original = client_mod._get_real_stdout
+        client_mod._get_real_stdout = lambda: real
+        try:
+            client_mod._write_real_clear_csi()
+        finally:
+            client_mod._get_real_stdout = original
+        self.assertEqual(raw.getvalue(), client_mod._CLEAR_CSI)
 
     def test_dnd_subcommand_completion(self) -> None:
         from prompt_toolkit.document import Document

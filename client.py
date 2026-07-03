@@ -13,7 +13,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output.vt100 import Vt100_Output
-from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.patch_stdout import StdoutProxy, patch_stdout
 
 from sshchat_client_util import (
     default_client_config_path,
@@ -47,6 +47,7 @@ _GAME_BYPASS_SECONDS = 45.0
 _GAME_BYPASS_UNTIL = 0.0
 _PENDING_INPUT_ECHOES: deque[str] = deque(maxlen=32)
 # Server sends CSI alone on one line; SSH/PTY often strips or replaces ESC (shows as "?[2J?[H").
+_CLEAR_CSI = b"\x1b[2J\x1b[H"
 _CLEAR_CSI_STRICT = re.compile(r"^\s*\x1b\[2J\x1b\[H\s*$")
 _CLEAR_CSI_MANGLED = re.compile(r"^\s*\?\[2J\?\[H\s*$")
 _SCREEN_CLEARED_ACK_RE = re.compile(r"^\[\*\]\s*Screen cleared\.\s*$")
@@ -542,6 +543,9 @@ def _try_handle_local_command(msg: str) -> bool:
         _set_dnd(False)
         print("[*] 勿扰模式已关闭")
         return True
+    if lower in ("/clear", "/cls"):
+        _terminal_hard_clear()
+        return True
     return False
 
 
@@ -549,8 +553,6 @@ def _prepare_outgoing(msg: str) -> bool:
     if _try_handle_local_command(msg):
         return False
     lower = msg.strip().lower()
-    if lower in ("/clear", "/cls"):
-        _terminal_hard_clear()
     if lower.startswith("/game"):
         if not _dnd_enabled() or _is_dnd_game_read_command(lower):
             _note_game_command()
@@ -777,20 +779,33 @@ def _consume_sent_input_echo(line: str) -> bool:
     return False
 
 
-def _raw_terminal_clear() -> None:
-    if not sys.stdout.isatty():
+def _get_real_stdout():
+    stdout = sys.stdout
+    if isinstance(stdout, StdoutProxy):
+        original = stdout.original_stdout
+        if original is not None:
+            return original
+    return sys.__stdout__
+
+
+def _terminal_is_tty() -> bool:
+    real = _get_real_stdout()
+    return bool(real is not None and real.isatty())
+
+
+def _clear_stdout_proxy_pending() -> None:
+    stdout = sys.stdout
+    if not isinstance(stdout, StdoutProxy):
         return
     try:
-        sys.stdout.buffer.write(b"\x1b[2J\x1b[H")
-        sys.stdout.flush()
+        with stdout._lock:
+            stdout._buffer.clear()
     except Exception:
         pass
 
 
-def _clear_terminal_with_prompt_sync() -> None:
-    """Clear screen without desyncing prompt_toolkit's prompt rendering."""
-    if not sys.stdout.isatty():
-        return
+def _clear_with_prompt_toolkit_output() -> bool:
+    """Clear via prompt_toolkit renderer/output; return True when attempted."""
     try:
         from prompt_toolkit.application import get_app_or_none
 
@@ -798,13 +813,51 @@ def _clear_terminal_with_prompt_sync() -> None:
         if app is not None and app.is_running:
             import asyncio
 
-            async def _clear_in_prompt() -> None:
+            async def _clear_renderer() -> None:
                 app.renderer.clear()
 
-            asyncio.run_coroutine_threadsafe(_clear_in_prompt(), app.loop).result(timeout=1)
+            asyncio.run_coroutine_threadsafe(_clear_renderer(), app.loop).result(timeout=1)
+            return True
+
+        stdout = sys.stdout
+        if isinstance(stdout, StdoutProxy):
+            output = stdout._output
+            output.erase_screen()
+            output.cursor_goto(0, 0)
+            output.flush()
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _write_real_clear_csi() -> None:
+    real = _get_real_stdout()
+    if real is None:
+        return
+    try:
+        if not real.isatty():
+            return
+        if hasattr(real, "buffer"):
+            real.buffer.write(_CLEAR_CSI)
+        else:
+            real.write(_CLEAR_CSI.decode("ascii"))
+        real.flush()
     except Exception:
         pass
-    _raw_terminal_clear()
+
+
+def _raw_terminal_clear() -> None:
+    _write_real_clear_csi()
+
+
+def _clear_terminal_with_prompt_sync() -> None:
+    """Clear screen without desyncing prompt_toolkit's prompt rendering."""
+    if not _terminal_is_tty():
+        return
+    _clear_stdout_proxy_pending()
+    _clear_with_prompt_toolkit_output()
+    _write_real_clear_csi()
 
 
 def _terminal_hard_clear() -> None:
