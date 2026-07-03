@@ -6,10 +6,35 @@ import client as client_mod
 class ClientDndTest(unittest.TestCase):
     def setUp(self) -> None:
         self._prev_dnd = client_mod._DND_ENABLED
+        self._prev_bypass_until = client_mod._GAME_BYPASS_UNTIL
+        self._prev_persist_dnd = client_mod._persist_dnd
+        client_mod._persist_dnd = lambda _enabled: None
         client_mod._DND_ENABLED = True
 
     def tearDown(self) -> None:
         client_mod._DND_ENABLED = self._prev_dnd
+        client_mod._GAME_BYPASS_UNTIL = self._prev_bypass_until
+        client_mod._persist_dnd = self._prev_persist_dnd
+
+    def test_reenabling_dnd_clears_game_bypass(self) -> None:
+        client_mod._DND_ENABLED = False
+        client_mod._note_game_command()
+        client_mod._set_dnd(True)
+        self.assertEqual(client_mod._dnd_system_action("底池=120，当前注=10", "alice"), "")
+
+    def test_game_move_does_not_bypass_while_dnd_on(self) -> None:
+        client_mod._GAME_BYPASS_UNTIL = 0.0
+        client_mod._prepare_outgoing("/game move 8 8")
+        self.assertFalse(client_mod._game_bypass_active())
+        self.assertEqual(
+            client_mod._dnd_system_action("gomoku 对局（playing）  黑：alice   白：bob", "alice"),
+            "",
+        )
+
+    def test_game_show_bypasses_while_dnd_on(self) -> None:
+        client_mod._GAME_BYPASS_UNTIL = 0.0
+        client_mod._prepare_outgoing("/game show")
+        self.assertTrue(client_mod._game_bypass_active())
 
     def test_reading_content_not_suppressed(self) -> None:
         self.assertTrue(client_mod._is_reading_content_line("--- 中文 ---"))
@@ -85,6 +110,17 @@ class ClientDndTest(unittest.TestCase):
         turn = "轮到 红 alice 行棋"
         self.assertTrue(client_mod._is_my_turn_line(turn, "alice"))
         self.assertEqual(client_mod._dnd_system_action(turn, "alice"), "turn_hint")
+
+    def test_dnd_subcommand_completion(self) -> None:
+        from prompt_toolkit.document import Document
+
+        comp = client_mod.SSHChatCommandCompleter()
+        after_cmd = list(comp.get_completions(Document("/dnd "), None))
+        self.assertTrue(any(c.text.startswith("on") for c in after_cmd))
+        self.assertTrue(any(c.text.startswith("off") for c in after_cmd))
+        partial = list(comp.get_completions(Document("/dnd o"), None))
+        self.assertTrue(any(c.text.startswith("on") for c in partial))
+        self.assertTrue(any(c.text.startswith("off") for c in partial))
 
 
 if __name__ == "__main__":

@@ -302,6 +302,7 @@ npm run build:portable
 | `/news 中文`、`/news 国际`、`/news 科技` | 只看某一类；可加条数，如 `/news 科技 10` |
 | `/news detail 中文 2` 或 `/news 详情 中文 2` | 该分类列表 **第 2 条** 的更长 RSS 提要（非网页全文） |
 | `/news fetch 中文 2` 或 `/news 全文 中文 2` | 按该条 RSS **链接**抓取网页 HTML，抽取正文（较慢；付费墙/反爬/纯 JS 页会失败） |
+| `/dnd on` / `/dnd off` | 终端勿扰模式：过滤游戏刷屏，轮到你时只显示一行提示；状态会持久化 |
 | `/clear` 或 `/cls` | 清屏（终端清空画面；图形客户端清空当前房间记录） |
 | `/part 房间名` | 退出某个房间（至少保留一个） |
 
@@ -364,7 +365,7 @@ npm run build:portable
 - `chess` 使用 **FIDE Elo** 风格积分与等级线（GM/IM/FM/CM 线等）。
 - `gomoku`、`go`、`xiangqi` 使用统一 Elo 积分并映射到业余级位。
 - 只有**真人对真人**对局会写入持久化积分；AI 练习局、观战不会写入。
-- terminal 端不再在每步自动整页刷棋盘；需要时可手动 `/game show` 刷新局面。
+- terminal 端可用 `/dnd on` 开启勿扰模式：读新闻/看书时过滤游戏棋盘与状态刷屏，轮到你时只显示一行 `轮到你操作`；设置写入本地客户端配置，重连后保留。需要完整局面时请手动 `/game show`（仅这类查看命令会短暂放行完整输出）；`/game move` 等走子命令不会把棋盘刷回来。再次 `/dnd on` 会立刻恢复过滤。
 
 `gomoku`、`go`、`xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。Electron 客户端左侧栏有**游戏工作台**，可按钮化执行常用 `/game` 操作。
 
@@ -411,7 +412,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 
 ### 命令补全
 
-- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library` 与 `/lib` 及常用子命令），行为类似 Linux shell。
+- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
 - **Electron 图形客户端**：输入框输入 `/` 后出现命令提示，按 **Tab** 补全当前高亮项，**↑/↓** 切换候选项。
 
 ### RSS 新闻

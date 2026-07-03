@@ -114,6 +114,11 @@ _DICT_SUBCOMMANDS = {
     "汉": None,
 }
 
+_DND_SUBCOMMANDS = {
+    "on": None,
+    "off": None,
+}
+
 _TOP_COMMANDS = (
     "/help",
     "/names",
@@ -140,6 +145,7 @@ _SUBCOMMANDS_BY_CMD = {
     "/library": sorted(_LIBRARY_SUBCOMMANDS),
     "/lib": sorted(_LIBRARY_SUBCOMMANDS),
     "/dict": sorted(_DICT_SUBCOMMANDS),
+    "/dnd": sorted(_DND_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -221,9 +227,11 @@ def _persist_dnd(enabled: bool) -> None:
 
 
 def _set_dnd(enabled: bool) -> None:
-    global _DND_ENABLED
+    global _DND_ENABLED, _GAME_BYPASS_UNTIL
     with _DND_LOCK:
         _DND_ENABLED = enabled
+        if enabled:
+            _GAME_BYPASS_UNTIL = 0.0
     _persist_dnd(enabled)
 
 
@@ -439,6 +447,22 @@ def _dnd_print_turn_hint(my_name: str) -> None:
     print(out, end="", flush=True)
 
 
+def _is_dnd_game_read_command(cmd: str) -> bool:
+    """While DND is on, only read-only /game commands may show full board output."""
+    lower = cmd.strip().lower()
+    if not lower.startswith("/game"):
+        return False
+    readonly = (
+        "/game show",
+        "/game seats",
+        "/game help",
+        "/game list",
+        "/game rating",
+        "/game pgn",
+    )
+    return any(lower == prefix or lower.startswith(prefix + " ") for prefix in readonly)
+
+
 def _try_handle_local_command(msg: str) -> bool:
     stripped = msg.strip()
     lower = stripped.lower()
@@ -447,8 +471,12 @@ def _try_handle_local_command(msg: str) -> bool:
         print(f"[*] 勿扰模式：{state}（/dnd on | /dnd off）")
         return True
     if lower == "/dnd on":
+        already = _dnd_enabled()
         _set_dnd(True)
-        print("[*] 勿扰模式已开启：游戏广播不再刷屏，轮到你时仅提示一行")
+        if already:
+            print("[*] 勿扰模式本就开启；已恢复过滤游戏广播")
+        else:
+            print("[*] 勿扰模式已开启：游戏广播不再刷屏，轮到你时仅提示一行")
         return True
     if lower == "/dnd off":
         _set_dnd(False)
@@ -460,8 +488,10 @@ def _try_handle_local_command(msg: str) -> bool:
 def _prepare_outgoing(msg: str) -> bool:
     if _try_handle_local_command(msg):
         return False
-    if msg.strip().lower().startswith("/game"):
-        _note_game_command()
+    lower = msg.strip().lower()
+    if lower.startswith("/game"):
+        if not _dnd_enabled() or _is_dnd_game_read_command(lower):
+            _note_game_command()
     return True
 
 
@@ -683,20 +713,40 @@ def _consume_sent_input_echo(line: str) -> bool:
     return False
 
 
-def _terminal_hard_clear() -> None:
-    """Clear the real terminal; needed when CSI bytes are mangled in SSH/PTY."""
+def _raw_terminal_clear() -> None:
     if not sys.stdout.isatty():
         return
     try:
-        if sys.platform == "win32":
-            os.system("cls")
-        elif shutil.which("clear"):
-            subprocess.run(["clear"], check=False)
-        else:
-            sys.stdout.buffer.write(b"\x1b[2J\x1b[H")
-            sys.stdout.flush()
+        sys.stdout.buffer.write(b"\x1b[2J\x1b[H")
+        sys.stdout.flush()
     except Exception:
         pass
+
+
+def _clear_terminal_with_prompt_sync() -> None:
+    """Clear screen without desyncing prompt_toolkit's prompt rendering."""
+    if not sys.stdout.isatty():
+        return
+    try:
+        from prompt_toolkit.application import get_app_or_none
+
+        app = get_app_or_none()
+        if app is not None and app.is_running:
+            import asyncio
+
+            async def _clear_in_prompt() -> None:
+                app.renderer.clear()
+
+            asyncio.run_coroutine_threadsafe(_clear_in_prompt(), app.loop).result(timeout=2)
+            return
+    except Exception:
+        pass
+    _raw_terminal_clear()
+
+
+def _terminal_hard_clear() -> None:
+    """Clear the real terminal; keep prompt_toolkit cursor state in sync when active."""
+    _clear_terminal_with_prompt_sync()
 
 
 def _is_clear_csi_line(line: str) -> bool:
@@ -733,6 +783,7 @@ def recv_msg(sock, my_name: str):
                 if _consume_sent_input_echo(text):
                     continue
                 if _is_clear_csi_line(text):
+                    _terminal_hard_clear()
                     continue
                 if _SCREEN_CLEARED_ACK_RE.match(text.strip()):
                     _terminal_hard_clear()
@@ -787,7 +838,7 @@ def main():
         f"(SSHCHAT_ALERT_SOUND={_ALERT_SOUND}): auto | canberra | paplay | aplay | none"
     )
     if _dnd_enabled():
-        print("[*] 勿扰模式已开启（/dnd off 关闭；发送 /game 命令后 45 秒内会临时显示完整棋盘）")
+        print("[*] 勿扰模式已开启（/dnd off 关闭；仅 /game show 等查看命令会临时显示完整局面）")
 
     threading.Thread(target=recv_msg, args=(s, name), daemon=True).start()
 
