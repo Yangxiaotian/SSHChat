@@ -13,6 +13,24 @@ import {
   RoomInfo,
 } from '../../shared/protocol';
 import { initLocaleFromStorage, persistLocale, type Locale } from '../i18n';
+
+const DND_STORAGE_KEY = 'sshchat:dnd:v1';
+
+function initDndFromStorage(): boolean {
+  try {
+    return localStorage.getItem(DND_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistDnd(value: boolean): void {
+  try {
+    localStorage.setItem(DND_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    // no-op
+  }
+}
 import {
   applyLibrarySystemMessage,
   emptyLibraryViewState,
@@ -71,6 +89,7 @@ interface ChatState {
   theme: 'dark' | 'light';
   locale: Locale;
   privacyMode: boolean;
+  doNotDisturb: boolean;
   composerText: string;
   libraryView: LibraryViewState;
 
@@ -104,6 +123,8 @@ interface ChatState {
   toggleLocale: () => void;
   setPrivacyMode: (value: boolean) => void;
   togglePrivacyMode: () => void;
+  setDoNotDisturb: (value: boolean) => void;
+  toggleDoNotDisturb: () => void;
   setComposerText: (value: string) => void;
   clearMessages: (room?: string) => void;
 
@@ -129,6 +150,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   theme: 'dark',
   locale: initLocaleFromStorage(),
   privacyMode: true,
+  doNotDisturb: initDndFromStorage(),
   composerText: '',
   libraryView: emptyLibraryViewState(),
 
@@ -314,6 +336,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
   setPrivacyMode: (value) => set({ privacyMode: value }),
   togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
+  setDoNotDisturb: (value) => {
+    persistDnd(value);
+    set({ doNotDisturb: value });
+  },
+  toggleDoNotDisturb: () =>
+    set((state) => {
+      const next = !state.doNotDisturb;
+      persistDnd(next);
+      return { doNotDisturb: next };
+    }),
   setComposerText: (value) => set({ composerText: value }),
   clearMessages: (room) => {
     const target = room ?? get().activeRoom;

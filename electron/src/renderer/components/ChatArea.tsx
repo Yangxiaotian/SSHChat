@@ -64,7 +64,7 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, clearMessages } = useChatStore();
+  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
@@ -186,9 +186,13 @@ export default function ChatArea() {
       </div>
 
       <div ref={splitRootRef} className="chat-main-split">
-        <div className="game-pane" style={{ height: `${workbenchHeight}px` }}>
+        <div
+          className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
+          style={doNotDisturb ? undefined : { height: `${workbenchHeight}px` }}
+        >
           <GameWorkbench />
         </div>
+        {!doNotDisturb && (
         <div
           className={`chat-splitter ${isResizing ? 'active' : ''}`}
           title="Drag to resize game panel height"
@@ -197,6 +201,7 @@ export default function ChatArea() {
         >
           <span className="chat-splitter-grip">...</span>
         </div>
+        )}
 
         <div className="chat-messages-surface">
           <div ref={chatScrollRef} className="chat-messages" onScroll={onChatScroll}>

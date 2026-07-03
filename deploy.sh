@@ -32,8 +32,9 @@ RESET_USER_RATING_GAME=""
 # Mirror / network knobs for pip. Default index left empty (pip uses pypi).
 # sudo strips env by default — also exposed as --pip-index-url.
 PIP_INDEX_URL_ARG="${SSHCHAT_PIP_INDEX_URL:-${PIP_INDEX_URL:-}}"
-PIP_TIMEOUT="${SSHCHAT_PIP_TIMEOUT:-60}"
+PIP_TIMEOUT="${SSHCHAT_PIP_TIMEOUT:-120}"
 PIP_RETRIES="${SSHCHAT_PIP_RETRIES:-5}"
+PIP_CMD_RETRIES="${SSHCHAT_PIP_CMD_RETRIES:-3}"
 : "${SSHCHAT_CLIENT_GROUP:=sshchat-clients}"
 CLIENT_GROUP=$SSHCHAT_CLIENT_GROUP
 
@@ -71,6 +72,27 @@ stop_existing_server() {
   fi
 }
 
+# Shell-level retry: pip's --retries does not always recover from IncompleteRead on large wheels.
+pip_run_with_retry() {
+  local attempt=1
+  local delay=5
+  while [[ "$attempt" -le "$PIP_CMD_RETRIES" ]]; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -ge "$PIP_CMD_RETRIES" ]]; then
+      echo "error: pip failed after ${PIP_CMD_RETRIES} attempt(s): $*" >&2
+      echo "hint: retry with --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple" >&2
+      echo "      or SSHCHAT_PIP_TIMEOUT=300 SSHCHAT_PIP_CMD_RETRIES=5 sudo -E ./deploy.sh ..." >&2
+      return 1
+    fi
+    echo "warn: pip attempt ${attempt}/${PIP_CMD_RETRIES} failed (${*:0:80}...); retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 usage() {
   cat >&2 <<EOF
 Usage: sudo $0 [options]
@@ -95,7 +117,8 @@ Options:
   --pip-index-url URL  Override pip index (e.g. https://pypi.tuna.tsinghua.edu.cn/simple); also reads
                        \$SSHCHAT_PIP_INDEX_URL / \$PIP_INDEX_URL (sudo strips env unless -E)
   Env: SSHCHAT_SKIP_PIP_UPGRADE=1  Skip upgrading pip before requirements (not recommended; old pip
-                       may fail pymupdf hash checks after PyPI wheel republish)
+       may fail hash checks on republished wheels).
+  Env: SSHCHAT_PIP_CMD_RETRIES=N  Shell-level pip retries on network errors (default: 3)
   -h, --help         This help
 
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
@@ -504,7 +527,7 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -534,9 +557,9 @@ fi
 # republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
 if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
   echo "info: upgrading pip in $PREFIX/venv"
-  "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
+  pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
 fi
-"$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" -r "$SCRIPT_DIR/requirements-server.txt"
+pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" -r "$SCRIPT_DIR/requirements-server.txt"
 rm -rf "$DEPLOY_TMP"
 
 umask 022

@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime
 from prompt_toolkit import PromptSession
@@ -13,6 +14,12 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.patch_stdout import patch_stdout
+
+from sshchat_client_util import (
+    default_client_config_path,
+    load_client_config,
+    save_client_config,
+)
 
 SERVER_IP = os.environ.get("SSHCHAT_SERVER", "127.0.0.1")
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
@@ -30,7 +37,14 @@ _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
 _DISPLAY_TIMES: deque[datetime] = deque(maxlen=2048)
+_DND_TURN_HINT = "轮到你操作"
+_DND_LOCK = threading.Lock()
+_DND_HINT_LOCK = threading.Lock()
+_DND_LAST_HINT_AT = 0.0
+_DND_HINT_COOLDOWN = 1.5
 _SEND_LOCK = threading.Lock()
+_GAME_BYPASS_SECONDS = 45.0
+_GAME_BYPASS_UNTIL = 0.0
 _PENDING_INPUT_ECHOES: deque[str] = deque(maxlen=32)
 # Server sends CSI alone on one line; SSH/PTY often strips or replaces ESC (shows as "?[2J?[H").
 _CLEAR_CSI_STRICT = re.compile(r"^\s*\x1b\[2J\x1b\[H\s*$")
@@ -117,6 +131,7 @@ _TOP_COMMANDS = (
     "/dict",
     "/clear",
     "/cls",
+    "/dnd",
 )
 
 _SUBCOMMANDS_BY_CMD = {
@@ -184,6 +199,240 @@ class SSHChatCommandCompleter(Completer):
         cmd = parts[0].lower()
         for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
             yield Completion(sub + " ", start_position=0)
+
+
+def _load_dnd_setting() -> bool:
+    env = (os.environ.get("SSHCHAT_DND") or "").strip().lower()
+    if env in ("1", "on", "yes", "true"):
+        return True
+    if env in ("0", "off", "no", "false"):
+        return False
+    cfg = load_client_config(default_client_config_path())
+    if isinstance(cfg, dict) and isinstance(cfg.get("doNotDisturb"), bool):
+        return cfg["doNotDisturb"]
+    return False
+
+
+def _persist_dnd(enabled: bool) -> None:
+    path = default_client_config_path()
+    cfg = load_client_config(path) or {}
+    cfg["doNotDisturb"] = enabled
+    save_client_config(path, cfg)
+
+
+def _set_dnd(enabled: bool) -> None:
+    global _DND_ENABLED
+    with _DND_LOCK:
+        _DND_ENABLED = enabled
+    _persist_dnd(enabled)
+
+
+def _dnd_enabled() -> bool:
+    with _DND_LOCK:
+        return _DND_ENABLED
+
+
+def _note_game_command() -> None:
+    global _GAME_BYPASS_UNTIL
+    with _DND_LOCK:
+        _GAME_BYPASS_UNTIL = time.monotonic() + _GAME_BYPASS_SECONDS
+
+
+def _game_bypass_active() -> bool:
+    with _DND_LOCK:
+        return time.monotonic() < _GAME_BYPASS_UNTIL
+
+
+_DND_ENABLED = _load_dnd_setting()
+
+
+def _is_reading_content_line(payload: str) -> bool:
+    """News/library/help lines should never be suppressed in DND mode."""
+    t = payload.strip()
+    if not t:
+        return False
+    if re.match(r"^---.+---$", t):
+        return True
+    if re.match(r"^\d+\.\s+\[", t):
+        return True
+    if t.startswith("《") or "【图书馆】" in t or t.startswith("[图书馆]"):
+        return True
+    if t.startswith("Usage:") or t.startswith("用法：") or t.startswith("用法:"):
+        return True
+    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib"):
+        return True
+    return False
+
+
+def _is_game_flood_line(payload: str) -> bool:
+    raw = payload.strip()
+    t = raw.lower()
+    if not t:
+        return False
+    if (
+        re.match(r"^\d+\s*,\s*\d+$", t)
+        or re.match(r"^\d{1,2}\s+(?:[.#o●○·#]\s+){4,}", raw, re.I)
+        or re.match(r"^\d{1,2}\s+(?:[.#o●○·]\s+){8,}[.#o●○·]\s*$", raw, re.I)
+        or re.match(r"^(?:\d{1,2}\s+){8,}\d{1,2}\s*$", raw)
+        or re.match(r"^((row|turn|state|pot|street|current_bet)\s*[:=])", t)
+        or re.match(r"^#\d+\s+[^:：]+[:：]", raw)
+        or re.match(r"^-\s+\S+\s+\((alive|out)\)", raw, re.I)
+        or re.match(r"^\s+\d+(?:\s+\d+){4,}\s*$", raw)
+        or re.match(r"^\s*\d{1,2}\s+(?:\([.#o#●○]\)|[.#o#●○])(?:\s+(?:\([.#o#●○]\)|[.#o#●○])){4,}", raw, re.I)
+    ):
+        return True
+    keywords = (
+        "当前房间正在进行",
+        "可直接加入",
+        "同一房间同一时刻仅允许一场进行中的对局",
+        "可玩游戏",
+        "你的手牌",
+        "公共牌",
+        "贴目",
+        "提子",
+        "停一手",
+        "底池=",
+        "当前注=",
+        "当前注：",
+        "落子：",
+        "走子：",
+        "轮到：",
+        "轮到 黑",
+        "轮到 白",
+        "轮到 红",
+        "轮到 黑方",
+        "轮到 白方",
+        "轮到 红方",
+        "gomoku",
+        "围棋",
+        "chess",
+        "xiangqi",
+        "holdem",
+        "zjh",
+        "niutou",
+        "sanguo",
+        "werewolf",
+        "doushou",
+        "斗兽棋",
+        "国际象棋",
+        "五子棋",
+        "中国象棋",
+        "德州扑克",
+        "炸金花",
+        "牛头王",
+        "三国杀",
+        "狼人杀",
+        "对局",
+        "开了一局",
+        "上一步",
+        "己方在下方",
+        "楚河汉界",
+        "图例：",
+    )
+    return any(k.lower() in t for k in keywords)
+
+
+def _is_game_context_line(payload: str) -> bool:
+    """Broader than flood: covers game show headers/ratings that arrive before the board."""
+    if _is_game_flood_line(payload):
+        return True
+    t = payload.strip()
+    if not t:
+        return False
+    if "积分体系" in t or "积分=" in t or "等级=" in t or "战绩=" in t:
+        return True
+    if re.search(r"对局[（(]", t) or "对局状态" in t:
+        return True
+    if re.match(r"^#\d+\s+\S", t):
+        return True
+    if re.match(r"^(黑|白|红)方\s+\S", t) or re.match(r"^\s+(黑|白|红)方", t):
+        return True
+    if re.match(r"^(黑|白|红)[：:]", t):
+        return True
+    if re.match(r"^[+\-!·*]", t) and ("楚河" in t or len(t) > 12):
+        return True
+    if re.match(r"^(alive|players|votes|state|street)[:：]", t, re.I):
+        return True
+    if re.match(r"^row\d+[:：]", t, re.I) or re.match(r"^第[1-4]行", t):
+        return True
+    if "方走 " in t or "方 走 " in t or "落子" in t or "走子" in t:
+        return True
+    return False
+
+
+def _parse_turn_name(payload: str) -> str:
+    for line in payload.split("\n"):
+        trimmed = line.strip()
+        if re.match(r"^(turn|轮到)[:：]", trimmed, re.I):
+            name = re.sub(r"^(turn|轮到)[:：]\s*", "", trimmed, flags=re.I).strip()
+            return name.split()[0] if name else ""
+        m = re.match(r"^轮到\s+(?:黑|白|红)方\s+(\S+)", trimmed)
+        if m:
+            return re.split(r"[（(]", m.group(1))[0].strip()
+    return ""
+
+
+def _is_my_turn_line(payload: str, my_name: str) -> bool:
+    if not my_name:
+        return False
+    turn = _parse_turn_name(payload)
+    if turn and turn == my_name:
+        return True
+    trimmed = payload.strip()
+    m = re.match(r"^轮到[：:]\s*(.+)$", trimmed)
+    return bool(m and m.group(1).strip() == my_name)
+
+
+def _dnd_system_action(payload: str, my_name: str) -> str | None:
+    """
+    Return None to show normally, '' to suppress, 'turn_hint' for compact turn line.
+    """
+    if not _dnd_enabled() or _game_bypass_active():
+        return None
+    if _is_reading_content_line(payload):
+        return None
+    if _is_my_turn_line(payload, my_name):
+        return "turn_hint"
+    if _is_game_context_line(payload):
+        return ""
+    return None
+
+
+def _dnd_print_turn_hint(my_name: str) -> None:
+    global _DND_LAST_HINT_AT
+    now = time.monotonic()
+    with _DND_HINT_LOCK:
+        if now - _DND_LAST_HINT_AT < _DND_HINT_COOLDOWN:
+            return
+        _DND_LAST_HINT_AT = now
+    out = _format_display_line(f"[*] {_DND_TURN_HINT}", my_name)
+    print(out, end="", flush=True)
+
+
+def _try_handle_local_command(msg: str) -> bool:
+    stripped = msg.strip()
+    lower = stripped.lower()
+    if lower == "/dnd":
+        state = "开启" if _dnd_enabled() else "关闭"
+        print(f"[*] 勿扰模式：{state}（/dnd on | /dnd off）")
+        return True
+    if lower == "/dnd on":
+        _set_dnd(True)
+        print("[*] 勿扰模式已开启：游戏广播不再刷屏，轮到你时仅提示一行")
+        return True
+    if lower == "/dnd off":
+        _set_dnd(False)
+        print("[*] 勿扰模式已关闭")
+        return True
+    return False
+
+
+def _prepare_outgoing(msg: str) -> bool:
+    if _try_handle_local_command(msg):
+        return False
+    if msg.strip().lower().startswith("/game"):
+        _note_game_command()
+    return True
 
 
 _COMMAND_COMPLETER = SSHChatCommandCompleter()
@@ -457,6 +706,15 @@ def recv_msg(sock, my_name: str):
                     continue
                 if _SCREEN_CLEARED_ACK_RE.match(text.strip()):
                     _terminal_hard_clear()
+                    continue
+                _room, sender, payload = _parse_chat_line(text)
+                if sender in _SYSTEM_SENDERS:
+                    dnd_action = _dnd_system_action(payload, my_name)
+                    if dnd_action == "":
+                        continue
+                    if dnd_action == "turn_hint":
+                        _dnd_print_turn_hint(my_name)
+                        continue
                 out = _format_display_line(text, my_name)
                 print(out, end="", flush=True)
 
@@ -486,7 +744,8 @@ def main():
     print(
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text>  /part <room>  "
-        "/announce  /game  /news  /news fetch <类> <号>  /dict  /library (/lib)  /clear  /help"
+        "/announce  /game  /news  /news fetch <类> <号>  /dict  /library (/lib)  "
+        "/dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")
     print(
@@ -497,6 +756,8 @@ def main():
         "Alert sound backend "
         f"(SSHCHAT_ALERT_SOUND={_ALERT_SOUND}): auto | canberra | paplay | aplay | none"
     )
+    if _dnd_enabled():
+        print("[*] 勿扰模式已开启（/dnd off 关闭；发送 /game 命令后 45 秒内会临时显示完整棋盘）")
 
     threading.Thread(target=recv_msg, args=(s, name), daemon=True).start()
 
@@ -524,6 +785,9 @@ def main():
                     if msg.strip() == "":
                         continue
 
+                    if not _prepare_outgoing(msg):
+                        continue
+
                     _remember_sent_input(msg)
                     s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))
 
@@ -547,6 +811,8 @@ def main():
                     break
                 msg = msg.rstrip("\r\n")
                 if msg.strip() == "":
+                    continue
+                if not _prepare_outgoing(msg):
                     continue
                 _remember_sent_input(msg)
                 s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))

@@ -276,6 +276,15 @@ type Advisor = {
   secondaryLabel?: string;
 };
 
+function isMyActiveTurn(game: GameKind, board: string, nickname: string): boolean {
+  if (game === 'none' || !board.trim() || !nickname) return false;
+  if (!inSeats(board, nickname)) return false;
+  const stateLine = board.split('\n').find((l) => l.includes('state:') || l.includes('状态：')) || '';
+  if (stateLine.includes('waiting') || stateLine.includes('等待开始')) return false;
+  if (stateLine.includes('ended') || stateLine.includes('已结束')) return false;
+  return parseTurnName(board) === nickname;
+}
+
 function buildAdvisor(locale: Locale, game: GameKind, board: string, systemLines: string[], nickname: string): Advisor {
   const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const issue = latestIssue(systemLines);
@@ -412,7 +421,7 @@ function sanitizeBoard(raw: string): string {
 }
 
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode, status, users, nickname, locale, setComposerText } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, users, nickname, locale, doNotDisturb, setComposerText } = useChatStore();
   const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
@@ -451,6 +460,7 @@ export default function GameWorkbench() {
   const hasBoard = cleanBoard.length > 0;
   const playerStats = useMemo(() => extractPlayerStats(cleanBoard, locale), [cleanBoard, locale]);
   const quickActions = useMemo(() => getQuickByGame(locale, game), [locale, game]);
+  const myTurn = useMemo(() => isMyActiveTurn(game, board, nickname), [game, board, nickname]);
 
   const send = async (cmd: string) => {
     if (status !== 'connected') return false;
@@ -508,6 +518,15 @@ export default function GameWorkbench() {
   };
 
   const disabled = status !== 'connected';
+
+  if (doNotDisturb) {
+    if (!myTurn) return null;
+    return (
+      <div className="game-workbench game-workbench-dnd">
+        <span className="game-workbench-dnd-text">{tr('game.advisor.yourTurnTitle')}</span>
+      </div>
+    );
+  }
 
   return (
     <div className={`game-workbench ${showWorkbenchContent ? 'expanded' : 'collapsed'}`}>

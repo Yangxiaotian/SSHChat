@@ -20,6 +20,10 @@ export const zhMessages = {
     focus: '专注',
     visible: '显示',
     language: '中文',
+    dndOn: '勿扰',
+    dndOff: '提醒',
+    dndOnHint: '勿扰模式已开启：游戏不会占用阅读区域，轮到你时仅显示一行提示',
+    dndOffHint: '勿扰模式已关闭：游戏面板正常显示',
   },
   activity: {
     rooms: '房间',

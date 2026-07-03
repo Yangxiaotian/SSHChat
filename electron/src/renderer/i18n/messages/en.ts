@@ -22,6 +22,10 @@ export const enMessages: MessageTree = {
     focus: 'Focus',
     visible: 'Visible',
     language: 'EN',
+    dndOn: 'DND',
+    dndOff: 'Alerts',
+    dndOnHint: 'Do not disturb: game panel stays hidden while reading; one-line hint when it is your turn',
+    dndOffHint: 'Do not disturb off: game panel shows normally',
   },
   activity: {
     rooms: 'Rooms',

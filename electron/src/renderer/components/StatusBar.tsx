@@ -13,6 +13,8 @@ export default function StatusBar() {
     toggleLocale,
     privacyMode,
     togglePrivacyMode,
+    doNotDisturb,
+    toggleDoNotDisturb,
     setShowLogin,
   } = useChatStore();
   const { t } = useTranslation();
@@ -64,6 +66,14 @@ export default function StatusBar() {
         <span className="statusbar-separator"></span>
         <span className="statusbar-item clickable" onClick={togglePrivacyMode}>
           {privacyMode ? t('status.focus') : t('status.visible')}
+        </span>
+        <span className="statusbar-separator"></span>
+        <span
+          className="statusbar-item clickable"
+          onClick={toggleDoNotDisturb}
+          title={doNotDisturb ? t('status.dndOnHint') : t('status.dndOffHint')}
+        >
+          {doNotDisturb ? t('status.dndOn') : t('status.dndOff')}
         </span>
       </div>
     </div>
