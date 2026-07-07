@@ -17,3 +17,6 @@ electron/dist/
 electron/release/
 electron/**/.runtime/
 electron/**/user-data/
+
+# Local game engines are not committed.
+electron/engines/

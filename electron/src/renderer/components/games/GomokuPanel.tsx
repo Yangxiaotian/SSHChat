@@ -2144,7 +2144,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
 
   const myTurn = !!turnInfo.name && turnInfo.name === nickname;
   const canPick = !disabled && boardWinner === null && (!turnInfo.name || myTurn);
-  const isHiddenMaster = nickname === 'zouyu';
+  const isHiddenMaster = false;
   const hwThreads =
     typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
       ? Math.max(2, Math.floor(navigator.hardwareConcurrency))
@@ -2887,8 +2887,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         {renderedCells.map((row) =>
           row.map((cell) => {
             const text = cell.stone === '#' ? '●' : cell.stone === 'o' ? '○' : '·';
-            const isRapfiPoint = rapfiDisplaySuggestion?.row === cell.row && rapfiDisplaySuggestion?.col === cell.col;
-            const isArbiterPoint = arbiterSuggestion?.row === cell.row && arbiterSuggestion?.col === cell.col;
+            const isRapfiPoint = isHiddenMaster && rapfiDisplaySuggestion?.row === cell.row && rapfiDisplaySuggestion?.col === cell.col;
+            const isArbiterPoint = isHiddenMaster && arbiterSuggestion?.row === cell.row && arbiterSuggestion?.col === cell.col;
             const cls = [
               'gomoku-cell',
               cell.stone === '#' ? 'black' : '',

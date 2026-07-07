@@ -538,7 +538,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   const mySide = nickname === seats.black ? 'black' : nickname === seats.white ? 'white' : null;
   const mySideNum: 1 | 2 | null = mySide === 'black' ? 1 : mySide === 'white' ? 2 : null;
   const myTurn = !!turn.name && turn.name === nickname;
-  const isHiddenMaster = nickname === 'zouyu';
+  const isHiddenMaster = false;
   const [katagoPending, setKataGoPending] = useState(false);
   const [katagoError, setKataGoError] = useState('');
   const [katagoMoves, setKataGoMoves] = useState<AdvisorMove[]>([]);
@@ -786,7 +786,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
             row.map((cell) => (
               <button
                 key={`${cell.row}-${cell.col}`}
-                className={`go-point ${cell.stone === '#' ? 'black' : ''} ${cell.stone === 'o' ? 'white' : ''} ${cell.last ? 'last' : ''} ${shownMoves[0]?.row === cell.row && shownMoves[0]?.col === cell.col ? 'suggested' : ''}`}
+                className={`go-point ${cell.stone === '#' ? 'black' : ''} ${cell.stone === 'o' ? 'white' : ''} ${cell.last ? 'last' : ''} ${isHiddenMaster && shownMoves[0]?.row === cell.row && shownMoves[0]?.col === cell.col ? 'suggested' : ''}`}
                 disabled={
                   disabled ||
                   cell.stone !== '.' ||

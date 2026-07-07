@@ -2338,22 +2338,20 @@ function setupIPC(): void {
     return true;
   });
 
-  // Gomoku: Rapfi external engine analysis
-  ipcMain.handle(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, async (_event, payload: GomokuRapfiAnalyzeRequest) => {
-    return analyzeGomokuByRapfi(payload);
+  // Game engine assistant endpoints are disabled in shared builds.
+  ipcMain.handle(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, async (_event, _payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> => {
+    return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
   });
 
-  // Go: KataGo external engine analysis
-  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_ANALYZE, async (_event, payload: GoKataGoAnalyzeRequest) => {
-    return analyzeGoByKataGo(payload);
+  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_ANALYZE, async (_event, _payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> => {
+    return { ok: false, ms: 0, suggestions: [], error: 'Game assistant disabled in this build.' };
   });
-  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_WARMUP, async () => {
-    return warmupGoByKataGo();
+  ipcMain.handle(IPC_CHANNELS.GO_KATAGO_WARMUP, async (): Promise<GoKataGoAnalyzeResponse> => {
+    return { ok: false, ms: 0, suggestions: [], error: 'Game assistant disabled in this build.' };
   });
 
-  // Xiangqi: Pikafish external engine analysis
-  ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, payload: XiangqiPikafishAnalyzeRequest) => {
-    return analyzeXiangqiByPikafish(payload);
+  ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, _payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
+    return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
   });
 }
 

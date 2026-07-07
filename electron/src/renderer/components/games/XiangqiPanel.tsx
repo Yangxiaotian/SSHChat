@@ -1061,7 +1061,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   const myTurn = !!turn.name && turn.name === nickname;
   const canPlay = !disabled && (!turn.name || myTurn);
-  const isMaster = nickname === 'zouyu';
+  const isMaster = false;
 
   const mySide: Side | null = useMemo(() => {
     if (seats.redName && seats.redName === nickname) return RED;

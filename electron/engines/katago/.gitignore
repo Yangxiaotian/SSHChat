@@ -1,4 +1,0 @@
-# Keep downloaded KataGo binaries/models local; they are too large for git.
-*
-!README.txt
-!.gitignore
