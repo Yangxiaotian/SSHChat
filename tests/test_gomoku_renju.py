@@ -102,7 +102,7 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
 
     def test_double_open_three_on_user_position(self) -> None:
-        """Regression: (10,5) must be 三三 — diag ..XXX.. and vertical .X.XX.."""
+        """Regression: (10,5) is forbidden — two four-threats on vertical and diagonal."""
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
         rows = [
             "...............",
@@ -128,7 +128,48 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
                 elif ch == "o":
                     g[r][c] = 2
         last = (9, 4)  # (10, 5)
-        self.assertIn("三三", _gomoku_renju_forbidden(g, last[0], last[1]))
+        self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
+
+    def test_user_position_5_11_not_forbidden(self) -> None:
+        """Regression: (5,11) is only one rush-four; split diagonal must not count."""
+        g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
+        rows = [
+            "...............",
+            "......o..#.....",
+            "..oo.#..o......",
+            "...#.o.#o......",
+            "....#..#o#.....",
+            ".....#oooo##...",
+            "......#o#o.#...",
+            ".......o#o###...",
+            ".......#ooo#o..",
+            ".........#.(o)..",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+        ]
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    g[r][c] = 1
+                elif ch == "o":
+                    g[r][c] = 2
+        g[9][11] = 2  # white last at (10, 12)
+        last = (4, 10)  # (5, 11)
+        self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
+
+        c1, c2 = object(), object()
+        game = GomokuGame(c1, "zouyu")
+        game.try_join(c2, "yxt")
+        game.grid = [row[:] for row in g]
+        game.state = "playing"
+        game._turn = 1
+        game._last = (9, 11)
+        priv, _, _ = game.try_move(c1, "5 11")
+        self.assertFalse(any("禁手" in line for line in priv))
+        self.assertEqual(game.grid[last[0]][last[1]], 1)
 
 
 class TestGomokuRenjuTryMove(unittest.TestCase):

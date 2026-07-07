@@ -1343,36 +1343,49 @@ def _gomoku_axis_line(
     return "".join(out)
 
 
+def _gomoku_line_max_run(line: str, ch: str = "X") -> int:
+    best = 0
+    i = 0
+    while i < len(line):
+        if line[i] != ch:
+            i += 1
+            continue
+        j = i
+        while j < len(line) and line[j] == ch:
+            j += 1
+        best = max(best, j - i)
+        i = j
+    return best
+
+
+def _gomoku_line_five_threat_count(line: str) -> int:
+    """Empty cells where X would complete five in a row on this line."""
+    count = 0
+    for pos in range(len(line)):
+        if line[pos] != ".":
+            continue
+        trial = list(line)
+        trial[pos] = "X"
+        if _gomoku_line_max_run("".join(trial)) >= 5:
+            count += 1
+    return count
+
+
 def _gomoku_axis_has_four(line: str) -> bool:
-    """One four-threat on an axis through center X (活四/冲四, not dead four)."""
+    """One four-threat on an axis through center X (活四/冲四/跳四, not dead four)."""
     if line[4] != "X":
         return False
-    s = line
-
-    def four_at(a: int, b: int, c: int, d: int) -> bool:
-        if not (s[a] == s[b] == s[c] == s[d] == "X"):
-            return False
-        wins: list[int] = []
-        if a > 0 and s[a - 1] == ".":
-            wins.append(a - 1)
-        if d < 8 and s[d + 1] == ".":
-            wins.append(d + 1)
-        return bool(wins)
-
-    for start in range(0, 6):
-        group = (start, start + 1, start + 2, start + 3)
-        if 4 in group and four_at(*group):
+    if _gomoku_line_max_run(line) >= 4:
+        return _gomoku_line_five_threat_count(line) >= 1
+    for pos in range(len(line)):
+        if line[pos] != ".":
+            continue
+        trial = list(line)
+        trial[pos] = "X"
+        filled = "".join(trial)
+        if _gomoku_line_max_run(filled) >= 4 and _gomoku_line_five_threat_count(filled) >= 1:
             return True
-    jump_groups = (
-        (1, 2, 4, 5),
-        (1, 3, 4, 5),
-        (2, 3, 4, 6),
-        (2, 4, 5, 6),
-        (3, 4, 5, 7),
-        (4, 5, 7, 8),
-        (4, 6, 7, 8),
-    )
-    return any(four_at(*g) for g in jump_groups)
+    return False
 
 
 def _gomoku_axis_open_three(line: str) -> bool:
