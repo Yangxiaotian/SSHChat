@@ -1572,7 +1572,7 @@ def _handle_library(conn, payload: str) -> None:
         send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
         send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
         send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
-        send_line(conn, "[*]   /library info | 状态               当前阅读进度\n")
+        send_line(conn, "[*]   /library info | show | 状态        当前阅读进度\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
         send_line(conn, f"[*] 目录：{lib_dir}\n")
         return
@@ -1604,7 +1604,7 @@ def _handle_library(conn, payload: str) -> None:
         send_line(conn, "[*] 已关闭当前图书（书签已保留）。\n")
         return
 
-    if head in {"info", "状态"}:
+    if head in {"info", "show", "状态"}:
         with lock:
             session = library_reading.get(conn)
         if not session:

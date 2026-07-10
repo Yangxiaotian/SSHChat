@@ -73,6 +73,7 @@ _LIBRARY_SUBCOMMANDS = {
     "reset": None,
     "close": None,
     "info": None,
+    "show": None,
     "help": None,
 }
 
