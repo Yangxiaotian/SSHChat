@@ -1469,7 +1469,7 @@ def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
         send_line(conn, f"[*]    {ln}\n")
     send_line(
         conn,
-        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | info | close\n",
+        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
     )
 
 
@@ -1566,13 +1566,14 @@ def _handle_library(conn, payload: str) -> None:
         send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
         send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
         send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
+        send_line(conn, "[*]   /library show | 显示               显示当前页内容\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
         send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
         send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
         send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
         send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
-        send_line(conn, "[*]   /library info | 状态               当前阅读进度\n")
+        send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
         send_line(conn, f"[*] 目录：{lib_dir}\n")
         return
@@ -1622,6 +1623,23 @@ def _handle_library(conn, payload: str) -> None:
             conn,
             f"[*] 在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页（{doc.source_path.name}）\n",
         )
+        return
+
+    if head in {"show", "显示"}:
+        with lock:
+            session = library_reading.get(conn)
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
+            return
+        try:
+            doc = _get_cached_book(Path(str(session["path"])))
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        page = int(session.get("page") or 0)
+        _send_library_page(conn, doc, page)
         return
 
     if head in {"next", "n", "下一页"}:
