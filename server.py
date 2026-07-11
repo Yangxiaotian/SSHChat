@@ -1095,7 +1095,35 @@ def _safe_http_url(raw: str) -> Optional[str]:
 
 
 def _decode_html_bytes(data: bytes, charset: Optional[str]) -> str:
-    for enc in (charset, "utf-8", "gb18030", "gbk", "latin-1"):
+    # Try to extract charset from HTML meta tags
+    meta_charset = None
+    try:
+        # Try to decode first 2KB as ASCII-compatible to find meta charset
+        head_sample = data[:2048].decode("ascii", errors="ignore").lower()
+        # Look for <meta charset="...">
+        m = re.search(r'<meta\s+charset=["\']?([\w-]+)', head_sample, re.I)
+        if m:
+            meta_charset = m.group(1)
+        else:
+            # Look for <meta http-equiv="Content-Type" content="...charset=...">
+            m = re.search(
+                r'<meta\s+http-equiv=["\']?content-type["\']?\s+content=["\']?[^"\']*charset=([\w-]+)',
+                head_sample,
+                re.I,
+            )
+            if not m:
+                m = re.search(
+                    r'<meta\s+content=["\']?[^"\']*charset=([\w-]+)[^"\']*["\']?\s+http-equiv=["\']?content-type',
+                    head_sample,
+                    re.I,
+                )
+            if m:
+                meta_charset = m.group(1)
+    except Exception:
+        pass
+    
+    # Try charsets in order: HTTP header, HTML meta, common Chinese encodings
+    for enc in (charset, meta_charset, "utf-8", "gb18030", "gbk", "gb2312", "latin-1"):
         if not enc:
             continue
         try:
