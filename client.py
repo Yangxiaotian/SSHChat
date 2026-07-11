@@ -824,6 +824,10 @@ def _format_display_line(line: str, my_name: str) -> str:
     room, sender, payload = _parse_chat_line(line)
     if not sender:
         return _expand_xiangqi_color(f"[{time_label}] {line}\n")
+    # System messages (games, news, library) display without timestamp/room prefix
+    if sender in _SYSTEM_SENDERS:
+        body = _expand_xiangqi_color(payload)
+        return f"[{sender}] {body}\n"
     if room:
         body = _expand_xiangqi_color(payload)
         return f"[{time_label}] [#{room}] [{sender}] {body}\n"
