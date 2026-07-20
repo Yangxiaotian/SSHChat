@@ -248,6 +248,12 @@ def _note_game_command() -> None:
         _GAME_BYPASS_UNTIL = time.monotonic() + _GAME_BYPASS_SECONDS
 
 
+def _clear_game_bypass() -> None:
+    global _GAME_BYPASS_UNTIL
+    with _DND_LOCK:
+        _GAME_BYPASS_UNTIL = 0.0
+
+
 def _game_bypass_active() -> bool:
     with _DND_LOCK:
         return time.monotonic() < _GAME_BYPASS_UNTIL
@@ -559,15 +565,29 @@ def _dnd_print_game_action_ack() -> None:
 def _dnd_system_action(payload: str, my_name: str) -> str | None:
     """
     Return None to show normally, '' to suppress, 'turn_hint' for compact turn line.
+
+    Turn handling is evaluated before the /game show bypass so that:
+    - opponent-to-move clears a peek bypass (avoid watching their thinking time);
+    - my-to-move reopens bypass so the oriented board that follows can display.
     """
-    if not _dnd_enabled() or _game_bypass_active():
+    if not _dnd_enabled():
         return None
     if _is_game_command_feedback_line(payload):
         return None
     if _is_reading_content_line(payload):
         return None
-    if _is_my_turn_line(payload, my_name):
-        return "turn_hint"
+    turn = _parse_turn_name(payload)
+    if turn:
+        if my_name and turn == my_name:
+            # Opponent just finished; private oriented board arrives next — let it through.
+            _note_game_command()
+            return "turn_hint"
+        # /game show while waiting ends with「轮到 对方」; drop the peek bypass
+        # so 对方继续行棋时不会再刷局面。
+        _clear_game_bypass()
+        return ""
+    if _game_bypass_active():
+        return None
     if _is_game_context_line(payload):
         return ""
     return None

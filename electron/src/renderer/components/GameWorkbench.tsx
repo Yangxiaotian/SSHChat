@@ -195,11 +195,12 @@ function gameTip(game: GameKind, locale: Locale): string {
 function parseTurnName(board: string): string {
   const line = board.split('\n').find((l) => /^(turn|轮到)[:：]/i.test(l.trim()));
   if (!line) {
-    const cnLine = board.split('\n').find((l) => /^轮到\s+(黑|白|红)方\s+.+/.test(l.trim()));
-    const m = cnLine?.trim().match(/^轮到\s+(?:黑|白|红)方\s+(.+?)\s+(?:落子|走棋)/);
+    const cnLine = board.split('\n').find((l) => /^轮到\s+(黑|白|红)(?:方)?\s+.+/.test(l.trim()));
+    // xiangqi uses 走子; gomoku/go use 落子; doushou may use 行棋 / 走棋.
+    const m = cnLine?.trim().match(/^轮到\s+(?:黑|白|红)(?:方)?\s+(\S+?)(?:\s+(?:落子|走子|走棋|行棋)|（|$)/);
     return m ? m[1].trim() : '';
   }
-  return line.replace(/^(turn|轮到)[:：]\s*/i, '').trim();
+  return line.replace(/^(turn|轮到)[:：]\s*/i, '').trim().split(/\s+/)[0] || '';
 }
 
 function inSeats(board: string, nickname: string): boolean {
