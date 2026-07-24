@@ -331,10 +331,18 @@ class FederationHub:
             old.close()
         self._peers[node_id] = link
 
-    def _unregister_peer(self, node_id: str) -> None:
-        link = self._peers.pop(node_id, None)
-        if link is not None:
-            link.close()
+    def _unregister_peer(
+        self, node_id: str, link: Optional[_PeerLink] = None
+    ) -> None:
+        # Only tear down if this session still owns the peer slot. Otherwise a
+        # replaced/stale session would wipe presence learned on the newer link
+        # (seen as one-way /names: initiator flaps, passive side looks fine).
+        current = self._peers.get(node_id)
+        if link is not None and current is not None and current is not link:
+            return
+        old = self._peers.pop(node_id, None)
+        if old is not None:
+            old.close()
         to_remove = [k for k in self._remote_users if k[0] == node_id]
         for k in to_remove:
             user = self._remote_users.pop(k, None)
@@ -598,8 +606,10 @@ class FederationHub:
             traceback.print_exc()
         finally:
             if peer_node:
-                self._unregister_peer(peer_node)
-                print(f"federation: peer {peer_node} disconnected")
+                current_before = self._peers.get(peer_node)
+                self._unregister_peer(peer_node, link)
+                if link is None or current_before is link:
+                    print(f"federation: peer {peer_node} disconnected")
             try:
                 conn.close()
             except Exception:
@@ -735,7 +745,7 @@ class FederationHub:
             if link is not None:
                 link.handle_line(line)
         if registered:
-            self._unregister_peer(peer_node)
+            self._unregister_peer(peer_node, link)
         try:
             proc.terminate()
         except Exception:
