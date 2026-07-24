@@ -397,7 +397,10 @@ class FederationHub:
             self._remote_switch(parts[1], parts[2], parts[3])
             return
         if kind == "presence" and len(parts) >= 3:
-            self._remote_presence_bulk(parts[1], parts[2])
+            # Keep JSON blob intact even if it ever contains tabs.
+            pres_parts = line.split("\t", 2)
+            if len(pres_parts) >= 3:
+                self._remote_presence_bulk(pres_parts[1], pres_parts[2])
             return
         if kind == "pm" and len(parts) >= 5:
             origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
@@ -524,6 +527,10 @@ class FederationHub:
             self._remote_users[rk] = user
             for room in rooms:
                 self._room_remotes[room].add(rk)
+        print(
+            f"federation: presence from {node_id}: "
+            f"{len(users)} user(s) → tracking {sum(1 for k in self._remote_users if k[0] == node_id)}"
+        )
 
     def _listen_loop(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -623,6 +630,11 @@ class FederationHub:
         if self.node_id > node_id:
             return
         while not self._stop.is_set():
+            existing = self._peers.get(node_id)
+            if existing is not None and not existing._closed:
+                # Already linked; do not open parallel outbound sessions.
+                time.sleep(_RECONNECT_DELAY)
+                continue
             try:
                 proc = self._open_outbound(peer)
                 if proc is None:
@@ -739,6 +751,41 @@ class FederationHub:
                 link = _PeerLink(self, peer_node, _send)
                 self._register_peer(peer_node, link)
                 registered = True
+                # Apply any peer lines already buffered with @fed-ok (usually
+                # their presence snapshot) BEFORE we announce ourselves. The
+                # initiator otherwise often dies after pushing local presence
+                # and never learns remote /names.
+                while b"\n" in buffer:
+                    line_b, buffer = buffer.split(b"\n", 1)
+                    link.handle_line(
+                        line_b.decode("utf-8", errors="replace")
+                    )
+                if not any(k[0] == peer_node for k in self._remote_users):
+                    # Presence not buffered yet — wait briefly for it.
+                    try:
+                        try:
+                            conn.settimeout(3.0)
+                        except (OSError, AttributeError):
+                            pass
+                        while b"\n" not in buffer:
+                            chunk = conn.recv(4096)
+                            if not chunk:
+                                break
+                            buffer += chunk
+                        if b"\n" in buffer:
+                            line_b, buffer = buffer.split(b"\n", 1)
+                            link.handle_line(
+                                line_b.decode("utf-8", errors="replace")
+                            )
+                    except OSError as e:
+                        print(
+                            f"federation: waiting presence from {peer_node}: {e!r}"
+                        )
+                    finally:
+                        try:
+                            conn.settimeout(None)
+                        except (OSError, AttributeError):
+                            pass
                 self._push_presence(link)
                 print(f"federation: outbound connected to {peer_node}")
                 continue
