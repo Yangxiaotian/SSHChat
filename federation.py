@@ -323,9 +323,12 @@ class FederationHub:
         return False
 
     def _register_peer(self, node_id: str, link: _PeerLink) -> None:
-        if node_id in self._peers:
-            link.close()
-            return
+        # Replace any existing link for this node. Closing the newcomer caused
+        # reconnect flaps when a stale peer entry briefly overlapped a retry
+        # (common over SSH tunnels / unstable paths).
+        old = self._peers.get(node_id)
+        if old is not None and old is not link:
+            old.close()
         self._peers[node_id] = link
 
     def _unregister_peer(self, node_id: str) -> None:
