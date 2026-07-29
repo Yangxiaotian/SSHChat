@@ -194,15 +194,26 @@ ensure_client_group() {
     return 0
   fi
 
-  if getent group "$CLIENT_GROUP" &>/dev/null; then
+  if getent group "$CLIENT_GROUP" &>/dev/null 2>&1; then
     return 0
   fi
-  if ! command -v groupadd &>/dev/null; then
-    echo "error: groupadd not found (cannot create $CLIENT_GROUP)" >&2
+  
+  # Try grep /etc/group as fallback if getent is not available (e.g., minimal ish/Alpine)
+  if ! command -v getent &>/dev/null && grep -q "^${CLIENT_GROUP}:" /etc/group 2>/dev/null; then
+    return 0
+  fi
+  
+  # Prefer groupadd (standard Linux), fall back to addgroup (Alpine/BusyBox)
+  if command -v groupadd &>/dev/null; then
+    groupadd -r "$CLIENT_GROUP"
+    echo "info: created system group $CLIENT_GROUP (chat SSH users join via admin-add-user.sh)"
+  elif command -v addgroup &>/dev/null; then
+    addgroup -S "$CLIENT_GROUP" 2>/dev/null || addgroup "$CLIENT_GROUP"
+    echo "info: created system group $CLIENT_GROUP (chat SSH users join via admin-add-user.sh)"
+  else
+    echo "error: neither groupadd nor addgroup found (cannot create $CLIENT_GROUP)" >&2
     exit 1
   fi
-  groupadd -r "$CLIENT_GROUP"
-  echo "info: created system group $CLIENT_GROUP (chat SSH users join via admin-add-user.sh)"
 }
 
 apply_data_plane_permissions() {
@@ -277,8 +288,14 @@ add_user_to_client_group() {
   fi
   if is_darwin; then
     dseditgroup -o edit -a "$user_name" -t user "$CLIENT_GROUP"
-  else
+  elif command -v usermod &>/dev/null; then
     usermod -aG "$CLIENT_GROUP" "$user_name"
+  elif command -v addgroup &>/dev/null; then
+    # Alpine/BusyBox: addgroup USER GROUP (adds user to existing group)
+    addgroup "$user_name" "$CLIENT_GROUP" 2>/dev/null || true
+  else
+    echo "warning: cannot add $user_name to $CLIENT_GROUP (no usermod or addgroup)" >&2
+    return 1
   fi
   echo "info: added existing user $user_name to group $CLIENT_GROUP"
 }
@@ -503,12 +520,18 @@ fi
 
 if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
   if ! id "$RUN_USER" &>/dev/null; then
-    if ! command -v useradd &>/dev/null; then
-      echo "error: useradd not found; install shadow-utils or use --no-run-user" >&2
+    # Prefer useradd (standard Linux), fall back to adduser (Alpine/BusyBox)
+    if command -v useradd &>/dev/null; then
+      useradd -r -s /usr/sbin/nologin "$RUN_USER"
+      echo "info: created system user $RUN_USER"
+    elif command -v adduser &>/dev/null; then
+      # Alpine/BusyBox adduser: -S for system user, -D for no password, -s for shell
+      adduser -S -D -s /sbin/nologin "$RUN_USER" 2>/dev/null || adduser -S -D -s /bin/false "$RUN_USER"
+      echo "info: created system user $RUN_USER"
+    else
+      echo "error: neither useradd nor adduser found; install shadow-utils or use --no-run-user" >&2
       exit 1
     fi
-    useradd -r -s /usr/sbin/nologin "$RUN_USER"
-    echo "info: created system user $RUN_USER"
   fi
 else
   RUN_USER=root
@@ -590,8 +613,16 @@ fi
 if [[ "$CREATE_RUN_USER" -eq 1 ]] && ! is_darwin; then
   FED_USER=sshchat-federation
   if ! id "$FED_USER" &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
-    echo "info: created federation user $FED_USER (for inbound peer SSH)"
+    # Prefer useradd (standard Linux), fall back to adduser (Alpine/BusyBox)
+    if command -v useradd &>/dev/null; then
+      useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
+    elif command -v adduser &>/dev/null; then
+      adduser -S -D -h "$FED_DIR" -s /sbin/nologin -g "SSHChat federation" "$FED_USER" 2>/dev/null || \
+        adduser -S -D -h "$FED_DIR" -s /bin/false "$FED_USER" 2>/dev/null || true
+    fi
+    if id "$FED_USER" &>/dev/null; then
+      echo "info: created federation user $FED_USER (for inbound peer SSH)"
+    fi
   fi
 fi
 if [[ "$RUN_USER" != "root" ]]; then
