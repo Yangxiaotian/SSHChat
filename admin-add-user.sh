@@ -93,14 +93,24 @@ ensure_client_group() {
     return 0
   fi
 
-  if getent group "$SSHCHAT_CLIENT_GROUP" &>/dev/null; then
+  if getent group "$SSHCHAT_CLIENT_GROUP" &>/dev/null 2>&1; then
     return 0
   fi
+  
+  # Try grep /etc/group as fallback if getent is not available (e.g., minimal ish/Alpine)
+  if ! command -v getent &>/dev/null && grep -q "^${SSHCHAT_CLIENT_GROUP}:" /etc/group 2>/dev/null; then
+    return 0
+  fi
+  
+  # Prefer groupadd (standard Linux), fall back to addgroup (Alpine/BusyBox)
   if command -v groupadd &>/dev/null; then
     groupadd -r "$SSHCHAT_CLIENT_GROUP"
     echo "info: created system group $SSHCHAT_CLIENT_GROUP"
+  elif command -v addgroup &>/dev/null; then
+    addgroup -S "$SSHCHAT_CLIENT_GROUP" 2>/dev/null || addgroup "$SSHCHAT_CLIENT_GROUP"
+    echo "info: created system group $SSHCHAT_CLIENT_GROUP"
   else
-    echo "error: group $SSHCHAT_CLIENT_GROUP missing and groupadd not found (run deploy.sh first?)" >&2
+    echo "error: group $SSHCHAT_CLIENT_GROUP missing and neither groupadd nor addgroup found (run deploy.sh first?)" >&2
     exit 1
   fi
 }
@@ -180,24 +190,36 @@ else
   if is_darwin; then
     create_user_darwin "$USER_NAME"
   else
-    if ! command -v useradd &>/dev/null; then
-      echo "error: useradd not found (this script targets Linux with shadow-utils)" >&2
+    # Prefer useradd (standard Linux), fall back to adduser (Alpine/BusyBox)
+    if command -v useradd &>/dev/null; then
+      useradd -m -s "$SSHCHAT_SHELL" "$USER_NAME"
+      echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
+    elif command -v adduser &>/dev/null; then
+      # Alpine/BusyBox adduser: -D no password, -s shell, -h creates home
+      adduser -D -s "$SSHCHAT_SHELL" "$USER_NAME"
+      echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
+    else
+      echo "error: neither useradd nor adduser found (this script targets Linux with user management tools)" >&2
       exit 1
     fi
-    useradd -m -s "$SSHCHAT_SHELL" "$USER_NAME"
-    echo "info: created user $USER_NAME (shell $SSHCHAT_SHELL)"
   fi
 fi
 
 if ! is_darwin; then
   ensure_client_group
-  if ! command -v usermod &>/dev/null; then
-    echo "error: usermod not found" >&2
-    exit 1
-  fi
   if ! id -nG "$USER_NAME" | grep -qw "$SSHCHAT_CLIENT_GROUP"; then
-    usermod -aG "$SSHCHAT_CLIENT_GROUP" "$USER_NAME"
-    echo "info: added $USER_NAME to group $SSHCHAT_CLIENT_GROUP"
+    # Prefer usermod (standard Linux), fall back to addgroup (Alpine/BusyBox)
+    if command -v usermod &>/dev/null; then
+      usermod -aG "$SSHCHAT_CLIENT_GROUP" "$USER_NAME"
+      echo "info: added $USER_NAME to group $SSHCHAT_CLIENT_GROUP"
+    elif command -v addgroup &>/dev/null; then
+      # Alpine/BusyBox: addgroup USER GROUP (adds user to existing group)
+      addgroup "$USER_NAME" "$SSHCHAT_CLIENT_GROUP"
+      echo "info: added $USER_NAME to group $SSHCHAT_CLIENT_GROUP"
+    else
+      echo "error: neither usermod nor addgroup found" >&2
+      exit 1
+    fi
   fi
 else
   ensure_client_group
