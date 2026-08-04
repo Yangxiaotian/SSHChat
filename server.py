@@ -24,6 +24,7 @@ import dict_lookup
 import federation
 import games
 import library
+from offline_messages import OfflineMessageStore
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
 from session_store import DisconnectedSeat, FederatedSeat, GameSessionStore
 
@@ -52,9 +53,17 @@ def _session_store_path() -> str:
     return os.path.join(os.path.dirname(__file__), "game_sessions.json")
 
 
+def _offline_messages_path() -> str:
+    raw = os.environ.get("SSHCHAT_OFFLINE_MSG_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "offline_messages.json")
+
+
 rating_store = GameRatingStore(_rating_store_path())
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
+offline_messages = OfflineMessageStore(_offline_messages_path())
 
 # conn -> {"name", "rooms", "current_room"}
 clients = {}
@@ -185,8 +194,8 @@ HELP_LINES = (
     "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
     "[*]\n",
     "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
-    "[*] /msg <昵称> <文字>   私聊：发给该昵称的在线用户（大小写不敏感）。\n",
-    "[*]              若有多人同昵称，会全部收到；发件人会收到汇总提示。\n",
+    "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
+    "[*]              昵称大小写不敏感；同昵称多人在线会全部收到；发件人会收到汇总提示。\n",
     "[*]\n",
     "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
@@ -828,17 +837,46 @@ def send_line(conn, text: str) -> None:
         remove_client(conn)
 
 
+def _format_offline_ts(ts: float) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+    except (OverflowError, OSError, ValueError, TypeError):
+        return "?"
+
+
+def deliver_offline_messages(conn, recipient_name: str) -> int:
+    """Flush stored leave-messages to this connection. Returns how many were sent."""
+    pending = offline_messages.take_all(recipient_name)
+    if not pending:
+        return 0
+    n = len(pending)
+    send_line(conn, f"[*] 你有 {n} 条留言（离线期间收到，按时间顺序）：\n")
+    for item in pending:
+        when = _format_offline_ts(item.get("ts", 0))
+        sender = item.get("from") or "?"
+        text = item.get("text") or ""
+        send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
+    return n
+
+
 def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -> None:
-    """Deliver a private message to all matching nicks; echo status to sender."""
+    """Deliver a private message to all matching nicks; leave a message if offline."""
     targets = find_clients_by_nickname(target_nick)
     hub = federation.get_hub()
     remote_sent = False
     if hub is not None and hub.enabled and hub.has_remote_user(target_nick):
         remote_sent = hub.send_pm(target_nick, sender_name, text)
     if not targets and not remote_sent:
+        stored = offline_messages.leave(target_nick, sender_name, text)
+        if stored is None:
+            send_line(
+                conn,
+                f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
+            )
+            return
         send_line(
             conn,
-            f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
+            f"[*] {target_nick!r} 当前不在线，已留言；对方下次上线时会收到。\n",
         )
         return
     for peer_conn, peer_name in targets:
@@ -3159,6 +3197,10 @@ def handle_client(conn, addr) -> None:
             send_line(conn, "[*] 已恢复上次客户端会话，回到原房间；如有未结束对局可继续操作。\n")
         if resumed_game_rooms:
             send_line(conn, "[*] 已接管旧连接保留的游戏席位。\n")
+        # Deliver leave-messages only on the first local session for this nick,
+        # so multi-device reconnect does not drain the mailbox twice.
+        if not same_name_peers:
+            deliver_offline_messages(conn, name)
         _mark_sessions_dirty()
         send_room_announcement_preview(conn, active_room)
         if active_game_lines:
