@@ -231,12 +231,16 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py"
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py"
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$u:$u" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
+  fi
+  if [[ -f "$PREFIX/offline_messages.json" ]]; then
+    chown "$u:$u" "$PREFIX/offline_messages.json"
+    chmod 660 "$PREFIX/offline_messages.json"
   fi
 
   chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
@@ -258,12 +262,16 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
+  fi
+  if [[ -f "$PREFIX/offline_messages.json" ]]; then
+    chown "$ROOT_OWN" "$PREFIX/offline_messages.json"
+    chmod 660 "$PREFIX/offline_messages.json"
   fi
 
   chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
@@ -470,7 +478,7 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh federation-bridge.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh federation-bridge.sh; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 
@@ -550,7 +558,7 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -673,7 +681,7 @@ else
   chown -R "$ROOT_OWN" "$PREFIX"
   chmod 755 "$PREFIX"
   chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
-  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/client.py"
+  chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
 fi
 
