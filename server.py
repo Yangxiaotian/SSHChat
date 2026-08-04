@@ -196,6 +196,8 @@ HELP_LINES = (
     "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
     "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
     "[*]              昵称大小写不敏感；同昵称多人在线会全部收到；发件人会收到汇总提示。\n",
+    "[*] /leave [昵称]     查看你发出、对方尚未阅读的留言（按昵称分组编号）。\n",
+    "[*] /leave <昵称> <编号>  撤回发给该昵称的第 N 条未读留言（别名：/留言、/unmsg）。\n",
     "[*]\n",
     "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
@@ -857,6 +859,96 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
         text = item.get("text") or ""
         send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
     return n
+
+
+def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> None:
+    items = offline_messages.list_sent_unread(sender_name, recipient)
+    if not items:
+        if recipient:
+            send_line(
+                conn,
+                f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言。\n",
+            )
+        else:
+            send_line(conn, "[*] 你目前没有对方尚未阅读的留言。\n")
+        return
+    if recipient:
+        send_line(
+            conn,
+            f"[*] 发给 {recipient!r}、对方尚未阅读的留言（共 {len(items)} 条）：\n",
+        )
+        for item in items:
+            when = _format_offline_ts(item.get("ts", 0))
+            send_line(
+                conn,
+                f"[*]   {item['index']}. ({when}) {item['text']}\n",
+            )
+        send_line(conn, f"[*] 撤回：/leave {recipient} <编号>\n")
+        return
+    send_line(conn, f"[*] 你发出的未读留言（共 {len(items)} 条）：\n")
+    current_to = None
+    for item in items:
+        to_name = item.get("to") or "?"
+        if to_name != current_to:
+            current_to = to_name
+            send_line(conn, f"[*] → {to_name}:\n")
+        when = _format_offline_ts(item.get("ts", 0))
+        send_line(
+            conn,
+            f"[*]   {item['index']}. ({when}) {item['text']}\n",
+        )
+    send_line(conn, "[*] 撤回：/leave <昵称> <编号>\n")
+
+
+def handle_leave_command(conn, name: str, parts: list[str]) -> None:
+    """List or recall unread leave-messages sent by this user."""
+    # /leave | /leave <nick> | /leave <nick> <n>
+    # /leave recall <nick> <n> | /leave 撤回 <nick> <n>
+    args = [p for p in parts[1:] if p.strip()]
+    if not args:
+        _send_leave_list(conn, name)
+        return
+    if args[0].lower() in ("recall", "unmsg", "撤回", "撤销"):
+        if len(args) < 3:
+            send_line(
+                conn,
+                "[*] Usage: /leave <nick> <n>  |  /leave recall <nick> <n>\n",
+            )
+            return
+        target = args[1].strip()
+        num_raw = args[2].strip()
+    elif len(args) >= 2 and args[1].strip().isdigit():
+        target = args[0].strip()
+        num_raw = args[1].strip()
+    elif len(args) == 1:
+        _send_leave_list(conn, name, args[0].strip())
+        return
+    else:
+        send_line(
+            conn,
+            "[*] Usage: /leave [nick]  |  /leave <nick> <n>\n"
+            "[*] （列出或撤回你发出、对方尚未阅读的留言）\n",
+        )
+        return
+    try:
+        index = int(num_raw)
+    except ValueError:
+        send_line(conn, "[*] 编号须为正整数。\n")
+        return
+    removed = offline_messages.recall(name, target, index)
+    if removed is None:
+        send_line(
+            conn,
+            f"[*] 撤回失败：没有发给 {target!r} 的第 {index} 条未读留言"
+            f"（可用 /leave {target} 查看）。\n",
+        )
+        return
+    when = _format_offline_ts(removed.get("ts", 0))
+    send_line(
+        conn,
+        f"[*] 已撤回发给 {target!r} 的第 {index} 条留言"
+        f"（{when}）：{removed.get('text')}\n",
+    )
 
 
 def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -> None:
@@ -2532,6 +2624,10 @@ def handle_command(conn, payload: str) -> None:
         send_private_messages(conn, name, target, text)
         return
 
+    if cmd in ("/leave", "/留言", "/unmsg"):
+        handle_leave_command(conn, name, parts)
+        return
+
     if cmd == "/part":
         if len(parts) < 2 or not parts[1].strip():
             send_line(conn, "[*] Usage: /part <room>\n")
@@ -3183,7 +3279,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /part /announce /game /news /dict /clear /help\n",
+            f"/names /rooms /join /switch /msg /leave /part /announce /game /news /dict /clear /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:

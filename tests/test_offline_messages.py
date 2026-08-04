@@ -62,6 +62,29 @@ class OfflineMessageStoreTests(unittest.TestCase):
         other = OfflineMessageStore(self.path)
         self.assertEqual(other.count("zoe"), 1)
 
+    def test_list_and_recall_by_index(self) -> None:
+        self.store.leave("alice", "bob", "one")
+        self.store.leave("alice", "carol", "other")
+        self.store.leave("alice", "bob", "two")
+        self.store.leave("dave", "bob", "to-dave")
+        listed = self.store.list_sent_unread("Bob")
+        self.assertEqual(
+            [(x["to"].lower(), x["index"], x["text"]) for x in listed],
+            [("alice", 1, "one"), ("alice", 2, "two"), ("dave", 1, "to-dave")],
+        )
+        only_alice = self.store.list_sent_unread("bob", "Alice")
+        self.assertEqual([x["text"] for x in only_alice], ["one", "two"])
+        removed = self.store.recall("bob", "alice", 1)
+        self.assertIsNotNone(removed)
+        assert removed is not None
+        self.assertEqual(removed["text"], "one")
+        after = self.store.list_sent_unread("bob", "alice")
+        self.assertEqual([x["index"] for x in after], [1])
+        self.assertEqual(after[0]["text"], "two")
+        self.assertIsNone(self.store.recall("bob", "alice", 9))
+        # carol's message still pending for alice
+        self.assertEqual(self.store.count("alice"), 2)
+
 
 class OfflineMessageServerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -129,6 +152,30 @@ class OfflineMessageServerTests(unittest.TestCase):
         self.assertIn("[PM from bob] (留言 ", text)
         self.assertIn("missed you", text)
         self.assertIn("[PM from carol]", text)
+
+    def test_leave_command_list_and_recall(self) -> None:
+        sender = DummyConn()
+        server.clients[sender] = {
+            "name": "bob",
+            "rooms": {"default"},
+            "current_room": "default",
+        }
+        server.offline_messages.leave("alice", "bob", "first")
+        server.offline_messages.leave("alice", "bob", "second")
+        server.handle_leave_command(sender, "bob", ["/leave", "alice"])
+        listed = b"".join(sender.sent).decode("utf-8")
+        self.assertIn("1. (", listed)
+        self.assertIn("first", listed)
+        self.assertIn("2. (", listed)
+        self.assertIn("second", listed)
+        sender.sent.clear()
+        server.handle_leave_command(sender, "bob", ["/leave", "alice", "1"])
+        ack = b"".join(sender.sent).decode("utf-8")
+        self.assertIn("已撤回", ack)
+        self.assertIn("first", ack)
+        remaining = server.offline_messages.list_sent_unread("bob", "alice")
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["text"], "second")
 
 
 if __name__ == "__main__":

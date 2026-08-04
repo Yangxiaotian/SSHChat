@@ -130,6 +130,8 @@ _TOP_COMMANDS = (
     "/switch",
     "/part",
     "/msg",
+    "/leave",
+    "/unmsg",
     "/announce",
     "/game",
     "/news",
@@ -1042,7 +1044,8 @@ def main():
     print("[OK] connected as " + name)
     print(
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
-        "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  /part <room>  "
+        "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
+        "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /game  /news  /news fetch <类> <号>  /dict  /library (/lib)  "
         "/dnd on|off  /clear  /help"
     )

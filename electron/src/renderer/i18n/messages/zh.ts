@@ -69,6 +69,7 @@ export const zhMessages = {
       switch: '切换活跃房间',
       part: '退出房间',
       msg: '发送私聊',
+      leave: '查看/撤回未读留言',
       clear: '清空本地视图（当前房间）',
       game: '游戏命令',
       news: '查看新闻',

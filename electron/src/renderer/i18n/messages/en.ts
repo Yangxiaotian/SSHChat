@@ -71,6 +71,7 @@ export const enMessages: MessageTree = {
       switch: 'Switch active room',
       part: 'Leave a room',
       msg: 'Send private message',
+      leave: 'List or recall unread leave-messages',
       clear: 'Clear local view (current room)',
       game: 'Game commands',
       news: 'Show news',

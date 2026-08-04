@@ -11,6 +11,7 @@ const COMMAND_KEYS = [
   { name: '/switch', key: 'input.commands.switch' },
   { name: '/part', key: 'input.commands.part' },
   { name: '/msg', key: 'input.commands.msg' },
+  { name: '/leave', key: 'input.commands.leave' },
   { name: '/clear', key: 'input.commands.clear' },
   { name: '/game', key: 'input.commands.game' },
   { name: '/news', key: 'input.commands.news' },

@@ -87,6 +87,20 @@ class OfflineMessageStore:
                 return 0
             return len(box)
 
+    @staticmethod
+    def _parse_entry(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        sender = str(item.get("from") or "?").strip() or "?"
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return None
+        try:
+            ts = float(item.get("ts", 0))
+        except (TypeError, ValueError):
+            ts = 0.0
+        return {"from": sender, "text": text, "ts": ts}
+
     def leave(self, recipient: str, sender: str, text: str) -> dict[str, Any] | None:
         """Enqueue a leave-message. Returns the stored entry, or None if invalid."""
         key = _normalize_user(recipient)
@@ -98,6 +112,7 @@ class OfflineMessageStore:
             body = body[: self.max_text_len]
         entry = {
             "from": sender_name,
+            "to_display": (recipient or "").strip() or key,
             "text": body,
             "ts": time.time(),
         }
@@ -115,6 +130,112 @@ class OfflineMessageStore:
             self._save_locked()
             return dict(entry)
 
+    def list_sent_unread(
+        self,
+        sender: str,
+        recipient: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Unread leave-messages from sender, optionally only to one recipient.
+
+        Each item: {to, from, text, ts, index} where index is 1-based among
+        messages from this sender to that recipient (for /leave recall).
+        """
+        sender_key = _normalize_user(sender)
+        if not sender_key:
+            return []
+        only_to = _normalize_user(recipient) if recipient else ""
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            mailboxes = self._cache["mailboxes"]
+            out: list[dict[str, Any]] = []
+            keys = (
+                [only_to]
+                if only_to
+                else sorted(k for k in mailboxes if isinstance(k, str))
+            )
+            for to_key in keys:
+                if not to_key:
+                    continue
+                box = mailboxes.get(to_key)
+                if not isinstance(box, list):
+                    continue
+                idx = 0
+                for item in box:
+                    parsed = self._parse_entry(item)
+                    if parsed is None:
+                        continue
+                    if _normalize_user(parsed["from"]) != sender_key:
+                        continue
+                    idx += 1
+                    display_to = to_key
+                    if isinstance(item, dict):
+                        raw_to = str(item.get("to_display") or "").strip()
+                        if raw_to:
+                            display_to = raw_to
+                    out.append(
+                        {
+                            "to": display_to,
+                            "from": parsed["from"],
+                            "text": parsed["text"],
+                            "ts": parsed["ts"],
+                            "index": idx,
+                        }
+                    )
+            return out
+
+    def recall(
+        self,
+        sender: str,
+        recipient: str,
+        index: int,
+    ) -> dict[str, Any] | None:
+        """Remove the index-th (1-based) unread message from sender to recipient."""
+        sender_key = _normalize_user(sender)
+        to_key = _normalize_user(recipient)
+        try:
+            want = int(index)
+        except (TypeError, ValueError):
+            return None
+        if not sender_key or not to_key or want < 1:
+            return None
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            mailboxes = self._cache["mailboxes"]
+            box = mailboxes.get(to_key)
+            if not isinstance(box, list) or not box:
+                return None
+            seen = 0
+            remove_at = -1
+            removed: dict[str, Any] | None = None
+            for i, item in enumerate(box):
+                parsed = self._parse_entry(item)
+                if parsed is None:
+                    continue
+                if _normalize_user(parsed["from"]) != sender_key:
+                    continue
+                seen += 1
+                if seen == want:
+                    remove_at = i
+                    removed = {
+                        "to": to_key,
+                        "from": parsed["from"],
+                        "text": parsed["text"],
+                        "ts": parsed["ts"],
+                        "index": want,
+                    }
+                    break
+            if remove_at < 0 or removed is None:
+                return None
+            del box[remove_at]
+            if box:
+                mailboxes[to_key] = box
+            else:
+                mailboxes.pop(to_key, None)
+            self._save_locked()
+            return removed
+
     def take_all(self, recipient: str) -> list[dict[str, Any]]:
         """Pop and return all pending messages for recipient (clears mailbox)."""
         key = _normalize_user(recipient)
@@ -130,15 +251,7 @@ class OfflineMessageStore:
             self._save_locked()
             out: list[dict[str, Any]] = []
             for item in box:
-                if not isinstance(item, dict):
-                    continue
-                sender = str(item.get("from") or "?").strip() or "?"
-                text = str(item.get("text") or "").strip()
-                if not text:
-                    continue
-                try:
-                    ts = float(item.get("ts", 0))
-                except (TypeError, ValueError):
-                    ts = 0.0
-                out.append({"from": sender, "text": text, "ts": ts})
+                parsed = self._parse_entry(item)
+                if parsed is not None:
+                    out.append(parsed)
             return out
