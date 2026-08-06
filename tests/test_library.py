@@ -51,11 +51,26 @@ class TestLibraryTxt(unittest.TestCase):
     def test_list_books_filters_extensions(self) -> None:
         (self.lib_dir / "a.txt").write_text("hello", encoding="utf-8")
         (self.lib_dir / "b.pdf").write_bytes(b"%PDF-1.4\n")
-        (self.lib_dir / "skip.md").write_text("no", encoding="utf-8")
+        (self.lib_dir / "c.md").write_text("# title\n", encoding="utf-8")
+        (self.lib_dir / "skip.docx").write_bytes(b"no")
         books = library.list_books(self.lib_dir)
-        self.assertEqual(len(books), 2)
+        self.assertEqual(len(books), 3)
         self.assertEqual(books[0].name, "a.txt")
         self.assertEqual(books[1].name, "b.pdf")
+        self.assertEqual(books[2].name, "c.md")
+
+    def test_load_md_as_plain_text(self) -> None:
+        path = self.lib_dir / "notes.md"
+        path.write_text("# Hello\n\nworld " * 200, encoding="utf-8")
+        old = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 500
+        try:
+            doc = library.load_book(path)
+            self.assertEqual(doc.title, "notes")
+            self.assertGreater(len(doc.pages), 1)
+            self.assertTrue(doc.pages[0].startswith("# Hello"))
+        finally:
+            library.LIBRARY_PAGE_CHARS = old
 
     def test_load_txt_splits_pages(self) -> None:
         path = self.lib_dir / "long.txt"

@@ -296,7 +296,7 @@ npm run build:portable
 | `/leave 昵称 编号` | 撤回发给该昵称的第 N 条未读留言（别名：`/留言`、`/unmsg`） |
 | `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
 | `/game help` | 查看房间小游戏用法 |
-| `/library` | 列出图书馆书目（epub / txt / pdf）；每人自带书签，翻页自动保存 |
+| `/library` | 列出图书馆书目（epub / txt / md / pdf）；每人自带书签，翻页自动保存 |
 | `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
 | `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续）；`next` / `prev` / `page` 翻页 |
 | `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
@@ -399,7 +399,7 @@ npm run build:portable
 
 ### 图书馆
 
-服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / pdf** 图书文件。PDF 优先用 PyMuPDF 提取正文，并过滤「逐字空格」类乱序排版，避免章节标题（如 1 → 1.1 → 1.2）顺序颠倒。**首次打开大型 PDF** 服务端需解析并缓存，约需十几秒，期间会提示「正在加载…」；再次打开同一本书会即时显示。
+服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / md / pdf** 图书文件。Markdown（`.md`）按纯文本分页阅读，不渲染语法。PDF 优先用 PyMuPDF 提取正文，并过滤「逐字空格」类乱序排版，避免章节标题（如 1 → 1.1 → 1.2）顺序颠倒。**首次打开大型 PDF** 服务端需解析并缓存，约需十几秒，期间会提示「正在加载…」；再次打开同一本书会即时显示。
 
 | 命令 | 说明 |
 |------|------|

@@ -208,7 +208,7 @@ HELP_LINES = (
     "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
     "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
     "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
-    "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
+    "[*] /library       列出图书馆书目（epub / txt / md / pdf；每人自带书签，翻页自动保存）。\n",
     "[*] /lib             /library 的简写。\n",
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
     "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
@@ -1636,12 +1636,12 @@ def _send_library_catalog(conn, user: str, query: str = "") -> None:
     send_line(conn, "[*] --- 图书馆 ---\n")
     if not lib_dir.is_dir():
         send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-        send_line(conn, "[*] 请将 epub / txt / pdf 放入该目录后重试。\n")
+        send_line(conn, "[*] 请将 epub / txt / md / pdf 放入该目录后重试。\n")
         return
     catalog = library.list_books(lib_dir)
     if not catalog:
         send_line(conn, f"[*] 目录为空：{lib_dir}\n")
-        send_line(conn, "[*] 支持格式：.epub、.txt、.pdf\n")
+        send_line(conn, "[*] 支持格式：.epub、.txt、.md、.pdf\n")
         return
     query = (query or "").strip()
     books = library.search_catalog(catalog, query) if query else catalog

@@ -1,4 +1,4 @@
-"""Server-side library: list and paginate books (txt, pdf, epub) under a directory."""
+"""Server-side library: list and paginate books (txt, md, pdf, epub) under a directory."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Optional
 
-LIBRARY_EXTENSIONS = {".txt", ".pdf", ".epub"}
+LIBRARY_EXTENSIONS = {".txt", ".md", ".pdf", ".epub"}
 LIBRARY_PAGE_CHARS = int(os.environ.get("SSHCHAT_LIBRARY_PAGE_CHARS", "2500"))
 LIBRARY_WRAP_WIDTH = int(os.environ.get("SSHCHAT_LIBRARY_WRAP", "88"))
 # Many mobile SSH terminals wrap by UTF-8 bytes (~80) not Unicode columns; keep
@@ -549,7 +549,7 @@ def _load_epub(path: Path) -> BookDocument:
 
 def load_book(path: Path) -> BookDocument:
     ext = path.suffix.lower()
-    if ext == ".txt":
+    if ext in {".txt", ".md"}:
         return _load_txt(path)
     if ext == ".pdf":
         return _load_pdf(path)
