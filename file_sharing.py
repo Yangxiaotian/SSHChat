@@ -50,7 +50,7 @@ class FileTransferStore:
         self.store_path = store_path
         self.transfers: Dict[str, FileTransfer] = {}
         self.token_to_transfer: Dict[str, str] = {}  # token -> transfer_id
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Use reentrant lock to avoid deadlocks
         self.upload_complete_callback = None  # Callback when upload completes
         self._load()
         
