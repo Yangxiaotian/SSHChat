@@ -24,6 +24,8 @@ import dict_lookup
 import federation
 import games
 import library
+import file_sharing
+import file_http_server
 from offline_messages import OfflineMessageStore
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
 from session_store import DisconnectedSeat, FederatedSeat, GameSessionStore
@@ -64,6 +66,7 @@ rating_store = GameRatingStore(_rating_store_path())
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
 offline_messages = OfflineMessageStore(_offline_messages_path())
+file_http = None  # HTTP server for file transfers, initialized in main()
 
 # conn -> {"name", "rooms", "current_room"}
 clients = {}
@@ -213,9 +216,11 @@ HELP_LINES = (
     "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
     "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
-    "[*] /help          显示本说明。\n",
     "[*]\n",
-    "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
+    "[*] /sendfile <昵称> <文件名>  发送文件给用户，你将收到上传URL+密钥。\n",
+    "[*] /sendfile #<房间> <文件名>  发送文件到房间，房间成员将各自收到下载URL+密钥。\n",
+    "[*]              上传成功后URL作废；每个接收者的下载URL和密钥都不同且仅可用一次。\n",
+    "[*] /help          显示本说明。\n",
 )
 
 
@@ -2005,6 +2010,182 @@ def _handle_dict(conn, payload: str) -> None:
         send_line(conn, "[*] 词典查询失败，请稍后重试（详情见服务端日志）。\n")
 
 
+def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
+    """Notify recipients that a file is ready for download."""
+    if file_http is None:
+        return
+    
+    base_url = file_http.get_base_url()
+    
+    for recipient, token in transfer.download_tokens.items():
+        key = transfer.download_keys[recipient]
+        download_url = f"{base_url}/download/{token}?key={key}"
+        
+        message_lines = [
+            "[*] ========== 收到新文件 ==========\n",
+            f"[*] 发件人: {transfer.sender}\n",
+            f"[*] 文件名: {transfer.filename}\n",
+            f"[*] 大小: {transfer.file_size / 1024:.1f} KB\n",
+        ]
+        
+        if transfer.room:
+            message_lines.append(f"[*] 来自房间: #{transfer.room}\n")
+        
+        message_lines.extend([
+            "[*]\n",
+            "[*] 下载 URL (一次性):\n",
+            f"[*] {download_url}\n",
+            "[*]\n",
+            f"[*] 下载密钥: {key}\n",
+            "[*]\n",
+            "[*] 说明:\n",
+            "[*] 1. 访问下载 URL\n",
+            "[*] 2. 输入密钥下载文件\n",
+            "[*] 3. 下载成功后此 URL 立即作废\n",
+            "[*] 4. 每个接收者的 URL 和密钥都不同\n",
+            "[*] ================================\n",
+        ])
+        
+        message = "".join(message_lines)
+        
+        # Try to send to online users
+        recipient_lower = recipient.lower()
+        with lock:
+            for conn, info in clients.items():
+                if info["name"].lower() == recipient_lower:
+                    try:
+                        send_line(conn, message)
+                    except Exception as e:
+                        print(f"[FileTransfer] Failed to notify {recipient}: {e}")
+        
+        # For offline users, store as offline message
+        offline_messages.add_message(
+            sender="SYSTEM",
+            recipient=recipient,
+            message=message,
+            persist_now=True
+        )
+
+
+def _handle_sendfile(conn, sender: str, payload: str) -> None:
+    """Handle /sendfile command for secure file sharing."""
+    global file_http
+    
+    if file_http is None:
+        send_line(conn, "[*] 文件传输功能未启用。\n")
+        return
+    
+    raw = payload[len("/sendfile"):].strip()
+    if payload.startswith("/file"):
+        raw = payload[len("/file"):].strip()
+    
+    if not raw or raw.lower() in ("help", "?", "帮助"):
+        send_line(conn, "[*] 用法：\n")
+        send_line(conn, "[*]   /sendfile <昵称> <文件名>  - 发送给用户\n")
+        send_line(conn, "[*]   /sendfile #<房间> <文件名> - 发送到房间\n")
+        send_line(conn, "[*] 示例：\n")
+        send_line(conn, "[*]   /sendfile alice document.pdf\n")
+        send_line(conn, "[*]   /sendfile #dev screenshot.png\n")
+        return
+    
+    parts = raw.split(None, 1)
+    if len(parts) < 2:
+        send_line(conn, "[*] 用法: /sendfile <昵称|#房间> <文件名>\n")
+        return
+    
+    target = parts[0].strip()
+    filename = parts[1].strip()
+    
+    if not filename:
+        send_line(conn, "[*] 请指定文件名。\n")
+        return
+    
+    # Determine if sending to room or user
+    is_room = target.startswith("#")
+    recipients = []
+    room_name = None
+    
+    if is_room:
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+        
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            
+            # Get all users in room except sender
+            for c in rooms[room_name]:
+                if c != conn and c in clients:
+                    recipients.append(clients[c]["name"])
+        
+        if not recipients:
+            send_line(conn, f"[*] 房间 #{room_name} 中没有其他用户。\n")
+            return
+    else:
+        # Sending to specific user(s)
+        target_lower = target.lower()
+        with lock:
+            # Find all online users with this nickname
+            online_recipients = [
+                info["name"] for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        
+        if online_recipients:
+            recipients = online_recipients
+        else:
+            # User is offline, still allow sending
+            recipients = [target]
+    
+    # Create transfer session
+    try:
+        store = file_sharing.file_transfer_store
+        transfer = store.create_upload_session(
+            sender=sender,
+            filename=filename,
+            recipients=recipients,
+            room=room_name
+        )
+        
+        # Send upload URL and key to sender
+        base_url = file_http.get_base_url()
+        upload_url = f"{base_url}/upload/{transfer.upload_token}?key={transfer.upload_key}"
+        
+        send_line(conn, "[*] ========== 文件上传信息 ==========\n")
+        send_line(conn, f"[*] 文件名: {filename}\n")
+        if is_room:
+            send_line(conn, f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n")
+        else:
+            send_line(conn, f"[*] 接收者: {', '.join(recipients)}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, "[*] 上传 URL (一次性):\n")
+        send_line(conn, f"[*] {upload_url}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, f"[*] 上传密钥: {transfer.upload_key}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, "[*] 说明:\n")
+        send_line(conn, "[*] 1. 访问上传 URL\n")
+        send_line(conn, "[*] 2. 输入密钥并上传文件\n")
+        send_line(conn, "[*] 3. 上传成功后此 URL 立即作废\n")
+        send_line(conn, "[*] 4. 接收者将收到各自的下载 URL 和密钥\n")
+        send_line(conn, "[*] =====================================\n")
+        
+        # Notify recipients that a file is coming (after upload completes)
+        # This will be done via a periodic check or callback when upload completes
+        
+    except Exception as e:
+        print(f"[FileTransfer] Error creating transfer: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建文件传输失败，请稍后重试。\n")
+
+
 def _fed_snapshot_clients() -> list[dict[str, object]]:
     with lock:
         return [
@@ -2818,6 +2999,10 @@ def handle_command(conn, payload: str) -> None:
         _handle_dict(conn, payload)
         return
 
+    if cmd == "/sendfile" or cmd == "/file":
+        _handle_sendfile(conn, name, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
 
 
@@ -3336,9 +3521,40 @@ def handle_client(conn, addr) -> None:
 
 
 def run_server() -> int:
-    global _listen_socket, _shutdown_requested, _shutting_down
+    global _listen_socket, _shutdown_requested, _shutting_down, file_http
     _load_persisted_sessions()
     _ensure_federation_hub()
+    
+    # Start file HTTP server
+    file_enabled = os.environ.get("SSHCHAT_FILE_TRANSFER_ENABLED", "1") != "0"
+    if file_enabled:
+        try:
+            # Set up upload complete callback
+            file_sharing.file_transfer_store.upload_complete_callback = _notify_file_ready
+            
+            file_http = file_http_server.create_file_server()
+            file_http.start()
+            print(f"[FileTransfer] HTTP server started at {file_http.get_base_url()}")
+            
+            # Start cleanup task for expired transfers
+            def _cleanup_task():
+                while not _shutdown_requested:
+                    time.sleep(3600)  # Run every hour
+                    if not _shutdown_requested:
+                        try:
+                            file_sharing.file_transfer_store.cleanup_expired()
+                        except Exception as e:
+                            print(f"[FileTransfer] Cleanup error: {e}")
+            
+            cleanup_thread = threading.Thread(target=_cleanup_task, daemon=True)
+            cleanup_thread.start()
+            
+        except Exception as e:
+            print(f"[FileTransfer] Failed to start file server: {e}")
+            traceback.print_exc()
+            file_http = None
+    else:
+        print("[FileTransfer] File transfer disabled (SSHCHAT_FILE_TRANSFER_ENABLED=0)")
 
     def _handle_shutdown_signal(signum, _frame) -> None:
         global _shutting_down, _shutdown_requested
@@ -3350,6 +3566,11 @@ def run_server() -> int:
         )
         _safe_persist_sessions_now()
         _shutdown_requested = True
+        if file_http is not None:
+            try:
+                file_http.stop()
+            except Exception:
+                pass
         sock = _listen_socket
         if sock is not None:
             try:
