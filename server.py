@@ -199,8 +199,8 @@ HELP_LINES = (
     "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
     "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
     "[*]              昵称大小写不敏感；同昵称多人在线会全部收到；发件人会收到汇总提示。\n",
-    "[*] /leave [昵称]     查看你发出、对方尚未阅读的留言（按昵称分组编号）。\n",
-    "[*] /leave <昵称> <编号>  撤回发给该昵称的第 N 条未读留言（别名：/留言、/unmsg）。\n",
+    "[*] /leave [昵称]     查看你发出、对方尚未阅读的留言/文件（按昵称分组编号）。\n",
+    "[*] /leave <昵称> <编号>  撤回发给该昵称的第 N 条未读留言或离线文件（别名：/留言、/unmsg）。\n",
     "[*]\n",
     "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
     "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
@@ -217,9 +217,12 @@ HELP_LINES = (
     "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*]\n",
-    "[*] /sendfile <昵称> <文件名>  发送文件给用户，你将收到一次性上传网址+密钥。\n",
-    "[*] /sendfile #<房间> <文件名>  发送文件到房间，成员各自收到不同的下载网址+密钥。\n",
-    "[*]              打开网址需输入密钥；支持图片、视频、PDF等在线预览；上传/下载后网址立即失效。\n",
+    "[*] /sendfile      发送文件到当前房间，你将收到上传网址，密钥另行单独给出。\n",
+    "[*] /sendfile <昵称>    发送文件给指定用户（对方离线则留言，上线后收到；可用 /leave 查看或撤回）。\n",
+    "[*] /sendfile #<房间>   发送文件到指定房间，成员各自收到不同的下载网址+密钥。\n",
+    "[*]              文件名以你实际上传的文件为准，不必在指令里写。\n",
+    "[*]              密钥不在网址里，打开网页后另行输入；支持图片、视频、PDF等在线预览。\n",
+    "[*]              上传和下载都只能用一次，用过即作废，链接被别人截获也没用。\n",
     "[*] /help          显示本说明。\n",
 )
 
@@ -851,6 +854,93 @@ def _format_offline_ts(ts: float) -> str:
         return "?"
 
 
+def _format_file_size_kb(size: int | float) -> str:
+    try:
+        return f"{float(size) / 1024:.1f} KB"
+    except (TypeError, ValueError):
+        return "? KB"
+
+
+def _format_file_leave_summary(filename: str, file_size: int | float) -> str:
+    name = (filename or "").strip() or "file"
+    return f"[文件] {name} ({_format_file_size_kb(file_size)})"
+
+
+def _build_file_ready_message(
+    *,
+    sender: str,
+    filename: str,
+    file_size: int | float,
+    download_url: str,
+    key: str,
+    room: str | None = None,
+) -> str:
+    message_lines = [
+        "[*] ========== 收到新文件 ==========\n",
+        f"[*] 发件人: {sender}\n",
+        f"[*] 文件名: {filename}\n",
+        f"[*] 大小: {_format_file_size_kb(file_size)}\n",
+    ]
+    if room:
+        message_lines.append(f"[*] 来自房间: #{room}\n")
+    message_lines.extend([
+        "[*]\n",
+        "[*] 下载网址:\n",
+        f"[*] {download_url}\n",
+        "[*]\n",
+        f"[*] 下载密钥: {key}\n",
+        "[*]\n",
+        "[*] 说明:\n",
+        "[*] 1. 打开下载网址，在页面里输入上面的密钥\n",
+        "[*] 2. 图片、视频、PDF 等会直接预览，确认后再点按钮保存\n",
+        "[*] 3. 文件只能下载一次，存好之前别关页面\n",
+        "[*] 4. 每个接收者的网址和密钥都不同\n",
+        "[*] ================================\n",
+    ])
+    return "".join(message_lines)
+
+
+def _file_ready_message_from_leave(item: dict) -> str | None:
+    """Rebuild a full download notice from an offline file leave-message."""
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    if file_http is None:
+        return None
+    token = str(meta.get("download_token") or "").strip()
+    key = str(meta.get("download_key") or "").strip()
+    if not token or not key:
+        return None
+    filename = str(meta.get("filename") or item.get("text") or "file").strip() or "file"
+    try:
+        file_size = float(meta.get("file_size", 0))
+    except (TypeError, ValueError):
+        file_size = 0.0
+    room = meta.get("room")
+    room_name = str(room).strip() if room else None
+    download_url = f"{file_http.get_base_url()}/download/{token}"
+    return _build_file_ready_message(
+        sender=str(item.get("from") or "?"),
+        filename=filename,
+        file_size=file_size,
+        download_url=download_url,
+        key=key,
+        room=room_name or None,
+    )
+
+
+def _revoke_recalled_file(removed: dict, recipient: str) -> None:
+    """Drop download access when a pending offline file leave-message is recalled."""
+    if (removed.get("kind") or "pm") != "file":
+        return
+    meta = removed.get("meta") if isinstance(removed.get("meta"), dict) else {}
+    transfer_id = str(meta.get("transfer_id") or "").strip()
+    if not transfer_id:
+        return
+    try:
+        file_sharing.file_transfer_store.revoke_recipient(transfer_id, recipient)
+    except Exception as e:
+        print(f"[FileTransfer] Failed to revoke recalled file for {recipient}: {e}")
+
+
 def deliver_offline_messages(conn, recipient_name: str) -> int:
     """Flush stored leave-messages to this connection. Returns how many were sent."""
     pending = offline_messages.take_all(recipient_name)
@@ -861,6 +951,15 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
     for item in pending:
         when = _format_offline_ts(item.get("ts", 0))
         sender = item.get("from") or "?"
+        if (item.get("kind") or "pm") == "file":
+            notice = _file_ready_message_from_leave(item)
+            if notice:
+                send_line(conn, f"[*] （离线文件 {when}，来自 {sender}）\n")
+                send_line(conn, notice)
+            else:
+                text = item.get("text") or "[文件]"
+                send_line(conn, f"[PM from {sender}] (离线文件 {when}) {text}\n")
+            continue
         text = item.get("text") or ""
         send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
     return n
@@ -872,15 +971,15 @@ def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> No
         if recipient:
             send_line(
                 conn,
-                f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言。\n",
+                f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言或文件。\n",
             )
         else:
-            send_line(conn, "[*] 你目前没有对方尚未阅读的留言。\n")
+            send_line(conn, "[*] 你目前没有对方尚未阅读的留言或文件。\n")
         return
     if recipient:
         send_line(
             conn,
-            f"[*] 发给 {recipient!r}、对方尚未阅读的留言（共 {len(items)} 条）：\n",
+            f"[*] 发给 {recipient!r}、对方尚未阅读的留言/文件（共 {len(items)} 条）：\n",
         )
         for item in items:
             when = _format_offline_ts(item.get("ts", 0))
@@ -890,7 +989,7 @@ def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> No
             )
         send_line(conn, f"[*] 撤回：/leave {recipient} <编号>\n")
         return
-    send_line(conn, f"[*] 你发出的未读留言（共 {len(items)} 条）：\n")
+    send_line(conn, f"[*] 你发出的未读留言/文件（共 {len(items)} 条）：\n")
     current_to = None
     for item in items:
         to_name = item.get("to") or "?"
@@ -934,7 +1033,7 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
         send_line(
             conn,
             "[*] Usage: /leave [nick]  |  /leave <nick> <n>\n"
-            "[*] （列出或撤回你发出、对方尚未阅读的留言）\n",
+            "[*] （列出或撤回你发出、对方尚未阅读的留言或离线文件）\n",
         )
         return
     try:
@@ -946,14 +1045,16 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
     if removed is None:
         send_line(
             conn,
-            f"[*] 撤回失败：没有发给 {target!r} 的第 {index} 条未读留言"
+            f"[*] 撤回失败：没有发给 {target!r} 的第 {index} 条未读留言/文件"
             f"（可用 /leave {target} 查看）。\n",
         )
         return
+    _revoke_recalled_file(removed, target)
     when = _format_offline_ts(removed.get("ts", 0))
+    label = "文件" if (removed.get("kind") or "pm") == "file" else "留言"
     send_line(
         conn,
-        f"[*] 已撤回发给 {target!r} 的第 {index} 条留言"
+        f"[*] 已撤回发给 {target!r} 的第 {index} 条{label}"
         f"（{when}）：{removed.get('text')}\n",
     )
 
@@ -2013,59 +2114,59 @@ def _handle_dict(conn, payload: str) -> None:
 
 
 def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
-    """Notify recipients that a file is ready for download."""
+    """Notify recipients that a file is ready for download.
+
+    Online users get the notice immediately. Offline recipients get a leave-message
+    (kind=file) so they see it on next login, and the sender can list/recall it
+    via /leave just like a text leave-message.
+    """
     if file_http is None:
         return
-    
+
     base_url = file_http.get_base_url()
-    
+
     for recipient, token in transfer.download_tokens.items():
         key = transfer.download_keys[recipient]
-        download_url = f"{base_url}/download/{token}?key={key}"
-        
-        message_lines = [
-            "[*] ========== 收到新文件 ==========\n",
-            f"[*] 发件人: {transfer.sender}\n",
-            f"[*] 文件名: {transfer.filename}\n",
-            f"[*] 大小: {transfer.file_size / 1024:.1f} KB\n",
-        ]
-        
-        if transfer.room:
-            message_lines.append(f"[*] 来自房间: #{transfer.room}\n")
-        
-        message_lines.extend([
-            "[*]\n",
-            "[*] 下载 URL (一次性):\n",
-            f"[*] {download_url}\n",
-            "[*]\n",
-            f"[*] 下载密钥: {key}\n",
-            "[*]\n",
-            "[*] 说明:\n",
-            "[*] 1. 访问下载 URL\n",
-            "[*] 2. 输入密钥下载文件\n",
-            "[*] 3. 下载成功后此 URL 立即作废\n",
-            "[*] 4. 每个接收者的 URL 和密钥都不同\n",
-            "[*] ================================\n",
-        ])
-        
-        message = "".join(message_lines)
-        
-        # Try to send to online users
+        download_url = f"{base_url}/download/{token}"
+        message = _build_file_ready_message(
+            sender=transfer.sender,
+            filename=transfer.filename,
+            file_size=transfer.file_size,
+            download_url=download_url,
+            key=key,
+            room=transfer.room,
+        )
+
         recipient_lower = recipient.lower()
+        delivered = False
         with lock:
             for conn, info in clients.items():
-                if info["name"].lower() == recipient_lower:
-                    try:
-                        send_line(conn, message)
-                    except Exception as e:
-                        print(f"[FileTransfer] Failed to notify {recipient}: {e}")
-        
-        # For offline users, store as offline message
-        offline_messages.add_message(
-            sender="SYSTEM",
-            recipient=recipient,
-            message=message,
-            persist_now=True
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(conn, message)
+                    delivered = True
+                except Exception as e:
+                    print(f"[FileTransfer] Failed to notify {recipient}: {e}")
+
+        if delivered:
+            continue
+
+        # Offline: leave a mailbox entry the sender can also see/recall via /leave.
+        summary = _format_file_leave_summary(transfer.filename, transfer.file_size)
+        offline_messages.leave(
+            recipient,
+            transfer.sender,
+            summary,
+            kind="file",
+            meta={
+                "transfer_id": transfer.transfer_id,
+                "filename": transfer.filename,
+                "file_size": transfer.file_size,
+                "download_token": token,
+                "download_key": key,
+                "room": transfer.room,
+            },
         )
 
 
@@ -2081,38 +2182,36 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
     if payload.startswith("/file"):
         raw = payload[len("/file"):].strip()
     
-    if not raw or raw.lower() in ("help", "?", "帮助"):
+    if raw.lower() in ("help", "?", "帮助"):
         send_line(conn, "[*] 用法：\n")
-        send_line(conn, "[*]   /sendfile <昵称> <文件名>  - 发送给用户\n")
-        send_line(conn, "[*]   /sendfile #<房间> <文件名> - 发送到房间\n")
-        send_line(conn, "[*] 示例：\n")
-        send_line(conn, "[*]   /sendfile alice document.pdf\n")
-        send_line(conn, "[*]   /sendfile #dev screenshot.png\n")
+        send_line(conn, "[*]   /sendfile          - 发送到当前房间\n")
+        send_line(conn, "[*]   /sendfile <昵称>   - 发送给某个用户\n")
+        send_line(conn, "[*]   /sendfile #<房间>  - 发送到指定房间\n")
+        send_line(conn, "[*] 文件名不用写，以你上传时选的文件为准。\n")
         return
     
-    parts = raw.split(None, 1)
-    if len(parts) < 2:
-        send_line(conn, "[*] 用法: /sendfile <昵称|#房间> <文件名>\n")
-        return
-    
-    target = parts[0].strip()
-    filename = parts[1].strip()
-    
-    if not filename:
-        send_line(conn, "[*] 请指定文件名。\n")
-        return
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    extra_args = len(parts) > 1
     
     # Determine if sending to room or user
-    is_room = target.startswith("#")
     recipients = []
     room_name = None
     
-    if is_room:
+    if not target:
+        # No target: default to the room the sender is currently in
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
         room_name = normalize_room(target[1:])
         if not room_name:
             send_line(conn, "[*] 无效的房间名。\n")
             return
-        
+    
+    is_room = room_name is not None
+    
+    if is_room:
         with lock:
             if room_name not in rooms:
                 send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
@@ -2151,36 +2250,34 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         store = file_sharing.file_transfer_store
         transfer = store.create_upload_session(
             sender=sender,
-            filename=filename,
             recipients=recipients,
             room=room_name
         )
         
         # Send upload URL and key to sender
         base_url = file_http.get_base_url()
-        upload_url = f"{base_url}/upload/{transfer.upload_token}?key={transfer.upload_key}"
+        upload_url = f"{base_url}/upload/{transfer.upload_token}"
+        
+        if extra_args:
+            send_line(conn, "[*] 提示: 现在不用再写文件名，直接 /sendfile 即可。\n")
         
         send_line(conn, "[*] ========== 文件上传信息 ==========\n")
-        send_line(conn, f"[*] 文件名: {filename}\n")
         if is_room:
             send_line(conn, f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n")
         else:
             send_line(conn, f"[*] 接收者: {', '.join(recipients)}\n")
         send_line(conn, "[*]\n")
-        send_line(conn, "[*] 上传 URL (一次性):\n")
+        send_line(conn, "[*] 上传网址:\n")
         send_line(conn, f"[*] {upload_url}\n")
         send_line(conn, "[*]\n")
         send_line(conn, f"[*] 上传密钥: {transfer.upload_key}\n")
         send_line(conn, "[*]\n")
         send_line(conn, "[*] 说明:\n")
-        send_line(conn, "[*] 1. 访问上传 URL\n")
-        send_line(conn, "[*] 2. 输入密钥并上传文件\n")
-        send_line(conn, "[*] 3. 上传成功后此 URL 立即作废\n")
-        send_line(conn, "[*] 4. 接收者将收到各自的下载 URL 和密钥\n")
+        send_line(conn, "[*] 1. 打开上传网址，在页面里输入上面的密钥\n")
+        send_line(conn, "[*] 2. 选择要发的文件并上传，文件名以所选文件为准\n")
+        send_line(conn, "[*] 3. 上传成功即完成，此网址随后作废\n")
+        send_line(conn, "[*] 4. 接收者将收到各自的下载网址和密钥，各自只能下载一次\n")
         send_line(conn, "[*] =====================================\n")
-        
-        # Notify recipients that a file is coming (after upload completes)
-        # This will be done via a periodic check or callback when upload completes
         
     except Exception as e:
         print(f"[FileTransfer] Error creating transfer: {e}")

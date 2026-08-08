@@ -28,17 +28,16 @@ def test_file_transfer_store():
             store_path=store_path
         )
         
-        # Test 1: Create upload session
+        # Test 1: Create upload session (no filename: it comes from the upload)
         print("  Test 1: Create upload session...")
         transfer = store.create_upload_session(
             sender="alice",
-            filename="test.txt",
             recipients=["bob", "charlie"],
             room=None
         )
         
         assert transfer.sender == "alice"
-        assert transfer.filename == "test.txt"
+        assert transfer.filename == ""
         assert len(transfer.upload_token) > 0
         assert len(transfer.upload_key) == 6
         assert not transfer.upload_used
@@ -63,7 +62,7 @@ def test_file_transfer_store():
         print("  Test 3: Validate upload with wrong key...")
         valid, t, error = store.validate_upload(transfer.upload_token, "WRONG1")
         assert not valid
-        assert "Invalid upload key" in error
+        assert "上传密钥" in error
         print("    ✓ Wrong key rejected correctly")
         
         # Test 4: Mark upload complete
@@ -78,7 +77,9 @@ def test_file_transfer_store():
         original_callback = store.upload_complete_callback
         store.upload_complete_callback = None
         
-        success = store.mark_upload_complete(transfer.upload_token, test_file, file_size)
+        success = store.mark_upload_complete(
+            transfer.upload_token, test_file, file_size, "C:\\docs\\test.txt"
+        )
         assert success
         
         store.upload_complete_callback = original_callback
@@ -88,6 +89,8 @@ def test_file_transfer_store():
         assert transfer.upload_used
         assert transfer.file_path == test_file
         assert transfer.file_size == file_size
+        # Filename is taken from the uploaded file, with any path stripped
+        assert transfer.filename == "test.txt"
         print("    ✓ Upload marked complete")
         
         # Test 5: Validate download with correct key
@@ -104,7 +107,7 @@ def test_file_transfer_store():
         print("  Test 6: Validate download with wrong key...")
         valid, t, error = store.validate_download(bob_token, "WRONG2")
         assert not valid
-        assert "Invalid download key" in error
+        assert "下载密钥" in error
         print("    ✓ Wrong download key rejected")
         
         # Test 7: Mark download complete
@@ -117,12 +120,20 @@ def test_file_transfer_store():
         assert transfer.download_used[bob_token]
         print("    ✓ Download marked complete")
         
-        # Test 8: Cannot download again with used token
-        print("  Test 8: Cannot reuse download URL...")
+        # Test 8: A completed download retires the link by default
+        print("  Test 8: Download URL cannot be reused...")
         valid, t, error = store.validate_download(bob_token, bob_key)
         assert not valid
-        assert "already used" in error
-        print("    ✓ Used download URL rejected")
+        assert "已使用过" in error
+        
+        # ...unless one-time downloads are explicitly turned off
+        file_sharing.ONE_TIME_DOWNLOAD = False
+        try:
+            valid, t, error = store.validate_download(bob_token, bob_key)
+            assert valid, f"Reuse should be allowed when opted out: {error}"
+        finally:
+            file_sharing.ONE_TIME_DOWNLOAD = True
+        print("    ✓ One-time by default, reusable only when explicitly opted out")
         
         # Test 9: Charlie can still download
         print("  Test 9: Other recipient can still download...")
@@ -133,11 +144,46 @@ def test_file_transfer_store():
         assert valid, f"Charlie's download validation failed: {error}"
         print("    ✓ Other recipient's download still valid")
         
+        # Test 9b: Tickets are single-use and separate per purpose
+        print("  Test 9b: Single-use preview/download tickets...")
+        t, tickets, error = store.issue_tickets(charlie_token, charlie_key)
+        assert t is not None, error
+        assert set(tickets) == {"preview", "download"}
+        assert tickets["preview"] != tickets["download"]
+        
+        # A wrong key mints nothing
+        _, empty, error = store.issue_tickets(charlie_token, "WRONG3")
+        assert not empty and "密钥" in error
+        
+        # Each ticket works exactly once
+        got, entry, error = store.consume_ticket(tickets["preview"])
+        assert got is not None and entry.kind == "preview", error
+        got, entry, error = store.consume_ticket(tickets["preview"])
+        assert got is None and "已被使用" in error, "preview ticket was replayable"
+        
+        # Previewing leaves the download link alone
+        valid, _, error = store.validate_download(charlie_token, charlie_key)
+        assert valid, f"preview must not consume the download link: {error}"
+        
+        got, entry, error = store.consume_ticket(tickets["download"])
+        assert got is not None and entry.kind == "download", error
+        got, _, error = store.consume_ticket(tickets["download"])
+        assert got is None and "已被使用" in error, "download ticket was replayable"
+        
+        # Re-entering the key retires whatever was minted before
+        _, first, _ = store.issue_tickets(charlie_token, charlie_key)
+        _, second, _ = store.issue_tickets(charlie_token, charlie_key)
+        assert first["download"] != second["download"]
+        got, _, error = store.consume_ticket(first["download"])
+        assert got is None, "superseded ticket stayed valid"
+        got, _, error = store.consume_ticket(second["download"])
+        assert got is not None, error
+        print("    ✓ Tickets are per-purpose, single-use and superseded on reissue")
+        
         # Test 10: Room transfer
         print("  Test 10: Room transfer...")
         room_transfer = store.create_upload_session(
             sender="dave",
-            filename="room_file.pdf",
             recipients=["eve", "frank"],
             room="testroom"
         )

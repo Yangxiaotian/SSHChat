@@ -31,13 +31,12 @@ print(f"   ✓ Generated key: {key}")
 print("\n2. Creating upload session...")
 transfer = store.create_upload_session(
     sender="alice",
-    filename="document.pdf",
     recipients=["bob", "charlie"],
     room=None
 )
 
 assert transfer.sender == "alice"
-assert transfer.filename == "document.pdf"
+assert transfer.filename == ""
 assert len(transfer.upload_token) > 0
 assert len(transfer.upload_key) == 6
 assert not transfer.upload_used
@@ -66,7 +65,7 @@ print("   ✓ Upload validation successful")
 print("\n5. Testing wrong key rejection...")
 valid, t, error = store.validate_upload(transfer.upload_token, "WRONG1")
 assert not valid
-assert "Invalid upload key" in error
+assert "上传密钥" in error
 print(f"   ✓ Wrong key rejected: {error}")
 
 # Test 6: Mark upload complete (without callback)
@@ -77,12 +76,13 @@ with tempfile.NamedTemporaryFile(delete=False) as f:
 
 file_size = os.path.getsize(test_file)
 store.upload_complete_callback = None  # Disable callback
-success = store.mark_upload_complete(transfer.upload_token, test_file, file_size)
+success = store.mark_upload_complete(transfer.upload_token, test_file, file_size, "document.pdf")
 assert success
 
 transfer = store.get_transfer_by_token(transfer.upload_token)
 assert transfer.upload_used
 assert transfer.file_path == test_file
+assert transfer.filename == "document.pdf"
 print(f"   ✓ Upload marked complete, size: {file_size} bytes")
 
 # Test 7: Validate download
@@ -103,18 +103,17 @@ transfer = store.get_transfer_by_token(bob_token)
 assert transfer.download_used[bob_token]
 print("   ✓ Download marked complete")
 
-# Test 9: Cannot reuse download URL
+# Test 9: A completed download retires the link
 print("\n9. Testing download URL reuse prevention...")
 valid, t, error = store.validate_download(bob_token, bob_key)
 assert not valid
-assert "already used" in error
+assert "已使用过" in error
 print(f"   ✓ Used URL rejected: {error}")
 
 # Test 10: Room transfer
 print("\n10. Testing room transfer...")
 room_transfer = store.create_upload_session(
     sender="dave",
-    filename="presentation.pptx",
     recipients=["eve", "frank", "grace"],
     room="meeting"
 )

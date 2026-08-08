@@ -99,23 +99,44 @@ class OfflineMessageStore:
             ts = float(item.get("ts", 0))
         except (TypeError, ValueError):
             ts = 0.0
-        return {"from": sender, "text": text, "ts": ts}
+        kind = str(item.get("kind") or "pm").strip() or "pm"
+        out: dict[str, Any] = {"from": sender, "text": text, "ts": ts, "kind": kind}
+        meta = item.get("meta")
+        if isinstance(meta, dict):
+            out["meta"] = dict(meta)
+        return out
 
-    def leave(self, recipient: str, sender: str, text: str) -> dict[str, Any] | None:
-        """Enqueue a leave-message. Returns the stored entry, or None if invalid."""
+    def leave(
+        self,
+        recipient: str,
+        sender: str,
+        text: str,
+        *,
+        kind: str = "pm",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Enqueue a leave-message. Returns the stored entry, or None if invalid.
+
+        kind=\"file\" stores an offline file notice (see meta for transfer details).
+        File summaries are not truncated by max_text_len so listing stays readable.
+        """
         key = _normalize_user(recipient)
         sender_name = (sender or "").strip() or "?"
         body = (text or "").strip()
         if not key or not body:
             return None
-        if len(body) > self.max_text_len:
+        msg_kind = (kind or "pm").strip() or "pm"
+        if msg_kind != "file" and len(body) > self.max_text_len:
             body = body[: self.max_text_len]
-        entry = {
+        entry: dict[str, Any] = {
             "from": sender_name,
             "to_display": (recipient or "").strip() or key,
             "text": body,
             "ts": time.time(),
+            "kind": msg_kind,
         }
+        if isinstance(meta, dict) and meta:
+            entry["meta"] = dict(meta)
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
@@ -173,15 +194,17 @@ class OfflineMessageStore:
                         raw_to = str(item.get("to_display") or "").strip()
                         if raw_to:
                             display_to = raw_to
-                    out.append(
-                        {
-                            "to": display_to,
-                            "from": parsed["from"],
-                            "text": parsed["text"],
-                            "ts": parsed["ts"],
-                            "index": idx,
-                        }
-                    )
+                    row = {
+                        "to": display_to,
+                        "from": parsed["from"],
+                        "text": parsed["text"],
+                        "ts": parsed["ts"],
+                        "index": idx,
+                        "kind": parsed.get("kind") or "pm",
+                    }
+                    if "meta" in parsed:
+                        row["meta"] = parsed["meta"]
+                    out.append(row)
             return out
 
     def recall(
@@ -224,7 +247,10 @@ class OfflineMessageStore:
                         "text": parsed["text"],
                         "ts": parsed["ts"],
                         "index": want,
+                        "kind": parsed.get("kind") or "pm",
                     }
+                    if "meta" in parsed:
+                        removed["meta"] = parsed["meta"]
                     break
             if remove_at < 0 or removed is None:
                 return None

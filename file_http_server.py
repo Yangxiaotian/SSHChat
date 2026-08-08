@@ -2,29 +2,39 @@
 HTTP server for file uploads and downloads with one-time URLs.
 
 Provides:
-- Upload page: GET /upload/<token> - Shows HTML form with key input
-- Upload endpoint: POST /upload/<token> - Handles file upload with key
-- Download page: GET /download/<token> - Shows HTML page with key input and preview
-- Download file: GET /download/<token>/file?key=<key> - Direct file download
+- Upload page:     GET  /upload/<token>          - HTML form with key input
+- Upload endpoint: POST /upload/<token>          - Upload, key in X-Upload-Key header
+- Download page:   GET  /download/<token>        - HTML page with key input and preview
+- Ticket exchange: POST /download/<token>/ticket - Key in body, returns two one-time links
+- File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - HTTPS support with auto-generated or provided certificates
+
+No key is ever carried in a URL, and every URL that serves file bytes is
+single-use, so capturing one off the wire does not allow a replay.
 """
 
 import os
 import cgi
+import html
 import json
 import ssl
 import subprocess
 import threading
 import mimetypes
+import socket
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, quote
 from pathlib import Path
 from typing import Optional
 import file_sharing
 
 
 MAX_FILE_SIZE = int(os.environ.get("SSHCHAT_MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
+
+# Preview pulls the whole file into the page at once, so keep it off very large
+# files; those go straight to the download button instead.
+MAX_PREVIEW_SIZE = int(os.environ.get("SSHCHAT_MAX_PREVIEW_SIZE", str(25 * 1024 * 1024)))
 
 # File types that can be previewed in browser
 PREVIEWABLE_TYPES = {
@@ -51,6 +61,34 @@ def get_mime_type(filename: str) -> str:
 def is_previewable(mime_type: str) -> bool:
     """Check if a file type can be previewed in browser."""
     return mime_type in PREVIEWABLE_TYPES
+
+
+def _detect_lan_ip() -> str:
+    """Best-effort guess of an address other machines can reach us on."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1)
+            # No packet is actually sent; this just picks the outbound interface
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def content_disposition(filename: str, inline: bool) -> str:
+    """Build a Content-Disposition header that survives non-ASCII filenames."""
+    disposition = "inline" if inline else "attachment"
+    ascii_fallback = filename.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
 def generate_upload_page(token: str, error: str = "") -> str:
@@ -200,16 +238,15 @@ def generate_upload_page(token: str, error: str = "") -> str:
 <body>
     <div class="container">
         <h1>🔒 安全文件上传</h1>
-        <p class="subtitle">一次性上传链接，上传后立即失效</p>
+        <p class="subtitle">上传成功后此链接即完成使命</p>
         
-        {"<div class='error'>" + error + "</div>" if error else ""}
+        {"<div class='error'>" + html.escape(error) + "</div>" if error else ""}
         
         <div class="info">
             ℹ️ <strong>使用说明：</strong><br>
-            1. 输入您收到的6位上传密钥<br>
-            2. 选择要上传的文件<br>
-            3. 点击上传按钮<br>
-            4. 上传成功后此链接将立即失效
+            1. 输入聊天窗里单独发给你的6位上传密钥<br>
+            2. 选择要上传的文件（文件名以你选的文件为准）<br>
+            3. 点击上传按钮，接收者会收到下载链接
         </div>
         
         <form id="uploadForm" method="POST" enctype="multipart/form-data">
@@ -248,6 +285,7 @@ def generate_upload_page(token: str, error: str = "") -> str:
         const progress = document.getElementById('progress');
         const progressFill = document.getElementById('progressFill');
         const progressText = document.getElementById('progressText');
+        const uploadUrl = '/upload/{token}';
         
         // Auto uppercase key input
         keyInput.addEventListener('input', function(e) {{
@@ -289,12 +327,15 @@ def generate_upload_page(token: str, error: str = "") -> str:
             formData.append('file', file);
             
             try {{
-                const response = await fetch('?key=' + encodeURIComponent(key), {{
+                // The key goes in a header, never in the URL, so it stays out
+                // of browser history, proxy logs and Referer headers.
+                const response = await fetch(uploadUrl, {{
                     method: 'POST',
+                    headers: {{ 'X-Upload-Key': key }},
                     body: formData
                 }});
                 
-                const result = await response.json();
+                const result = await response.json().catch(() => ({{}}));
                 
                 if (response.ok) {{
                     progressFill.style.width = '100%';
@@ -302,9 +343,9 @@ def generate_upload_page(token: str, error: str = "") -> str:
                     progressText.style.color = '#4caf50';
                     
                     setTimeout(() => {{
-                        alert('上传成功！\\n\\n接收者将收到下载通知。\\n\\n此上传链接已失效。');
-                        window.location.reload();
-                    }}, 1000);
+                        const name = result.filename || file.name;
+                        alert('上传成功！\\n\\n文件名：' + name + '\\n\\n接收者已收到下载链接，无需再做别的操作。');
+                    }}, 800);
                 }} else {{
                     throw new Error(result.error || '上传失败');
                 }}
@@ -320,17 +361,149 @@ def generate_upload_page(token: str, error: str = "") -> str:
 </html>"""
 
 
+DOWNLOAD_PAGE_SCRIPT = r"""
+        const form = document.getElementById('downloadForm');
+        const keyInput = document.getElementById('key');
+        const submitBtn = document.getElementById('submitBtn');
+        const previewContainer = document.getElementById('previewContainer');
+        const previewContent = document.getElementById('previewContent');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const canPreview = __CAN_PREVIEW__;
+        const mimeType = __MIME_TYPE__;
+        const filename = __FILENAME__;
+        const ticketEndpoint = __TICKET_ENDPOINT__;
+        let downloadUrl = '';
+
+        keyInput.addEventListener('input', function () {
+            this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        });
+
+        form.addEventListener('submit', async function (e) {
+            e.preventDefault();
+
+            const key = keyInput.value.trim();
+            if (!key || key.length !== 6) {
+                alert('请输入6位密钥');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = '验证中...';
+
+            let tickets;
+            try {
+                // The key travels in the request body, never in a URL, so it
+                // stays out of history, proxy logs and Referer headers.
+                const response = await fetch(ticketEndpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: key })
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(result.error || '验证失败');
+                }
+                tickets = result;
+            } catch (error) {
+                alert(error.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🔁 重试';
+                return;
+            }
+
+            downloadUrl = tickets.download;
+            keyInput.disabled = true;
+
+            if (canPreview && tickets.preview) {
+                await loadPreview(tickets.preview);
+            } else {
+                previewContainer.classList.add('show');
+                previewContent.innerHTML = '<p>验证成功，点击下方按钮保存文件。</p>';
+                submitBtn.textContent = '✅ 验证成功';
+            }
+        });
+
+        async function loadPreview(previewUrl) {
+            submitBtn.textContent = '加载中...';
+            try {
+                // Fetched once through a single-use ticket, then rendered from
+                // an in-page blob so media never re-requests the server.
+                const response = await fetch(previewUrl);
+                if (!response.ok) {
+                    const reason = await response.json().catch(() => ({}));
+                    throw new Error(reason.error || ('服务器返回 ' + response.status));
+                }
+                const blob = await response.blob();
+
+                if (mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/xml') {
+                    const text = await blob.text();
+                    previewContent.innerHTML = '<pre></pre>';
+                    previewContent.firstChild.textContent = text.substring(0, 10000);
+                } else {
+                    const objectUrl = URL.createObjectURL(blob);
+                    if (mimeType.startsWith('image/')) {
+                        const img = document.createElement('img');
+                        img.src = objectUrl;
+                        img.alt = filename;
+                        previewContent.replaceChildren(img);
+                    } else if (mimeType.startsWith('video/')) {
+                        const video = document.createElement('video');
+                        video.controls = true;
+                        video.src = objectUrl;
+                        previewContent.replaceChildren(video);
+                    } else if (mimeType.startsWith('audio/')) {
+                        const audio = document.createElement('audio');
+                        audio.controls = true;
+                        audio.src = objectUrl;
+                        previewContent.replaceChildren(audio);
+                    } else if (mimeType === 'application/pdf') {
+                        const frame = document.createElement('iframe');
+                        frame.src = objectUrl;
+                        previewContent.replaceChildren(frame);
+                    }
+                }
+
+                previewContainer.classList.add('show');
+                submitBtn.textContent = '✅ 验证成功';
+            } catch (error) {
+                previewContainer.classList.add('show');
+                previewContent.innerHTML = '<p>预览失败，仍可直接下载。</p>';
+                submitBtn.textContent = '⚠️ 预览失败';
+            }
+        }
+
+        function downloadFile() {
+            if (!downloadUrl) {
+                alert('请先输入密钥');
+                return;
+            }
+            window.location.href = downloadUrl;
+            downloadUrl = '';
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = '⬇️ 已开始下载，本链接已作废';
+        }
+"""
+
+
 def generate_download_page(token: str, filename: str, file_size: int, mime_type: str) -> str:
     """Generate HTML download page with preview support."""
-    can_preview = is_previewable(mime_type)
+    can_preview = is_previewable(mime_type) and file_size <= MAX_PREVIEW_SIZE
     size_mb = file_size / 1024 / 1024
+    safe_filename = html.escape(filename)
+    download_script = (
+        DOWNLOAD_PAGE_SCRIPT
+        .replace("__CAN_PREVIEW__", "true" if can_preview else "false")
+        .replace("__MIME_TYPE__", json.dumps(mime_type))
+        .replace("__FILENAME__", json.dumps(filename))
+        .replace("__TICKET_ENDPOINT__", json.dumps(f"/download/{token}/ticket"))
+    )
     
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件下载 - {filename}</title>
+    <title>文件下载 - {safe_filename}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -506,14 +679,14 @@ def generate_download_page(token: str, filename: str, file_size: int, mime_type:
     <div class="container">
         <div class="header">
             <h1>📥 安全文件下载</h1>
-            <p class="subtitle">一次性下载链接，下载后立即失效</p>
+            <p class="subtitle">专属下载链接，需要密钥才能打开</p>
         </div>
         
         <div class="content">
             <div class="file-info">
                 <div class="file-info-row">
                     <span class="file-info-label">📄 文件名：</span>
-                    <span class="file-info-value">{filename}</span>
+                    <span class="file-info-value">{safe_filename}</span>
                 </div>
                 <div class="file-info-row">
                     <span class="file-info-label">📦 文件大小：</span>
@@ -531,8 +704,8 @@ def generate_download_page(token: str, filename: str, file_size: int, mime_type:
             
             <div class="info">
                 ℹ️ <strong>使用说明：</strong><br>
-                1. 输入您收到的6位下载密钥<br>
-                {'2. 系统将自动预览文件（如支持）<br>3. 点击下载按钮获取文件<br>4. 下载后此链接将立即失效' if can_preview else '2. 点击下载按钮获取文件<br>3. 下载后此链接将立即失效'}
+                1. 输入聊天窗里单独发给你的6位下载密钥<br>
+                {'2. 预览和下载会各自生成一条一次性链接<br>3. 点击下载按钮保存文件<br>4. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开' if can_preview else '2. 点击下载按钮保存文件<br>3. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开'}
             </div>
             
             <form id="downloadForm">
@@ -561,88 +734,7 @@ def generate_download_page(token: str, filename: str, file_size: int, mime_type:
     </div>
     
     <script>
-        const form = document.getElementById('downloadForm');
-        const keyInput = document.getElementById('key');
-        const submitBtn = document.getElementById('submitBtn');
-        const previewContainer = document.getElementById('previewContainer');
-        const previewContent = document.getElementById('previewContent');
-        const canPreview = {str(can_preview).lower()};
-        const mimeType = '{mime_type}';
-        const filename = '{filename}';
-        let downloadKey = '';
-        
-        // Auto uppercase key input
-        keyInput.addEventListener('input', function(e) {{
-            this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-        }});
-        
-        form.addEventListener('submit', async function(e) {{
-            e.preventDefault();
-            
-            const key = keyInput.value.trim();
-            
-            if (!key || key.length !== 6) {{
-                alert('请输入6位密钥');
-                return;
-            }}
-            
-            downloadKey = key;
-            
-            if (canPreview) {{
-                await loadPreview(key);
-            }} else {{
-                downloadFile();
-            }}
-        }});
-        
-        async function loadPreview(key) {{
-            submitBtn.disabled = true;
-            submitBtn.textContent = '加载中...';
-            
-            try {{
-                const fileUrl = `file?key=${{encodeURIComponent(key)}}`;
-                
-                if (mimeType.startsWith('image/')) {{
-                    previewContent.innerHTML = `<img src="${{fileUrl}}" alt="${{filename}}">`;
-                }} else if (mimeType.startsWith('video/')) {{
-                    previewContent.innerHTML = `<video controls><source src="${{fileUrl}}" type="${{mimeType}}"></video>`;
-                }} else if (mimeType.startsWith('audio/')) {{
-                    previewContent.innerHTML = `<audio controls><source src="${{fileUrl}}" type="${{mimeType}}"></audio>`;
-                }} else if (mimeType === 'application/pdf') {{
-                    previewContent.innerHTML = `<iframe src="${{fileUrl}}"></iframe>`;
-                }} else if (mimeType.startsWith('text/')) {{
-                    const response = await fetch(fileUrl);
-                    const text = await response.text();
-                    previewContent.innerHTML = `<pre>${{escapeHtml(text.substring(0, 10000))}}</pre>`;
-                }}
-                
-                previewContainer.classList.add('show');
-                submitBtn.textContent = '✅ 验证成功';
-            }} catch (error) {{
-                alert('预览加载失败：' + error.message);
-                submitBtn.disabled = false;
-                submitBtn.textContent = '🔍 重试';
-            }}
-        }}
-        
-        function downloadFile() {{
-            if (!downloadKey) {{
-                alert('请先输入密钥');
-                return;
-            }}
-            
-            window.location.href = `file?key=${{encodeURIComponent(downloadKey)}}`;
-            
-            setTimeout(() => {{
-                alert('下载已开始！\\n\\n此下载链接已失效。');
-            }}, 1000);
-        }}
-        
-        function escapeHtml(text) {{
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }}
+{download_script}
     </script>
 </body>
 </html>"""
@@ -657,19 +749,43 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def _send_json_response(self, code: int, data: dict):
         """Send JSON response."""
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        self.wfile.write(body)
+    
+    def _drain_request_body(self, limit: int = 8 * 1024 * 1024):
+        """Consume a rejected request body so the client can read our response.
+        
+        Closing the socket while the client is still sending resets the
+        connection, which surfaces in the browser as an opaque network error
+        instead of the actual reason for the rejection.
+        """
+        try:
+            remaining = min(int(self.headers.get('Content-Length') or 0), limit)
+        except ValueError:
+            return
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
     
     def _send_error_json(self, code: int, message: str):
         """Send JSON error response."""
         self._send_json_response(code, {'error': message})
     
+    def _reject_upload(self, code: int, message: str):
+        """Reject an in-flight upload without resetting the connection."""
+        self._drain_request_body()
+        self._send_error_json(code, message)
+    
     def _send_html_error(self, code: int, message: str):
         """Send HTML error page."""
-        html = f"""<!DOCTYPE html>
+        page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -713,49 +829,79 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     <div class="container">
         <h1>❌</h1>
         <h2>错误 {code}</h2>
-        <p>{message}</p>
+        <p>{html.escape(message)}</p>
     </div>
 </body>
 </html>"""
+        body = page.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(html.encode('utf-8'))))
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(html.encode('utf-8'))
+        self.wfile.write(body)
     
-    def do_OPTIONS(self):
-        """Handle CORS preflight."""
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+    def _read_json_body(self, limit: int = 64 * 1024) -> dict:
+        """Read a small JSON request body, e.g. the one carrying a key."""
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            return {}
+        if length <= 0 or length > limit:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode('utf-8'))
+        except Exception:
+            return {}
     
     def do_POST(self):
-        """Handle file upload."""
+        """Handle key exchange and file upload."""
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
+        store = file_sharing.file_transfer_store
+        
+        # Trade a correct key for single-use preview/download tickets. The key
+        # arrives in the body so it never lands in a URL.
+        if len(path_parts) == 3 and path_parts[0] == 'download' and path_parts[2] == 'ticket':
+            token = path_parts[1]
+            key = str(self._read_json_body().get('key', '')).strip().upper()
+            if not key:
+                self._send_error_json(400, "缺少密钥")
+                return
+            
+            transfer, tickets, error = store.issue_tickets(token, key)
+            if not transfer:
+                self._send_error_json(403, error)
+                return
+            
+            mime_type = get_mime_type(transfer.filename)
+            previewable = (is_previewable(mime_type)
+                           and transfer.file_size <= MAX_PREVIEW_SIZE)
+            self._send_json_response(200, {
+                'preview': f"/f/{tickets['preview']}" if previewable else None,
+                'download': f"/f/{tickets['download']}",
+                'filename': transfer.filename,
+                'mime': mime_type,
+            })
+            return
         
         if len(path_parts) < 2 or path_parts[0] != 'upload':
-            self._send_error_json(404, "Not found")
+            self._reject_upload(404, "网址无效")
             return
         
         token = path_parts[1]
-        query_params = parse_qs(parsed.query)
-        key = query_params.get('key', [''])[0]
+        # The upload key rides in a header for the same reason.
+        key = (self.headers.get('X-Upload-Key') or '').strip().upper()
         
-        # Validate token and key
-        store = file_sharing.file_transfer_store
         valid, transfer, error = store.validate_upload(token, key)
         
         if not valid:
-            self._send_error_json(403, error)
+            self._reject_upload(403, error)
             return
         
         # Parse multipart form data
         content_type = self.headers.get('Content-Type', '')
         if not content_type.startswith('multipart/form-data'):
-            self._send_error_json(400, "Content-Type must be multipart/form-data")
+            self._reject_upload(400, "请求格式不正确")
             return
         
         try:
@@ -770,12 +916,12 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             )
             
             if 'file' not in form:
-                self._send_error_json(400, "No file uploaded")
+                self._send_error_json(400, "没有选择文件")
                 return
             
             file_item = form['file']
             if not file_item.file:
-                self._send_error_json(400, "No file content")
+                self._send_error_json(400, "文件内容为空")
                 return
             
             # Check file size
@@ -784,15 +930,21 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             file_item.file.seek(0)  # Seek back to start
             
             if file_size > MAX_FILE_SIZE:
-                self._send_error_json(413, f"File too large (max {MAX_FILE_SIZE / 1024 / 1024:.0f}MB)")
+                self._send_error_json(413, f"文件太大，最大 {MAX_FILE_SIZE / 1024 / 1024:.0f}MB")
                 return
             
             if file_size == 0:
-                self._send_error_json(400, "Empty file")
+                self._send_error_json(400, "文件内容为空")
                 return
             
+            # The filename comes from the uploaded file itself, so the sender
+            # never has to type it into the chat command.
+            filename = file_sharing.sanitize_filename(
+                file_item.filename or transfer.filename or "file"
+            )
+            
             # Save file
-            file_path = store.get_file_path(transfer.transfer_id, transfer.filename)
+            file_path = store.get_file_path(transfer.transfer_id, filename)
             with open(file_path, 'wb') as f:
                 while True:
                     chunk = file_item.file.read(8192)
@@ -801,147 +953,133 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                     f.write(chunk)
             
             # Mark upload complete
-            store.mark_upload_complete(token, file_path, file_size)
+            store.mark_upload_complete(token, file_path, file_size, filename)
             
             self._send_json_response(200, {
                 'success': True,
                 'message': 'File uploaded successfully',
-                'filename': transfer.filename,
+                'filename': filename,
                 'size': file_size
             })
             
         except Exception as e:
             print(f"[FileHTTP] Upload error: {e}")
-            self._send_error_json(500, "Upload failed")
+            self._send_error_json(500, "上传失败，请重试")
+    
+    def _send_html_page(self, markup: str):
+        body = markup.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+    
+    def _serve_ticket(self, ticket: str):
+        """Serve the file bytes for one single-use ticket."""
+        store = file_sharing.file_transfer_store
+        transfer, entry, error = store.consume_ticket(ticket)
+        
+        if not transfer:
+            self._send_error_json(403, error)
+            return
+        
+        if not transfer.file_path or not os.path.exists(transfer.file_path):
+            self._send_error_json(404, "文件已不存在")
+            return
+        
+        mime_type = get_mime_type(transfer.filename)
+        inline = entry.kind == 'preview'
+        
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', mime_type)
+            self.send_header('Content-Disposition',
+                           content_disposition(transfer.filename, inline))
+            self.send_header('Content-Length', str(os.path.getsize(transfer.file_path)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            
+            with open(transfer.file_path, 'rb') as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except Exception as e:
+            # The ticket is already spent; a failed transfer is retried by
+            # re-entering the key, which mints a fresh one.
+            print(f"[FileHTTP] Download error: {e}")
+            return
+        
+        # Only a completed download retires the recipient's link
+        if entry.kind == 'download':
+            token = store.download_token_for(transfer, entry.recipient)
+            if token:
+                store.mark_download_complete(token)
     
     def do_GET(self):
-        """Handle file download page or direct file download."""
+        """Handle the upload/download pages and ticketed file fetches."""
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
+        store = file_sharing.file_transfer_store
         
         if len(path_parts) < 2:
-            self._send_error_json(404, "Not found")
+            self._send_error_json(404, "网址无效")
+            return
+        
+        # Bytes are only ever served through a single-use ticket
+        if path_parts[0] == 'f' and len(path_parts) == 2:
+            self._serve_ticket(path_parts[1])
             return
         
         if path_parts[0] == 'upload':
-            # Show upload page
             token = path_parts[1]
-            store = file_sharing.file_transfer_store
             transfer = store.get_transfer_by_token(token)
             
             if not transfer or transfer.upload_token != token:
-                self._send_html_error(404, "Invalid upload link")
+                self._send_html_error(404, "上传链接无效")
                 return
             
             if transfer.upload_used:
-                self._send_html_error(403, "Upload link already used")
+                self._send_html_error(403, "该上传链接已使用过，请让发送方重新执行 /sendfile")
                 return
             
             if time.time() > transfer.upload_expires:
-                self._send_html_error(403, "Upload link expired")
+                self._send_html_error(403, "上传链接已过期")
                 return
             
-            # Send upload page
-            html = generate_upload_page(token)
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(html.encode('utf-8'))))
-            self.end_headers()
-            self.wfile.write(html.encode('utf-8'))
+            self._send_html_page(generate_upload_page(token))
             return
         
-        if path_parts[0] == 'download':
+        if path_parts[0] == 'download' and len(path_parts) == 2:
             token = path_parts[1]
-            store = file_sharing.file_transfer_store
+            transfer = store.get_transfer_by_token(token)
             
-            # Check if this is a file download request
-            if len(path_parts) == 3 and path_parts[2] == 'file':
-                # Direct file download/preview
-                query_params = parse_qs(parsed.query)
-                key = query_params.get('key', [''])[0]
-                
-                if not key:
-                    self._send_error_json(400, "Missing key parameter")
-                    return
-                
-                # Validate token and key
-                valid, transfer, error = store.validate_download(token, key)
-                
-                if not valid:
-                    self._send_error_json(403, error)
-                    return
-                
-                if not transfer.file_path or not os.path.exists(transfer.file_path):
-                    self._send_error_json(404, "File not found")
-                    return
-                
-                try:
-                    # Determine MIME type
-                    mime_type = get_mime_type(transfer.filename)
-                    
-                    # Send file
-                    self.send_response(200)
-                    self.send_header('Content-Type', mime_type)
-                    
-                    # For previewable types, use inline disposition
-                    if is_previewable(mime_type):
-                        self.send_header('Content-Disposition', 
-                                       f'inline; filename="{quote(transfer.filename)}"')
-                    else:
-                        self.send_header('Content-Disposition', 
-                                       f'attachment; filename="{quote(transfer.filename)}"')
-                    
-                    self.send_header('Content-Length', str(transfer.file_size))
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.send_header('Cache-Control', 'no-store')
-                    self.end_headers()
-                    
-                    with open(transfer.file_path, 'rb') as f:
-                        while True:
-                            chunk = f.read(8192)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                    
-                    # Mark download complete
-                    store.mark_download_complete(token)
-                    
-                except Exception as e:
-                    print(f"[FileHTTP] Download error: {e}")
-                
-            else:
-                # Show download page
-                transfer = store.get_transfer_by_token(token)
-                
-                if not transfer:
-                    self._send_html_error(404, "Invalid download link")
-                    return
-                
-                if not transfer.upload_used:
-                    self._send_html_error(403, "File not yet uploaded")
-                    return
-                
-                if time.time() > transfer.download_expires:
-                    self._send_html_error(403, "Download link expired")
-                    return
-                
-                # Check if already downloaded
-                if transfer.download_used.get(token, False):
-                    self._send_html_error(403, "Download link already used")
-                    return
-                
-                # Send download page
-                mime_type = get_mime_type(transfer.filename)
-                html = generate_download_page(token, transfer.filename, 
-                                             transfer.file_size, mime_type)
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(html.encode('utf-8'))))
-                self.end_headers()
-                self.wfile.write(html.encode('utf-8'))
+            if not transfer or token not in transfer.download_tokens.values():
+                self._send_html_error(404, "下载链接无效")
+                return
+            
+            if not transfer.upload_used:
+                self._send_html_error(403, "发送方还没有上传文件，请稍后再试")
+                return
+            
+            if time.time() > transfer.download_expires:
+                self._send_html_error(403, "下载链接已过期")
+                return
+            
+            if (file_sharing.ONE_TIME_DOWNLOAD
+                    and transfer.download_used.get(token, False)):
+                self._send_html_error(403, "该下载链接已使用过，如需重发请联系发送方")
+                return
+            
+            mime_type = get_mime_type(transfer.filename)
+            self._send_html_page(generate_download_page(
+                token, transfer.filename, transfer.file_size, mime_type))
             return
         
-        self._send_error_json(404, "Not found")
+        self._send_error_json(404, "网址无效")
 
 
 class FileHTTPServer:
@@ -949,13 +1087,18 @@ class FileHTTPServer:
     
     def __init__(self, host: str = "0.0.0.0", port: int = 8443,
                  use_https: bool = True, cert_file: Optional[str] = None,
-                 key_file: Optional[str] = None, domain: Optional[str] = None):
+                 key_file: Optional[str] = None, domain: Optional[str] = None,
+                 public_host: Optional[str] = None,
+                 public_port: Optional[int] = None):
         self.host = host
         self.port = port
         self.use_https = use_https
         self.cert_file = cert_file
         self.key_file = key_file
         self.domain = domain
+        self.public_host = public_host
+        # Port shown in user-facing links (e.g. 443 behind Cloudflare); listen port stays self.port
+        self.public_port = public_port
         self.server: Optional[HTTPServer] = None
         self.thread: Optional[threading.Thread] = None
         
@@ -1109,11 +1252,28 @@ class FileHTTPServer:
             self.thread = None
     
     def get_base_url(self) -> str:
-        """Get base URL for this server."""
+        """Get the base URL to hand out to users.
+        
+        self.host is a bind address, so it may be a wildcard like 0.0.0.0 that
+        nobody can actually open. Prefer an explicitly configured public name.
+        public_port (if set) is what appears in links; omit 443/80 as usual.
+        """
         protocol = "https" if self.use_https else "http"
-        if self.domain:
-            return f"{protocol}://{self.domain}:{self.port}"
-        return f"{protocol}://{self.host}:{self.port}"
+        host = self.get_public_host()
+        port = self.port if self.public_port is None else self.public_port
+        default_port = 443 if protocol == "https" else 80
+        if port == default_port:
+            return f"{protocol}://{host}"
+        return f"{protocol}://{host}:{port}"
+    
+    def get_public_host(self) -> str:
+        """Resolve the hostname users should see in their links."""
+        for candidate in (self.domain, self.public_host):
+            if candidate and candidate.strip():
+                return candidate.strip()
+        if self.host in ("", "0.0.0.0", "::", "*"):
+            return _detect_lan_ip()
+        return self.host
 
 
 def create_file_server() -> FileHTTPServer:
@@ -1124,6 +1284,9 @@ def create_file_server() -> FileHTTPServer:
     cert_file = os.environ.get("SSHCHAT_FILE_CERT_FILE", "").strip() or None
     key_file = os.environ.get("SSHCHAT_FILE_KEY_FILE", "").strip() or None
     domain = os.environ.get("SSHCHAT_FILE_DOMAIN", "").strip() or None
+    public_host = os.environ.get("SSHCHAT_FILE_PUBLIC_HOST", "").strip() or None
+    public_port_raw = os.environ.get("SSHCHAT_FILE_PUBLIC_PORT", "").strip()
+    public_port = int(public_port_raw) if public_port_raw else None
     
     return FileHTTPServer(
         host=host,
@@ -1131,5 +1294,7 @@ def create_file_server() -> FileHTTPServer:
         use_https=use_https,
         cert_file=cert_file,
         key_file=key_file,
-        domain=domain
+        domain=domain,
+        public_host=public_host,
+        public_port=public_port,
     )

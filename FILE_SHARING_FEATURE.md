@@ -4,15 +4,24 @@
 
 ### 核心功能
 
-1. **一次性上传 URL + 密钥**
-   - ✅ 发送者收到系统私发的上传 URL 和 6 位随机密钥
-   - ✅ 上传前必须输入密钥验证
+1. **一次性上传 URL + 独立密钥**
+   - ✅ 发送者收到系统私发的上传 URL，密钥单独给出，不拼在 URL 上
+   - ✅ 上传前必须在页面上输入密钥验证
    - ✅ 上传成功后 URL 立即作废
+   - ✅ 文件名取自上传的文件，指令里不必填写
 
-2. **一次性下载 URL + 密钥**
+2. **专属下载 URL + 独立密钥**
    - ✅ 每个接收者收到独立的下载 URL 和密钥
    - ✅ 房间内每个成员的 URL 和密钥都不同
-   - ✅ 下载成功后 URL 立即作废
+   - ✅ 密钥不拼在 URL 上，需在页面输入
+   - ✅ 下载完成后该接收者的链接即作废
+
+3. **预览与下载分离的一次性凭据（ticket）**
+   - ✅ 输入密钥后签发两条互不相同的临时链接：一条预览、一条下载
+   - ✅ 两条都只能用一次，取完文件立即失效
+   - ✅ 即使全程走 HTTP 明文、链接被中途截获，重放一律 403
+   - ✅ 默认 10 分钟有效（`SSHCHAT_TICKET_TTL_SECONDS`），重新输密钥会作废上一组
+   - ✅ 只有传输真正完成才作废下载链接，断线可重新输密钥重试
 
 3. **HTTPS 自动配置**
    - ✅ 支持 Let's Encrypt 自动申请证书
@@ -50,9 +59,12 @@
 #### 2. `file_http_server.py` (672 行)
 HTTP/HTTPS 服务器：
 - 上传页面：`GET /upload/<token>` - 精美 HTML 表单
-- 上传处理：`POST /upload/<token>` - 文件上传
+- 上传处理：`POST /upload/<token>` - 密钥走 `X-Upload-Key` 请求头，不进 URL
 - 下载页面：`GET /download/<token>` - 智能预览界面
-- 文件获取：`GET /download/<token>/file?key=<key>` - 直接下载
+- 凭据签发：`POST /download/<token>/ticket` - 密钥走请求体，返回两条一次性链接
+- 取件：`GET /f/<ticket>` - 按凭据发文件，用过即废（预览 inline / 下载 attachment）
+
+**任何 URL 都不携带密钥，任何发送文件字节的 URL 都是一次性的。**
 - HTTPS 支持（Let's Encrypt / 自签名）
 - MIME 类型自动检测
 - 智能预览判断（20+ 格式）
@@ -99,35 +111,42 @@ Web 界面和预览测试套件：
 
 ### 命令格式
 
-#### 发送给用户
+#### 发送到当前房间
 ```bash
-/sendfile <昵称> <文件名>
-/sendfile alice document.pdf
+/sendfile
 ```
 
-#### 发送到房间
+#### 发送给用户
 ```bash
-/sendfile #<房间> <文件名>
-/sendfile #dev screenshot.png
+/sendfile <昵称>
+/sendfile alice
 ```
+
+#### 发送到指定房间
+```bash
+/sendfile #<房间>
+/sendfile #dev
+```
+
+文件名不用写，以上传时选择的文件为准。旧写法 `/sendfile alice a.pdf`
+仍可使用，多余的文件名会被忽略并提示。
 
 ### 发送者收到
 
 ```
 ========== 文件上传信息 ==========
-文件名: document.pdf
 接收者: alice
 
-上传 URL (一次性):
+上传网址:
 https://your-domain.com:8443/upload/UoGX...
 
 上传密钥: MUJVB2
 
 说明:
-1. 访问上传 URL
-2. 输入密钥并上传文件
-3. 上传成功后此 URL 立即作废
-4. 接收者将收到各自的下载 URL 和密钥
+1. 打开上传网址，在页面里输入上面的密钥
+2. 选择要发的文件并上传，文件名以所选文件为准
+3. 上传成功即完成，此网址随后作废
+4. 接收者将收到各自的下载网址和密钥
 =====================================
 ```
 
@@ -136,13 +155,12 @@ https://your-domain.com:8443/upload/UoGX...
 ```
 🔒 安全文件上传
 ━━━━━━━━━━━━━━━━━━━━━
-一次性上传链接，上传后立即失效
+上传成功后此链接即完成使命
 
 ℹ️ 使用说明：
-1. 输入您收到的6位上传密钥
-2. 选择要上传的文件
-3. 点击上传按钮
-4. 上传成功后此链接将立即失效
+1. 输入聊天窗里单独发给你的6位上传密钥
+2. 选择要上传的文件（文件名以你选的文件为准）
+3. 点击上传按钮，接收者会收到下载链接
 
 ┌─────────────────────────┐
 │ 上传密钥 *              │
@@ -166,16 +184,16 @@ https://your-domain.com:8443/upload/UoGX...
 大小: 245.3 KB
 来自房间: #dev (可选)
 
-下载 URL (一次性):
+下载网址:
 https://your-domain.com:8443/download/ffh6...
 
 下载密钥: R9S3PJ
 
 说明:
-1. 访问下载 URL
-2. 输入密钥
-3. 自动预览文件（如支持）
-4. 点击下载按钮获取文件
+1. 打开下载网址，在页面里输入上面的密钥
+2. 图片、视频、PDF 等会直接预览，确认后再点按钮保存
+3. 文件只能下载一次，存好之前别关页面
+4. 每个接收者的网址和密钥都不同
 ================================
 ```
 
@@ -184,7 +202,7 @@ https://your-domain.com:8443/download/ffh6...
 ```
 📥 安全文件下载
 ━━━━━━━━━━━━━━━━━━━━━
-一次性下载链接，下载后立即失效
+专属下载链接，需要密钥才能打开
 
 ┌─────────────────────────┐
 │ 📄 文件名: photo.jpg    │
@@ -194,10 +212,10 @@ https://your-domain.com:8443/download/ffh6...
 └─────────────────────────┘
 
 ℹ️ 使用说明：
-1. 输入您收到的6位下载密钥
-2. 系统将自动预览文件
-3. 点击下载按钮获取文件
-4. 下载后此链接将立即失效
+1. 输入聊天窗里单独发给你的6位下载密钥
+2. 预览和下载会各自生成一条一次性链接
+3. 点击下载按钮保存文件
+4. 下载完成后本页面即作废，请确认保存成功再离开
 
 ┌─────────────────────────┐
 │ 下载密钥 *              │
@@ -259,6 +277,9 @@ SSHCHAT_FILE_DOMAIN=files.example.com
 # 可选配置
 SSHCHAT_FILE_STORAGE_DIR=/var/lib/sshchat/files
 SSHCHAT_MAX_FILE_SIZE=104857600  # 100MB
+SSHCHAT_ONE_TIME_DOWNLOAD=1      # 默认 1；设为 0 才允许重复下载（不推荐）
+SSHCHAT_TICKET_TTL_SECONDS=600   # 一次性凭据有效期，默认 10 分钟
+SSHCHAT_MAX_PREVIEW_SIZE=26214400  # 超过此大小不预览，直接下载，默认 25MB
 ```
 
 ### 防火墙配置
@@ -275,27 +296,35 @@ sudo ufw allow 80/tcp
 
 ## 🔒 安全特性
 
-### 1. 一次性使用保护
-- 每个 URL 只能使用一次
-- 使用后立即失效
-- 防止链接泄露
+### 1. 全链路一次性
+- 上传 URL 成功上传一次后立即失效
+- 预览凭据、下载凭据各自只能用一次
+- 下载完成后该接收者的整个下载页面失效
+- 只有传输真正完成才作废，断线可重新输密钥重试
+- 确需允许重复下载时才设置 `SSHCHAT_ONE_TIME_DOWNLOAD=0`（不推荐）
 
-### 2. 密钥验证
-- 6 位随机密钥（A-Z, 0-9）
-- 访问 URL 时必须提供正确密钥
-- 密钥通过私聊传递
+### 2. 密钥从不进入 URL
+- 6 位随机密钥（A-Z, 0-9），通过私聊单独下发
+- 上传时走 `X-Upload-Key` 请求头，下载时走 POST 请求体
+- 因此密钥不会落入浏览器历史、代理日志、Referer 或服务端访问日志
+- 打开网页后必须手动输入密钥，链接被转发也无法使用
 
-### 3. 隔离设计
+### 3. 抗截获重放
+即使部署成 HTTP 明文、链接在网络中间被抓到，攻击者拿到的也是已经用掉的
+一次性凭据，重放只会得到 403。凭据默认 10 分钟过期，重新输密钥会让上一组
+立即作废，避免旧链接被留存复用。
+
+### 4. 隔离设计
 - 房间内每个成员获得独立凭证
 - 无法通过一个凭证访问其他人的下载
 - 追踪每个下载的使用状态
 
-### 4. 自动过期
+### 5. 自动过期
 - 上传 URL：60 分钟过期
 - 下载 URL：24 小时过期
 - 过期文件自动清理（每小时检查）
 
-### 5. HTTPS 加密
+### 6. HTTPS 加密
 - 优先使用 Let's Encrypt 证书
 - 备选自签名证书
 - 传输过程全程加密
@@ -313,14 +342,18 @@ sudo ufw allow 80/tcp
 6. Marking upload complete...             ✓
 7. Validating download...                 ✓
 8. Marking download complete...           ✓
-9. Testing download URL reuse prevention..✓
+9. Testing download URL reuse...          ✓
 10. Testing room transfer...              ✓
 ```
 
 运行测试：
 ```bash
-cd /workspace
+python3 test_file_sharing.py
 python3 test_file_sharing_simple.py
+python3 test_file_preview.py
+
+# 端到端跑通上传/预览/下载的真实 HTTP 流程
+python3 tests/e2e_file_transfer_check.py
 ```
 
 ## 📝 技术细节
@@ -336,8 +369,9 @@ FileTransferStore (file_sharing.py)
     ↓ generate tokens & keys
     ↓ save to JSON
 HTTP Server (file_http_server.py)
-    ↓ POST /upload/<token>?key=<key>
-    ↓ GET /download/<token>?key=<key>
+    ↓ POST /upload/<token>          (key in X-Upload-Key header)
+    ↓ POST /download/<token>/ticket (key in body) → 两条一次性链接
+    ↓ GET  /f/<ticket>              (无密钥，用过即废)
 File Storage (/tmp/sshchat_files)
 ```
 
@@ -350,33 +384,41 @@ File Storage (/tmp/sshchat_files)
    生成 upload_token, upload_key
    生成 download_tokens[user], download_keys[user]
    ↓
-   返回上传 URL + 密钥给发送者
+   分别返回上传 URL 和密钥给发送者（密钥不在 URL 上）
    ```
 
 2. **文件上传**
    ```
-   发送者 → HTTP POST /upload/<token>?key=<key>
+   发送者 → 页面输入密钥 → HTTP POST /upload/<token>
+   （密钥放在 X-Upload-Key 请求头里，不进 URL）
    ↓
    验证 token + key
    ↓
-   保存文件到存储目录
+   从上传的文件读取文件名并保存到存储目录
    ↓
-   标记 upload_used = True
+   标记 upload_used = True，写入 filename
    ↓
    触发回调通知接收者
    ```
 
 3. **文件下载**
    ```
-   接收者 → HTTP GET /download/<token>?key=<key>
+   接收者 → HTTP GET /download/<token> 打开页面并输入密钥
    ↓
-   验证 token + key
+   POST /download/<token>/ticket  (密钥在请求体里)
    ↓
-   检查 upload_used = True
+   验证 token + key，作废该接收者此前的凭据
+   ↓
+   签发 preview / download 两条一次性凭据（默认 10 分钟有效）
+   ↓
+   GET /f/<preview_ticket>  → 页面 fetch 成 blob 后本地渲染，不再回源
+   GET /f/<download_ticket> → 作为附件保存
+   ↓
+   取件前先把 ticket 标记为已用（重放即失败）
    ↓
    发送文件
    ↓
-   标记 download_used[token] = True
+   下载传输完成后才标记 download_used[token] = True
    ```
 
 ### 持久化
@@ -428,8 +470,8 @@ File Storage (/tmp/sshchat_files)
 
 ### 1. 团队协作
 ```bash
-# 分享会议记录
-/sendfile #meeting notes.pdf
+# 分享会议记录（在 #meeting 房间里直接用 /sendfile 即可）
+/sendfile #meeting
 
 # 每个成员收到独立下载链接
 ```
@@ -437,7 +479,7 @@ File Storage (/tmp/sshchat_files)
 ### 2. 私密分享
 ```bash
 # 发送合同给特定用户
-/sendfile john contract.pdf
+/sendfile john
 
 # 只有 john 能下载
 ```
@@ -445,7 +487,7 @@ File Storage (/tmp/sshchat_files)
 ### 3. 临时文件
 ```bash
 # 分享截图
-/sendfile #dev screenshot.png
+/sendfile #dev
 
 # 下载后自动清理
 ```

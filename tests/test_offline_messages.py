@@ -62,6 +62,26 @@ class OfflineMessageStoreTests(unittest.TestCase):
         other = OfflineMessageStore(self.path)
         self.assertEqual(other.count("zoe"), 1)
 
+    def test_file_kind_keeps_summary_and_meta(self) -> None:
+        long_name = "x" * 40
+        summary = f"[文件] {long_name}.pdf (1.0 KB)"
+        self.assertGreater(len(summary), self.store.max_text_len)
+        entry = self.store.leave(
+            "alice",
+            "bob",
+            summary,
+            kind="file",
+            meta={"transfer_id": "t1", "filename": f"{long_name}.pdf"},
+        )
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry["kind"], "file")
+        self.assertEqual(entry["text"], summary)
+        pending = self.store.take_all("alice")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["kind"], "file")
+        self.assertEqual(pending[0]["meta"]["transfer_id"], "t1")
+
     def test_list_and_recall_by_index(self) -> None:
         self.store.leave("alice", "bob", "one")
         self.store.leave("alice", "carol", "other")
@@ -194,6 +214,76 @@ class OfflineMessageServerTests(unittest.TestCase):
         self.assertIn("drop-me", text)
         remaining = server.offline_messages.list_sent_unread("bob", "alice")
         self.assertEqual([x["text"] for x in remaining], ["keep"])
+
+    def test_file_leave_deliver_and_recall(self) -> None:
+        class FakeHTTP:
+            def get_base_url(self):
+                return "https://files.example:8443"
+
+        prev_http = server.file_http
+        server.file_http = FakeHTTP()
+        try:
+            server.offline_messages.leave(
+                "alice",
+                "bob",
+                "[文件] notes.pdf (1.0 KB)",
+                kind="file",
+                meta={
+                    "transfer_id": "tid-1",
+                    "filename": "notes.pdf",
+                    "file_size": 1024,
+                    "download_token": "tok-alice",
+                    "download_key": "ABCDEF",
+                    "room": None,
+                },
+            )
+            conn = DummyConn()
+            n = server.deliver_offline_messages(conn, "alice")
+            self.assertEqual(n, 1)
+            text = b"".join(conn.sent).decode("utf-8")
+            self.assertIn("收到新文件", text)
+            self.assertIn("notes.pdf", text)
+            self.assertIn("ABCDEF", text)
+            self.assertIn("/download/tok-alice", text)
+            self.assertEqual(server.offline_messages.count("alice"), 0)
+
+            server.offline_messages.leave(
+                "carol",
+                "bob",
+                "[文件] secret.bin (2.0 KB)",
+                kind="file",
+                meta={
+                    "transfer_id": "tid-2",
+                    "filename": "secret.bin",
+                    "file_size": 2048,
+                    "download_token": "tok-carol",
+                    "download_key": "XYZ123",
+                    "room": None,
+                },
+            )
+            with patch.object(
+                server.file_sharing.file_transfer_store,
+                "revoke_recipient",
+                return_value=True,
+            ) as revoke:
+                sender = DummyConn()
+                server.clients[sender] = {
+                    "name": "bob",
+                    "rooms": {"default"},
+                    "current_room": "default",
+                }
+                server.handle_leave_command(sender, "bob", ["/leave", "carol 1"])
+                ack = b"".join(sender.sent).decode("utf-8")
+                self.assertIn("已撤回", ack)
+                self.assertIn("文件", ack)
+                self.assertIn("secret.bin", ack)
+                revoke.assert_called_once_with("tid-2", "carol")
+            self.assertEqual(
+                server.offline_messages.list_sent_unread("bob", "carol"),
+                [],
+            )
+        finally:
+            server.file_http = prev_http
 
 
 if __name__ == "__main__":
