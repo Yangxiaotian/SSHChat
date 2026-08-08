@@ -162,6 +162,7 @@ class OfflineMessageServerTests(unittest.TestCase):
         }
         server.offline_messages.leave("alice", "bob", "first")
         server.offline_messages.leave("alice", "bob", "second")
+        # Mimic handle_command: split(None, 1) keeps remainder as one string.
         server.handle_leave_command(sender, "bob", ["/leave", "alice"])
         listed = b"".join(sender.sent).decode("utf-8")
         self.assertIn("1. (", listed)
@@ -169,13 +170,30 @@ class OfflineMessageServerTests(unittest.TestCase):
         self.assertIn("2. (", listed)
         self.assertIn("second", listed)
         sender.sent.clear()
-        server.handle_leave_command(sender, "bob", ["/leave", "alice", "1"])
+        server.handle_leave_command(sender, "bob", ["/leave", "alice 1"])
         ack = b"".join(sender.sent).decode("utf-8")
         self.assertIn("已撤回", ack)
         self.assertIn("first", ack)
         remaining = server.offline_messages.list_sent_unread("bob", "alice")
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["text"], "second")
+
+    def test_leave_via_handle_command_split(self) -> None:
+        sender = DummyConn()
+        server.clients[sender] = {
+            "name": "bob",
+            "rooms": {"default"},
+            "current_room": "default",
+        }
+        server.rooms["default"].add(sender)
+        server.offline_messages.leave("alice", "bob", "keep")
+        server.offline_messages.leave("alice", "bob", "drop-me")
+        server.handle_command(sender, "/leave alice 2")
+        text = b"".join(sender.sent).decode("utf-8")
+        self.assertIn("已撤回", text)
+        self.assertIn("drop-me", text)
+        remaining = server.offline_messages.list_sent_unread("bob", "alice")
+        self.assertEqual([x["text"] for x in remaining], ["keep"])
 
 
 if __name__ == "__main__":

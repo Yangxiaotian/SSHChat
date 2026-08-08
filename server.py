@@ -902,9 +902,11 @@ def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> No
 
 def handle_leave_command(conn, name: str, parts: list[str]) -> None:
     """List or recall unread leave-messages sent by this user."""
+    # handle_command uses split(None, 1), so parts[1] is the whole remainder.
     # /leave | /leave <nick> | /leave <nick> <n>
     # /leave recall <nick> <n> | /leave 撤回 <nick> <n>
-    args = [p for p in parts[1:] if p.strip()]
+    rest = parts[1] if len(parts) > 1 else ""
+    args = rest.split()
     if not args:
         _send_leave_list(conn, name)
         return
