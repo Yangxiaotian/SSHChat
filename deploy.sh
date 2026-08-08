@@ -37,6 +37,11 @@ PIP_RETRIES="${SSHCHAT_PIP_RETRIES:-5}"
 PIP_CMD_RETRIES="${SSHCHAT_PIP_CMD_RETRIES:-3}"
 : "${SSHCHAT_CLIENT_GROUP:=sshchat-clients}"
 CLIENT_GROUP=$SSHCHAT_CLIENT_GROUP
+# File transfer configuration
+FILE_TRANSFER_ENABLED="${SSHCHAT_FILE_TRANSFER_ENABLED:-1}"
+FILE_HTTP_PORT="${SSHCHAT_FILE_HTTP_PORT:-8443}"
+FILE_DOMAIN="${SSHCHAT_FILE_DOMAIN:-}"
+FILE_USE_HTTPS="${SSHCHAT_FILE_USE_HTTPS:-1}"
 
 is_darwin() {
   [[ "$(uname -s)" == "Darwin" ]]
@@ -107,6 +112,10 @@ Options:
   --run-user NAME    User to run the server as (default: $RUN_USER)
   --no-run-user      Do not create user; install as root (manual server only)
   --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
+  --file-domain DOMAIN    Domain name for file transfer HTTPS (enables Let's Encrypt; default: none, uses self-signed)
+  --file-port N      HTTP/HTTPS port for file transfers (default: $FILE_HTTP_PORT)
+  --no-file-https    Disable HTTPS for file transfers (use HTTP only)
+  --no-file-transfer Disable file transfer feature entirely
   --client-ssh-port PORT  sshd port embedded in client-bundle.json (default: $CLIENT_SSH_PORT)
   --build-gui-packages    After install, run scripts/build-gui-packages.sh if present (needs tkinter + PyInstaller)
   --reset-all-ratings     Reset all persisted chess/gomoku/xiangqi ratings before restart
@@ -231,8 +240,8 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py"
+  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$u:$u" "$PREFIX/game_ratings.json"
@@ -262,8 +271,8 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/game_ratings.json"
@@ -446,6 +455,22 @@ while [[ $# -gt 0 ]]; do
       PIP_INDEX_URL_ARG="$2"
       shift 2
       ;;
+    --file-domain)
+      FILE_DOMAIN=${2:?}
+      shift 2
+      ;;
+    --file-port)
+      FILE_HTTP_PORT=${2:?}
+      shift 2
+      ;;
+    --no-file-https)
+      FILE_USE_HTTPS=0
+      shift
+      ;;
+    --no-file-transfer)
+      FILE_TRANSFER_ENABLED=0
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -558,7 +583,7 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$SCRIPT_DIR/file_sharing.py" "$SCRIPT_DIR/file_http_server.py" "$PREFIX/"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
@@ -608,6 +633,16 @@ SSHCHAT_ALERT_SOUND=auto
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
+
+# 文件传输配置
+SSHCHAT_FILE_TRANSFER_ENABLED=$FILE_TRANSFER_ENABLED
+SSHCHAT_FILE_HTTP_PORT=$FILE_HTTP_PORT
+SSHCHAT_FILE_USE_HTTPS=$FILE_USE_HTTPS
+SSHCHAT_FILE_DOMAIN=$FILE_DOMAIN
+# 文件存储目录：默认 /tmp/sshchat_files
+# SSHCHAT_FILE_STORAGE_DIR=/var/lib/sshchat/files
+# 最大文件大小（字节）：默认 100MB
+# SSHCHAT_MAX_FILE_SIZE=104857600
 EOF
 fi
 
