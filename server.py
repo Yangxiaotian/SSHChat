@@ -217,9 +217,9 @@ HELP_LINES = (
     "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
     "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
     "[*]\n",
-    "[*] /sendfile <昵称> <文件名>  发送文件给用户，你将收到上传URL+密钥。\n",
-    "[*] /sendfile #<房间> <文件名>  发送文件到房间，房间成员将各自收到下载URL+密钥。\n",
-    "[*]              上传成功后URL作废；每个接收者的下载URL和密钥都不同且仅可用一次。\n",
+    "[*] /sendfile <昵称> <文件名>  发送文件给用户，你将收到一次性上传网址+密钥。\n",
+    "[*] /sendfile #<房间> <文件名>  发送文件到房间，成员各自收到不同的下载网址+密钥。\n",
+    "[*]              打开网址需输入密钥；支持图片、视频、PDF等在线预览；上传/下载后网址立即失效。\n",
     "[*] /help          显示本说明。\n",
 )
 
@@ -3464,7 +3464,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /leave /part /announce /game /news /dict /clear /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /leave /part /announce /game /news /dict /clear /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
