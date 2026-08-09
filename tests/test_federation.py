@@ -158,6 +158,63 @@ class FederationProtocolTests(unittest.TestCase):
         self.assertEqual(rooms, {"dev", "ops"})
         self.assertEqual(hub.names_in_room("dev"), ["alice"])
 
+    def test_file_notice_routes_to_remote_peer(self) -> None:
+        received: list[tuple[str, str, dict]] = []
+
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_file_notice=lambda to, frm, notice: received.append((to, frm, notice)),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = FakeLink()
+        hub._peers["node-b"] = link
+        hub._remote_join("node-b", "bob", "dev")
+
+        notice = {
+            "filename": "a.pdf",
+            "file_size": 12,
+            "download_url": "https://files.example/download/tok",
+            "download_key": "ABC123",
+            "download_token": "tok",
+            "room": "dev",
+            "transfer_id": "tid",
+        }
+        self.assertTrue(hub.send_file_notice("bob", "alice", notice))
+        self.assertEqual(len(link.lines), 1)
+        self.assertTrue(link.lines[0].startswith("fnotice\tnode-a\tbob\talice\t"))
+
+        # Simulate peer receive on another hub
+        peer = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_file_notice=lambda to, frm, n: received.append((to, frm, n)),
+        )
+        peer.enabled = True
+        peer.node_id = "node-b"
+        peer._on_peer_line("node-a", link.lines[0].rstrip("\n"))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "bob")
+        self.assertEqual(received[0][1], "alice")
+        self.assertEqual(received[0][2]["download_url"], notice["download_url"])
+        self.assertEqual(received[0][2]["download_key"], "ABC123")
+
 
 class FederationServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:

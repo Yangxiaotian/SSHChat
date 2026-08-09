@@ -115,6 +115,7 @@ class FederationHub:
         on_game_end: Optional[Callable[[str, str], None]] = None,
         on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
         on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
+        on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -128,6 +129,7 @@ class FederationHub:
         self.on_game_end = on_game_end
         self.on_game_cmd = on_game_cmd
         self.on_game_priv = on_game_priv
+        self.on_file_notice = on_file_notice
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -234,6 +236,39 @@ class FederationHub:
         sent = False
         for user in targets:
             line = f"pm\t{self.node_id}\t{user.name}\t{from_name}\t{payload}\n"
+            link = self._peers.get(user.node_id)
+            if link is not None:
+                link.send_line(line)
+                sent = True
+        return sent
+
+    def send_file_notice(
+        self, to_nick: str, from_name: str, notice: dict[str, Any]
+    ) -> bool:
+        """Route a /sendfile download notice to remote user(s). Returns True if any sent.
+
+        File bytes stay on the origin node's HTTP(S) endpoint; only the absolute
+        download_url + key cross the federation link (same idea as PM).
+        """
+        if not self.enabled or not self._peers:
+            return False
+        key = _nick_key(to_nick)
+        targets = [
+            u
+            for u in self._remote_users.values()
+            if _nick_key(u.name) == key
+        ]
+        if not targets:
+            return False
+        try:
+            blob = base64.b64encode(
+                json.dumps(notice, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return False
+        sent = False
+        for user in targets:
+            line = f"fnotice\t{self.node_id}\t{user.name}\t{from_name}\t{blob}\n"
             link = self._peers.get(user.node_id)
             if link is not None:
                 link.send_line(line)
@@ -411,6 +446,19 @@ class FederationHub:
             except Exception:
                 return
             self.on_pm(to_name, from_name, text)
+            return
+        if kind == "fnotice" and len(parts) >= 5 and self.on_file_notice:
+            origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
+            if origin == self.node_id:
+                return
+            try:
+                notice = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(notice, dict):
+                self.on_file_notice(to_name, from_name, notice)
             return
         if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
             origin, room, authority, b64 = parts[1], parts[2], parts[3], parts[4]
@@ -817,6 +865,7 @@ def init_hub(
     on_game_end: Optional[Callable[[str, str], None]] = None,
     on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
     on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
+    on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -830,5 +879,6 @@ def init_hub(
         on_game_end,
         on_game_cmd,
         on_game_priv,
+        on_file_notice,
     )
     return _hub

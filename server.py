@@ -903,27 +903,33 @@ def _build_file_ready_message(
 def _file_ready_message_from_leave(item: dict) -> str | None:
     """Rebuild a full download notice from an offline file leave-message."""
     meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-    if file_http is None:
-        return None
     token = str(meta.get("download_token") or "").strip()
     key = str(meta.get("download_key") or "").strip()
-    if not token or not key:
-        return None
     filename = str(meta.get("filename") or item.get("text") or "file").strip() or "file"
     try:
-        file_size = float(meta.get("file_size", 0))
+        file_size = int(meta.get("file_size") or 0)
     except (TypeError, ValueError):
-        file_size = 0.0
+        file_size = 0
     room = meta.get("room")
-    room_name = str(room).strip() if room else None
-    download_url = f"{file_http.get_base_url()}/download/{token}"
+    if isinstance(room, str):
+        room = room.strip() or None
+    else:
+        room = None
+    # Federated leaves carry an absolute URL hosted on the origin node.
+    download_url = str(meta.get("download_url") or "").strip()
+    if not download_url:
+        if file_http is None or not token:
+            return None
+        download_url = f"{file_http.get_base_url()}/download/{token}"
+    if not key:
+        return None
     return _build_file_ready_message(
         sender=str(item.get("from") or "?"),
         filename=filename,
         file_size=file_size,
         download_url=download_url,
         key=key,
-        room=room_name or None,
+        room=room,
     )
 
 
@@ -2149,7 +2155,25 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 except Exception as e:
                     print(f"[FileTransfer] Failed to notify {recipient}: {e}")
 
-        if delivered:
+        # Also fan out to the same nick on peer nodes (Cloudflare/public file URL).
+        remote_sent = False
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled and hub.has_remote_user(recipient):
+            remote_sent = hub.send_file_notice(
+                recipient,
+                transfer.sender,
+                {
+                    "filename": transfer.filename,
+                    "file_size": transfer.file_size,
+                    "download_url": download_url,
+                    "download_key": key,
+                    "download_token": token,
+                    "room": transfer.room,
+                    "transfer_id": transfer.transfer_id,
+                },
+            )
+
+        if delivered or remote_sent:
             continue
 
         # Offline: leave a mailbox entry the sender can also see/recall via /leave.
@@ -2165,6 +2189,7 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 "file_size": transfer.file_size,
                 "download_token": token,
                 "download_key": key,
+                "download_url": download_url,
                 "room": transfer.room,
             },
         )
@@ -2226,14 +2251,24 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                 if c != conn and c in clients:
                     recipients.append(clients[c]["name"])
         
+        # Federated peers in the same room (presence) also get a download slot.
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            seen.add(sender.lower())
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+        
         if not recipients:
             send_line(conn, f"[*] 房间 #{room_name} 中没有其他用户。\n")
             return
     else:
-        # Sending to specific user(s)
+        # Sending to specific user(s) — local online, federated online, or offline leave.
         target_lower = target.lower()
         with lock:
-            # Find all online users with this nickname
             online_recipients = [
                 info["name"] for info in clients.values()
                 if info["name"].lower() == target_lower
@@ -2242,9 +2277,8 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         if online_recipients:
             recipients = online_recipients
         else:
-            # User is offline, still allow sending
+            # Offline locally or only present on a peer — open a session either way.
             recipients = [target]
-    
     # Create transfer session
     try:
         store = file_sharing.file_transfer_store
@@ -2599,6 +2633,58 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
         send_line(peer_conn, f"[PM from {from_name}] {text}\n")
 
 
+def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
+    """Deliver a federated /sendfile download notice to a local user (or leave offline)."""
+    if not isinstance(notice, dict):
+        return
+    download_url = str(notice.get("download_url") or "").strip()
+    key = str(notice.get("download_key") or "").strip()
+    if not download_url or not key:
+        return
+    filename = str(notice.get("filename") or "").strip() or "file"
+    try:
+        file_size = int(notice.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    room = notice.get("room")
+    room_name = str(room).strip() if room else None
+    message = _build_file_ready_message(
+        sender=from_name,
+        filename=filename,
+        file_size=file_size,
+        download_url=download_url,
+        key=key,
+        room=room_name or None,
+    )
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            try:
+                send_line(peer_conn, message)
+            except Exception as e:
+                print(f"[FileTransfer] Federated notify failed for {to_name}: {e}")
+        return
+
+    # Recipient is offline on this node — store absolute origin URL for later login.
+    summary = _format_file_leave_summary(filename, file_size)
+    offline_messages.leave(
+        to_name,
+        from_name,
+        summary,
+        kind="file",
+        meta={
+            "transfer_id": str(notice.get("transfer_id") or "").strip(),
+            "filename": filename,
+            "file_size": file_size,
+            "download_token": str(notice.get("download_token") or "").strip(),
+            "download_key": key,
+            "download_url": download_url,
+            "room": room_name,
+            "federated": True,
+        },
+    )
+
+
 def _ensure_federation_hub() -> None:
     global _fed_hub
     if _fed_hub is not None:
@@ -2614,6 +2700,7 @@ def _ensure_federation_hub() -> None:
         _fed_on_game_end,
         _fed_execute_game_cmd,
         _fed_on_game_priv,
+        _fed_on_file_notice,
     )
     _fed_hub.start()
 

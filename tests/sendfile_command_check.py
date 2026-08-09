@@ -171,4 +171,49 @@ assert server.offline_messages.list_sent_unread("alice", "ghost") == []
 assert "ghost" not in store.get_transfer_by_token(t.upload_token).download_tokens
 print("11. /leave 可查看并撤回离线文件，下载权同步作废")
 
+# 12. Room /sendfile includes federated remote members
+class FakeFedHub:
+    enabled = True
+
+    def names_in_room(self, room):
+        return ["remote_bob"] if room == "dev" else []
+
+    def has_remote_user(self, nick):
+        return nick.lower() == "remote_bob"
+
+    def send_file_notice(self, to_nick, from_name, notice):
+        FakeFedHub.last = (to_nick, from_name, notice)
+        return True
+
+
+FakeFedHub.last = None
+server.clients[bob] = {"name": "bob", "rooms": {"dev"}, "current_room": "dev"}
+server.rooms["dev"].add(bob)
+import federation as _fed
+
+_prev_get = _fed.get_hub
+_fed.get_hub = lambda: FakeFedHub()
+try:
+    out = run("/sendfile #dev")
+    t = latest()
+    assert "remote_bob" in t.download_tokens, t.download_tokens
+    assert "bob" in t.download_tokens
+    assert "remote_bob" in out or "人" in out
+    print("12. /sendfile #dev 收件人含联邦远端 remote_bob")
+
+    uploaded4 = os.path.join(tmpdir, "fed.txt")
+    with open(uploaded4, "wb") as f:
+        f.write(b"federated")
+    store.mark_upload_complete(t.upload_token, uploaded4, 9, "fed.txt")
+    FakeFedHub.last = None
+    captured.clear()
+    server._notify_file_ready(store.get_transfer_by_token(t.upload_token))
+    assert FakeFedHub.last is not None, "should federate notice to remote_bob"
+    assert FakeFedHub.last[0].lower() == "remote_bob"
+    assert FakeFedHub.last[2]["download_url"].startswith("https://example.com:8443/download/")
+    assert FakeFedHub.last[2]["download_key"] == t.download_keys["remote_bob"]
+    print("13. 上传完成后向联邦远端发送 fnotice（含公网 download_url）")
+finally:
+    _fed.get_hub = _prev_get
+
 print("\n✅ /sendfile 参数解析全部通过")
