@@ -107,6 +107,9 @@ _shutting_down = False
 _shutdown_requested = False
 _listen_socket: Optional[socket.socket] = None
 _fed_hub: Optional[federation.FederationHub] = None
+_library_watch_thread: Optional[threading.Thread] = None
+_library_watch_stop = threading.Event()
+_library_last_state: Optional[tuple[set[str], float]] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -1809,6 +1812,79 @@ def _federation_sync_library_catalog() -> None:
         print(f"federation: library catalog sync failed: {e!r}")
 
 
+def _get_library_state() -> tuple[set[str], float]:
+    """Get current library directory state (file names + mtime)."""
+    lib_dir = _library_dir()
+    if not lib_dir.is_dir():
+        return (set(), 0.0)
+    try:
+        dir_mtime = lib_dir.stat().st_mtime
+        files = {
+            path.name
+            for path in lib_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in library.LIBRARY_EXTENSIONS
+        }
+        return (files, dir_mtime)
+    except OSError:
+        return (set(), 0.0)
+
+
+def _library_watch_loop() -> None:
+    """Background thread that monitors library directory for changes."""
+    global _library_last_state
+    
+    # Get initial state
+    _library_last_state = _get_library_state()
+    
+    # Check interval in seconds
+    watch_interval = float(os.environ.get("SSHCHAT_LIBRARY_WATCH_SECONDS", "5"))
+    watch_interval = max(1.0, watch_interval)
+    
+    print(f"federation: library watch started (interval={watch_interval}s)")
+    
+    while not _library_watch_stop.is_set():
+        time.sleep(watch_interval)
+        
+        if _library_watch_stop.is_set():
+            break
+        
+        hub = federation.get_hub()
+        if hub is None or not hub.enabled:
+            continue
+        
+        try:
+            current_state = _get_library_state()
+            
+            if _library_last_state is None:
+                _library_last_state = current_state
+                continue
+            
+            prev_files, prev_mtime = _library_last_state
+            curr_files, curr_mtime = current_state
+            
+            # Check if there are changes (new/removed files or directory mtime changed)
+            if prev_files != curr_files or abs(curr_mtime - prev_mtime) > 0.01:
+                added = curr_files - prev_files
+                removed = prev_files - curr_files
+                
+                if added or removed:
+                    print(
+                        f"federation: library changed "
+                        f"(+{len(added)} -{len(removed)}), syncing catalog"
+                    )
+                elif curr_mtime != prev_mtime:
+                    print("federation: library directory modified, syncing catalog")
+                
+                # Sync catalog to federation peers
+                _federation_sync_library_catalog()
+                _library_last_state = current_state
+                
+        except Exception as e:
+            print(f"federation: library watch error: {e!r}")
+    
+    print("federation: library watch stopped")
+
+
 def _fed_local_library_bookmarks_snapshot() -> list[dict]:
     """Bookmarks for locally connected nicks (for peer catch-up)."""
     with lock:
@@ -3452,7 +3528,7 @@ def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
 
 
 def _ensure_federation_hub() -> None:
-    global _fed_hub
+    global _fed_hub, _library_watch_thread
     if _fed_hub is not None:
         return
     _fed_hub = federation.init_hub(
@@ -3484,6 +3560,16 @@ def _ensure_federation_hub() -> None:
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    
+    # Start library directory watch thread
+    if _library_watch_thread is None:
+        _library_watch_stop.clear()
+        _library_watch_thread = threading.Thread(
+            target=_library_watch_loop,
+            name="library-watch",
+            daemon=True
+        )
+        _library_watch_thread.start()
 
 
 def broadcast_room(
@@ -4562,6 +4648,10 @@ def run_server() -> int:
         )
         _safe_persist_sessions_now()
         _shutdown_requested = True
+        
+        # Stop library watch thread
+        _library_watch_stop.set()
+        
         if file_http is not None:
             try:
                 file_http.stop()
