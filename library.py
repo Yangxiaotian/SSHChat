@@ -690,6 +690,99 @@ def load_book(path: Path) -> BookDocument:
     raise ValueError(f"不支持的格式：{ext}")
 
 
+def _subprocess_load_entry() -> None:
+    """Child-process entry: argv[1]=book path, argv[2]=json output path."""
+    import sys
+
+    path = Path(sys.argv[1])
+    out = Path(sys.argv[2])
+    try:
+        doc = load_book(path)
+        payload = {
+            "ok": True,
+            "title": doc.title,
+            "pages": list(doc.pages),
+            "source_path": str(doc.source_path),
+        }
+        out.write_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except Exception as e:
+        out.write_bytes(
+            json.dumps(
+                {"ok": False, "error": f"{type(e).__name__}: {e}"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        raise SystemExit(1) from e
+
+
+def load_book_isolated(
+    path: Path, *, timeout: Optional[float] = None
+) -> BookDocument:
+    """Load a book without holding the GIL in this process.
+
+    EPUB/PDF parsing is CPU-heavy pure Python. Doing it in-process (even on a
+    worker thread) stalls every other thread — including the federation I/O
+    loop — and SSH tunnels drop. Light txt/md loads stay in-process.
+    """
+    import subprocess
+    import sys
+
+    path = path.resolve()
+    ext = path.suffix.lower()
+    if ext in {".txt", ".md"}:
+        return load_book(path)
+    if timeout is None:
+        timeout = float(os.environ.get("SSHCHAT_LIBRARY_LOAD_TIMEOUT", "180"))
+    timeout = max(5.0, float(timeout))
+    root = str(Path(__file__).resolve().parent)
+    env = os.environ.copy()
+    prev = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = root + (os.pathsep + prev if prev else "")
+    with tempfile.TemporaryDirectory(prefix="sshchat-libload-") as td:
+        out = Path(td) / "book.json"
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from library import _subprocess_load_entry; "
+                    "_subprocess_load_entry()",
+                    str(path),
+                    str(out),
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"解析图书超时（>{int(timeout)}s）：{path.name}"
+            ) from exc
+        if not out.is_file():
+            err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                err or f"图书解析子进程失败（exit {proc.returncode}）"
+            )
+        try:
+            payload = json.loads(out.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"图书解析结果无效：{exc}") from exc
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise RuntimeError(
+                str((payload or {}).get("error") or "图书解析失败")
+            )
+        pages = payload.get("pages")
+        if not isinstance(pages, list) or not pages:
+            raise RuntimeError("图书解析结果无正文")
+        title = str(payload.get("title") or path.stem)
+        return BookDocument(
+            title=title,
+            pages=[str(p) for p in pages],
+            source_path=path,
+        )
+
+
 def format_size(size_bytes: int) -> str:
     if size_bytes < 1024:
         return f"{size_bytes} B"

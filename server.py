@@ -1912,7 +1912,7 @@ def _get_cached_book(path: Path) -> library.BookDocument:
         cached = library_doc_cache.get(key)
         if cached and cached[0] == mtime_ns:
             return cached[1]
-        doc = library.load_book(path)
+        doc = library.load_book_isolated(path)
         library_doc_cache[key] = (mtime_ns, doc)
         return doc
 
@@ -2320,7 +2320,7 @@ def _handle_library(conn, payload: str) -> None:
                 conn,
                 f"[*] 正在从节点 {entry.origin} 拉取 "
                 f"[{entry.ext.upper()}] {entry.name}…"
-                "（首次解析可能较慢，请稍候）\n",
+                "（对端首次解析在子进程中进行，请稍候）\n",
             )
             try:
                 payload = _fetch_remote_library_page(entry.origin, entry.name, page)

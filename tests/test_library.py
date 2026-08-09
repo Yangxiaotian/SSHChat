@@ -1,7 +1,9 @@
 """Tests for library book listing and pagination."""
+import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import library
@@ -347,6 +349,76 @@ class TestFederatedCatalog(unittest.TestCase):
         hits = library.search_catalog_items(catalog, "math")
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0].name, "calc.txt")
+
+
+class TestLibraryIsolatedLoad(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib_dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_txt_stays_in_process(self) -> None:
+        path = self.lib_dir / "note.txt"
+        path.write_text("hello isolated", encoding="utf-8")
+        doc = library.load_book_isolated(path)
+        self.assertEqual(doc.title, "note")
+        self.assertIn("hello isolated", doc.pages[0])
+
+    def test_epub_uses_subprocess(self) -> None:
+        path = self.lib_dir / "demo.epub"
+        path.write_bytes(b"PK\x03\x04fake")
+        calls: list[list[str]] = []
+
+        class FakeProc:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "title": "demo",
+                        "pages": ["page one", "page two"],
+                        "source_path": str(path),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            doc = library.load_book_isolated(path, timeout=30)
+        self.assertEqual(doc.title, "demo")
+        self.assertEqual(doc.pages, ["page one", "page two"])
+        self.assertTrue(calls)
+        self.assertIn("-c", calls[0])
+
+    def test_subprocess_error_surfaces(self) -> None:
+        path = self.lib_dir / "bad.epub"
+        path.write_bytes(b"nope")
+
+        class FakeProc:
+            returncode = 1
+            stderr = b"boom"
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps({"ok": False, "error": "RuntimeError: boom"}),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                library.load_book_isolated(path)
+        self.assertIn("boom", str(ctx.exception))
 
 
 if __name__ == "__main__":
