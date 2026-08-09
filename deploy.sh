@@ -61,6 +61,12 @@ is_ish() {
   [[ -d /ish ]] || grep -q 'apk\.ish\.app' /etc/apk/repositories 2>/dev/null
 }
 
+# Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
+primary_group_of() {
+  local user_name=$1
+  id -gn "$user_name" 2>/dev/null || printf '%s' "$user_name"
+}
+
 # Stop any previously running server bound to this PREFIX so the restart below
 # actually picks up the freshly copied server.py / games.py / client.py rather
 # than leaving an older interpreter holding the chat port.
@@ -259,6 +265,8 @@ apply_data_plane_permissions() {
   # Chat login users only need chat.sh, client.py, sshchat.env, venv/. Admins keep
   # server.* and admin-add-user.sh private to root / service user.
   local u="$RUN_USER"
+  local g
+  g=$(primary_group_of "$u")
   chown "$u:$CLIENT_GROUP" "$PREFIX"
   chmod 750 "$PREFIX"
 
@@ -270,15 +278,15 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
   chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
-    chown "$u:$u" "$PREFIX/game_ratings.json"
+    chown "$u:$g" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
   fi
   if [[ -f "$PREFIX/offline_messages.json" ]]; then
-    chown "$u:$u" "$PREFIX/offline_messages.json"
+    chown "$u:$g" "$PREFIX/offline_messages.json"
     chmod 660 "$PREFIX/offline_messages.json"
   fi
 
@@ -298,7 +306,7 @@ apply_data_plane_permissions() {
   fi
 
   if [[ -d /var/lib/sshchat/files ]]; then
-    chown -R "$u:$u" /var/lib/sshchat/files
+    chown -R "$u:$g" /var/lib/sshchat/files
     chmod 750 /var/lib/sshchat/files
   fi
 
@@ -314,40 +322,43 @@ apply_federation_permissions() {
   local fed_user=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
   local fed_home=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
   local svc_user="$RUN_USER"
+  local svc_group fed_group
+  svc_group=$(primary_group_of "$svc_user")
   [[ -d "$fed_dir" ]] || mkdir -p "$fed_dir"
 
   # Service data dir: only the chat service needs it (not sshd home).
   if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-    chown "$svc_user:$svc_user" "$fed_dir"
+    chown "$svc_user:$svc_group" "$fed_dir"
   fi
   chmod 750 "$fed_dir"
 
   if [[ -f "$fed_dir/id_ed25519" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519"
+      chown "$svc_user:$svc_group" "$fed_dir/id_ed25519"
     fi
     chmod 600 "$fed_dir/id_ed25519"
   fi
   if [[ -f "$fed_dir/id_ed25519.pub" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519.pub"
+      chown "$svc_user:$svc_group" "$fed_dir/id_ed25519.pub"
     fi
     chmod 644 "$fed_dir/id_ed25519.pub"
   fi
   if [[ -f "$fed_dir/peers.json" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/peers.json"
+      chown "$svc_user:$svc_group" "$fed_dir/peers.json"
     fi
     chmod 640 "$fed_dir/peers.json"
   fi
 
   if ! is_darwin && id "$fed_user" &>/dev/null; then
+    fed_group=$(primary_group_of "$fed_user")
     add_user_to_client_group "$fed_user" || true
     local cur_home
     cur_home=$(getent passwd "$fed_user" | cut -d: -f6)
     mkdir -p "$fed_home"
     # sshd: home must be owned by the user (or root) and not group/other-writable.
-    chown "$fed_user:$fed_user" "$fed_home"
+    chown "$fed_user:$fed_group" "$fed_home"
     chmod 755 "$fed_home"
     if [[ -n "$cur_home" && "$cur_home" != "$fed_home" ]]; then
       # Migrate inbound keys from the old home (often PREFIX/federation).
@@ -361,10 +372,10 @@ apply_federation_permissions() {
       fi
     fi
     mkdir -p "$fed_home/.ssh"
-    chown "$fed_user:$fed_user" "$fed_home/.ssh"
+    chown "$fed_user:$fed_group" "$fed_home/.ssh"
     chmod 700 "$fed_home/.ssh"
     if [[ -f "$fed_home/.ssh/authorized_keys" ]]; then
-      chown "$fed_user:$fed_user" "$fed_home/.ssh/authorized_keys"
+      chown "$fed_user:$fed_group" "$fed_home/.ssh/authorized_keys"
       chmod 600 "$fed_home/.ssh/authorized_keys"
     fi
   fi
@@ -739,9 +750,17 @@ if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
       useradd -r -s /usr/sbin/nologin "$RUN_USER"
       echo "info: created system user $RUN_USER"
     elif command -v adduser &>/dev/null; then
-      # Alpine/BusyBox adduser: -S for system user, -D for no password, -s for shell
-      adduser -S -D -s /sbin/nologin "$RUN_USER" 2>/dev/null || adduser -S -D -s /bin/false "$RUN_USER"
-      echo "info: created system user $RUN_USER"
+      # Alpine: create a same-named group first so later chown user:user works.
+      if command -v addgroup &>/dev/null && ! getent group "$RUN_USER" &>/dev/null 2>&1; then
+        addgroup -S "$RUN_USER" 2>/dev/null || addgroup "$RUN_USER" || true
+      fi
+      if getent group "$RUN_USER" &>/dev/null 2>&1; then
+        adduser -S -D -G "$RUN_USER" -s /sbin/nologin "$RUN_USER" 2>/dev/null || \
+          adduser -S -D -G "$RUN_USER" -s /bin/false "$RUN_USER"
+      else
+        adduser -S -D -s /sbin/nologin "$RUN_USER" 2>/dev/null || adduser -S -D -s /bin/false "$RUN_USER"
+      fi
+      echo "info: created system user $RUN_USER (group $(primary_group_of "$RUN_USER"))"
     else
       echo "error: neither useradd nor adduser found; install shadow-utils or use --no-run-user" >&2
       exit 1
@@ -772,62 +791,74 @@ chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PRE
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PREFIX" -maxdepth 2 -name '*.pyc' -delete 2>/dev/null || true
 
-rm -rf "$PREFIX/venv"
-# Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
-DEPLOY_TMP="$PREFIX/.deploy-tmp"
-rm -rf "$DEPLOY_TMP"
-mkdir -p "$DEPLOY_TMP"
-export TMPDIR="$DEPLOY_TMP"
-export PIP_NO_CACHE_DIR=1
-
-VENV_ARGS=()
-REQ_FILE="$SCRIPT_DIR/requirements-server.txt"
-if is_ish; then
-  # Reuse Alpine py3-lxml (and any other system site packages) so ebooklib
-  # does not compile lxml from source under the i686 emulator.
-  VENV_ARGS+=(--system-site-packages)
-  if [[ -f "$SCRIPT_DIR/requirements-server-ish.txt" ]]; then
-    REQ_FILE="$SCRIPT_DIR/requirements-server-ish.txt"
-    echo "info: iSH: using $REQ_FILE (pymupdf skipped; PDF via pypdf)" >&2
+REUSE_VENV=0
+if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
+  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+    REUSE_VENV=1
+    echo "info: iSH: reusing existing venv (deps already importable)" >&2
   fi
 fi
 
-echo "info: creating venv at $PREFIX/venv (on iSH this can take several minutes)..."
-python3 -m venv "${VENV_ARGS[@]}" "$PREFIX/venv"
+if [[ "$REUSE_VENV" -eq 0 ]]; then
+  rm -rf "$PREFIX/venv"
+  # Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
+  DEPLOY_TMP="$PREFIX/.deploy-tmp"
+  rm -rf "$DEPLOY_TMP"
+  mkdir -p "$DEPLOY_TMP"
+  export TMPDIR="$DEPLOY_TMP"
+  export PIP_NO_CACHE_DIR=1
 
-PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
-if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
-  PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
-  echo "info: using pip index $PIP_INDEX_URL_ARG (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES})"
-else
-  echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
-fi
-
-# Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
-# republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
-if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
-  echo "info: upgrading pip in $PREFIX/venv"
-  pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
-fi
-# Prefer binary wheels; never try to build pymupdf/lxml from source on constrained hosts.
-echo "info: installing Python deps from $REQ_FILE"
-if is_ish; then
-  # Install pure-python / wheel deps first; ebooklib needs lxml which comes from apk
-  # via --system-site-packages — avoid pip compiling lxml for i686.
-  pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary \
-    prompt_toolkit 'chess>=1.10' 'pypdf>=4.0'
-  pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary --no-deps \
-    'ebooklib>=0.18'
-  if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
-    echo "error: iSH venv missing required modules after install" >&2
-    "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
-    exit 1
+  VENV_ARGS=()
+  REQ_FILE="$SCRIPT_DIR/requirements-server.txt"
+  if is_ish; then
+    # Reuse Alpine py3-lxml (and any other system site packages) so ebooklib
+    # does not compile lxml from source under the i686 emulator.
+    VENV_ARGS+=(--system-site-packages)
+    if [[ -f "$SCRIPT_DIR/requirements-server-ish.txt" ]]; then
+      REQ_FILE="$SCRIPT_DIR/requirements-server-ish.txt"
+      echo "info: iSH: using $REQ_FILE (pymupdf skipped; PDF via pypdf)" >&2
+    fi
   fi
-  echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
+
+  echo "info: creating venv at $PREFIX/venv (on iSH this can take several minutes)..."
+  python3 -m venv "${VENV_ARGS[@]}" "$PREFIX/venv"
+
+  PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
+  if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
+    PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
+    echo "info: using pip index $PIP_INDEX_URL_ARG (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES})"
+  else
+    echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
+  fi
+
+  # Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
+  # republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
+  if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
+    echo "info: upgrading pip in $PREFIX/venv"
+    pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
+  fi
+  # Prefer binary wheels; never try to build pymupdf/lxml from source on constrained hosts.
+  echo "info: installing Python deps from $REQ_FILE"
+  if is_ish; then
+    # Install pure-python / wheel deps first; ebooklib needs lxml which comes from apk
+    # via --system-site-packages — avoid pip compiling lxml for i686.
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary \
+      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0'
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary --no-deps \
+      'ebooklib>=0.18'
+    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+      echo "error: iSH venv missing required modules after install" >&2
+      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
+      exit 1
+    fi
+    echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
+  else
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
+  fi
+  rm -rf "$DEPLOY_TMP"
 else
-  pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
+  echo "info: skipped venv recreate / pip install"
 fi
-rm -rf "$DEPLOY_TMP"
 
 umask 022
 if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
@@ -1081,7 +1112,7 @@ EOF
   # Ensure service user can write the log / runtime files.
   touch "$PREFIX/server.log" 2>/dev/null || true
   if [[ "$RUN_USER" != "root" ]] && id "$RUN_USER" &>/dev/null; then
-    chown "$RUN_USER:$RUN_USER" "$PREFIX/server.log" 2>/dev/null || true
+    chown "$RUN_USER:$(primary_group_of "$RUN_USER")" "$PREFIX/server.log" 2>/dev/null || true
   fi
   rc-update add sshchat default 2>/dev/null || true
   stop_existing_server "$PREFIX"
@@ -1124,7 +1155,7 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
       chmod 640 "$PREFIX/sshchat.env"
     fi
     if [[ -d "$FILE_STORAGE_DIR" && "$CREATE_RUN_USER" -eq 1 ]]; then
-      chown -R "$RUN_USER:$RUN_USER" "$FILE_STORAGE_DIR"
+      chown -R "$RUN_USER:$(primary_group_of "$RUN_USER")" "$FILE_STORAGE_DIR"
       chmod 750 "$FILE_STORAGE_DIR"
     fi
     # Hard check: env host must match the live tunnel file
