@@ -176,9 +176,7 @@ sudo ufw allow 80/tcp   # 仅 Let's Encrypt 签发/续期需要
 
 ### 4. 联邦扩网（可选）
 
-两台及以上服务器要合并成一张聊天网时：**两边互换联邦公钥并互加，再各自重启**。  
-联邦公钥在 `/opt/sshchat/federation/id_ed25519.pub`（不是用户 `~/.ssh` 里的钥匙）。  
-完整对照步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
+两台及以上服务器合并聊天网时，用 `admin-add-peer.sh` **两边互加**联邦公钥即可；**一般不必重启**（脚本会 SIGHUP 热加载，服务也会监视 `peers.json`）。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
 
 **升级：** 在新版本仓库里再执行一次，**`--prefix` 与当初相同**，一般要加 **`--keep-env`** 保留你已改过的端口等配置：
 
@@ -239,16 +237,6 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 ```
 
-建议在 `sshchat.env` 里写死节点名（两边不同）：
-
-```bash
-# 在 A 上
-SSHCHAT_NODE_ID=server-a
-
-# 在 B 上
-SSHCHAT_NODE_ID=server-b
-```
-
 #### 1. 各自取出「本机联邦公钥」发给对方管理员
 
 在 **A** 上：
@@ -275,21 +263,26 @@ sudo /opt/sshchat/admin-add-peer.sh server-b b.example.com "$(cat /path/to/b-fed
 
 含义：`server-b` = B 的 `SSHCHAT_NODE_ID`；`b.example.com` = A 能 SSH 到的 B 地址；第三个参数 = **B 的联邦公钥**。
 
+脚本会：
+
+- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（允许对方隧道连进来；sshd 即时生效）
+- 更新 `federation/peers.json`，并触发本机热加载出站连接
+
 #### 3. 在 B 上登记 A（对称）
 
 ```bash
 sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /path/to/a-federation.pub)"
 ```
 
-#### 4. 两边都重启聊天服务
+#### 4. 不必重启聊天服务
 
-登记只写配置，**不会立刻连上**，必须重启：
+`admin-add-peer.sh` 会更新 `peers.json` / `authorized_keys`，并向运行中的 `sshchat` 发送 **SIGHUP** 热加载新对端；若信号未送达，服务也会在数秒内监视到 `peers.json` 变更并自动加载。
 
-```bash
-sudo systemctl restart sshchat
-```
+#### 5. 防火墙（若节点间无法直连）
 
-#### 5. 怎么确认连上了
+默认走 SSH 隧道（`ssh -W`，通常只需对方 **22** 可达）。若改用直连 TCP，再放行 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1）。
+
+#### 6. 怎么确认连上了
 
 - 服务日志里出现 `federation: outbound connected` 或 `peer … connected`
 - 两边用户进入同一房间名，一方说话另一方能看到
@@ -297,29 +290,9 @@ sudo systemctl restart sshchat
 
 ### 脚本实际改了什么
 
-每台执行 `admin-add-peer.sh` 时会：
+联邦公钥在首次部署时生成，之后重复跑 `deploy.sh` **不会更换**（除非有人删掉密钥文件）。
 
-1. 把**对方联邦公钥**写进本机联邦用户的 `authorized_keys`（允许对方隧道连进来）
-2. 更新本机 `/opt/sshchat/federation/peers.json`（本机知道要连谁）
-
-默认用 SSH 隧道（`ssh -W`），一般只要对方 **22** 端口可达即可；联邦业务端口默认是聊天端口 +1，通常走隧道，不必单独对公网开放。
-
-可选环境变量（登记前可设）：
-
-| 变量 | 含义 | 默认 |
-|------|------|------|
-| `SSHCHAT_PEER_SSH_PORT` | 对方 sshd 端口 | `22` |
-| `SSHCHAT_PEER_FED_PORT` | 对方联邦端口 | 本机 `SSHCHAT_PORT+1` |
-| `SSHCHAT_PEER_MODE` | `ssh` 或 `tcp` | `ssh` |
-
-### 行为约定（连上之后）
-
-- **同名用户 = 同一账号**：两边都建了用户 `alice`，视为同一人多端在线
-- **同名房间 = 同一房间**：`#dev` 等在全网共享
-- **`/msg` / `/names` / `/game`**：可跨服
-- **`/sendfile`**：会话在发起方节点；下载链接用该节点的 `SSHCHAT_FILE_PUBLIC_HOST`（建议公网可达，如 Cloudflare）
-
-### 相关环境变量（`sshchat.env`）
+**环境变量（`sshchat.env`）：**
 
 | 变量 | 含义 |
 |------|------|
@@ -327,6 +300,7 @@ sudo systemctl restart sshchat
 | `SSHCHAT_FEDERATION_PORT` | 联邦 TCP 端口（默认聊天端口 +1） |
 | `SSHCHAT_FEDERATION_DISABLE=1` | 关闭联邦 |
 | `SSHCHAT_FEDERATION_PEERS` | 可选，覆盖 `federation/peers.json` 路径 |
+| `SSHCHAT_FED_PEERS_WATCH_SECONDS` | 监视 `peers.json` 的间隔（默认 `5`；`0` 关闭监视，仍可用 SIGHUP） |
 
 普通用户若要在多台服务器用同一身份：在各机用 `admin-add-user.sh` 建**相同用户名**并登记各自（或同一把）登录公钥，再按上面完成联邦互信即可。
 
