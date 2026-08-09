@@ -94,6 +94,11 @@ _library_page_waiters: dict[str, dict[str, object]] = {}
 _library_page_waiters_lock = threading.Lock()
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
+# per-book load locks so concurrent federated page requests share one parse
+_library_load_locks: dict[str, threading.Lock] = {}
+_library_load_locks_guard = threading.Lock()
+# Cap federated page bodies so lpage_ok stays well under the 1 MiB line budget.
+_FED_LIBRARY_PAGE_MAX_CHARS = max(500, int(library.LIBRARY_PAGE_CHARS) * 2)
 lock = threading.Lock()
 _MISSING = object()  # sentinel for "attribute not present"
 _persist_dirty = False
@@ -1771,6 +1776,12 @@ def _fed_on_library_page_request(
             doc = _get_cached_book(entry.path)
             total = doc.total_pages
             page = max(0, min(int(page), total - 1))
+            text = str(doc.pages[page] or "")
+            if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
+                text = (
+                    text[:_FED_LIBRARY_PAGE_MAX_CHARS]
+                    + "\n…（本页过长，联邦传输已截断）"
+                )
             payload = {
                 "ok": True,
                 "req_id": req_id,
@@ -1778,7 +1789,7 @@ def _fed_on_library_page_request(
                 "title": doc.title,
                 "page": page,
                 "total_pages": total,
-                "text": doc.pages[page],
+                "text": text,
                 "ext": entry.ext,
                 "size_bytes": entry.size_bytes,
             }
@@ -1801,8 +1812,21 @@ def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> 
             event.set()
 
 
+def _fail_library_page_waiters(error: str) -> None:
+    """Unblock pending remote /library opens when a peer link drops."""
+    with _library_page_waiters_lock:
+        waiters = list(_library_page_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
 def _fetch_remote_library_page(
-    owner: str, book_name: str, page: int, timeout: float = 45.0
+    owner: str, book_name: str, page: int, timeout: float = 90.0
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -1882,9 +1906,15 @@ def _get_cached_book(path: Path) -> library.BookDocument:
     cached = library_doc_cache.get(key)
     if cached and cached[0] == mtime_ns:
         return cached[1]
-    doc = library.load_book(path)
-    library_doc_cache[key] = (mtime_ns, doc)
-    return doc
+    with _library_load_locks_guard:
+        load_lock = _library_load_locks.setdefault(key, threading.Lock())
+    with load_lock:
+        cached = library_doc_cache.get(key)
+        if cached and cached[0] == mtime_ns:
+            return cached[1]
+        doc = library.load_book(path)
+        library_doc_cache[key] = (mtime_ns, doc)
+        return doc
 
 
 def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
@@ -2289,7 +2319,8 @@ def _handle_library(conn, payload: str) -> None:
             send_line(
                 conn,
                 f"[*] 正在从节点 {entry.origin} 拉取 "
-                f"[{entry.ext.upper()}] {entry.name}…\n",
+                f"[{entry.ext.upper()}] {entry.name}…"
+                "（首次解析可能较慢，请稍候）\n",
             )
             try:
                 payload = _fetch_remote_library_page(entry.origin, entry.name, page)
@@ -3122,6 +3153,7 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             text = f"[*] 联邦节点 {peer_node} 已退出（与本机断开）\n"
         else:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
+        _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
     else:
         return
     broadcast_local_notice(text)

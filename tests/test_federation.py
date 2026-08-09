@@ -888,6 +888,7 @@ class FederationServerIntegrationTests(unittest.TestCase):
     def test_lpage_round_trip_invokes_handlers(self) -> None:
         requests: list[tuple] = []
         results: list[tuple] = []
+        done = threading.Event()
 
         class FakeLink:
             def __init__(self, node_id: str) -> None:
@@ -897,6 +898,10 @@ class FederationServerIntegrationTests(unittest.TestCase):
             def send_line(self, line: str) -> None:
                 self.lines.append(line)
 
+        def on_req(*a):
+            requests.append(a)
+            done.set()
+
         owner = federation.FederationHub(
             12345,
             server.lock,
@@ -904,7 +909,7 @@ class FederationServerIntegrationTests(unittest.TestCase):
             lambda r, m: None,
             lambda t, f, x: None,
             lambda: [],
-            on_library_page_request=lambda *a: requests.append(a),
+            on_library_page_request=on_req,
         )
         owner.enabled = True
         owner.node_id = "node-owner"
@@ -927,6 +932,7 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertTrue(reader.request_library_page("node-owner", "req1", "a.txt", 2))
         req_line = reader._peers["node-owner"].lines[-1].rstrip("\n")
         owner._on_peer_line("node-reader", req_line)
+        self.assertTrue(done.wait(2.0), "lpage handler thread did not run")
         self.assertEqual(requests[-1][:4], ("node-owner", "req1", "a.txt", 2))
         self.assertEqual(requests[-1][4], "node-reader")
 
@@ -937,6 +943,56 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(results[-1][0], "node-owner")
         self.assertEqual(results[-1][1], "req1")
         self.assertEqual(results[-1][2]["text"], "hello")
+
+    def test_lpage_handler_does_not_block_peer_line(self) -> None:
+        """Slow book loads must not stall federation I/O."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_handler(*_a):
+            started.set()
+            release.wait(2.0)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_request=slow_handler,
+        )
+        hub.enabled = True
+        hub.node_id = "node-owner"
+        t0 = time.monotonic()
+        hub._on_peer_line(
+            "node-reader",
+            "lpage\tnode-reader\tnode-owner\treq9\tbook.epub\t0",
+        )
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(started.wait(2.0))
+        release.set()
+
+    def test_peer_down_fails_pending_library_page_waiters(self) -> None:
+        event = threading.Event()
+        req_id = "abc123"
+        with server._library_page_waiters_lock:
+            server._library_page_waiters[req_id] = {
+                "event": event,
+                "payload": None,
+            }
+        try:
+            server._fed_on_peer_event("down", "Mathematics.local", "node-a")
+            self.assertTrue(event.is_set())
+            with server._library_page_waiters_lock:
+                payload = server._library_page_waiters[req_id]["payload"]
+            self.assertIsInstance(payload, dict)
+            self.assertFalse(payload.get("ok"))
+            self.assertIn("Mathematics.local", str(payload.get("error") or ""))
+        finally:
+            with server._library_page_waiters_lock:
+                server._library_page_waiters.pop(req_id, None)
 
     def test_sync_library_catalog_fanout(self) -> None:
         class FakeLink:

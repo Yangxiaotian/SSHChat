@@ -975,12 +975,28 @@ class FederationHub:
                 return
             if owner == self.node_id:
                 if self.on_library_page_request is not None:
-                    try:
-                        self.on_library_page_request(
-                            owner, req_id, book_name, page_i, origin
-                        )
-                    except Exception as e:
-                        print(f"federation: on_library_page_request error: {e!r}")
+                    # Heavy book parses (large EPUB/PDF) must not block the
+                    # federation I/O thread — that stalls the duplex link and
+                    # SSH tunnels drop mid-request.
+                    cb = self.on_library_page_request
+                    args = (owner, req_id, book_name, page_i, origin)
+
+                    def _run_library_page(
+                        _cb=cb, _args=args, _req=req_id
+                    ) -> None:
+                        try:
+                            _cb(*_args)
+                        except Exception as e:
+                            print(
+                                f"federation: on_library_page_request "
+                                f"error ({_req}): {e!r}"
+                            )
+
+                    threading.Thread(
+                        target=_run_library_page,
+                        name=f"fed-lpage-{req_id[:8]}",
+                        daemon=True,
+                    ).start()
             else:
                 self._learn_route(owner, peer_node)
                 self._send_toward(owner, line + "\n", exclude_node=peer_node)
