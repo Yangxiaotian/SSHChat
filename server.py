@@ -3072,7 +3072,24 @@ def _should_forward_game(room: str, sub: str) -> bool:
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
     # Hub already fanouts the original msg line; only deliver locally.
+    # Join/leave presence uses dedicated join/leave frames — ignore chat-shaped
+    # duplicates from older peers that still federated those via msg.
+    if _is_presence_chat_notice(msg):
+        return
     broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
+
+
+def _is_presence_chat_notice(msg: bytes) -> bool:
+    """True for `[+] nick joined #room` / `[!] nick left #room` system lines."""
+    try:
+        text = msg.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return False
+    if text.startswith("[+] ") and " joined #" in text:
+        return True
+    if text.startswith("[!] ") and " left #" in text:
+        return True
+    return False
 
 
 def _fed_on_join_notice(room: str, msg: bytes) -> None:
@@ -3347,7 +3364,9 @@ def remove_client(conn) -> None:
         if same_local or remote_same:
             continue
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
-        broadcast_room(room, leave_msg)
+        # Local delivery only: federation uses notify_leave (presence), not msg,
+        # otherwise peers see the leave line twice.
+        broadcast_room(room, leave_msg, skip_federation=True)
         if hub is not None and hub.enabled:
             hub.notify_leave(name, room)
     for room, lines in game_notices:
@@ -3405,6 +3424,7 @@ def handle_command(conn, payload: str) -> None:
                 new_room,
                 f"[+] {name} joined #{new_room}\n".encode("utf-8"),
                 exclude_conn=conn,
+                skip_federation=True,
             )
             hub = federation.get_hub()
             if hub is not None and hub.enabled:
@@ -3562,6 +3582,7 @@ def handle_command(conn, payload: str) -> None:
             broadcast_room(
                 target_room,
                 f"[!] {name} left #{target_room}\n".encode("utf-8"),
+                skip_federation=True,
             )
             if hub is not None and hub.enabled:
                 hub.notify_leave(name, target_room)
@@ -4170,7 +4191,7 @@ def handle_client(conn, addr) -> None:
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
         join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
-        broadcast_room(active_room, join_msg, exclude_conn=conn)
+        broadcast_room(active_room, join_msg, exclude_conn=conn, skip_federation=True)
         if hub is not None and hub.enabled:
             for room in inherited_rooms:
                 hub.notify_join(name, room)

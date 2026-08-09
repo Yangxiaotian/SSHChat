@@ -694,15 +694,22 @@ class FederationHub:
                 return True
         return False
 
-    def _register_peer(self, node_id: str, link: _PeerLink) -> None:
-        # Replace any existing link for this node. Closing the newcomer caused
-        # reconnect flaps when a stale peer entry briefly overlapped a retry
-        # (common over SSH tunnels / unstable paths).
+    def _register_peer(self, node_id: str, link: _PeerLink) -> bool:
+        """Install link for node_id.
+
+        Returns True when the peer newly became reachable (caller should announce
+        up). Returns False when replacing an already-live link (silent swap), so
+        reconnect races do not spam local users with down/up pairs.
+        """
         old = self._peers.get(node_id)
-        if old is not None and old is not link:
-            old.close()
+        already_up = old is not None and old is not link and not old._closed
+        # Install before closing the old link so a concurrent finally on the old
+        # session sees the newer owner and skips tearing down presence/routes.
         self._peers[node_id] = link
         self._routes[node_id] = node_id
+        if old is not None and old is not link:
+            old.close()
+        return not already_up
 
     def _notify_peer_up(self, peer_node: str) -> None:
         """Local peer just connected: tell local users and other online peers."""
@@ -1349,11 +1356,12 @@ class FederationHub:
                     _c.sendall(data)
 
                 link = _PeerLink(self, peer_node, _send)
-                self._register_peer(peer_node, link)
+                is_new = self._register_peer(peer_node, link)
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
                 self._push_presence(link)
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
-                self._notify_peer_up(peer_node)
+                if is_new:
+                    self._notify_peer_up(peer_node)
 
             assert link is not None and peer_node is not None
             while not self._stop.is_set():
@@ -1536,7 +1544,7 @@ class FederationHub:
                     break
                 parts = line.split("\t")
                 link = _PeerLink(self, peer_node, _send)
-                self._register_peer(peer_node, link)
+                is_new = self._register_peer(peer_node, link)
                 registered = True
                 # Apply any peer lines already buffered with @fed-ok (usually
                 # their presence snapshot) BEFORE we announce ourselves. The
@@ -1575,7 +1583,8 @@ class FederationHub:
                             pass
                 self._push_presence(link)
                 print(f"federation: outbound connected to {peer_node}")
-                self._notify_peer_up(peer_node)
+                if is_new:
+                    self._notify_peer_up(peer_node)
                 continue
             if link is not None:
                 link.handle_line(line)
@@ -1625,9 +1634,9 @@ def init_hub(
     on_peer_event: Optional[Callable[[str, str, str], None]] = None,
     on_game_request: Optional[Callable[[str, str], None]] = None,
     get_local_library: Optional[Callable[[], list[dict[str, Any]]]] = None,
-        on_library_page_request: Optional[
-            Callable[[str, str, str, int, str], None]
-        ] = None,
+    on_library_page_request: Optional[
+        Callable[[str, str, str, int, str], None]
+    ] = None,
     on_library_page_result: Optional[
         Callable[[str, str, dict[str, Any]], None]
     ] = None,

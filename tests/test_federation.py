@@ -969,6 +969,86 @@ class FederationServerIntegrationTests(unittest.TestCase):
         books = json.loads(base64.b64decode(parts[2]).decode("utf-8"))
         self.assertEqual(books[0]["name"], "local.md")
 
+    def test_leave_broadcast_skips_federation_msg(self) -> None:
+        """Disconnect leave must not dual-send via room msg + notify_leave."""
+        msgs: list[tuple[str, bytes]] = []
+        leaves: list[tuple[str, str]] = []
+
+        class FakeHub:
+            enabled = True
+
+            def same_name_in_room(self, room, name, local_same):
+                return False
+
+            def broadcast_room(self, room, msg, exclude_node=None):
+                msgs.append((room, msg))
+
+            def notify_leave(self, name, room):
+                leaves.append((name, room))
+
+        alice = DummyConn()
+        with server.lock:
+            server.clients[alice] = {
+                "name": "yxt",
+                "rooms": {"default"},
+                "current_room": "default",
+            }
+            server.rooms["default"] = {alice}
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            server.remove_client(alice)
+        self.assertEqual(leaves, [("yxt", "default")])
+        self.assertEqual(msgs, [])
+
+    def test_fed_room_msg_drops_presence_chat_duplicates(self) -> None:
+        delivered: list[bytes] = []
+
+        def capture(room, msg, **kwargs):
+            delivered.append(msg)
+
+        with mock.patch.object(server, "broadcast_room", side_effect=capture):
+            server._fed_on_room_msg(
+                "default", b"[!] yxt left #default\n", "node-b"
+            )
+            server._fed_on_room_msg(
+                "default", b"[+] yxt joined #default\n", "node-b"
+            )
+            server._fed_on_room_msg("default", b"hello chat\n", "node-b")
+        self.assertEqual(delivered, [b"hello chat\n"])
+
+    def test_register_peer_replace_suppresses_up_notice(self) -> None:
+        events: list[tuple[str, str, str]] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self._closed = False
+
+            def close(self) -> None:
+                self._closed = True
+
+            def send_line(self, line: str) -> None:
+                return None
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_peer_event=lambda ev, peer, rep: events.append((ev, peer, rep)),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        first = FakeLink("node-b")
+        self.assertTrue(hub._register_peer("node-b", first))
+        hub._notify_peer_up("node-b")
+        second = FakeLink("node-b")
+        self.assertFalse(hub._register_peer("node-b", second))
+        self.assertEqual(events, [("up", "node-b", "node-a")])
+        self.assertTrue(first._closed)
+        self.assertIs(hub._peers["node-b"], second)
+
 
 if __name__ == "__main__":
     unittest.main()
