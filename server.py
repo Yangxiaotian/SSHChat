@@ -2627,6 +2627,41 @@ def _fed_on_join_notice(room: str, msg: bytes) -> None:
     broadcast_room(room, msg, skip_federation=True)
 
 
+def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
+    """Tell all local chat users when a federation node comes or goes."""
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    peer_node = (peer_node or "").strip() or "?"
+    reporter = (reporter or "").strip() or "?"
+    if event == "up":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
+    elif event == "down":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已退出（与本机断开）\n"
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
+    else:
+        return
+    broadcast_local_notice(text)
+
+
+def broadcast_local_notice(text: str) -> None:
+    """Send a system line to every locally connected client (no federation fan-out)."""
+    with lock:
+        targets = list(clients.keys())
+    dead = []
+    for c in targets:
+        try:
+            send_line(c, text)
+        except Exception:
+            dead.append(c)
+    for c in dead:
+        remove_client(c)
+
+
 def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     targets = find_clients_by_nickname(to_name, local_only=True)
     for peer_conn, _ in targets:
@@ -2701,6 +2736,7 @@ def _ensure_federation_hub() -> None:
         _fed_execute_game_cmd,
         _fed_on_game_priv,
         _fed_on_file_notice,
+        _fed_on_peer_event,
     )
     _fed_hub.start()
 

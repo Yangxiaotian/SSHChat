@@ -269,6 +269,63 @@ class FederationProtocolTests(unittest.TestCase):
                     self.assertEqual(hub.reload_peers(), 0)
                     self.assertEqual(started_ids, ["node-b"])
 
+    def test_peer_up_down_notifies_other_peers(self) -> None:
+        events: list[tuple[str, str, str]] = []
+
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+            def close(self) -> None:
+                return None
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_peer_event=lambda ev, peer, rep: events.append((ev, peer, rep)),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link_b = FakeLink()
+        link_c = FakeLink()
+        hub._peers["node-b"] = link_b
+        hub._peers["node-c"] = link_c
+
+        hub._notify_peer_up("node-c")
+        self.assertEqual(events[-1], ("up", "node-c", "node-a"))
+        # Other online peers get nodeup; the subject peer itself does not.
+        self.assertTrue(any(l.startswith("nodeup\tnode-a\tnode-c") for l in link_b.lines))
+        self.assertFalse(any(l.startswith("nodeup\t") for l in link_c.lines))
+
+        # Peer B receives the relay and announces locally without re-flooding.
+        peer_b = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_peer_event=lambda ev, peer, rep: events.append((ev, peer, rep)),
+        )
+        peer_b.enabled = True
+        peer_b.node_id = "node-b"
+        other = FakeLink()
+        peer_b._peers["node-d"] = other
+        peer_b._on_peer_line("node-a", "nodeup\tnode-a\tnode-c")
+        self.assertEqual(events[-1], ("up", "node-c", "node-a"))
+        self.assertEqual(other.lines, [])
+
+        hub._notify_peer_down("node-c")
+        self.assertEqual(events[-1], ("down", "node-c", "node-a"))
+        self.assertTrue(any(l.startswith("nodedown\tnode-a\tnode-c") for l in link_b.lines))
+
 
 class FederationServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:

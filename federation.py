@@ -117,6 +117,7 @@ class FederationHub:
         on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
         on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
         on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
+        on_peer_event: Optional[Callable[[str, str, str], None]] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -131,6 +132,8 @@ class FederationHub:
         self.on_game_cmd = on_game_cmd
         self.on_game_priv = on_game_priv
         self.on_file_notice = on_file_notice
+        # event in {"up","down"}, peer_node, reporter_node
+        self.on_peer_event = on_peer_event
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -473,15 +476,69 @@ class FederationHub:
             old.close()
         self._peers[node_id] = link
 
+    def _notify_peer_up(self, peer_node: str) -> None:
+        """Local peer just connected: tell local users and other online peers."""
+        self._emit_peer_event("up", peer_node, reporter=self.node_id, relay=True)
+
+    def _notify_peer_down(self, peer_node: str) -> None:
+        """Local peer just disconnected: tell local users and other online peers."""
+        self._emit_peer_event("down", peer_node, reporter=self.node_id, relay=True)
+
+    def _emit_peer_event(
+        self,
+        event: str,
+        peer_node: str,
+        *,
+        reporter: str,
+        relay: bool,
+        exclude_node: Optional[str] = None,
+    ) -> None:
+        peer_node = str(peer_node or "").strip()
+        reporter = str(reporter or "").strip() or self.node_id
+        if event not in ("up", "down") or not peer_node:
+            return
+        if self.on_peer_event is not None:
+            try:
+                self.on_peer_event(event, peer_node, reporter)
+            except Exception as e:
+                print(f"federation: on_peer_event error: {e!r}")
+        if relay:
+            self._broadcast_peer_event(
+                event,
+                peer_node,
+                reporter,
+                exclude_node=exclude_node if exclude_node is not None else peer_node,
+            )
+
+    def _broadcast_peer_event(
+        self,
+        event: str,
+        peer_node: str,
+        reporter: str,
+        *,
+        exclude_node: Optional[str] = None,
+    ) -> None:
+        if not self.enabled or not self._peers:
+            return
+        kind = "nodeup" if event == "up" else "nodedown"
+        line = f"{kind}\t{reporter}\t{peer_node}\n"
+        for node_id, link in list(self._peers.items()):
+            if exclude_node and node_id == exclude_node:
+                continue
+            # Don't bounce the event back to the peer it is about if still linked.
+            if node_id == peer_node:
+                continue
+            link.send_line(line)
+
     def _unregister_peer(
         self, node_id: str, link: Optional[_PeerLink] = None
-    ) -> None:
+    ) -> bool:
         # Only tear down if this session still owns the peer slot. Otherwise a
         # replaced/stale session would wipe presence learned on the newer link
         # (seen as one-way /names: initiator flaps, passive side looks fine).
         current = self._peers.get(node_id)
         if link is not None and current is not None and current is not link:
-            return
+            return False
         old = self._peers.pop(node_id, None)
         if old is not None:
             old.close()
@@ -497,6 +554,7 @@ class FederationHub:
                             "utf-8"
                         ),
                     )
+        return old is not None
 
     def _push_presence(self, link: _PeerLink) -> None:
         """Send local online users snapshot to a newly connected peer."""
@@ -553,6 +611,16 @@ class FederationHub:
             except Exception:
                 return
             self.on_pm(to_name, from_name, text)
+            return
+        if kind in ("nodeup", "nodedown") and len(parts) >= 3:
+            reporter, subject = parts[1], parts[2]
+            if reporter == self.node_id or subject == self.node_id:
+                return
+            event = "up" if kind == "nodeup" else "down"
+            # One-hop only: show locally, do not flood further.
+            self._emit_peer_event(
+                event, subject, reporter=reporter, relay=False
+            )
             return
         if kind == "fnotice" and len(parts) >= 5 and self.on_file_notice:
             origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
@@ -745,6 +813,7 @@ class FederationHub:
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
                 self._push_presence(link)
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
+                self._notify_peer_up(peer_node)
 
             assert link is not None and peer_node is not None
             while not self._stop.is_set():
@@ -769,9 +838,11 @@ class FederationHub:
         finally:
             if peer_node:
                 current_before = self._peers.get(peer_node)
-                self._unregister_peer(peer_node, link)
+                removed = self._unregister_peer(peer_node, link)
                 if link is None or current_before is link:
                     print(f"federation: peer {peer_node} disconnected")
+                if removed:
+                    self._notify_peer_down(peer_node)
             try:
                 conn.close()
             except Exception:
@@ -948,11 +1019,13 @@ class FederationHub:
                             pass
                 self._push_presence(link)
                 print(f"federation: outbound connected to {peer_node}")
+                self._notify_peer_up(peer_node)
                 continue
             if link is not None:
                 link.handle_line(line)
         if registered:
-            self._unregister_peer(peer_node, link)
+            if self._unregister_peer(peer_node, link):
+                self._notify_peer_down(peer_node)
         try:
             proc.terminate()
         except Exception:
@@ -978,6 +1051,7 @@ def init_hub(
     on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
     on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
     on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
+    on_peer_event: Optional[Callable[[str, str, str], None]] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -992,5 +1066,6 @@ def init_hub(
         on_game_cmd,
         on_game_priv,
         on_file_notice,
+        on_peer_event,
     )
     return _hub
