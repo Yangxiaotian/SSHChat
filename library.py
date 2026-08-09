@@ -867,21 +867,79 @@ def _normalize_user(name: str) -> str:
 
 
 def bookmark_book_key(book_name: str) -> str:
-    """Normalize a bookmark key; preserves ``origin::filename`` federated keys."""
+    """Normalize a bookmark storage key to the bare filename.
+
+    Federated reading used to store ``origin::filename``, which broke progress
+    when the same nick opened the owner's local copy (bare filename). Progress
+    is shared by filename across nodes for the same nick.
+    """
+    return bookmark_bare_name(book_name)
+
+
+def bookmark_bare_name(book_name: str) -> str:
+    """Strip optional ``origin::`` prefix and return a safe basename."""
     raw = str(book_name or "").strip()
     if not raw:
         return ""
     if "::" in raw and not raw.startswith("::"):
-        origin, name = raw.split("::", 1)
-        origin = origin.strip()
+        _origin, name = raw.split("::", 1)
         name = Path(name.strip()).name
-        if not origin or not name or Path(name).name != name:
-            return ""
-        return f"{origin}::{name}"
-    name = Path(raw).name
-    if not name or name != Path(name).name:
+    else:
+        name = Path(raw).name
+    if not name or Path(name).name != name:
         return ""
     return name
+
+
+def _bookmark_entry_ts(entry: dict[str, Any]) -> int:
+    try:
+        return int(entry.get("updated_ts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bookmark_entry_better(candidate: dict[str, Any], current: Optional[dict[str, Any]]) -> bool:
+    """True if candidate should replace current (LWW, then higher page)."""
+    if not isinstance(candidate, dict):
+        return False
+    if not isinstance(current, dict):
+        return True
+    c_ts = _bookmark_entry_ts(candidate)
+    cur_ts = _bookmark_entry_ts(current)
+    if c_ts != cur_ts:
+        return c_ts > cur_ts
+    if candidate.get("deleted") and not current.get("deleted"):
+        return True
+    if current.get("deleted") and not candidate.get("deleted"):
+        return False
+    try:
+        return int(candidate.get("page") or 0) > int(current.get("page") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def canonicalize_bookmark_map(entries: dict[str, Any]) -> dict[str, Any]:
+    """Collapse ``origin::file`` and ``file`` keys into bare filenames (LWW)."""
+    out: dict[str, Any] = {}
+    for raw_key, entry in (entries or {}).items():
+        bare = bookmark_bare_name(str(raw_key))
+        if not bare or not isinstance(entry, dict):
+            continue
+        try:
+            ts = _bookmark_entry_ts(entry)
+        except Exception:
+            ts = 0
+        if entry.get("deleted"):
+            normalized = {"deleted": True, "updated_ts": ts, "page": 0}
+        else:
+            try:
+                page = max(0, int(entry.get("page") or 0))
+            except (TypeError, ValueError):
+                continue
+            normalized = {"page": page, "updated_ts": ts}
+        if _bookmark_entry_better(normalized, out.get(bare)):
+            out[bare] = normalized
+    return out
 
 
 def merge_bookmark_entries(
@@ -889,49 +947,13 @@ def merge_bookmark_entries(
     remote: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     """Last-write-wins merge by updated_ts. Returns (merged, changed)."""
-    out = dict(local)
-    changed = False
-    for raw_key, remote_entry in (remote or {}).items():
-        key = bookmark_book_key(str(raw_key))
-        if not key or not isinstance(remote_entry, dict):
-            continue
-        try:
-            remote_ts = int(remote_entry.get("updated_ts") or 0)
-        except (TypeError, ValueError):
-            remote_ts = 0
-        local_entry = out.get(key)
-        local_ts = 0
-        if isinstance(local_entry, dict):
-            try:
-                local_ts = int(local_entry.get("updated_ts") or 0)
-            except (TypeError, ValueError):
-                local_ts = 0
-        if isinstance(local_entry, dict) and remote_ts < local_ts:
-            continue
-        if isinstance(local_entry, dict) and remote_ts == local_ts:
-            # Identical timestamp: prefer remote delete, else keep higher page.
-            if remote_entry.get("deleted") and not local_entry.get("deleted"):
-                pass
-            elif not remote_entry.get("deleted") and local_entry.get("deleted"):
-                continue
-            else:
-                try:
-                    if int(remote_entry.get("page") or 0) <= int(
-                        local_entry.get("page") or 0
-                    ):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-        if remote_entry.get("deleted"):
-            new_entry = {"deleted": True, "updated_ts": remote_ts, "page": 0}
-        else:
-            try:
-                page = max(0, int(remote_entry.get("page") or 0))
-            except (TypeError, ValueError):
-                continue
-            new_entry = {"page": page, "updated_ts": remote_ts}
-        if local_entry != new_entry:
-            out[key] = new_entry
+    base = canonicalize_bookmark_map(local)
+    incoming = canonicalize_bookmark_map(remote)
+    out = dict(base)
+    changed = out != local  # true when migrating origin:: keys → bare names
+    for key, remote_entry in incoming.items():
+        if _bookmark_entry_better(remote_entry, out.get(key)):
+            out[key] = dict(remote_entry)
             changed = True
     return out, changed
 
@@ -984,16 +1006,30 @@ class LibraryBookmarkStore:
                 except OSError:
                     pass
 
+    def _user_books_locked(self, user_key: str) -> dict[str, Any]:
+        assert self._cache is not None
+        users = self._cache["users"]
+        raw = users.get(user_key, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        canon = canonicalize_bookmark_map(raw)
+        if canon != raw:
+            if canon:
+                users[user_key] = canon
+            else:
+                users.pop(user_key, None)
+            self._save_locked()
+        return users.get(user_key, {}) if canon else {}
+
     def get_page(self, user: str, book_name: str) -> Optional[int]:
         key = _normalize_user(user)
-        book_key = bookmark_book_key(book_name)
+        book_key = bookmark_bare_name(book_name)
         if not key or not book_key:
             return None
         with self._lock:
             self._ensure_loaded_locked()
-            assert self._cache is not None
-            users = self._cache["users"]
-            entry = users.get(key, {}).get(book_key)
+            user_books = self._user_books_locked(key)
+            entry = user_books.get(book_key)
             if not isinstance(entry, dict) or entry.get("deleted"):
                 return None
             try:
@@ -1003,9 +1039,9 @@ class LibraryBookmarkStore:
             return max(0, page)
 
     def set_page(self, user: str, book_name: str, page: int) -> dict[str, Any]:
-        """Set bookmark. Returns the stored entry (for federation fan-out)."""
+        """Set bookmark under bare filename. Returns entry map for federation."""
         key = _normalize_user(user)
-        book_key = bookmark_book_key(book_name)
+        book_key = bookmark_bare_name(book_name)
         if not key or not book_key:
             return {}
         page = max(0, int(page))
@@ -1014,11 +1050,15 @@ class LibraryBookmarkStore:
             self._ensure_loaded_locked()
             assert self._cache is not None
             users = self._cache["users"]
-            user_books = users.setdefault(key, {})
+            user_books = self._user_books_locked(key)
             if not isinstance(user_books, dict):
                 user_books = {}
-                users[key] = user_books
+            # Drop legacy origin-prefixed aliases for this file.
+            for alias in list(user_books.keys()):
+                if alias != book_key and bookmark_bare_name(alias) == book_key:
+                    del user_books[alias]
             user_books[book_key] = entry
+            users[key] = user_books
             self._save_locked()
         return {book_key: dict(entry)}
 
@@ -1026,10 +1066,7 @@ class LibraryBookmarkStore:
         key = _normalize_user(user)
         with self._lock:
             self._ensure_loaded_locked()
-            assert self._cache is not None
-            raw = self._cache["users"].get(key, {})
-            if not isinstance(raw, dict):
-                return {}
+            raw = self._user_books_locked(key)
             out: dict[str, int] = {}
             for book_name, entry in raw.items():
                 if isinstance(entry, dict) and not entry.get("deleted"):
@@ -1040,23 +1077,17 @@ class LibraryBookmarkStore:
             return out
 
     def export_user(self, user: str) -> dict[str, Any]:
-        """Full bookmark map for federation (includes tombstones)."""
+        """Full bookmark map for federation (includes tombstones; bare keys)."""
         key = _normalize_user(user)
         with self._lock:
             self._ensure_loaded_locked()
-            assert self._cache is not None
-            raw = self._cache["users"].get(key, {})
-            if not isinstance(raw, dict):
-                return {}
+            raw = self._user_books_locked(key)
             out: dict[str, Any] = {}
             for book_name, entry in raw.items():
-                bk = bookmark_book_key(str(book_name))
+                bk = bookmark_bare_name(str(book_name))
                 if not bk or not isinstance(entry, dict):
                     continue
-                try:
-                    ts = int(entry.get("updated_ts") or 0)
-                except (TypeError, ValueError):
-                    ts = 0
+                ts = _bookmark_entry_ts(entry)
                 if entry.get("deleted"):
                     out[bk] = {"deleted": True, "updated_ts": ts, "page": 0}
                 else:
@@ -1068,7 +1099,7 @@ class LibraryBookmarkStore:
             return out
 
     def merge_from_remote(self, user: str, entries: dict[str, Any]) -> bool:
-        """Apply federated bookmark entries (LWW). Returns True if store changed."""
+        """Apply federated bookmark entries (LWW, bare filenames)."""
         key = _normalize_user(user)
         if not key or not isinstance(entries, dict) or not entries:
             return False
@@ -1082,10 +1113,9 @@ class LibraryBookmarkStore:
             merged, changed = merge_bookmark_entries(local, entries)
             if not changed:
                 return False
-            # Drop pure tombstones that only exist to sync deletes? Keep them so
-            # a later stale set_page from another peer cannot resurrect the book.
-            users[key] = merged
-            if not merged:
+            if merged:
+                users[key] = merged
+            else:
                 users.pop(key, None)
             self._save_locked()
             return True
@@ -1093,19 +1123,33 @@ class LibraryBookmarkStore:
     def clear_book(self, user: str, book_name: str) -> Optional[dict[str, Any]]:
         """Clear a bookmark. Returns tombstone map for federation, or None."""
         key = _normalize_user(user)
-        book_key = bookmark_book_key(book_name)
+        book_key = bookmark_bare_name(book_name)
         if not key or not book_key:
             return None
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
-            user_books = self._cache["users"].get(key)
+            user_books = self._user_books_locked(key)
             if not isinstance(user_books, dict):
                 return None
             existing = user_books.get(book_key)
-            if not isinstance(existing, dict) or existing.get("deleted"):
+            if isinstance(existing, dict) and existing.get("deleted"):
+                return None
+            active = isinstance(existing, dict) and not existing.get("deleted")
+            alias_active = any(
+                k != book_key
+                and bookmark_bare_name(k) == book_key
+                and isinstance(user_books.get(k), dict)
+                and not user_books[k].get("deleted")
+                for k in user_books
+            )
+            if not active and not alias_active:
                 return None
             entry = {"deleted": True, "updated_ts": int(time.time()), "page": 0}
+            for alias in list(user_books.keys()):
+                if bookmark_bare_name(alias) == book_key:
+                    del user_books[alias]
             user_books[book_key] = entry
+            self._cache["users"][key] = user_books
             self._save_locked()
             return {book_key: dict(entry)}

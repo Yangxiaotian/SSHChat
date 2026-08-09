@@ -65,19 +65,34 @@ class TestLibraryBookmarkFederationMerge(unittest.TestCase):
 
     def test_merge_delete_tombstone(self) -> None:
         self.store.set_page("yxt", "peer::b.txt", 4)
+        self.assertEqual(self.store.get_page("yxt", "b.txt"), 4)
         ts = int(time.time()) + 5
         self.assertTrue(
             self.store.merge_from_remote(
                 "yxt", {"peer::b.txt": {"deleted": True, "updated_ts": ts}}
             )
         )
+        self.assertIsNone(self.store.get_page("yxt", "b.txt"))
         self.assertIsNone(self.store.get_page("yxt", "peer::b.txt"))
 
     def test_export_includes_federated_keys(self) -> None:
         self.store.set_page("yxt", "Math::book.epub", 7)
         exported = self.store.export_user("yxt")
-        self.assertIn("Math::book.epub", exported)
-        self.assertEqual(exported["Math::book.epub"]["page"], 7)
+        self.assertIn("book.epub", exported)
+        self.assertNotIn("Math::book.epub", exported)
+        self.assertEqual(exported["book.epub"]["page"], 7)
+        self.assertEqual(self.store.get_page("yxt", "Math::book.epub"), 7)
+
+    def test_remote_origin_key_merges_into_bare_name(self) -> None:
+        """Owner saved bare name; reader must resume via federated merge."""
+        remote = {
+            "中国近代史.epub": {"page": 41, "updated_ts": int(time.time())}
+        }
+        self.assertTrue(self.store.merge_from_remote("yxt", remote))
+        self.assertEqual(self.store.get_page("yxt", "中国近代史.epub"), 41)
+        self.assertEqual(
+            self.store.get_page("yxt", "Mathematics.local::中国近代史.epub"), 41
+        )
 
 
 class TestLibraryTxt(unittest.TestCase):

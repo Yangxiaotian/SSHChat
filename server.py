@@ -1724,11 +1724,9 @@ def _client_name(conn) -> str:
 
 
 def _library_bookmark_key(origin: str, name: str) -> str:
-    name = Path(str(name or "")).name
-    origin = (origin or "").strip()
-    if not origin:
-        return name
-    return f"{origin}::{name}"
+    """Bookmark id is the bare filename so local and federated opens share progress."""
+    _ = origin  # origin only matters for catalog display / page fetch
+    return library.bookmark_bare_name(name)
 
 
 def _fed_local_library_snapshot() -> list[dict]:
@@ -1893,7 +1891,10 @@ def _set_library_page(conn, user: str, path: Path, page: int) -> None:
     page = max(0, int(page))
     with lock:
         library_reading[conn] = {"path": str(path.resolve()), "page": page, "origin": ""}
-    entries = library_bookmarks.set_page(user, path.name, page)
+    book_key = library.bookmark_bare_name(path.name)
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
     _federation_sync_library_bookmarks(user, entries)
 
 
@@ -1920,9 +1921,12 @@ def _set_library_session(
             "title": title,
             "total_pages": int(total_pages or 0),
         }
-    entries = library_bookmarks.set_page(
-        user, _library_bookmark_key(origin, name), page
-    )
+    book_key = _library_bookmark_key(origin, name)
+    # Avoid creating/syncing a page-0 bookmark on first open — that would LWW-stomp
+    # a peer's real progress when keys were mismatched or sync arrived late.
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
     _federation_sync_library_bookmarks(user, entries)
 
 
