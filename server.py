@@ -967,6 +967,8 @@ def _federation_clear_file_leave(recipient: str, transfer_id: str) -> None:
     if hub is None or not hub.enabled:
         return
     try:
+        print(f"[FileTransfer] Broadcasting fleave_clear for {recipient} "
+              f"(transfer_id={transfer_id})")
         hub.clear_file_leave(recipient, transfer_id)
     except Exception as e:
         print(f"federation: clear_file_leave failed: {e!r}")
@@ -1016,6 +1018,10 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
             tid = str(meta.get("transfer_id") or "").strip()
             if tid:
                 _federation_clear_file_leave(recipient_name, tid)
+            else:
+                # Log missing transfer_id for debugging
+                print(f"[WARNING] deliver_offline_messages: file leave without transfer_id "
+                      f"(from={sender}, to={recipient_name})")
             continue
         text = item.get("text") or ""
         send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
@@ -3505,7 +3511,13 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
 
 
 def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
-    offline_messages.remove_file_by_transfer(to_name, transfer_id)
+    removed = offline_messages.remove_file_by_transfer(to_name, transfer_id)
+    if removed:
+        print(f"[FileTransfer] Federation clear: removed {len(removed)} file leave(s) "
+              f"for {to_name} (transfer_id={transfer_id})")
+    else:
+        print(f"[FileTransfer] Federation clear: no file leave found for {to_name} "
+              f"(transfer_id={transfer_id})")
 
 
 def _fed_on_offline_pm(
