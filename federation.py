@@ -1181,9 +1181,9 @@ class FederationHub:
         ssh_user = str(peer.get("ssh_user") or "sshchat-federation").strip()
         key = str(peer.get("ssh_key") or _ssh_key_path())
         target = f"{ssh_user}@{host}"
-        # Do NOT use ssh -W: authorized_keys sets command=federation-bridge.sh
-        # and no-port-forwarding, so -W is refused. The forced command already
-        # bridges stdio to the local federation port via nc.
+        remote = f"127.0.0.1:{fed_port}"
+        # ssh -W requires the peer's authorized_keys to allow this port
+        # (restrict,port-forwarding,permitopen="127.0.0.1:FED_PORT").
         cmd = [
             "ssh",
             "-i",
@@ -1197,6 +1197,10 @@ class FederationHub:
             "StrictHostKeyChecking=accept-new",
             "-o",
             "ConnectTimeout=15",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-W",
+            remote,
             target,
         ]
         try:
@@ -1204,7 +1208,7 @@ class FederationHub:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=0,
             )
         except OSError as e:
@@ -1325,6 +1329,21 @@ class FederationHub:
         if registered:
             if self._unregister_peer(peer_node, link):
                 self._notify_peer_down(peer_node)
+        # Surface ssh client errors (e.g. refused port forward) when the
+        # session dies before a federation handshake completes.
+        try:
+            err = getattr(proc, "stderr", None)
+            if err is not None and hasattr(err, "read"):
+                try:
+                    err_b = err.read() or b""
+                except Exception:
+                    err_b = b""
+                if err_b and not registered:
+                    msg = err_b.decode("utf-8", errors="replace").strip()
+                    if msg:
+                        print(f"federation: ssh stderr ({peer_node}): {msg[:500]}")
+        except Exception:
+            pass
         try:
             proc.terminate()
         except Exception:

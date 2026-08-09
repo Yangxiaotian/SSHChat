@@ -117,17 +117,35 @@ else
   chmod 600 "$AUTH_KEYS"
 fi
 
-OPTS="command=\"${BRIDGE}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
+# Local federation port the peer will ssh -W into (this machine).
+LOCAL_FED_PORT=${SSHCHAT_FEDERATION_PORT:-$((CHAT_PORT + 1))}
+# Prefer ssh -W + permitopen over forced-command+nc: more reliable under sshd,
+# and avoids no-port-forwarding rejecting the tunnel.
+OPTS="restrict,port-forwarding,permitopen=\"127.0.0.1:${LOCAL_FED_PORT}\",permitopen=\"[::1]:${LOCAL_FED_PORT}\""
 FINAL_LINE="$OPTS $PEER_PUBKEY"
-if [[ -f "$AUTH_KEYS" ]] && grep -qF "${PEER_PUBKEY##* }" "$AUTH_KEYS" 2>/dev/null; then
-  echo "info: peer pubkey already in $AUTH_KEYS"
+KEY_BLOB=$(awk '{print $2}' <<<"$PEER_PUBKEY")
+if [[ -f "$AUTH_KEYS" ]] && grep -qF "$KEY_BLOB" "$AUTH_KEYS" 2>/dev/null; then
+  # Upgrade legacy command=/no-port-forwarding lines to permitopen.
+  if grep -F "$KEY_BLOB" "$AUTH_KEYS" | grep -q 'permitopen='; then
+    echo "info: peer pubkey already in $AUTH_KEYS"
+  else
+    TMP=$(mktemp)
+    grep -vF "$KEY_BLOB" "$AUTH_KEYS" >"$TMP" || true
+    echo "$FINAL_LINE" >>"$TMP"
+    mv "$TMP" "$AUTH_KEYS"
+    chmod 600 "$AUTH_KEYS"
+    if ! is_darwin; then
+      chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
+    fi
+    echo "info: updated peer inbound key options in $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
+  fi
 else
   echo "$FINAL_LINE" >>"$AUTH_KEYS"
   chmod 600 "$AUTH_KEYS"
   if ! is_darwin; then
     chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
   fi
-  echo "info: added peer inbound key to $AUTH_KEYS"
+  echo "info: added peer inbound key to $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
 fi
 
 # Merge peers.json

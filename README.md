@@ -314,7 +314,7 @@ sudo /opt/sshchat/admin-remove-peer.sh server-a
 
 #### 5. 防火墙（若节点间无法直连）
 
-默认走 SSH 强制命令桥接（`federation-bridge.sh` → 本机联邦端口，通常只需对方 **22** 可达）。若改用直连 TCP，再放行 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1）。
+默认走 SSH `ssh -W` 隧道到对端本机联邦端口（`authorized_keys` 使用 `permitopen`，通常只需对方 **22** 可达）。若改用直连 TCP，再放行 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1）。
 
 #### 6. 怎么确认连上了
 
