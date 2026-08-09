@@ -133,7 +133,8 @@ Environment=SSHCHAT_ENV_FILE=$ENV_FILE
 Environment=SSHCHAT_FILE_LOCAL_URL=$LOCAL_URL
 Environment=SSHCHAT_PREFIX=$PREFIX
 Environment=SSHCHAT_FILE_HTTP_PORT=$FILE_HTTP_PORT
-KillMode=process
+KillMode=control-group
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
@@ -183,7 +184,8 @@ EOF
 }
 
 stop_existing() {
-  if command -v systemctl >/dev/null 2>&1 && [[ -f "$UNIT" ]]; then
+  echo "info: stopping any existing Cloudflare Quick Tunnel (force fresh URL on deploy)"
+  if command -v systemctl >/dev/null 2>&1 && [[ -f "$UNIT" || -f /etc/systemd/system/sshchat-cloudflared.service ]]; then
     systemctl stop sshchat-cloudflared.service 2>/dev/null || true
   fi
   if is_darwin && [[ -f "$PLIST" ]]; then
@@ -199,8 +201,114 @@ stop_existing() {
       launchctl asuser "$(id -u "$u" 2>/dev/null)" launchctl unload "$user_plist" 2>/dev/null || true
     done
   fi
+  # KillMode=process used to leave orphans; always reap them so the next start gets a NEW trycloudflare URL.
   pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
+  pkill -f '/usr/local/sbin/sshchat-cloudflared-tunnel.sh' 2>/dev/null || true
   sleep 1
+  pkill -9 -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
+  rm -f "$STATE_DIR/public_url"
+}
+
+restart_sshchat_service() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files sshchat.service >/dev/null 2>&1; then
+    systemctl restart sshchat.service || true
+    return 0
+  fi
+  if pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+    pkill -f "$PREFIX/server.py" || true
+    sleep 1
+  fi
+  if [[ -x "$PREFIX/server.sh" ]]; then
+    nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
+  fi
+}
+
+# Always make sshchat.env match the live Quick Tunnel URL (deploy must not leave a stale host).
+ensure_env_matches_public_url() {
+  local url host current owner mode tmp
+  [[ -f "$STATE_DIR/public_url" ]] || return 1
+  url=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+  [[ "$url" =~ ^https://[a-zA-Z0-9-]+\.trycloudflare\.com$ ]] || {
+    echo "error: invalid public_url: $url" >&2
+    return 1
+  }
+  host="${url#https://}"
+  [[ -f "$ENV_FILE" ]] || { echo "error: missing $ENV_FILE" >&2; return 1; }
+  current=$(grep -E '^SSHCHAT_FILE_PUBLIC_HOST=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  owner=$(stat -c '%u:%g' "$ENV_FILE" 2>/dev/null || stat -f '%u:%g' "$ENV_FILE")
+  mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")
+  if [[ "$current" == "$host" ]]; then
+    echo "info: sshchat.env PUBLIC_HOST already $host"
+    # Still bounce sshchat once so in-memory links match after deploy file swaps.
+    restart_sshchat_service
+    return 0
+  fi
+  tmp=$(mktemp)
+  grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
+    | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
+  cat >>"$tmp" <<ENV
+
+# File transfer via Cloudflare Tunnel (managed by sshchat-cloudflared)
+SSHCHAT_FILE_TRANSFER_ENABLED=1
+SSHCHAT_FILE_HTTP_HOST=127.0.0.1
+SSHCHAT_FILE_HTTP_PORT=$FILE_HTTP_PORT
+SSHCHAT_FILE_USE_HTTPS=0
+SSHCHAT_FILE_PUBLIC_HOST=$host
+SSHCHAT_FILE_PUBLIC_PORT=443
+SSHCHAT_FILE_STORAGE_DIR=$STORAGE_DIR
+ENV
+  cat "$tmp" >"$ENV_FILE"
+  rm -f "$tmp"
+  chown "$owner" "$ENV_FILE" 2>/dev/null || true
+  chmod "$mode" "$ENV_FILE" 2>/dev/null || true
+  echo "info: wrote SSHCHAT_FILE_PUBLIC_HOST=$host into $ENV_FILE"
+  restart_sshchat_service
+}
+
+# If the helper crashed before writing public_url, recover URL from the fresh log tail.
+recover_url_from_log() {
+  [[ -f "$STATE_DIR/tunnel.log" ]] || return 1
+  local url
+  url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$STATE_DIR/tunnel.log" | tail -1 || true)
+  [[ -n "$url" ]] || return 1
+  printf '%s\n' "$url" >"$STATE_DIR/public_url"
+  echo "info: recovered PUBLIC_URL from tunnel.log -> $url"
+}
+
+wait_for_url() {
+  local sec="$1"
+  local marker="${2:-0}"
+  [[ "$sec" -gt 0 ]] || return 0
+  echo "info: waiting up to ${sec}s for a NEW trycloudflare URL..."
+  local i url
+  for i in $(seq 1 "$sec"); do
+    # Prefer a public_url file written after this start (mtime/content from live log).
+    if [[ -f "$STATE_DIR/tunnel.log" ]]; then
+      url=$(tail -c +"$((marker + 1))" "$STATE_DIR/tunnel.log" 2>/dev/null \
+        | grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' | head -1 || true)
+      if [[ -n "$url" ]]; then
+        printf '%s\n' "$url" >"$STATE_DIR/public_url"
+        echo "info: PUBLIC_URL=$url"
+        return 0
+      fi
+      if tail -c +"$((marker + 1))" "$STATE_DIR/tunnel.log" 2>/dev/null | grep -qE '429 Too Many Requests|error code: 1015'; then
+        echo "warning: Cloudflare rate-limited quick tunnels; service will retry (RestartSec=300)" >&2
+        echo "hint: later run: sudo $SCRIPT_DIR/start-cloudflared-once.sh" >&2
+        return 2
+      fi
+    fi
+    # Helper may have written public_url; only accept if it matches a post-start log URL.
+    if [[ -f "$STATE_DIR/public_url" && -f "$STATE_DIR/tunnel.log" ]]; then
+      url=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+      if tail -c +"$((marker + 1))" "$STATE_DIR/tunnel.log" 2>/dev/null | grep -qF "$url"; then
+        echo "info: PUBLIC_URL=$url"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "error: no new public URL after ${sec}s" >&2
+  return 1
 }
 
 start_service() {
@@ -219,27 +327,6 @@ start_service() {
   nohup "$HELPER" >>"$STATE_DIR/tunnel.log" 2>&1 &
 }
 
-wait_for_url() {
-  local sec="$1"
-  [[ "$sec" -gt 0 ]] || return 0
-  echo "info: waiting up to ${sec}s for trycloudflare URL..."
-  local i
-  for i in $(seq 1 "$sec"); do
-    if [[ -f "$STATE_DIR/public_url" ]]; then
-      echo "info: PUBLIC_URL=$(cat "$STATE_DIR/public_url")"
-      return 0
-    fi
-    if [[ -f "$STATE_DIR/tunnel.log" ]] && grep -qE '429 Too Many Requests|error code: 1015' "$STATE_DIR/tunnel.log" 2>/dev/null; then
-      echo "warning: Cloudflare rate-limited quick tunnels; service will retry (RestartSec=300)" >&2
-      echo "hint: later run: sudo $SCRIPT_DIR/start-cloudflared-once.sh" >&2
-      return 2
-    fi
-    sleep 1
-  done
-  echo "warning: no public URL yet; cloudflared will keep retrying in background" >&2
-  return 1
-}
-
 install_cloudflared_bin || exit 1
 install_helper
 stop_existing
@@ -255,15 +342,26 @@ if [[ "$INSTALL_ONLY" -eq 1 ]]; then
 fi
 
 start_service
-wait_for_url "$WAIT_URL_SEC" || true
+# Capture log offset AFTER start so we never treat a pre-start URL as "new".
+LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
+rm -f "$STATE_DIR/public_url" 2>/dev/null || true
+
+wait_rc=0
+wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
+
+if [[ -f "$STATE_DIR/public_url" ]]; then
+  ensure_env_matches_public_url || wait_rc=1
+  PUBLIC=$(cat "$STATE_DIR/public_url")
+  sleep 2
+  curl --noproxy '*' -sS -o /dev/null -w "info: probe %{http_code} $PUBLIC/\n" --max-time 20 "$PUBLIC/" || true
+else
+  echo "error: deploy did not obtain a Cloudflare public URL; /sendfile links will break" >&2
+  wait_rc=1
+fi
 
 if [[ -f "$ENV_FILE" ]]; then
   echo "info: file-transfer env:"
   grep -E '^SSHCHAT_FILE_' "$ENV_FILE" || true
 fi
-if [[ -f "$STATE_DIR/public_url" ]]; then
-  PUBLIC=$(cat "$STATE_DIR/public_url")
-  sleep 2
-  curl --noproxy '*' -sS -o /dev/null -w "info: probe %{http_code} $PUBLIC/\n" --max-time 20 "$PUBLIC/" || true
-fi
 echo "info: cloudflared tunnel setup done"
+exit "$wait_rc"

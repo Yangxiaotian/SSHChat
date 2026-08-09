@@ -39,7 +39,9 @@ file_stat_mode() {
 }
 
 update_public_host() {
-  local url="$1" host="${url#https://}"
+  # Split locals: with set -u, `local a=1 b=$a` treats a as unbound.
+  local url="$1"
+  local host="${url#https://}"
   host="${host%%/*}"
   printf '%s\n' "$url" >"$URL_FILE"
   echo "[sshchat-cloudflared] public URL: $url"

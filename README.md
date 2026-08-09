@@ -168,7 +168,7 @@ sudo ./deploy.sh --client-ssh-host 10.0.0.5 --no-cloudflare
 | `SSHCHAT_TICKET_TTL_SECONDS` | 预览/下载一次性链接的有效期，默认 `600`（10 分钟） |
 | `SSHCHAT_MAX_PREVIEW_SIZE` | 超过这个大小就不预览、直接走下载，默认 25MB |
 
-Quick Tunnel 无账号、URL 会变；进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活。若被 Cloudflare 限流，可稍后执行仓库里的 `scripts/start-cloudflared-once.sh`。
+Quick Tunnel 无账号、**每次成功部署都会停掉旧隧道并换新的 `*.trycloudflare.com`**，同时写回 `sshchat.env` 并重启聊天服务。进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活。若被 Cloudflare 限流，可稍后执行仓库里的 `scripts/start-cloudflared-once.sh`。
 
 ### 2. 给聊天的人开账号并登记公钥
 

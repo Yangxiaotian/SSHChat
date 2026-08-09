@@ -962,9 +962,9 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
   CF_SETUP="$SCRIPT_DIR/scripts/setup-cloudflared-file-tunnel.sh"
   if [[ -f "$CF_SETUP" ]]; then
     chmod +x "$CF_SETUP" "$SCRIPT_DIR/scripts/sshchat-cloudflared-tunnel.sh" 2>/dev/null || true
-    echo "info: configuring Cloudflare Quick Tunnel for file transfer..."
-    if ! "$CF_SETUP" --prefix "$PREFIX" --env-file "$PREFIX/sshchat.env" --port "$FILE_HTTP_PORT" --wait-url 90; then
-      echo "warning: Cloudflare tunnel setup reported issues; /sendfile public links may be unavailable until it recovers" >&2
+    echo "info: refreshing Cloudflare Quick Tunnel (new public URL required every deploy)..."
+    if ! "$CF_SETUP" --prefix "$PREFIX" --env-file "$PREFIX/sshchat.env" --port "$FILE_HTTP_PORT" --wait-url 120; then
+      echo "error: Cloudflare tunnel did not publish a usable URL; /sendfile will fail until fixed" >&2
       echo "hint: sudo $CF_SETUP --prefix $PREFIX" >&2
       echo "hint: if rate-limited: sudo $SCRIPT_DIR/scripts/start-cloudflared-once.sh" >&2
     fi
@@ -980,6 +980,16 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
       chown -R "$RUN_USER:$RUN_USER" "$FILE_STORAGE_DIR"
       chmod 750 "$FILE_STORAGE_DIR"
     fi
+    # Hard check: env host must match the live tunnel file
+    if [[ -f /var/lib/sshchat/cloudflared/public_url && -f "$PREFIX/sshchat.env" ]]; then
+      CF_HOST=$(sed -n 's|^https://||p' /var/lib/sshchat/cloudflared/public_url | tr -d '[:space:]')
+      ENV_HOST=$(grep -E '^SSHCHAT_FILE_PUBLIC_HOST=' "$PREFIX/sshchat.env" | head -1 | cut -d= -f2-)
+      if [[ -n "$CF_HOST" && "$ENV_HOST" != "$CF_HOST" ]]; then
+        echo "error: PUBLIC_HOST mismatch (env=$ENV_HOST tunnel=$CF_HOST)" >&2
+      elif [[ -n "$CF_HOST" ]]; then
+        echo "info: /sendfile public host confirmed: https://$CF_HOST"
+      fi
+    fi
   else
     echo "warning: missing $CF_SETUP; skip Cloudflare tunnel" >&2
   fi
@@ -991,6 +1001,7 @@ else
   if is_darwin && [[ -f /Library/LaunchDaemons/com.sshchat.cloudflared.plist ]]; then
     launchctl bootout system /Library/LaunchDaemons/com.sshchat.cloudflared.plist 2>/dev/null || true
   fi
+  pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
 fi
 
 echo
