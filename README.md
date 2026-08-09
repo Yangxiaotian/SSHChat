@@ -18,10 +18,10 @@
 
 ## Update (2026-06 联邦聊天室)
 
-- **多服务器互联（联邦）**：多台独立部署的 SSHChat 可通过 `admin-add-peer.sh` 交换联邦公钥，组成更大的聊天网络。
+- **多服务器互联（联邦）**：多台独立部署的 SSHChat 可通过 `admin-add-peer.sh` 交换联邦公钥，组成更大的聊天网络；拓扑为图，中继洪泛后不必全互连。
 - **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同，视为同一人在多端登录（房间同步、不误报离线）。
 - **同名房间 = 同一房间**：`#default`、`#dev` 等房间名跨节点合并；文字聊天、`/names`、`/msg` 私聊互通。
-- **跨服对局**：`/game` 由开局节点同步局面，远端玩家可 `/game join`、`/game move` 等。
+- **跨服对局**：`/game` 由开局节点同步局面，远端玩家可 `/game join`、`/game move`、`/game show` 等；节点刚连上或本地缺局面时会自动补同步。若两节点在同名房间各开一局，会用随机票选保留其中一局，并向房间广播冲突通知（落选节点的对局作废）。
 - 详见下方 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**；管理员可选步骤见 **[管理员怎么做 → 4. 联邦扩网](#4-联邦扩网可选)**。
 
 ## Update (2026-05-21 UI/UX)
@@ -126,34 +126,49 @@ sudo ./deploy.sh --client-ssh-host 你的域名或公网IP --client-ssh-port 22
 
 没有域名、只有 IP，就把 IP 写在 `--client-ssh-host` 里。
 
-**文件收发（`/sendfile`）相关参数**，默认就已启用，装完即可用：
+**文件收发（`/sendfile`）相关参数**，默认就已启用，并用 **Cloudflare Quick Tunnel** 给出公网 `https://*.trycloudflare.com` 链接（无需开放 8443 端口）：
 
 | 参数 | 作用 |
 |------|------|
-| `--file-domain 域名` | 文件网页用这个域名申请 **Let's Encrypt** 证书（需要机器上有 `certbot`，且 80 端口可达）。不填则用自签名证书 |
-| `--file-port N` | 文件网页监听端口，默认 `8443` |
-| `--no-file-https` | 只用 HTTP，不加密（仅建议内网测试） |
+| `--cloudflare` | 强制启用 Cloudflare 隧道（**默认已开**） |
+| `--no-cloudflare` | 不用隧道：自签名 HTTPS，或配合 `--file-domain` |
+| `--file-domain 域名` | 文件网页用这个域名申请 **Let's Encrypt**（会自动关掉 Cloudflare 隧道；需要 `certbot` 且 80 可达） |
+| `--file-port N` | 本机文件网页端口，默认 `8443`（走 Cloudflare 时只监听本机，不必对公网开放） |
+| `--no-file-https` | 本机只用 HTTP（Cloudflare 模式下本来就是 HTTP） |
 | `--no-file-transfer` | 完全关闭文件收发功能 |
 
-有域名的话推荐这样装，用户点开链接不会看到证书警告：
+推荐（默认即可）：
+
+```bash
+sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22
+```
+
+有自己的域名、想用 Let's Encrypt 而不是临时 `trycloudflare.com`：
 
 ```bash
 sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22 \
   --file-domain chat.example.com
 ```
 
-只有 IP、没有域名时不用加 `--file-domain`，会自动生成自签名证书；浏览器首次打开会提示「不安全」，需要手动点继续。
+内网自测、不要公网隧道：
 
-装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务）：
+```bash
+sudo ./deploy.sh --client-ssh-host 10.0.0.5 --no-cloudflare
+```
+
+装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务；Cloudflare 模式下公网域名一般由 `sshchat-cloudflared` 自动改写）：
 
 | 变量 | 说明 |
 |------|------|
-| `SSHCHAT_FILE_PUBLIC_HOST` | **发给用户的网址用哪个地址**。部署时自动填成 `--client-ssh-host` 的值。服务监听的是 `0.0.0.0`，不能直接给用户，所以这个值填错的话用户点开链接会打不开 |
-| `SSHCHAT_FILE_STORAGE_DIR` | 文件存储目录，默认 `/tmp/sshchat_files`（注意重启机器会清空 `/tmp`，要长期保留就改到别处） |
+| `SSHCHAT_FILE_PUBLIC_HOST` | **发给用户的网址用哪个地址**。开 Cloudflare 时会自动写成 `*.trycloudflare.com`；关隧道时部署会填成 `--client-ssh-host` |
+| `SSHCHAT_FILE_PUBLIC_PORT` | 外链端口；Cloudflare 下为 `443` |
+| `SSHCHAT_FILE_STORAGE_DIR` | 文件存储目录；Cloudflare 默认 `/var/lib/sshchat/files`（比 `/tmp` 更耐重启） |
 | `SSHCHAT_MAX_FILE_SIZE` | 单文件大小上限，默认 100MB |
 | `SSHCHAT_ONE_TIME_DOWNLOAD` | 下载链接是否只能用一次，默认 `1`。设 `0` 才允许重复下载，会削弱安全性，不推荐 |
 | `SSHCHAT_TICKET_TTL_SECONDS` | 预览/下载一次性链接的有效期，默认 `600`（10 分钟） |
 | `SSHCHAT_MAX_PREVIEW_SIZE` | 超过这个大小就不预览、直接走下载，默认 25MB |
+
+Quick Tunnel 无账号、**每次成功部署都会停掉旧隧道并换新的 `*.trycloudflare.com`**，同时写回 `sshchat.env` 并重启聊天服务。进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活。若被 Cloudflare 限流，可稍后执行仓库里的 `scripts/start-cloudflared-once.sh`。
 
 ### 2. 给聊天的人开账号并登记公钥
 
@@ -167,16 +182,21 @@ sudo /opt/sshchat/admin-add-user.sh 用户名 ssh-ed25519 AAAA... 备注可选
 
 除 SSH 端口外，若聊天服务监听非本机回环，可能还需放行 **`sshchat.env` 里配置的聊天端口**（默认常见为 `12345`，与 SSH 端口不是同一个）。云厂商安全组里一并放行。
 
-用到 `/sendfile` 还需放行**文件网页端口**（默认 `8443`）；若用 `--file-domain` 走 Let's Encrypt，申请证书时还要临时放行 **80** 端口：
+**默认走 Cloudflare 隧道时，不必放行文件端口 `8443`。** 仅在 `--no-cloudflare` 或用户要直连本机文件口时才需要：
 
 ```bash
 sudo ufw allow 8443/tcp
+```
+
+若用 `--file-domain` 走 Let's Encrypt，申请证书时还要临时放行 **80** 端口：
+
+```bash
 sudo ufw allow 80/tcp   # 仅 Let's Encrypt 签发/续期需要
 ```
 
 ### 4. 联邦扩网（可选）
 
-若你有**两台及以上** SSHChat 服务器，希望用户在不同机器上登录后仍处在**同一套聊天室**（同名房间合并、跨服私聊、跨服对局），在每台机器上各部署完成后，用 `admin-add-peer.sh` 互相登记联邦公钥。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
+两台及以上服务器合并聊天网时，用 `admin-add-peer.sh` **按边互加**联邦公钥即可（A↔B、B↔C 即可三者互通，不必全互连）；拆除用 `admin-remove-peer.sh`。加/拆都会 **SIGHUP 热加载**并通知在线用户（加入/退出提示），**一般不必重启**。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
 
 **升级：** 在新版本仓库里再执行一次，**`--prefix` 与当初相同**，一般要加 **`--keep-env`** 保留你已改过的端口等配置：
 
@@ -208,48 +228,124 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
 
 ## 联邦网络（多服务器互联）
 
-多台独立部署的 SSHChat 可通过 **SSH 互信** 组成更大的聊天网络。典型场景：服务器 A 上的 `userA`、服务器 B 上的 `userB` 各自用 `deploy.sh` 部署；双方把对方的 **联邦公钥** 登记到本机后，两台机器的聊天室在逻辑上合并。
+多台已部署的 SSHChat 可以组成一张聊天网：同名房间合并、跨服私聊/`/names`、跨服对局，以及跨服 `/sendfile` 通知（文件仍存在发起方节点，需公网可达的文件地址）。
 
-**行为约定：**
+### 拓扑：图，不必全互连
+
+联邦按**图**组织：每条边仍需两端互加公钥，但消息会沿邻居洪泛（带去重），私聊/对局指令按 next-hop 中继。
+
+因此 **A↔B、B↔C 即可让 A/B/C 三者互通**，不必再让 A 与 C 直接互加。全互连只是可选的低延迟加速，不是必须。
+
+```
+  A ——— B ——— C     ✓ 连通分量内互通
+  A ——— B            ✓
+  A ——— C
+```
+
+### 先分清两把钥匙
+
+| 钥匙 | 路径（默认） | 干什么 |
+|------|--------------|--------|
+| **联邦公钥** | `/opt/sshchat/federation/id_ed25519.pub` | **只给节点互连用**。`admin-add-peer.sh` 交换的是这个 |
+| **用户登录公钥** | 各用户自己的 `~/.ssh/*.pub` | 人 SSH 进聊天用，和联邦无关 |
+
+联邦密钥在首次部署（或首次跑 `admin-add-peer.sh`）时自动生成，**不是** root / 管理员家目录下的 `.ssh` 公钥。
+
+### 联邦网络行为说明
 
 - **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同（如都叫 `alice`），视为同一人在多端登录；会同步房间列表，离开/加入时不会误报「离线」（只要另一端还在线）。
-- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名在全网共享；任一节点发出的房间消息会广播到所有已连接节点上的同名房间。
-- **私聊与 /names**：`/msg alice …` 可投递到联邦网络中的在线 `alice`；`/names` 会列出当前房间内包括远端节点在内的昵称。
+- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名在全网共享；任一节点发出的房间消息会沿联邦图广播到连通分量内所有节点上的同名房间。
+- **私聊与 /names**：`/msg alice …` 可经中继投递到联邦网络中的在线 `alice`；`/names` 会列出当前房间内包括多跳远端节点在内的昵称。
+- **文件收发 `/sendfile`**：会话建在**发起方节点**，下载/上传网址用该节点的 `SSHCHAT_FILE_PUBLIC_HOST`（建议各节点都配公网可达地址，例如 Cloudflare）。对端房间成员与对端在线用户会收到下载通知；对方完全离线时，文件留言会写入各联邦节点留言箱，在任意节点登录都能收到；文件字节不经联邦链路拷贝。
+- **离线文字留言 `/msg`**：对方全网离线时，留言同样会播种到各联邦节点，登录任一节点即可收到。
+- **节点上线/下线**：某节点与本机连通或断开时，本机在线用户会收到系统提示；本机还会向邻居洪泛通报（`nodeup` / `nodedown`），连通分量内其它节点的用户同样能看到。
 
-**互信步骤（两台机器各执行一次，交换公钥）：**
+### 互加联邦（每条边两边都要做）
 
-1. 升级部署（会生成 `federation/id_ed25519` 联邦密钥与 `sshchat-federation` 系统用户）：
+假设两台机先连成一条边（三台时再对 B–C 做同样的事即可）：
 
-   ```bash
-   sudo ./deploy.sh --prefix /opt/sshchat --keep-env
-   ```
+| | 服务器 A | 服务器 B |
+|--|----------|----------|
+| 公网地址 | `a.example.com` | `b.example.com` |
+| 节点名 `node_id`（自定，两边别撞车） | `server-a` | `server-b` |
 
-2. 在 **服务器 A** 上登记 **服务器 B**（把 B 的联邦公钥与地址写入本机）：
+**原则：每条信任边两端各登记对方，自动热加载无需重启。** 只加一边连不上。扩展到第三台时，只需让新节点与已有连通分量中的任一节点互加，即可并入整网。
 
-   ```bash
-   sudo /opt/sshchat/admin-add-peer.sh server-b b.example.com "$(cat /path/to/b-federation.pub)"
-   ```
+#### 0. 两边都先装好 SSHChat
 
-3. 在 **服务器 B** 上对称操作，使用 A 的公钥：
+```bash
+# 每台各执行一次（已装过可加 --keep-env）
+sudo ./deploy.sh --prefix /opt/sshchat --keep-env
+```
 
-   ```bash
-   sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /opt/sshchat/federation/id_ed25519.pub)"
-   ```
+#### 1. 各自取出「本机联邦公钥」发给对方管理员
 
-4. 重启聊天服务（`systemctl restart sshchat` 或重新运行 `server.sh`）。
-
-5. **防火墙（若节点间无法直连）**：除 SSH 外，确保各节点能访问对端的 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1，如 `12346`），或仅依赖 SSH 隧道（`ssh -W`，默认走 22 端口，通常无需额外放行联邦端口）。
-
-脚本会：
-
-- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（强制命令走 `federation-bridge.sh` → 本机联邦端口）；
-- 更新 `federation/peers.json`，由本机主动发起 SSH 隧道（`ssh -W`）连到对方联邦端口。
-
-**查看本机联邦公钥：**
+在 **A** 上：
 
 ```bash
 cat /opt/sshchat/federation/id_ed25519.pub
+# 把整行发给 B 的管理员（保存成文件也可以，如 a-federation.pub）
 ```
+
+在 **B** 上：
+
+```bash
+cat /opt/sshchat/federation/id_ed25519.pub
+# 把整行发给 A 的管理员（如 b-federation.pub）
+```
+
+#### 2. 在 A 上登记 B
+
+把 B 的联邦公钥放到 A 能读到的地方后执行：
+
+```bash
+sudo /opt/sshchat/admin-add-peer.sh server-b b.example.com "$(cat /path/to/b-federation.pub)"
+```
+
+含义：`server-b` = B 的 `SSHCHAT_NODE_ID`；`b.example.com` = A 能 SSH 到的 B 地址；第三个参数 = **B 的联邦公钥**。
+
+脚本会：
+
+- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（允许对方隧道连进来；sshd 即时生效）
+- 更新 `federation/peers.json`，并触发本机热加载出站连接
+
+#### 3. 在 B 上登记 A（对称）
+
+```bash
+sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /path/to/a-federation.pub)"
+```
+
+#### 4. 不必重启聊天服务
+
+`admin-add-peer.sh` 会更新 `peers.json` / `authorized_keys`，并向运行中的 `sshchat` 发送 **SIGHUP** 热加载新对端；连上后本机用户会收到「联邦节点已加入」提示（并洪泛通报邻居）。若信号未送达，服务也会在数秒内监视到 `peers.json` 变更并自动加载。
+
+#### 拆除一条联邦边
+
+两端各执行（`peer_node_id` 必须是对方真实 `SSHCHAT_NODE_ID`）：
+
+```bash
+# 在 A 上拆掉 B
+sudo /opt/sshchat/admin-remove-peer.sh server-b
+
+# 在 B 上拆掉 A
+sudo /opt/sshchat/admin-remove-peer.sh server-a
+```
+
+脚本会从 `peers.json` 删除该节点、从联邦 `authorized_keys` 去掉对方公钥（若登记时已写入 `peer_pubkey`），并 **SIGHUP** 热加载：已建立的链路会断开，本机用户收到「联邦节点已退出」提示。不必整机重启。旧条目若没有存公钥，可把公钥作为第二参数传入，或手动编辑 `authorized_keys`。
+
+#### 5. 防火墙（若节点间无法直连）
+
+默认走 SSH `ssh -W` 隧道到对端本机联邦端口（`authorized_keys` 使用 `permitopen`，通常只需对方 **22** 可达）。若改用直连 TCP，再放行 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1）。
+
+#### 6. 怎么确认连上了
+
+- 服务日志里出现 `federation: outbound connected` 或 `peer … connected`
+- 两边用户进入同一房间名，一方说话另一方能看到
+- `/names` 能列出对端节点上的人（含经中继可达的多跳节点）
+
+### 脚本实际改了什么
+
+联邦公钥在首次部署时生成，之后重复跑 `deploy.sh` **不会更换**（除非有人删掉密钥文件）。
 
 **环境变量（`sshchat.env`）：**
 
@@ -259,10 +355,10 @@ cat /opt/sshchat/federation/id_ed25519.pub
 | `SSHCHAT_FEDERATION_PORT` | 联邦 TCP 端口（默认聊天端口 +1） |
 | `SSHCHAT_FEDERATION_DISABLE=1` | 关闭联邦 |
 | `SSHCHAT_FEDERATION_PEERS` | 可选，覆盖 `federation/peers.json` 路径 |
+| `SSHCHAT_FED_PEERS_WATCH_SECONDS` | 监视 `peers.json` 的间隔（默认 `5`；`0` 关闭监视，仍可用 SIGHUP） |
+| `SSHCHAT_FED_SEEN_MAX` | 洪泛去重缓存条数（默认 `4096`） |
 
-**说明：** 房间小游戏（`/game`）在联邦网络中由开局节点作为权威主机同步局面；跨服玩家以联邦席位入座，可正常 `/game join`、`/game move` 等。棋类积分仍按用户名在本机持久化。
-
-普通用户若要在多台服务器使用同一身份，请在各台机器上用 `admin-add-user.sh` 创建 **相同用户名** 并登记各自的 SSH 公钥（或同一公钥），再配合上述联邦互信即可。
+普通用户若要在多台服务器用同一身份：在各机用 `admin-add-user.sh` 建**相同用户名**并登记各自（或同一把）登录公钥，再按上面完成联邦互信即可。
 
 ---
 
@@ -353,9 +449,9 @@ npm run build:portable
 | `/leave 昵称 编号` | 撤回发给该昵称的第 N 条未读留言（别名：`/留言`、`/unmsg`） |
 | `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
 | `/game help` | 查看房间小游戏用法 |
-| `/library` | 列出图书馆书目（epub / txt / md / pdf）；每人自带书签，翻页自动保存 |
+| `/library` | 联邦并集书目（本机 + 对端 epub / txt / md / pdf）；书签以**藏书节点**为准，翻页自动保存 |
 | `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
-| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续）；`next` / `prev` / `page` 翻页 |
+| `/library open <序号\|文件名[@节点]>` | 打开图书（对端书按页拉取，并从藏书节点恢复书签）；`next` / `prev` / `page` 翻页 |
 | `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
 | `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
 | `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
@@ -458,14 +554,16 @@ npm run build:portable
 
 服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / md / pdf** 图书文件。Markdown（`.md`）按纯文本分页阅读，不渲染语法。PDF 优先用 PyMuPDF 提取正文，并过滤「逐字空格」类乱序排版，避免章节标题（如 1 → 1.1 → 1.2）顺序颠倒。**首次打开大型 PDF** 服务端需解析并缓存，约需十几秒，期间会提示「正在加载…」；再次打开同一本书会即时显示。
 
+联邦开启时，`/library` 显示**各节点书目并集**（对端书带 `@节点`）；打开对端书时只按页拉取正文，不在联邦链路上复制整本文件。同名书可用 `/library open 书名@节点` 消歧。阅读进度（书签）保存在**该书所在节点**：在联邦 B 打开联邦 A 的书时，会从 A 恢复书签，翻页也会写回 A。
+
 | 命令 | 说明 |
 |------|------|
-| `/library` 或 `/lib` | 书目列表（含你的书签进度） |
-| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续） |
-| `/library next` / `prev` | 翻页（自动存书签） |
+| `/library` 或 `/lib` | 联邦并集书目（含你的书签进度） |
+| `/library open <序号\|文件名[@节点]>` | 打开图书（有书签则从藏书节点继续） |
+| `/library next` / `prev` | 翻页（自动存书签到藏书节点） |
 | `/library page <页码>` | 跳到指定页 |
 | `/library bookmarks` | 列出我的全部书签 |
-| `/library reset <序号\|文件名>` | 清除某本书的书签 |
+| `/library reset <序号\|文件名[@节点]>` | 清除某本书的书签（对端书同时清藏书节点） |
 | `/library close` | 结束阅读（保留书签） |
 
 Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。
@@ -547,6 +645,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `deploy.sh` | 一键部署 |
 | `admin-add-user.sh` | 添加用户与公钥 |
 | `admin-add-peer.sh` | 登记联邦互信节点（多服扩网） |
+| `admin-remove-peer.sh` | 拆除联邦互信节点（热加载并通知用户） |
 | `federation.py` / `federation-bridge.sh` | 服务器间联邦协议与 SSH 桥接 |
 | `server.py` / `client.py` | 服务端与终端客户端 |
 | `games.py` | 房间小游戏逻辑 |

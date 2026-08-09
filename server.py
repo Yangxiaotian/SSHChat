@@ -3,6 +3,7 @@ import base64
 import os
 import pickle
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -80,14 +81,24 @@ room_announcements: dict[str, str] = {}
 room_games: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
+# room -> random hex token used to break dual-authority conflicts deterministically
+room_game_tokens: dict[str, str] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
-# conn -> {"path": str, "page": int (0-based)}
+# conn -> {"path": str, "page": int (0-based)}  (remote: also origin/name/title/total_pages)
 library_reading: dict[object, dict[str, object]] = {}
+# req_id -> {"event": Event, "payload": dict|None, "error": str}
+_library_page_waiters: dict[str, dict[str, object]] = {}
+_library_page_waiters_lock = threading.Lock()
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
+# per-book load locks so concurrent federated page requests share one parse
+_library_load_locks: dict[str, threading.Lock] = {}
+_library_load_locks_guard = threading.Lock()
+# Cap federated page bodies so lpage_ok stays well under the 1 MiB line budget.
+_FED_LIBRARY_PAGE_MAX_CHARS = max(500, int(library.LIBRARY_PAGE_CHARS) * 2)
 lock = threading.Lock()
 _MISSING = object()  # sentinel for "attribute not present"
 _persist_dirty = False
@@ -903,27 +914,33 @@ def _build_file_ready_message(
 def _file_ready_message_from_leave(item: dict) -> str | None:
     """Rebuild a full download notice from an offline file leave-message."""
     meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-    if file_http is None:
-        return None
     token = str(meta.get("download_token") or "").strip()
     key = str(meta.get("download_key") or "").strip()
-    if not token or not key:
-        return None
     filename = str(meta.get("filename") or item.get("text") or "file").strip() or "file"
     try:
-        file_size = float(meta.get("file_size", 0))
+        file_size = int(meta.get("file_size") or 0)
     except (TypeError, ValueError):
-        file_size = 0.0
+        file_size = 0
     room = meta.get("room")
-    room_name = str(room).strip() if room else None
-    download_url = f"{file_http.get_base_url()}/download/{token}"
+    if isinstance(room, str):
+        room = room.strip() or None
+    else:
+        room = None
+    # Federated leaves carry an absolute URL hosted on the origin node.
+    download_url = str(meta.get("download_url") or "").strip()
+    if not download_url:
+        if file_http is None or not token:
+            return None
+        download_url = f"{file_http.get_base_url()}/download/{token}"
+    if not key:
+        return None
     return _build_file_ready_message(
         sender=str(item.get("from") or "?"),
         filename=filename,
         file_size=file_size,
         download_url=download_url,
         key=key,
-        room=room_name or None,
+        room=room,
     )
 
 
@@ -939,6 +956,39 @@ def _revoke_recalled_file(removed: dict, recipient: str) -> None:
         file_sharing.file_transfer_store.revoke_recipient(transfer_id, recipient)
     except Exception as e:
         print(f"[FileTransfer] Failed to revoke recalled file for {recipient}: {e}")
+    _federation_clear_file_leave(recipient, transfer_id)
+
+
+def _federation_clear_file_leave(recipient: str, transfer_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.clear_file_leave(recipient, transfer_id)
+    except Exception as e:
+        print(f"federation: clear_file_leave failed: {e!r}")
+
+
+def _federation_clear_offline_pm(recipient: str, leave_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.clear_offline_pm(recipient, leave_id)
+    except Exception as e:
+        print(f"federation: clear_offline_pm failed: {e!r}")
+
+
+def _federation_seed_file_leave(
+    recipient: str, sender: str, notice: dict
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.broadcast_file_leave(recipient, sender, notice)
+    except Exception as e:
+        print(f"federation: broadcast_file_leave failed: {e!r}")
 
 
 def deliver_offline_messages(conn, recipient_name: str) -> int:
@@ -959,9 +1009,16 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
             else:
                 text = item.get("text") or "[文件]"
                 send_line(conn, f"[PM from {sender}] (离线文件 {when}) {text}\n")
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            if tid:
+                _federation_clear_file_leave(recipient_name, tid)
             continue
         text = item.get("text") or ""
         send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
+        lid = str(item.get("id") or "").strip()
+        if lid:
+            _federation_clear_offline_pm(recipient_name, lid)
     return n
 
 
@@ -1050,6 +1107,9 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
         )
         return
     _revoke_recalled_file(removed, target)
+    lid = str(removed.get("id") or "").strip()
+    if lid and (removed.get("kind") or "pm") != "file":
+        _federation_clear_offline_pm(target, lid)
     when = _format_offline_ts(removed.get("ts", 0))
     label = "文件" if (removed.get("kind") or "pm") == "file" else "留言"
     send_line(
@@ -1074,6 +1134,16 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
                 f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
             )
             return
+        if hub is not None and hub.enabled:
+            try:
+                hub.broadcast_offline_pm(
+                    target_nick,
+                    sender_name,
+                    text,
+                    leave_id=str(stored.get("id") or ""),
+                )
+            except Exception as e:
+                print(f"federation: broadcast_offline_pm failed: {e!r}")
         send_line(
             conn,
             f"[*] {target_nick!r} 当前不在线，已留言；对方下次上线时会收到。\n",
@@ -1706,11 +1776,273 @@ def _client_name(conn) -> str:
     return str(info["name"]) if info else "Unknown"
 
 
+def _library_bookmark_key(origin: str, name: str) -> str:
+    """Bookmark id is the bare filename so local and federated opens share progress."""
+    _ = origin  # origin only matters for catalog display / page fetch
+    return library.bookmark_bare_name(name)
+
+
+def _fed_local_library_snapshot() -> list[dict]:
+    lib_dir = _library_dir()
+    if not lib_dir.is_dir():
+        return []
+    return [library.book_entry_to_meta(entry) for entry in library.list_books(lib_dir)]
+
+
+def _union_library_catalog() -> list[library.CatalogItem]:
+    lib_dir = _library_dir()
+    local = library.list_books(lib_dir) if lib_dir.is_dir() else []
+    remote: dict[str, list[dict]] = {}
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        remote = hub.remote_library_catalogs()
+    return library.merge_federated_catalog(local, remote)
+
+
+def _federation_sync_library_catalog() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.sync_library_catalog(_fed_local_library_snapshot())
+    except Exception as e:
+        print(f"federation: library catalog sync failed: {e!r}")
+
+
+def _fed_local_library_bookmarks_snapshot() -> list[dict]:
+    """Bookmarks for locally connected nicks (for peer catch-up)."""
+    with lock:
+        names = {str(info.get("name") or "").strip() for info in clients.values()}
+    rows: list[dict] = []
+    for name in sorted(names, key=lambda n: n.lower()):
+        if not name:
+            continue
+        books = library_bookmarks.export_user(name)
+        if books:
+            rows.append({"name": name, "books": books})
+    return rows
+
+
+def _federation_sync_library_bookmarks(
+    user: str, entries: Optional[dict] = None
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if entries is None:
+        entries = library_bookmarks.export_user(user)
+    if not entries:
+        return
+    try:
+        hub.sync_library_bookmarks(user, entries)
+    except Exception as e:
+        print(f"federation: library bookmark sync failed: {e!r}")
+
+
+def _fed_on_library_bookmarks(_origin: str, nick: str, books: dict) -> None:
+    if not isinstance(books, dict) or not nick:
+        return
+    try:
+        library_bookmarks.merge_from_remote(nick, books)
+    except Exception as e:
+        print(f"federation: merge library bookmarks failed: {e!r}")
+
+
+def _fed_on_library_bookmark_clear(nick: str, book_name: str) -> None:
+    """Owner-node handler: clear a nick's bookmark for a local book."""
+    cleared = library_bookmarks.clear_book(nick, book_name)
+    if cleared:
+        _federation_sync_library_bookmarks(nick, cleared)
+
+
+def _fed_on_library_page_request(
+    _owner: str,
+    req_id: str,
+    book_name: str,
+    page: int,
+    requester: str,
+    nick: str = "",
+    flags: str = "",
+) -> None:
+    """Serve one page from this node's library; bookmarks live on the owner node."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    book_name = Path(str(book_name or "")).name
+    nick = str(nick or "").strip()
+    flags = str(flags or "").lower()
+    resume = "r" in flags
+    save = "s" in flags
+    payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
+    try:
+        lib_dir = _library_dir()
+        catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
+        entry = next((e for e in catalog if e.name == book_name), None)
+        if entry is None:
+            payload["error"] = f"book not found: {book_name}"
+        else:
+            doc = _get_cached_book(entry.path)
+            total = doc.total_pages
+            bookmark_page = (
+                library_bookmarks.get_page(nick, book_name) if nick else None
+            )
+            had_bookmark = bookmark_page is not None
+            if resume:
+                page = bookmark_page if had_bookmark else 0
+            page = max(0, min(int(page), total - 1))
+            if nick and save:
+                entries = library_bookmarks.set_page(nick, book_name, page)
+                _federation_sync_library_bookmarks(nick, entries)
+                bookmark_page = page
+            text = str(doc.pages[page] or "")
+            if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
+                text = (
+                    text[:_FED_LIBRARY_PAGE_MAX_CHARS]
+                    + "\n…（本页过长，联邦传输已截断）"
+                )
+            payload = {
+                "ok": True,
+                "req_id": req_id,
+                "name": entry.name,
+                "title": doc.title,
+                "page": page,
+                "total_pages": total,
+                "text": text,
+                "ext": entry.ext,
+                "size_bytes": entry.size_bytes,
+                "bookmark_page": (
+                    bookmark_page if bookmark_page is not None else page
+                ),
+                "resumed": bool(resume and had_bookmark),
+            }
+    except Exception as e:
+        payload = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_library_page(requester, req_id, payload)
+    except Exception as e:
+        print(f"federation: reply_library_page failed: {e!r}")
+
+
+def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _library_page_waiters_lock:
+        waiter = _library_page_waiters.get(req_id)
+        if not waiter:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_library_page_waiters(error: str) -> None:
+    """Unblock pending remote /library opens when a peer link drops."""
+    with _library_page_waiters_lock:
+        waiters = list(_library_page_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fetch_remote_library_page(
+    owner: str,
+    book_name: str,
+    page: int,
+    *,
+    nick: str = "",
+    flags: str = "",
+    timeout: float = 90.0,
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _library_page_waiters_lock:
+        _library_page_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_library_page(
+            owner, req_id, book_name, page, nick=nick, flags=flags
+        ):
+            return {"ok": False, "error": f"无法联系图书所在节点 {owner}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待对端图书页超时"}
+        with _library_page_waiters_lock:
+            payload = _library_page_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _library_page_waiters_lock:
+            _library_page_waiters.pop(req_id, None)
+
+
 def _set_library_page(conn, user: str, path: Path, page: int) -> None:
     page = max(0, int(page))
     with lock:
-        library_reading[conn] = {"path": str(path.resolve()), "page": page}
-    library_bookmarks.set_page(user, path.name, page)
+        library_reading[conn] = {"path": str(path.resolve()), "page": page, "origin": ""}
+    book_key = library.bookmark_bare_name(path.name)
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
+    _federation_sync_library_bookmarks(user, entries)
+
+
+def _set_library_session(
+    conn,
+    user: str,
+    *,
+    origin: str,
+    name: str,
+    page: int,
+    path: Optional[Path] = None,
+    title: str = "",
+    total_pages: int = 0,
+    persist_bookmark: bool = True,
+) -> None:
+    page = max(0, int(page))
+    origin = (origin or "").strip()
+    name = Path(str(name or "")).name
+    with lock:
+        library_reading[conn] = {
+            "path": str(path.resolve()) if path is not None else "",
+            "page": page,
+            "origin": origin,
+            "name": name,
+            "title": title,
+            "total_pages": int(total_pages or 0),
+        }
+    if not persist_bookmark:
+        return
+    book_key = _library_bookmark_key(origin, name)
+    if origin:
+        # Remote books: authoritative bookmark is on the owner node (via lpage).
+        # Keep a local mirror for /library list only — do not fan out lmarks.
+        if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+            return
+        library_bookmarks.set_page(user, book_key, page)
+        return
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
+    _federation_sync_library_bookmarks(user, entries)
+
+
+def _send_library_page_payload(
+    conn, title: str, page_idx: int, total: int, text: str
+) -> None:
+    total = max(1, int(total))
+    page_idx = max(0, min(int(page_idx), total - 1))
+    send_line(conn, f"[*] --- 《{title}》 第 {page_idx + 1}/{total} 页 ---\n")
+    for ln in library.wrap_page_lines(text or ""):
+        send_line(conn, f"[*]    {ln}\n")
+    send_line(
+        conn,
+        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
+    )
 
 
 def _get_cached_book(path: Path) -> library.BookDocument:
@@ -1722,76 +2054,117 @@ def _get_cached_book(path: Path) -> library.BookDocument:
     cached = library_doc_cache.get(key)
     if cached and cached[0] == mtime_ns:
         return cached[1]
-    doc = library.load_book(path)
-    library_doc_cache[key] = (mtime_ns, doc)
-    return doc
+    with _library_load_locks_guard:
+        load_lock = _library_load_locks.setdefault(key, threading.Lock())
+    with load_lock:
+        cached = library_doc_cache.get(key)
+        if cached and cached[0] == mtime_ns:
+            return cached[1]
+        doc = library.load_book_isolated(path)
+        library_doc_cache[key] = (mtime_ns, doc)
+        return doc
 
 
 def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     total = doc.total_pages
     page_idx = max(0, min(page_idx, total - 1))
-    send_line(conn, f"[*] --- 《{doc.title}》 第 {page_idx + 1}/{total} 页 ---\n")
-    for ln in library.wrap_page_lines(doc.pages[page_idx]):
-        send_line(conn, f"[*]    {ln}\n")
-    send_line(
-        conn,
-        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
-    )
+    _send_library_page_payload(conn, doc.title, page_idx, total, doc.pages[page_idx])
+
+
+def _library_read_session_page(
+    session: dict, *, user: str = "", save_bookmark: bool = False
+) -> tuple[str, int, int, str]:
+    """Return (title, page, total, text) for a library_reading session."""
+    origin = str(session.get("origin") or "").strip()
+    page = int(session.get("page") or 0)
+    if origin:
+        name = str(session.get("name") or "").strip()
+        flags = "s" if (save_bookmark and user) else ""
+        payload = _fetch_remote_library_page(
+            origin, name, page, nick=user, flags=flags
+        )
+        if not payload.get("ok"):
+            raise RuntimeError(str(payload.get("error") or "remote page failed"))
+        title = str(payload.get("title") or name)
+        total = int(payload.get("total_pages") or 1)
+        page = int(payload.get("page") or page)
+        text = str(payload.get("text") or "")
+        session["title"] = title
+        session["total_pages"] = total
+        session["page"] = page
+        return title, page, total, text
+    path = Path(str(session.get("path") or ""))
+    doc = _get_cached_book(path)
+    page = max(0, min(page, doc.total_pages - 1))
+    return doc.title, page, doc.total_pages, doc.pages[page]
 
 
 def _send_library_catalog(conn, user: str, query: str = "") -> None:
     lib_dir = _library_dir()
     send_line(conn, "[*] --- 图书馆 ---\n")
-    if not lib_dir.is_dir():
-        send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-        send_line(conn, "[*] 请将 epub / txt / md / pdf 放入该目录后重试。\n")
-        return
-    catalog = library.list_books(lib_dir)
+    catalog = _union_library_catalog()
+    local_count = sum(1 for e in catalog if not e.origin)
+    remote_count = len(catalog) - local_count
     if not catalog:
-        send_line(conn, f"[*] 目录为空：{lib_dir}\n")
-        send_line(conn, "[*] 支持格式：.epub、.txt、.md、.pdf\n")
+        if not lib_dir.is_dir():
+            send_line(conn, f"[*] 本机图书馆目录不存在：{lib_dir}\n")
+        else:
+            send_line(conn, f"[*] 本机目录为空：{lib_dir}\n")
+        if remote_count == 0:
+            send_line(conn, "[*] 联邦暂无共享图书；支持格式：.epub、.txt、.md、.pdf\n")
         return
     query = (query or "").strip()
-    books = library.search_catalog(catalog, query) if query else catalog
+    books = library.search_catalog_items(catalog, query) if query else catalog
     if query:
         send_line(
             conn,
-            f"[*] 查找「{query}」，共 {len(books)} 本（全库 {len(catalog)} 本）。\n",
+            f"[*] 查找「{query}」，共 {len(books)} 本（联邦并集 {len(catalog)} 本："
+            f"本机 {local_count}，对端 {remote_count}）。\n",
         )
         if not books:
             send_line(conn, "[*] 未找到匹配的图书，请换关键词重试。\n")
             send_line(conn, "[*] 用 /library 查看全部书目。\n")
             return
+    else:
+        send_line(
+            conn,
+            f"[*] 联邦并集共 {len(catalog)} 本（本机 {local_count}，对端 {remote_count}）。\n",
+        )
     user_marks = library_bookmarks.list_for_user(user)
     for entry in books:
-        mark = user_marks.get(entry.name)
+        mark = user_marks.get(_library_bookmark_key(entry.origin, entry.name))
         mark_suffix = f" · 书签第 {mark + 1} 页" if mark is not None else ""
         send_line(
             conn,
-            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
+            f"({library.format_size(entry.size_bytes)}){entry.display_origin()}{mark_suffix}\n",
         )
-    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名[@节点]>\n")
     if len(catalog) > 10:
         send_line(conn, "[*] 查找：/library find <关键词>\n")
     send_line(conn, "[*] 我的书签：/library bookmarks\n")
 
 
 def _send_library_bookmarks(conn, user: str) -> None:
-    lib_dir = _library_dir()
     marks = library_bookmarks.list_for_user(user)
     send_line(conn, "[*] --- 我的书签 ---\n")
     if not marks:
         send_line(conn, "[*] 暂无书签；打开图书并翻页后会自动保存。\n")
         return
-    catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
-    name_by_file = {entry.name: entry for entry in catalog}
-    for book_name in sorted(marks, key=lambda n: n.lower()):
-        page = marks[book_name]
-        entry = name_by_file.get(book_name)
+    catalog = _union_library_catalog()
+    by_key = {
+        _library_bookmark_key(entry.origin, entry.name): entry for entry in catalog
+    }
+    for book_key in sorted(marks, key=lambda n: n.lower()):
+        page = marks[book_key]
+        entry = by_key.get(book_key)
         if entry:
-            label = f"{entry.index}. [{entry.ext.upper()}] {book_name}"
+            label = (
+                f"{entry.index}. [{entry.ext.upper()}] {entry.name}"
+                f"{entry.display_origin()}"
+            )
         else:
-            label = book_name
+            label = book_key
         send_line(conn, f"[*] {label} · 第 {page + 1} 页\n")
     send_line(conn, "[*] 打开对应图书会自动从书签继续。\n")
 
@@ -1809,19 +2182,20 @@ def _handle_library(conn, payload: str) -> None:
     if not raw:
         _send_library_catalog(conn, user)
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if session:
-            path = session.get("path")
-            page = int(session.get("page") or 0)
-            if path:
-                try:
-                    doc = _get_cached_book(Path(str(path)))
-                    send_line(
-                        conn,
-                        f"[*] 当前在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页\n",
-                    )
-                except Exception:
-                    library_reading.pop(conn, None)
+            try:
+                title, page, total, _text = _library_read_session_page(
+                    session, user=user
+                )
+                origin = str(session.get("origin") or "")
+                where = f" @{origin}" if origin else ""
+                send_line(
+                    conn,
+                    f"[*] 当前在读：《{title}》第 {page + 1}/{total} 页{where}\n",
+                )
+            except Exception:
+                library_reading.pop(conn, None)
         return
 
     parts = raw.split()
@@ -1829,19 +2203,22 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library | /lib                 联邦并集书目（含书签进度）\n")
         send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
-        send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
+        send_line(
+            conn,
+            "[*]   /library open <序号|文件名[@节点]>  打开（有书签则从书签继续）\n",
+        )
         send_line(conn, "[*]   /library show | 显示               显示当前页内容\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
         send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
-        send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
-        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
-        send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
+        send_line(conn, "[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n")
+        send_line(conn, "[*]   /library bookmarks | 书签           列出书签（进度以图书所在节点为准）\n")
+        send_line(conn, "[*]   /library reset <序号|文件名[@节点]> 清除某本书的书签\n")
         send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
-        send_line(conn, f"[*] 目录：{lib_dir}\n")
+        send_line(conn, f"[*] 本机目录：{lib_dir}（对端图书按页拉取，不复制整本）\n")
         return
 
     if head in {"bookmarks", "bookmark", "书签"}:
@@ -1850,19 +2227,34 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"reset", "清除"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library reset <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library reset <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
-        book_name = entry.name if entry else Path(token).name
-        if library_bookmarks.clear_book(user, book_name):
-            send_line(conn, f"[*] 已清除《{book_name}》的书签。\n")
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
+        remote_cleared = False
+        if entry:
+            book_key = _library_bookmark_key(entry.origin, entry.name)
+            label = f"{entry.name}{entry.display_origin()}"
+            if entry.is_remote:
+                hub = federation.get_hub()
+                if hub is not None and hub.enabled:
+                    try:
+                        remote_cleared = hub.clear_remote_library_bookmark(
+                            entry.origin, user, entry.name
+                        )
+                    except Exception as e:
+                        print(f"federation: remote bookmark clear failed: {e!r}")
         else:
-            send_line(conn, f"[*] 《{book_name}》没有保存的书签。\n")
+            book_key = library.bookmark_book_key(token) or Path(token).name
+            label = book_key
+        cleared = library_bookmarks.clear_book(user, book_key)
+        if cleared and not (entry and entry.is_remote):
+            _federation_sync_library_bookmarks(user, cleared)
+        if cleared or remote_cleared:
+            send_line(conn, f"[*] 已清除《{label}》的书签。\n")
+        else:
+            send_line(conn, f"[*] 《{label}》没有保存的书签。\n")
         return
 
     if head in {"close", "关闭"}:
@@ -1873,80 +2265,116 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"info", "状态"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 当前没有在阅读的图书。\n")
             return
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, _text = _library_read_session_page(session, user=user)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取当前图书：{exc}\n")
             return
-        page = int(session.get("page") or 0)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        where = f" @{origin}" if origin else ""
         send_line(
             conn,
-            f"[*] 在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页（{doc.source_path.name}）\n",
+            f"[*] 在读：《{title}》第 {page + 1}/{total} 页（{name}{where}）\n",
         )
         return
 
     if head in {"show", "显示"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(session, user=user)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = int(session.get("page") or 0)
-        _send_library_page(conn, doc, page)
+        with lock:
+            if conn in library_reading:
+                library_reading[conn]["page"] = page
+                library_reading[conn]["title"] = title
+                library_reading[conn]["total_pages"] = total
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"next", "n", "下一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        requested = int(session.get("page") or 0) + 1
+        session["page"] = requested
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = int(session.get("page") or 0) + 1
-        if page >= doc.total_pages:
+        if requested > page:
             send_line(conn, "[*] 已是最后一页。\n")
-            page = doc.total_pages - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"prev", "p", "上一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        old_page = int(session.get("page") or 0)
+        page = max(0, old_page - 1)
+        if page == old_page:
+            send_line(conn, "[*] 已是第一页。\n")
+        session["page"] = page
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = max(0, int(session.get("page") or 0) - 1)
-        if page == int(session.get("page") or 0):
-            send_line(conn, "[*] 已是第一页。\n")
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"page", "页"}:
@@ -1959,26 +2387,40 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 页码须为整数，例如：/library page 3\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        session["page"] = max(0, page_1based - 1)
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        if page_1based < 1 or page_1based > doc.total_pages:
+        if page_1based < 1 or page_1based > total:
             send_line(
                 conn,
-                f"[*] 无效页码：共 {doc.total_pages} 页，请用 1～{doc.total_pages}。\n",
+                f"[*] 无效页码：共 {total} 页，请用 1～{total}。\n",
             )
             return
-        page = page_1based - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"search", "find", "搜索", "查找", "检索"}:
@@ -1987,9 +2429,16 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 用法：/library find <关键词>（查找书目）或打开书后 search <关键词>（书内检索）\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             _send_library_catalog(conn, user, query)
+            return
+        if str(session.get("origin") or "").strip():
+            send_line(
+                conn,
+                "[*] 联邦图书暂不支持书内全文检索；可用 /library find <关键词> 查书目，"
+                "或 /library page <页码> 翻页。\n",
+            )
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))
@@ -2010,7 +2459,16 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
         if len(results) == 1:
             page_idx = results[0][0]
-            _set_library_page(conn, user, Path(str(session["path"])), page_idx)
+            _set_library_session(
+                conn,
+                user,
+                origin="",
+                name=Path(str(session["path"])).name,
+                page=page_idx,
+                path=Path(str(session["path"])),
+                title=doc.title,
+                total_pages=doc.total_pages,
+            )
             send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
             _send_library_page(conn, doc, page_idx)
         else:
@@ -2019,17 +2477,68 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"open", "read", "读", "打开"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library open <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library open <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
         if not entry:
             send_line(conn, f"[*] 未找到图书：{token}\n")
-            send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
+            send_line(conn, "[*] 用 /library 查看可用序号与文件名[@节点]。\n")
+            return
+        bookmark_key = _library_bookmark_key(entry.origin, entry.name)
+        if entry.is_remote:
+            send_line(
+                conn,
+                f"[*] 正在从节点 {entry.origin} 拉取 "
+                f"[{entry.ext.upper()}] {entry.name}…（请稍候）\n",
+            )
+            try:
+                # Resume from the book-owner node's bookmark for this nick.
+                payload = _fetch_remote_library_page(
+                    entry.origin, entry.name, 0, nick=user, flags="r"
+                )
+            except Exception as exc:
+                send_line(conn, f"[*] 打开失败：{exc}\n")
+                return
+            if not payload.get("ok"):
+                send_line(
+                    conn,
+                    f"[*] 打开失败：{payload.get('error') or '对端无响应'}\n",
+                )
+                return
+            title = str(payload.get("title") or entry.name)
+            total = max(1, int(payload.get("total_pages") or 1))
+            page = max(0, min(int(payload.get("page") or 0), total - 1))
+            text = str(payload.get("text") or "")
+            resumed = bool(payload.get("resumed"))
+            _set_library_session(
+                conn,
+                user,
+                origin=entry.origin,
+                name=entry.name,
+                page=page,
+                title=title,
+                total_pages=total,
+            )
+            if resumed and page > 0:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"从书签第 {page + 1}/{total} 页继续。\n",
+                )
+            else:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"共 {total} 页。\n",
+                )
+            _send_library_page_payload(conn, title, page, total, text)
+            return
+        saved = library_bookmarks.get_page(user, bookmark_key)
+        page = saved if saved is not None else 0
+        if entry.path is None:
+            send_line(conn, f"[*] 本机图书缺少路径：{entry.name}\n")
             return
         if entry.ext == "pdf" or entry.size_bytes >= 2 * 1024 * 1024:
             send_line(
@@ -2042,14 +2551,22 @@ def _handle_library(conn, payload: str) -> None:
         except Exception as exc:
             send_line(conn, f"[*] 打开失败：{exc}\n")
             return
-        saved = library_bookmarks.get_page(user, entry.name)
-        page = saved if saved is not None else 0
         page = min(page, doc.total_pages - 1)
-        _set_library_page(conn, user, entry.path, page)
+        _set_library_session(
+            conn,
+            user,
+            origin="",
+            name=entry.name,
+            page=page,
+            path=entry.path,
+            title=doc.title,
+            total_pages=doc.total_pages,
+        )
         if saved is not None and saved > 0:
             send_line(
                 conn,
-                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
+                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，"
+                f"从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
             )
         else:
             send_line(
@@ -2149,23 +2666,57 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 except Exception as e:
                     print(f"[FileTransfer] Failed to notify {recipient}: {e}")
 
-        if delivered:
+        # Also fan out to the same nick on peer nodes (Cloudflare/public file URL).
+        remote_sent = False
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled and hub.has_remote_user(recipient):
+            remote_sent = hub.send_file_notice(
+                recipient,
+                transfer.sender,
+                {
+                    "filename": transfer.filename,
+                    "file_size": transfer.file_size,
+                    "download_url": download_url,
+                    "download_key": key,
+                    "download_token": token,
+                    "room": transfer.room,
+                    "transfer_id": transfer.transfer_id,
+                },
+            )
+
+        if delivered or remote_sent:
             continue
 
         # Offline: leave a mailbox entry the sender can also see/recall via /leave.
+        # Also seed every federation peer so login on another node still delivers.
         summary = _format_file_leave_summary(transfer.filename, transfer.file_size)
+        meta = {
+            "transfer_id": transfer.transfer_id,
+            "filename": transfer.filename,
+            "file_size": transfer.file_size,
+            "download_token": token,
+            "download_key": key,
+            "download_url": download_url,
+            "room": transfer.room,
+        }
         offline_messages.leave(
             recipient,
             transfer.sender,
             summary,
             kind="file",
-            meta={
-                "transfer_id": transfer.transfer_id,
+            meta=meta,
+        )
+        _federation_seed_file_leave(
+            recipient,
+            transfer.sender,
+            {
                 "filename": transfer.filename,
                 "file_size": transfer.file_size,
-                "download_token": token,
+                "download_url": download_url,
                 "download_key": key,
+                "download_token": token,
                 "room": transfer.room,
+                "transfer_id": transfer.transfer_id,
             },
         )
 
@@ -2226,14 +2777,24 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                 if c != conn and c in clients:
                     recipients.append(clients[c]["name"])
         
+        # Federated peers in the same room (presence) also get a download slot.
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            seen.add(sender.lower())
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+        
         if not recipients:
             send_line(conn, f"[*] 房间 #{room_name} 中没有其他用户。\n")
             return
     else:
-        # Sending to specific user(s)
+        # Sending to specific user(s) — local online, federated online, or offline leave.
         target_lower = target.lower()
         with lock:
-            # Find all online users with this nickname
             online_recipients = [
                 info["name"] for info in clients.values()
                 if info["name"].lower() == target_lower
@@ -2242,9 +2803,8 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         if online_recipients:
             recipients = online_recipients
         else:
-            # User is offline, still allow sending
+            # Offline locally or only present on a peer — open a session either way.
             recipients = [target]
-    
     # Create transfer session
     try:
         store = file_sharing.file_transfer_store
@@ -2355,8 +2915,79 @@ def _federation_sync_game(room: str) -> None:
         if auth != hub.node_id:
             return
         room_game_authority[room] = hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
         raw = _pickle_game_for_storage(game)
-    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"))
+    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"), token)
+
+
+def _federation_push_game_snapshot(room: str) -> None:
+    """Re-fanout a room's game (owned or replica) so late-joining peers catch up."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        auth = room_game_authority.get(room) or hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
+        raw = _pickle_game_for_storage(game)
+    hub.sync_game(room, auth, base64.b64encode(raw).decode("ascii"), token)
+
+
+def _federation_push_all_game_snapshots() -> None:
+    """After a peer connects, push every active local game replica/authority state."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        rooms = [
+            room
+            for room, game in room_games.items()
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        ]
+    for room in rooms:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: catch-up gsync failed for room {room!r}: {e!r}")
+
+
+def _fed_on_game_request(_from_peer: str, room: str) -> None:
+    """Peer is missing this room's game; re-push our snapshot if we have one."""
+    room = (room or "").strip()
+    if not room:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+    _federation_push_game_snapshot(room)
+
+
+def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
+    """Ask peers for a missing room game and wait briefly for gsync."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    with lock:
+        if room_games.get(room) is not None:
+            return True
+    try:
+        hub.request_game(room)
+    except Exception as e:
+        print(f"federation: greq failed for room {room!r}: {e!r}")
+        return False
+    deadline = time.time() + max(0.2, float(timeout))
+    while time.time() < deadline:
+        with lock:
+            game = room_games.get(room)
+            if game is not None and getattr(game, "state", "ended") != "ended":
+                return True
+        time.sleep(0.05)
+    return False
 
 
 def _federation_notify_game_end(room: str) -> None:
@@ -2364,13 +2995,41 @@ def _federation_notify_game_end(room: str) -> None:
     if hub is None or not hub.enabled:
         return
     auth = room_game_authority.pop(room, None) or hub.node_id
+    room_game_tokens.pop(room, None)
     if auth == hub.node_id:
         hub.end_game(room, hub.node_id)
 
 
-def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> None:
+def _game_conflict_winner(
+    auth_a: str, token_a: str, auth_b: str, token_b: str
+) -> tuple[str, str]:
+    """Pick one of two conflicting games. Tokens are random; compare is deterministic."""
+    a_auth = (auth_a or "").strip()
+    b_auth = (auth_b or "").strip()
+    a_tok = (token_a or "").strip() or a_auth
+    b_tok = (token_b or "").strip() or b_auth
+    if a_tok > b_tok:
+        return a_auth, a_tok
+    if b_tok > a_tok:
+        return b_auth, b_tok
+    if a_auth >= b_auth:
+        return a_auth, a_tok
+    return b_auth, b_tok
+
+
+def _fed_on_game_sync(
+    _from_peer: str,
+    room: str,
+    authority: str,
+    b64: str,
+    conflict_token: str = "",
+) -> None:
     hub = federation.get_hub()
-    if hub is not None and authority == hub.node_id:
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    authority = (authority or "").strip()
+    conflict_token = (conflict_token or "").strip() or authority
+    if authority == local_id:
+        # Echo of our own authority snapshot (or stale self-claim).
         return
     try:
         game = pickle.loads(base64.b64decode(b64.encode("ascii")))
@@ -2378,11 +3037,59 @@ def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> N
         print(f"federation game sync skip room {room!r}: {e!r}")
         return
     _rebind_game_services(game)
+
+    lost_local = False
+    loser_auth = ""
+    winner_auth = authority
+    keep_local = False
     with lock:
-        _remap_local_game_seats_locked(room, game)
-        room_games[room] = game
-        room_game_authority[room] = authority
+        local_game = room_games.get(room)
+        local_auth = (room_game_authority.get(room) or "").strip()
+        local_token = (room_game_tokens.get(room) or "").strip() or local_auth
+        local_active = (
+            local_game is not None
+            and getattr(local_game, "state", "ended") != "ended"
+        )
+        remote_active = getattr(game, "state", "ended") != "ended"
+        if (
+            local_active
+            and remote_active
+            and local_auth
+            and local_auth != authority
+        ):
+            win_auth, win_tok = _game_conflict_winner(
+                local_auth, local_token, authority, conflict_token
+            )
+            winner_auth = win_auth
+            if win_auth == local_auth:
+                # Keep local; ask peers to take ours.
+                room_game_tokens[room] = win_tok or local_token
+                keep_local = True
+            else:
+                lost_local = True
+                loser_auth = local_auth
+
+        if not keep_local:
+            _remap_local_game_seats_locked(room, game)
+            room_games[room] = game
+            room_game_authority[room] = authority
+            room_game_tokens[room] = conflict_token
+
+    if keep_local:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: re-push after winning conflict: {e!r}")
+        return
+
     _mark_sessions_dirty()
+    if lost_local:
+        notice = (
+            f"[*] 联邦对局冲突：#{room} 同时存在多局，已随机保留节点 "
+            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已作废。"
+            f"请用 /game show 查看当前局面。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
     if getattr(game, "state", "ended") != "ended":
         send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
@@ -2395,6 +3102,7 @@ def _fed_on_game_end(room: str, authority: str) -> None:
     with lock:
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
+        room_game_tokens.pop(room, None)
     _mark_sessions_dirty()
 
 
@@ -2586,17 +3294,161 @@ def _should_forward_game(room: str, sub: str) -> bool:
 
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
-    broadcast_room(room, msg, via_federation_from=from_peer)
+    # Hub already fanouts the original msg line; only deliver locally.
+    # Join/leave presence uses dedicated join/leave frames — ignore chat-shaped
+    # duplicates from older peers that still federated those via msg.
+    if _is_presence_chat_notice(msg):
+        return
+    broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
+
+
+def _is_presence_chat_notice(msg: bytes) -> bool:
+    """True for `[+] nick joined #room` / `[!] nick left #room` system lines."""
+    try:
+        text = msg.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return False
+    if text.startswith("[+] ") and " joined #" in text:
+        return True
+    if text.startswith("[!] ") and " left #" in text:
+        return True
+    return False
 
 
 def _fed_on_join_notice(room: str, msg: bytes) -> None:
     broadcast_room(room, msg, skip_federation=True)
 
 
+def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
+    """Tell all local chat users when a federation node comes or goes."""
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    peer_node = (peer_node or "").strip() or "?"
+    reporter = (reporter or "").strip() or "?"
+    if event == "up":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
+            # Peer just linked: re-push active games so /game show works on the newcomer
+            # (and so multi-hop nodes that only see us get a fresh gsync).
+            try:
+                _federation_push_all_game_snapshots()
+            except Exception as e:
+                print(f"federation: peer-up game catch-up error: {e!r}")
+            try:
+                _federation_sync_library_catalog()
+            except Exception as e:
+                print(f"federation: peer-up library catalog sync error: {e!r}")
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
+    elif event == "down":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已退出（与本机断开）\n"
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
+        _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
+    else:
+        return
+    broadcast_local_notice(text)
+
+
+def broadcast_local_notice(text: str) -> None:
+    """Send a system line to every locally connected client (no federation fan-out)."""
+    with lock:
+        targets = list(clients.keys())
+    dead = []
+    for c in targets:
+        try:
+            send_line(c, text)
+        except Exception:
+            dead.append(c)
+    for c in dead:
+        remove_client(c)
+
+
 def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     targets = find_clients_by_nickname(to_name, local_only=True)
     for peer_conn, _ in targets:
         send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+
+
+def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
+    """Deliver a federated /sendfile download notice to a local user (or leave offline)."""
+    if not isinstance(notice, dict):
+        return
+    download_url = str(notice.get("download_url") or "").strip()
+    key = str(notice.get("download_key") or "").strip()
+    if not download_url or not key:
+        return
+    filename = str(notice.get("filename") or "").strip() or "file"
+    try:
+        file_size = int(notice.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    room = notice.get("room")
+    room_name = str(room).strip() if room else None
+    message = _build_file_ready_message(
+        sender=from_name,
+        filename=filename,
+        file_size=file_size,
+        download_url=download_url,
+        key=key,
+        room=room_name or None,
+    )
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            try:
+                send_line(peer_conn, message)
+            except Exception as e:
+                print(f"[FileTransfer] Federated notify failed for {to_name}: {e}")
+        # Live delivery — drop any seeded offline copies (including origin).
+        tid = str(notice.get("transfer_id") or "").strip()
+        if tid:
+            offline_messages.remove_file_by_transfer(to_name, tid)
+            _federation_clear_file_leave(to_name, tid)
+        return
+
+    # Recipient is offline on this node — store absolute origin URL for later login.
+    summary = _format_file_leave_summary(filename, file_size)
+    offline_messages.leave(
+        to_name,
+        from_name,
+        summary,
+        kind="file",
+        meta={
+            "transfer_id": str(notice.get("transfer_id") or "").strip(),
+            "filename": filename,
+            "file_size": file_size,
+            "download_token": str(notice.get("download_token") or "").strip(),
+            "download_key": key,
+            "download_url": download_url,
+            "room": room_name,
+            "federated": True,
+        },
+    )
+
+
+def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
+    offline_messages.remove_file_by_transfer(to_name, transfer_id)
+
+
+def _fed_on_offline_pm(
+    to_name: str, from_name: str, text: str, leave_id: str = ""
+) -> None:
+    """Seed or deliver an offline text leave that originated on another node."""
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+        if leave_id:
+            offline_messages.remove_by_id(to_name, leave_id)
+            _federation_clear_offline_pm(to_name, leave_id)
+        return
+    offline_messages.leave(to_name, from_name, text, leave_id=leave_id or None)
+
+
+def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
+    offline_messages.remove_by_id(to_name, leave_id)
 
 
 def _ensure_federation_hub() -> None:
@@ -2614,8 +3466,24 @@ def _ensure_federation_hub() -> None:
         _fed_on_game_end,
         _fed_execute_game_cmd,
         _fed_on_game_priv,
+        _fed_on_file_notice,
+        _fed_on_peer_event,
+        _fed_on_game_request,
+        _fed_local_library_snapshot,
+        _fed_on_library_page_request,
+        _fed_on_library_page_result,
+        _fed_local_library_bookmarks_snapshot,
+        _fed_on_library_bookmarks,
     )
     _fed_hub.start()
+    _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
+    _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
+    _fed_hub.on_offline_pm = _fed_on_offline_pm
+    _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
+    _federation_sync_library_catalog()
+    # Push bookmarks for currently connected users once hub is up.
+    for row in _fed_local_library_bookmarks_snapshot():
+        _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
 
 
 def broadcast_room(
@@ -2757,7 +3625,9 @@ def remove_client(conn) -> None:
         if same_local or remote_same:
             continue
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
-        broadcast_room(room, leave_msg)
+        # Local delivery only: federation uses notify_leave (presence), not msg,
+        # otherwise peers see the leave line twice.
+        broadcast_room(room, leave_msg, skip_federation=True)
         if hub is not None and hub.enabled:
             hub.notify_leave(name, room)
     for room, lines in game_notices:
@@ -2815,6 +3685,7 @@ def handle_command(conn, payload: str) -> None:
                 new_room,
                 f"[+] {name} joined #{new_room}\n".encode("utf-8"),
                 exclude_conn=conn,
+                skip_federation=True,
             )
             hub = federation.get_hub()
             if hub is not None and hub.enabled:
@@ -2972,6 +3843,7 @@ def handle_command(conn, payload: str) -> None:
             broadcast_room(
                 target_room,
                 f"[!] {name} left #{target_room}\n".encode("utf-8"),
+                skip_federation=True,
             )
             if hub is not None and hub.enabled:
                 hub.notify_leave(name, target_room)
@@ -3266,6 +4138,10 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             hub = federation.get_hub()
             if hub is not None:
                 room_game_authority[room] = hub.node_id
+                room_game_tokens[room] = secrets.token_hex(16)
+            else:
+                room_game_authority.pop(room, None)
+                room_game_tokens.pop(room, None)
         seat = getattr(new_game, "first_seat_desc", "第一席")
         join_hint = getattr(
             new_game,
@@ -3284,9 +4160,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "join":
         with lock:
             game = room_games.get(room)
-            if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
-                return
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        if game is None:
+            send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
+            return
+        with lock:
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
             if resumed:
                 priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
@@ -3299,6 +4180,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "seats":
         with lock:
             game = room_games.get(room)
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        with lock:
             lines = game.seats() if game else ["本房没有进行中的对局。"]
         send_game_private(conn, room, lines)
         return
@@ -3307,6 +4193,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        with lock:
             if game is None:
                 lines = ["本房没有进行中的对局。"]
             else:
@@ -3331,6 +4222,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         try:
             with lock:
                 game = room_games.get(room)
+            if game is None:
+                _federation_request_game_and_wait(room)
+                with lock:
+                    game = room_games.get(room)
+            with lock:
                 if game is None:
                     send_line(conn, "[*] 本房没有进行中的对局。\n")
                     return
@@ -3556,10 +4452,11 @@ def handle_client(conn, addr) -> None:
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
         join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
-        broadcast_room(active_room, join_msg, exclude_conn=conn)
+        broadcast_room(active_room, join_msg, exclude_conn=conn, skip_federation=True)
         if hub is not None and hub.enabled:
             for room in inherited_rooms:
                 hub.notify_join(name, room)
+            _federation_sync_library_bookmarks(name)
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
@@ -3679,6 +4576,23 @@ def run_server() -> int:
 
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
+    def _handle_federation_reload(signum, _frame) -> None:
+        hub = federation.get_hub()
+        if hub is None or not hub.enabled:
+            print(f"federation reload signal {signum}: hub not active")
+            return
+        try:
+            started = hub.reload_peers()
+            print(f"federation reload signal {signum}: {started} new outbound loop(s)")
+        except Exception as e:
+            print(f"federation reload signal {signum} failed: {e!r}")
+
+    if hasattr(signal, "SIGHUP"):
+        try:
+            signal.signal(signal.SIGHUP, _handle_federation_reload)
+        except (ValueError, OSError) as e:
+            print(f"warning: could not install SIGHUP handler for federation reload: {e!r}")
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

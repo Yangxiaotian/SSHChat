@@ -1257,10 +1257,18 @@ class FileHTTPServer:
         self.host is a bind address, so it may be a wildcard like 0.0.0.0 that
         nobody can actually open. Prefer an explicitly configured public name.
         public_port (if set) is what appears in links; omit 443/80 as usual.
+
+        When public_port is 443/80 (e.g. Cloudflare Tunnel terminating TLS), the
+        link scheme follows that public port even if the local listener is plain HTTP.
         """
-        protocol = "https" if self.use_https else "http"
-        host = self.get_public_host()
         port = self.port if self.public_port is None else self.public_port
+        if self.public_port == 443:
+            protocol = "https"
+        elif self.public_port == 80:
+            protocol = "http"
+        else:
+            protocol = "https" if self.use_https else "http"
+        host = self.get_public_host()
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"

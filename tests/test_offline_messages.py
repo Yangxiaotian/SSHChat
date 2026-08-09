@@ -82,6 +82,28 @@ class OfflineMessageStoreTests(unittest.TestCase):
         self.assertEqual(pending[0]["kind"], "file")
         self.assertEqual(pending[0]["meta"]["transfer_id"], "t1")
 
+    def test_file_leave_dedupes_by_transfer_id(self) -> None:
+        a = self.store.leave(
+            "alice",
+            "bob",
+            "[文件] a.pdf",
+            kind="file",
+            meta={"transfer_id": "same"},
+        )
+        b = self.store.leave(
+            "alice",
+            "bob",
+            "[文件] a.pdf",
+            kind="file",
+            meta={"transfer_id": "same"},
+        )
+        self.assertEqual(self.store.count("alice"), 1)
+        assert a is not None and b is not None
+        self.assertEqual(a.get("id"), b.get("id"))
+        removed = self.store.remove_file_by_transfer("alice", "same")
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(self.store.count("alice"), 0)
+
     def test_list_and_recall_by_index(self) -> None:
         self.store.leave("alice", "bob", "one")
         self.store.leave("alice", "carol", "other")

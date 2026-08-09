@@ -1,7 +1,10 @@
 """Tests for library book listing and pagination."""
+import json
 import os
 import tempfile
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import library
@@ -29,15 +32,67 @@ class TestLibraryBookmarks(unittest.TestCase):
 
     def test_clear_book(self) -> None:
         self.store.set_page("carol", "x.epub", 5)
-        self.assertTrue(self.store.clear_book("Carol", "x.epub"))
+        cleared = self.store.clear_book("Carol", "x.epub")
+        self.assertIsNotNone(cleared)
         self.assertIsNone(self.store.get_page("carol", "x.epub"))
-        self.assertFalse(self.store.clear_book("carol", "x.epub"))
+        self.assertIsNone(self.store.clear_book("carol", "x.epub"))
 
     def test_users_are_isolated(self) -> None:
         self.store.set_page("dave", "book.txt", 7)
         self.store.set_page("erin", "book.txt", 2)
         self.assertEqual(self.store.get_page("dave", "book.txt"), 7)
         self.assertEqual(self.store.get_page("erin", "book.txt"), 2)
+
+
+class TestLibraryBookmarkFederationMerge(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = library.LibraryBookmarkStore(
+            str(Path(self.tmp.name) / "bookmarks.json")
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_merge_lww_keeps_newer_page(self) -> None:
+        self.store.set_page("yxt", "a.epub", 1)
+        older = {"a.epub": {"page": 9, "updated_ts": 1}}
+        newer = {"a.epub": {"page": 3, "updated_ts": int(time.time()) + 10}}
+        self.assertTrue(self.store.merge_from_remote("YXT", newer))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+        self.assertFalse(self.store.merge_from_remote("yxt", older))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+
+    def test_merge_delete_tombstone(self) -> None:
+        self.store.set_page("yxt", "peer::b.txt", 4)
+        self.assertEqual(self.store.get_page("yxt", "b.txt"), 4)
+        ts = int(time.time()) + 5
+        self.assertTrue(
+            self.store.merge_from_remote(
+                "yxt", {"peer::b.txt": {"deleted": True, "updated_ts": ts}}
+            )
+        )
+        self.assertIsNone(self.store.get_page("yxt", "b.txt"))
+        self.assertIsNone(self.store.get_page("yxt", "peer::b.txt"))
+
+    def test_export_includes_federated_keys(self) -> None:
+        self.store.set_page("yxt", "Math::book.epub", 7)
+        exported = self.store.export_user("yxt")
+        self.assertIn("book.epub", exported)
+        self.assertNotIn("Math::book.epub", exported)
+        self.assertEqual(exported["book.epub"]["page"], 7)
+        self.assertEqual(self.store.get_page("yxt", "Math::book.epub"), 7)
+
+    def test_remote_origin_key_merges_into_bare_name(self) -> None:
+        """Owner saved bare name; reader must resume via federated merge."""
+        remote = {
+            "中国近代史.epub": {"page": 41, "updated_ts": int(time.time())}
+        }
+        self.assertTrue(self.store.merge_from_remote("yxt", remote))
+        self.assertEqual(self.store.get_page("yxt", "中国近代史.epub"), 41)
+        self.assertEqual(
+            self.store.get_page("yxt", "Mathematics.local::中国近代史.epub"), 41
+        )
 
 
 class TestLibraryTxt(unittest.TestCase):
@@ -293,6 +348,130 @@ class TestLibraryPdfExtract(unittest.TestCase):
         idx = full.find("直播时没出")
         self.assertGreaterEqual(idx, 0)
         self.assertEqual(full[idx : idx + len(phrase)], phrase)
+
+
+class TestFederatedCatalog(unittest.TestCase):
+    def test_merge_union_sorts_and_indexes(self) -> None:
+        local = [
+            library.BookEntry(1, "zeta.txt", "txt", 10, Path("/z")),
+            library.BookEntry(2, "alpha.txt", "txt", 20, Path("/a")),
+        ]
+        remote = {
+            "node-b": [
+                {"name": "alpha.txt", "ext": "txt", "size_bytes": 99},
+                {"name": "beta.md", "ext": "md", "size_bytes": 5},
+            ],
+            "node-c": [{"name": "gamma.pdf", "ext": "pdf", "size_bytes": 1000}],
+        }
+        catalog = library.merge_federated_catalog(local, remote)
+        names = [(it.name, it.origin) for it in catalog]
+        self.assertEqual(
+            names,
+            [
+                ("alpha.txt", ""),
+                ("alpha.txt", "node-b"),
+                ("beta.md", "node-b"),
+                ("gamma.pdf", "node-c"),
+                ("zeta.txt", ""),
+            ],
+        )
+        self.assertEqual([it.index for it in catalog], [1, 2, 3, 4, 5])
+        self.assertTrue(catalog[1].is_remote)
+        self.assertFalse(catalog[0].is_remote)
+
+    def test_resolve_prefers_local_then_name_at_node(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [library.BookEntry(1, "same.txt", "txt", 1, Path("/s"))],
+            {"peer": [{"name": "same.txt", "ext": "txt", "size_bytes": 2}]},
+        )
+        local = library.resolve_catalog_item("same.txt", catalog)
+        assert local is not None
+        self.assertEqual(local.origin, "")
+        remote = library.resolve_catalog_item("same.txt@peer", catalog)
+        assert remote is not None
+        self.assertEqual(remote.origin, "peer")
+        by_idx = library.resolve_catalog_item("2", catalog)
+        assert by_idx is not None
+        self.assertEqual(by_idx.origin, "peer")
+
+    def test_search_catalog_items_matches_origin(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [],
+            {"math": [{"name": "calc.txt", "ext": "txt", "size_bytes": 3}]},
+        )
+        hits = library.search_catalog_items(catalog, "math")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "calc.txt")
+
+
+class TestLibraryIsolatedLoad(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib_dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_txt_stays_in_process(self) -> None:
+        path = self.lib_dir / "note.txt"
+        path.write_text("hello isolated", encoding="utf-8")
+        doc = library.load_book_isolated(path)
+        self.assertEqual(doc.title, "note")
+        self.assertIn("hello isolated", doc.pages[0])
+
+    def test_epub_uses_subprocess(self) -> None:
+        path = self.lib_dir / "demo.epub"
+        path.write_bytes(b"PK\x03\x04fake")
+        calls: list[list[str]] = []
+
+        class FakeProc:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "title": "demo",
+                        "pages": ["page one", "page two"],
+                        "source_path": str(path),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            doc = library.load_book_isolated(path, timeout=30)
+        self.assertEqual(doc.title, "demo")
+        self.assertEqual(doc.pages, ["page one", "page two"])
+        self.assertTrue(calls)
+        self.assertIn("-c", calls[0])
+
+    def test_subprocess_error_surfaces(self) -> None:
+        path = self.lib_dir / "bad.epub"
+        path.write_bytes(b"nope")
+
+        class FakeProc:
+            returncode = 1
+            stderr = b"boom"
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps({"ok": False, "error": "RuntimeError: boom"}),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                library.load_book_isolated(path)
+        self.assertIn("boom", str(ctx.exception))
 
 
 if __name__ == "__main__":
