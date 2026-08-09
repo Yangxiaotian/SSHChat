@@ -268,6 +268,12 @@ apply_data_plane_permissions() {
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
 
+  # Library directory: readable by client group so users can browse books
+  if [[ -d "$PREFIX/library" ]]; then
+    chown "$u:$CLIENT_GROUP" "$PREFIX/library"
+    chmod 750 "$PREFIX/library"
+  fi
+
   if [[ -d /var/lib/sshchat/files ]]; then
     chown -R "$u:$u" /var/lib/sshchat/files
     chmod 750 /var/lib/sshchat/files
@@ -369,6 +375,13 @@ apply_root_group_permissions() {
 
   chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  
+  # Library directory: readable by client group so users can browse books
+  if [[ -d "$PREFIX/library" ]]; then
+    chown "root:$CLIENT_GROUP" "$PREFIX/library"
+    chmod 750 "$PREFIX/library"
+  fi
+  
   apply_federation_permissions
 }
 
@@ -905,6 +918,11 @@ else
   chmod 755 "$PREFIX/federation-bridge.sh"
   chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
+  # Library directory should be accessible by client group
+  if [[ -d "$PREFIX/library" ]]; then
+    chown "root:$CLIENT_GROUP" "$PREFIX/library"
+    chmod 750 "$PREFIX/library"
+  fi
   apply_federation_permissions
 fi
 
