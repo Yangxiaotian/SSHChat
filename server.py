@@ -3,6 +3,7 @@ import base64
 import os
 import pickle
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -80,6 +81,8 @@ room_announcements: dict[str, str] = {}
 room_games: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
+# room -> random hex token used to break dual-authority conflicts deterministically
+room_game_tokens: dict[str, str] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
@@ -2389,8 +2392,79 @@ def _federation_sync_game(room: str) -> None:
         if auth != hub.node_id:
             return
         room_game_authority[room] = hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
         raw = _pickle_game_for_storage(game)
-    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"))
+    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"), token)
+
+
+def _federation_push_game_snapshot(room: str) -> None:
+    """Re-fanout a room's game (owned or replica) so late-joining peers catch up."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        auth = room_game_authority.get(room) or hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
+        raw = _pickle_game_for_storage(game)
+    hub.sync_game(room, auth, base64.b64encode(raw).decode("ascii"), token)
+
+
+def _federation_push_all_game_snapshots() -> None:
+    """After a peer connects, push every active local game replica/authority state."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        rooms = [
+            room
+            for room, game in room_games.items()
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        ]
+    for room in rooms:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: catch-up gsync failed for room {room!r}: {e!r}")
+
+
+def _fed_on_game_request(_from_peer: str, room: str) -> None:
+    """Peer is missing this room's game; re-push our snapshot if we have one."""
+    room = (room or "").strip()
+    if not room:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+    _federation_push_game_snapshot(room)
+
+
+def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
+    """Ask peers for a missing room game and wait briefly for gsync."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    with lock:
+        if room_games.get(room) is not None:
+            return True
+    try:
+        hub.request_game(room)
+    except Exception as e:
+        print(f"federation: greq failed for room {room!r}: {e!r}")
+        return False
+    deadline = time.time() + max(0.2, float(timeout))
+    while time.time() < deadline:
+        with lock:
+            game = room_games.get(room)
+            if game is not None and getattr(game, "state", "ended") != "ended":
+                return True
+        time.sleep(0.05)
+    return False
 
 
 def _federation_notify_game_end(room: str) -> None:
@@ -2398,13 +2472,41 @@ def _federation_notify_game_end(room: str) -> None:
     if hub is None or not hub.enabled:
         return
     auth = room_game_authority.pop(room, None) or hub.node_id
+    room_game_tokens.pop(room, None)
     if auth == hub.node_id:
         hub.end_game(room, hub.node_id)
 
 
-def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> None:
+def _game_conflict_winner(
+    auth_a: str, token_a: str, auth_b: str, token_b: str
+) -> tuple[str, str]:
+    """Pick one of two conflicting games. Tokens are random; compare is deterministic."""
+    a_auth = (auth_a or "").strip()
+    b_auth = (auth_b or "").strip()
+    a_tok = (token_a or "").strip() or a_auth
+    b_tok = (token_b or "").strip() or b_auth
+    if a_tok > b_tok:
+        return a_auth, a_tok
+    if b_tok > a_tok:
+        return b_auth, b_tok
+    if a_auth >= b_auth:
+        return a_auth, a_tok
+    return b_auth, b_tok
+
+
+def _fed_on_game_sync(
+    _from_peer: str,
+    room: str,
+    authority: str,
+    b64: str,
+    conflict_token: str = "",
+) -> None:
     hub = federation.get_hub()
-    if hub is not None and authority == hub.node_id:
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    authority = (authority or "").strip()
+    conflict_token = (conflict_token or "").strip() or authority
+    if authority == local_id:
+        # Echo of our own authority snapshot (or stale self-claim).
         return
     try:
         game = pickle.loads(base64.b64decode(b64.encode("ascii")))
@@ -2412,11 +2514,59 @@ def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> N
         print(f"federation game sync skip room {room!r}: {e!r}")
         return
     _rebind_game_services(game)
+
+    lost_local = False
+    loser_auth = ""
+    winner_auth = authority
+    keep_local = False
     with lock:
-        _remap_local_game_seats_locked(room, game)
-        room_games[room] = game
-        room_game_authority[room] = authority
+        local_game = room_games.get(room)
+        local_auth = (room_game_authority.get(room) or "").strip()
+        local_token = (room_game_tokens.get(room) or "").strip() or local_auth
+        local_active = (
+            local_game is not None
+            and getattr(local_game, "state", "ended") != "ended"
+        )
+        remote_active = getattr(game, "state", "ended") != "ended"
+        if (
+            local_active
+            and remote_active
+            and local_auth
+            and local_auth != authority
+        ):
+            win_auth, win_tok = _game_conflict_winner(
+                local_auth, local_token, authority, conflict_token
+            )
+            winner_auth = win_auth
+            if win_auth == local_auth:
+                # Keep local; ask peers to take ours.
+                room_game_tokens[room] = win_tok or local_token
+                keep_local = True
+            else:
+                lost_local = True
+                loser_auth = local_auth
+
+        if not keep_local:
+            _remap_local_game_seats_locked(room, game)
+            room_games[room] = game
+            room_game_authority[room] = authority
+            room_game_tokens[room] = conflict_token
+
+    if keep_local:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: re-push after winning conflict: {e!r}")
+        return
+
     _mark_sessions_dirty()
+    if lost_local:
+        notice = (
+            f"[*] 联邦对局冲突：#{room} 同时存在多局，已随机保留节点 "
+            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已作废。"
+            f"请用 /game show 查看当前局面。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
     if getattr(game, "state", "ended") != "ended":
         send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
@@ -2429,6 +2579,7 @@ def _fed_on_game_end(room: str, authority: str) -> None:
     with lock:
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
+        room_game_tokens.pop(room, None)
     _mark_sessions_dirty()
 
 
@@ -2637,6 +2788,12 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
     if event == "up":
         if reporter == local_id:
             text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
+            # Peer just linked: re-push active games so /game show works on the newcomer
+            # (and so multi-hop nodes that only see us get a fresh gsync).
+            try:
+                _federation_push_all_game_snapshots()
+            except Exception as e:
+                print(f"federation: peer-up game catch-up error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -2738,6 +2895,7 @@ def _ensure_federation_hub() -> None:
         _fed_on_game_priv,
         _fed_on_file_notice,
         _fed_on_peer_event,
+        _fed_on_game_request,
     )
     _fed_hub.start()
 
@@ -3390,6 +3548,10 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             hub = federation.get_hub()
             if hub is not None:
                 room_game_authority[room] = hub.node_id
+                room_game_tokens[room] = secrets.token_hex(16)
+            else:
+                room_game_authority.pop(room, None)
+                room_game_tokens.pop(room, None)
         seat = getattr(new_game, "first_seat_desc", "第一席")
         join_hint = getattr(
             new_game,
@@ -3408,9 +3570,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "join":
         with lock:
             game = room_games.get(room)
-            if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
-                return
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        if game is None:
+            send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
+            return
+        with lock:
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
             if resumed:
                 priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
@@ -3423,6 +3590,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "seats":
         with lock:
             game = room_games.get(room)
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        with lock:
             lines = game.seats() if game else ["本房没有进行中的对局。"]
         send_game_private(conn, room, lines)
         return
@@ -3431,6 +3603,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        with lock:
             if game is None:
                 lines = ["本房没有进行中的对局。"]
             else:
@@ -3455,6 +3632,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         try:
             with lock:
                 game = room_games.get(room)
+            if game is None:
+                _federation_request_game_and_wait(room)
+                with lock:
+                    game = room_games.get(room)
+            with lock:
                 if game is None:
                     send_line(conn, "[*] 本房没有进行中的对局。\n")
                     return

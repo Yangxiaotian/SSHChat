@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+import pickle
 import socket
 import tempfile
 import threading
@@ -32,6 +34,7 @@ class FederationProtocolTests(unittest.TestCase):
         server.room_announcements.clear()
         server.room_games.clear()
         server.room_game_authority.clear()
+        server.room_game_tokens.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
         federation._hub = None
@@ -630,6 +633,9 @@ class FederationServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         server.clients.clear()
         server.rooms.clear()
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
         federation._hub = None
         server._fed_hub = None
 
@@ -645,6 +651,204 @@ class FederationServerIntegrationTests(unittest.TestCase):
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             server.broadcast_room("general", b"hi\n")
         self.assertEqual(sent, [("general", b"hi\n")])
+
+    def test_peer_up_pushes_active_game_snapshots(self) -> None:
+        pushed: list[tuple[str, str]] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 1
+
+            def sync_game(self, room, authority, pickle_b64, conflict_token=""):
+                pushed.append((room, authority))
+
+        class FakeGame:
+            state = "playing"
+
+        server.room_games["lobby"] = FakeGame()
+        server.room_game_authority["lobby"] = "node-a"
+        server.room_game_tokens["lobby"] = "aa"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_pickle_game_for_storage", return_value=b"x"):
+                with mock.patch.object(server, "broadcast_local_notice"):
+                    server._fed_on_peer_event("up", "node-b", "node-a")
+        self.assertEqual(pushed, [("lobby", "node-a")])
+
+    def test_game_request_pushes_snapshot(self) -> None:
+        pushed: list[str] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 1
+
+            def sync_game(self, room, authority, pickle_b64, conflict_token=""):
+                pushed.append(room)
+
+        class FakeGame:
+            state = "playing"
+
+        server.room_games["arena"] = FakeGame()
+        server.room_game_authority["arena"] = "node-a"
+        server.room_game_tokens["arena"] = "bb"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_pickle_game_for_storage", return_value=b"x"):
+                server._fed_on_game_request("node-b", "arena")
+        self.assertEqual(pushed, ["arena"])
+
+    def test_sync_game_line_includes_nonce(self) -> None:
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = FakeLink()
+        hub._peers["node-b"] = link
+        hub.sync_game("lobby", "node-a", "YmFzZTY0", "deadbeef")
+        self.assertEqual(len(link.lines), 1)
+        parts = link.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "gsync")
+        self.assertEqual(parts[2], "lobby")
+        self.assertEqual(parts[4], "YmFzZTY0")
+        self.assertGreaterEqual(len(parts), 7)
+        self.assertEqual(parts[6], "deadbeef")
+
+    def test_greq_invokes_handler_and_fanout(self) -> None:
+        got: list[tuple[str, str]] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_game_request=lambda peer, room: got.append((peer, room)),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link_b = FakeLink("node-b")
+        link_c = FakeLink("node-c")
+        hub._peers["node-b"] = link_b
+        hub._peers["node-c"] = link_c
+        hub._on_peer_line("node-b", "greq\tnode-b\tlobby\t1")
+        self.assertEqual(got, [("node-b", "lobby")])
+        self.assertTrue(any(l.startswith("greq\t") for l in link_c.lines))
+        self.assertFalse(any(l.startswith("greq\t") for l in link_b.lines))
+
+    def test_conflict_winner_is_deterministic(self) -> None:
+        w1, _ = server._game_conflict_winner("node-a", "aa", "node-b", "bb")
+        w2, _ = server._game_conflict_winner("node-b", "bb", "node-a", "aa")
+        self.assertEqual(w1, "node-b")
+        self.assertEqual(w2, "node-b")
+
+    def test_game_sync_conflict_keeps_higher_token_and_notifies(self) -> None:
+        notices: list[bytes] = []
+
+        class LocalGame:
+            name = "chess"
+            state = "playing"
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+
+        remote = RemoteGame()
+        server.room_games["lobby"] = LocalGame()
+        server.room_game_authority["lobby"] = "node-a"
+        server.room_game_tokens["lobby"] = "aaaa"  # loses to bbbb
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(
+                            server,
+                            "broadcast_room",
+                            side_effect=lambda r, m, **k: notices.append(m),
+                        ):
+                            with mock.patch.object(server, "send_oriented_boards"):
+                                with mock.patch.object(server, "send_sanguo_hand_views"):
+                                    server._fed_on_game_sync(
+                                        "node-b",
+                                        "lobby",
+                                        "node-b",
+                                        "ZmFrZQ==",
+                                        "bbbb",
+                                    )
+        self.assertIs(server.room_games["lobby"], remote)
+        self.assertEqual(server.room_game_authority["lobby"], "node-b")
+        self.assertEqual(len(notices), 1)
+        self.assertIn("联邦对局冲突".encode("utf-8"), notices[0])
+        self.assertIn(b"node-b", notices[0])
+        self.assertIn(b"node-a", notices[0])
+
+    def test_game_sync_conflict_keeps_local_when_token_wins(self) -> None:
+        pushed: list[str] = []
+
+        class LocalGame:
+            name = "chess"
+            state = "playing"
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 1
+
+            def sync_game(self, room, authority, pickle_b64, conflict_token=""):
+                pushed.append(room)
+
+        local = LocalGame()
+        server.room_games["lobby"] = local
+        server.room_game_authority["lobby"] = "node-a"
+        server.room_game_tokens["lobby"] = "zzzz"  # wins over aaaa
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=RemoteGame()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(server, "broadcast_room") as br:
+                            with mock.patch.object(
+                                server, "_pickle_game_for_storage", return_value=b"x"
+                            ):
+                                server._fed_on_game_sync(
+                                    "node-b",
+                                    "lobby",
+                                    "node-b",
+                                    "ZmFrZQ==",
+                                    "aaaa",
+                                )
+                                br.assert_not_called()
+        self.assertIs(server.room_games["lobby"], local)
+        self.assertEqual(server.room_game_authority["lobby"], "node-a")
+        self.assertEqual(pushed, ["lobby"])
 
 
 if __name__ == "__main__":

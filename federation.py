@@ -116,12 +116,13 @@ class FederationHub:
         on_join_notice: Callable[[str, bytes], None],
         on_pm: Callable[[str, str, str], None],
         get_local_clients: Callable[[], list[dict[str, Any]]],
-        on_game_sync: Optional[Callable[[str, str, str, str], None]] = None,
+        on_game_sync: Optional[Callable[..., None]] = None,
         on_game_end: Optional[Callable[[str, str], None]] = None,
         on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
         on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
         on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
         on_peer_event: Optional[Callable[[str, str, str], None]] = None,
+        on_game_request: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -138,6 +139,8 @@ class FederationHub:
         self.on_file_notice = on_file_notice
         # event in {"up","down"}, peer_node, reporter_node
         self.on_peer_event = on_peer_event
+        # peer_node, room — ask holders to re-push gsync for that room
+        self.on_game_request = on_game_request
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -507,10 +510,34 @@ class FederationHub:
                 sent = True
         return sent
 
-    def sync_game(self, room: str, authority: str, pickle_b64: str) -> None:
+    def sync_game(
+        self,
+        room: str,
+        authority: str,
+        pickle_b64: str,
+        conflict_token: str = "",
+    ) -> None:
         if not self.enabled or not self._peers:
             return
-        line = f"gsync\t{self.node_id}\t{room}\t{authority}\t{pickle_b64}\n"
+        # Nonce so catch-up re-pushes are not dropped by ingress dedup when the
+        # pickled state is unchanged (same room/authority/payload).
+        nonce = str(time.time_ns())
+        token = (conflict_token or "").strip() or authority
+        line = (
+            f"gsync\t{self.node_id}\t{room}\t{authority}\t{pickle_b64}\t{nonce}\t{token}\n"
+        )
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def request_game(self, room: str) -> None:
+        """Ask peers that hold room's game to re-push a gsync snapshot."""
+        if not self.enabled or not self._peers:
+            return
+        room = str(room or "").strip()
+        if not room:
+            return
+        nonce = str(time.time_ns())
+        line = f"greq\t{self.node_id}\t{room}\t{nonce}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -856,12 +883,27 @@ class FederationHub:
             if self._remember_seen(line):
                 return
             origin, room, authority, b64 = parts[1], parts[2], parts[3], parts[4]
+            conflict_token = parts[6] if len(parts) >= 7 else authority
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
             if authority and authority != self.node_id:
                 self._learn_route(authority, peer_node)
-            self.on_game_sync(peer_node, room, authority, b64)
+            self.on_game_sync(peer_node, room, authority, b64, conflict_token)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "greq" and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
+            origin, room = parts[1], parts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if self.on_game_request is not None:
+                try:
+                    self.on_game_request(peer_node, room)
+                except Exception as e:
+                    print(f"federation: on_game_request error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gend" and len(parts) >= 3 and self.on_game_end:
@@ -1364,12 +1406,13 @@ def init_hub(
     on_join_notice: Callable[[str, bytes], None],
     on_pm: Callable[[str, str, str], None],
     get_local_clients: Callable[[], list[dict[str, Any]]],
-    on_game_sync: Optional[Callable[[str, str, str, str], None]] = None,
+    on_game_sync: Optional[Callable[..., None]] = None,
     on_game_end: Optional[Callable[[str, str], None]] = None,
     on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
     on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
     on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
     on_peer_event: Optional[Callable[[str, str, str], None]] = None,
+    on_game_request: Optional[Callable[[str, str], None]] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -1385,5 +1428,6 @@ def init_hub(
         on_game_priv,
         on_file_notice,
         on_peer_event,
+        on_game_request,
     )
     return _hub
