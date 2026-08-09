@@ -21,6 +21,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${SSHCHAT_PREFIX:-$SCRIPT_DIR}
 FED_USER=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
+FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
 PEER_SSH_PORT=${SSHCHAT_PEER_SSH_PORT:-22}
 PEER_MODE=${SSHCHAT_PEER_MODE:-ssh}
 FED_DIR="$PREFIX/federation"
@@ -72,7 +73,7 @@ CHAT_PORT=${SSHCHAT_PORT:-12345}
 PEER_FED_PORT=${SSHCHAT_PEER_FED_PORT:-$((CHAT_PORT + 1))}
 
 mkdir -p "$FED_DIR"
-chmod 700 "$FED_DIR"
+chmod 750 "$FED_DIR"
 
 if [[ ! -f "$KEY_PRIV" ]]; then
   ssh-keygen -t ed25519 -f "$KEY_PRIV" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)"
@@ -81,15 +82,31 @@ if [[ ! -f "$KEY_PRIV" ]]; then
   echo "info: generated federation key $KEY_PUB"
 fi
 
-# Ensure federation user exists (Linux).
+# Ensure federation user exists (Linux). Home is separate from FED_DIR so sshd
+# accepts ownership (service user owns FED_DIR for peers.json + private key).
 if ! is_darwin; then
   if ! id "$FED_USER" &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER"
-    echo "info: created system user $FED_USER"
+    mkdir -p "$FED_HOME"
+    useradd -r -s /usr/sbin/nologin -d "$FED_HOME" -c "SSHChat federation" "$FED_USER"
+    echo "info: created system user $FED_USER (home $FED_HOME)"
+  else
+    cur_home=$(getent passwd "$FED_USER" | cut -d: -f6)
+    if [[ -n "$cur_home" && "$cur_home" != "$FED_HOME" ]]; then
+      mkdir -p "$FED_HOME"
+      if [[ -f "$cur_home/.ssh/authorized_keys" && ! -f "$FED_HOME/.ssh/authorized_keys" ]]; then
+        mkdir -p "$FED_HOME/.ssh"
+        cp -a "$cur_home/.ssh/authorized_keys" "$FED_HOME/.ssh/authorized_keys"
+      fi
+      usermod -d "$FED_HOME" "$FED_USER" 2>/dev/null || true
+      echo "info: federation SSH home -> $FED_HOME (was $cur_home)"
+    fi
   fi
-  install -d -m 700 -o "$FED_USER" -g "$FED_USER" "/home/$FED_USER/.ssh" 2>/dev/null || \
-    install -d -m 700 -o "$FED_USER" -g "$FED_USER" "$FED_DIR/.ssh"
+  mkdir -p "$FED_HOME"
+  chown "$FED_USER:$FED_USER" "$FED_HOME"
+  chmod 755 "$FED_HOME"
+  install -d -m 700 -o "$FED_USER" -g "$FED_USER" "$FED_HOME/.ssh"
   AUTH_DIR=$(getent passwd "$FED_USER" | cut -d: -f6)
+  AUTH_DIR=${AUTH_DIR:-$FED_HOME}
   AUTH_KEYS="$AUTH_DIR/.ssh/authorized_keys"
   mkdir -p "$(dirname "$AUTH_KEYS")"
   chown "$FED_USER:$FED_USER" "$(dirname "$AUTH_KEYS")"
@@ -154,10 +171,6 @@ PY
 
 chmod 640 "$PEERS_JSON"
 # Service user (sshchat) must read peers.json; root:root 640 breaks federation reload.
-if [[ -f "$PREFIX/sshchat.env" ]]; then
-  # shellcheck disable=SC1091
-  . "$PREFIX/sshchat.env"
-fi
 SVC_USER=${SSHCHAT_RUN_USER:-}
 if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
   SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
@@ -165,9 +178,8 @@ fi
 SVC_USER=${SVC_USER:-sshchat}
 if id "$SVC_USER" &>/dev/null; then
   chown "$SVC_USER:$SVC_USER" "$PEERS_JSON" 2>/dev/null || true
-  # Keep federation SSH user able to traverse into .ssh under FED_DIR.
-  chmod 751 "$FED_DIR" 2>/dev/null || true
   chown "$SVC_USER:$SVC_USER" "$FED_DIR" 2>/dev/null || true
+  chmod 750 "$FED_DIR" 2>/dev/null || true
   if [[ -f "$KEY_PRIV" ]]; then
     chown "$SVC_USER:$SVC_USER" "$KEY_PRIV" "$KEY_PUB" 2>/dev/null || true
     chmod 600 "$KEY_PRIV" 2>/dev/null || true
@@ -177,11 +189,6 @@ fi
 if ! is_darwin && id "$FED_USER" &>/dev/null; then
   # Need group access to traverse /opt/sshchat (750) and read sshchat.env for bridge.
   CLIENT_GROUP_NAME=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
-  if [[ -f "$PREFIX/sshchat.env" ]]; then
-    # shellcheck disable=SC1091
-    . "$PREFIX/sshchat.env"
-  fi
-  CLIENT_GROUP_NAME=${SSHCHAT_CLIENT_GROUP:-$CLIENT_GROUP_NAME}
   if getent group "$CLIENT_GROUP_NAME" >/dev/null 2>&1; then
     usermod -aG "$CLIENT_GROUP_NAME" "$FED_USER" 2>/dev/null || true
   fi
@@ -190,6 +197,9 @@ if ! is_darwin && id "$FED_USER" &>/dev/null; then
     chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
     chmod 600 "$AUTH_KEYS" 2>/dev/null || true
   fi
+  # Keep sshd-compliant home ownership.
+  chown "$FED_USER:$FED_USER" "$FED_HOME" 2>/dev/null || true
+  chmod 755 "$FED_HOME" 2>/dev/null || true
 fi
 # Bridge is forced-command for inbound peers.
 chmod 755 "$BRIDGE" 2>/dev/null || true

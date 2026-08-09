@@ -265,21 +265,21 @@ apply_data_plane_permissions() {
 }
 
 # Federation needs two identities:
-# - RUN_USER (sshchat): read peers.json + private key, dial peers
-# - sshchat-federation: inbound SSH home under FED_DIR, run bridge
+# - RUN_USER (sshchat): owns PREFIX/federation (peers.json + private key)
+# - sshchat-federation: separate home for inbound SSH (sshd requires home owned
+#   by that user — cannot share PREFIX/federation with the service user)
 apply_federation_permissions() {
   local fed_dir="$PREFIX/federation"
   local fed_user=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
+  local fed_home=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
   local svc_user="$RUN_USER"
-  [[ -d "$fed_dir" ]] || return 0
+  [[ -d "$fed_dir" ]] || mkdir -p "$fed_dir"
 
-  mkdir -p "$fed_dir"
-  # Service user owns the dir; o+x so federation SSH user can reach .ssh/
-  # (PREFIX is 750 + federation user is in CLIENT_GROUP for traverse).
+  # Service data dir: only the chat service needs it (not sshd home).
   if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
     chown "$svc_user:$svc_user" "$fed_dir"
   fi
-  chmod 751 "$fed_dir"
+  chmod 750 "$fed_dir"
 
   if [[ -f "$fed_dir/id_ed25519" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
@@ -302,15 +302,29 @@ apply_federation_permissions() {
 
   if ! is_darwin && id "$fed_user" &>/dev/null; then
     add_user_to_client_group "$fed_user" || true
-    local auth_home
-    auth_home=$(getent passwd "$fed_user" | cut -d: -f6)
-    [[ -n "$auth_home" ]] || auth_home=$fed_dir
-    mkdir -p "$auth_home/.ssh"
-    chown "$fed_user:$fed_user" "$auth_home/.ssh"
-    chmod 700 "$auth_home/.ssh"
-    if [[ -f "$auth_home/.ssh/authorized_keys" ]]; then
-      chown "$fed_user:$fed_user" "$auth_home/.ssh/authorized_keys"
-      chmod 600 "$auth_home/.ssh/authorized_keys"
+    local cur_home
+    cur_home=$(getent passwd "$fed_user" | cut -d: -f6)
+    mkdir -p "$fed_home"
+    # sshd: home must be owned by the user (or root) and not group/other-writable.
+    chown "$fed_user:$fed_user" "$fed_home"
+    chmod 755 "$fed_home"
+    if [[ -n "$cur_home" && "$cur_home" != "$fed_home" ]]; then
+      # Migrate inbound keys from the old home (often PREFIX/federation).
+      if [[ -f "$cur_home/.ssh/authorized_keys" && ! -f "$fed_home/.ssh/authorized_keys" ]]; then
+        mkdir -p "$fed_home/.ssh"
+        cp -a "$cur_home/.ssh/authorized_keys" "$fed_home/.ssh/authorized_keys"
+      fi
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -d "$fed_home" "$fed_user" 2>/dev/null || true
+        echo "info: federation SSH home -> $fed_home (was $cur_home)"
+      fi
+    fi
+    mkdir -p "$fed_home/.ssh"
+    chown "$fed_user:$fed_user" "$fed_home/.ssh"
+    chmod 700 "$fed_home/.ssh"
+    if [[ -f "$fed_home/.ssh/authorized_keys" ]]; then
+      chown "$fed_user:$fed_user" "$fed_home/.ssh/authorized_keys"
+      chmod 600 "$fed_home/.ssh/authorized_keys"
     fi
   fi
 }
@@ -715,24 +729,26 @@ EOF
 fi
 
 FED_DIR="$PREFIX/federation"
+FED_USER=sshchat-federation
+FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
 mkdir -p "$FED_DIR"
-chmod 751 "$FED_DIR"
+chmod 750 "$FED_DIR"
 if [[ ! -f "$FED_DIR/id_ed25519" ]]; then
   ssh-keygen -t ed25519 -f "$FED_DIR/id_ed25519" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)" >/dev/null
   echo "info: generated federation key $FED_DIR/id_ed25519.pub"
 fi
 if [[ "$CREATE_RUN_USER" -eq 1 ]] && ! is_darwin; then
-  FED_USER=sshchat-federation
   if ! id "$FED_USER" &>/dev/null; then
+    mkdir -p "$FED_HOME"
     # Prefer useradd (standard Linux), fall back to adduser (Alpine/BusyBox)
     if command -v useradd &>/dev/null; then
-      useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
+      useradd -r -s /usr/sbin/nologin -d "$FED_HOME" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
     elif command -v adduser &>/dev/null; then
-      adduser -S -D -h "$FED_DIR" -s /sbin/nologin -g "SSHChat federation" "$FED_USER" 2>/dev/null || \
-        adduser -S -D -h "$FED_DIR" -s /bin/false "$FED_USER" 2>/dev/null || true
+      adduser -S -D -h "$FED_HOME" -s /sbin/nologin -g "SSHChat federation" "$FED_USER" 2>/dev/null || \
+        adduser -S -D -h "$FED_HOME" -s /bin/false "$FED_USER" 2>/dev/null || true
     fi
     if id "$FED_USER" &>/dev/null; then
-      echo "info: created federation user $FED_USER (for inbound peer SSH)"
+      echo "info: created federation user $FED_USER (home $FED_HOME)"
     fi
   fi
   if id "$FED_USER" &>/dev/null; then

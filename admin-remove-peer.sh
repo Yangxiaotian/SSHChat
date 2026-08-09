@@ -22,6 +22,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${SSHCHAT_PREFIX:-$SCRIPT_DIR}
 FED_USER=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
+FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
 FED_DIR="$PREFIX/federation"
 PEERS_JSON="$FED_DIR/peers.json"
 
