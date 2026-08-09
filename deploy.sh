@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-shot install: copy app under PREFIX, venv + prompt_toolkit, sshchat.env, systemd unit.
 # Linux: systemd + service user. macOS: auto local-dev (no useradd/groupadd/systemd).
+# iSH (iOS Alpine): auto OpenRC + no Cloudflare + lightweight deps (no pymupdf).
 # File transfer defaults to Cloudflare Quick Tunnel (override with --no-cloudflare / --file-domain).
 #
 #   sudo ./deploy.sh
@@ -22,6 +23,7 @@ CLIENT_SSH_HOST="${SSHCHAT_CLIENT_SSH_HOST:-}"
 CLIENT_SSH_PORT="${SSHCHAT_CLIENT_SSH_PORT:-22}"
 BUILD_GUI_PACKAGES=0
 INSTALL_SYSTEMD=1
+INSTALL_OPENRC=1
 RUN_USER=sshchat
 CREATE_RUN_USER=1
 KEEP_ENV=0
@@ -47,9 +49,22 @@ FILE_USE_HTTPS="${SSHCHAT_FILE_USE_HTTPS:-1}"
 # or when --file-domain is set for Let's Encrypt).
 USE_CLOUDFLARE="${SSHCHAT_USE_CLOUDFLARE:-1}"
 FILE_STORAGE_DIR="${SSHCHAT_FILE_STORAGE_DIR:-/var/lib/sshchat/files}"
+# Track whether the operator explicitly set Cloudflare so iSH defaults can yield.
+CLOUDFLARE_EXPLICIT=0
 
 is_darwin() {
   [[ "$(uname -s)" == "Darwin" ]]
+}
+
+# iSH ships Alpine under an x86 userspace emulator; marker dir is /ish.
+is_ish() {
+  [[ -d /ish ]] || grep -q 'apk\.ish\.app' /etc/apk/repositories 2>/dev/null
+}
+
+# Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
+primary_group_of() {
+  local user_name=$1
+  id -gn "$user_name" 2>/dev/null || printf '%s' "$user_name"
 }
 
 # Stop any previously running server bound to this PREFIX so the restart below
@@ -62,6 +77,13 @@ stop_existing_server() {
     if systemctl is-active --quiet sshchat.service; then
       echo "info: stopping running sshchat.service before file swap"
       systemctl stop sshchat.service || true
+    fi
+  fi
+
+  if command -v rc-service &>/dev/null && [[ -f /etc/init.d/sshchat ]]; then
+    if rc-service sshchat status &>/dev/null; then
+      echo "info: stopping OpenRC sshchat before file swap"
+      rc-service sshchat stop || true
     fi
   fi
 
@@ -114,6 +136,7 @@ Options:
   --keep-env         If $PREFIX/sshchat.env already exists, do not overwrite it (upgrade-friendly)
   --no-migrate-keys  Do not rewrite authorized_keys command= paths to this install's chat.sh
   --no-systemd       Do not install or start systemd service
+  --no-openrc        Do not install or start OpenRC service (iSH/Alpine)
   --run-user NAME    User to run the server as (default: $RUN_USER)
   --no-run-user      Do not create user; install as root (manual server only)
   --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
@@ -156,6 +179,12 @@ sshchat_stop_running_server() {
     if systemctl is-active --quiet sshchat.service 2>/dev/null; then
       echo "info: stopping sshchat.service (pick up new server.py / games.py)"
       systemctl stop sshchat.service || true
+    fi
+  fi
+  if command -v rc-service &>/dev/null && [[ -f /etc/init.d/sshchat ]]; then
+    if rc-service sshchat status &>/dev/null; then
+      echo "info: stopping OpenRC sshchat (pick up new server.py / games.py)"
+      rc-service sshchat stop || true
     fi
   fi
   local i
@@ -236,6 +265,8 @@ apply_data_plane_permissions() {
   # Chat login users only need chat.sh, client.py, sshchat.env, venv/. Admins keep
   # server.* and admin-add-user.sh private to root / service user.
   local u="$RUN_USER"
+  local g
+  g=$(primary_group_of "$u")
   chown "$u:$CLIENT_GROUP" "$PREFIX"
   chmod 750 "$PREFIX"
 
@@ -247,15 +278,15 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$u" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
   chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
-    chown "$u:$u" "$PREFIX/game_ratings.json"
+    chown "$u:$g" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
   fi
   if [[ -f "$PREFIX/offline_messages.json" ]]; then
-    chown "$u:$u" "$PREFIX/offline_messages.json"
+    chown "$u:$g" "$PREFIX/offline_messages.json"
     chmod 660 "$PREFIX/offline_messages.json"
   fi
 
@@ -275,7 +306,7 @@ apply_data_plane_permissions() {
   fi
 
   if [[ -d /var/lib/sshchat/files ]]; then
-    chown -R "$u:$u" /var/lib/sshchat/files
+    chown -R "$u:$g" /var/lib/sshchat/files
     chmod 750 /var/lib/sshchat/files
   fi
 
@@ -291,40 +322,43 @@ apply_federation_permissions() {
   local fed_user=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
   local fed_home=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
   local svc_user="$RUN_USER"
+  local svc_group fed_group
+  svc_group=$(primary_group_of "$svc_user")
   [[ -d "$fed_dir" ]] || mkdir -p "$fed_dir"
 
   # Service data dir: only the chat service needs it (not sshd home).
   if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-    chown "$svc_user:$svc_user" "$fed_dir"
+    chown "$svc_user:$svc_group" "$fed_dir"
   fi
   chmod 750 "$fed_dir"
 
   if [[ -f "$fed_dir/id_ed25519" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519"
+      chown "$svc_user:$svc_group" "$fed_dir/id_ed25519"
     fi
     chmod 600 "$fed_dir/id_ed25519"
   fi
   if [[ -f "$fed_dir/id_ed25519.pub" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519.pub"
+      chown "$svc_user:$svc_group" "$fed_dir/id_ed25519.pub"
     fi
     chmod 644 "$fed_dir/id_ed25519.pub"
   fi
   if [[ -f "$fed_dir/peers.json" ]]; then
     if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
-      chown "$svc_user:$svc_user" "$fed_dir/peers.json"
+      chown "$svc_user:$svc_group" "$fed_dir/peers.json"
     fi
     chmod 640 "$fed_dir/peers.json"
   fi
 
   if ! is_darwin && id "$fed_user" &>/dev/null; then
+    fed_group=$(primary_group_of "$fed_user")
     add_user_to_client_group "$fed_user" || true
     local cur_home
     cur_home=$(getent passwd "$fed_user" | cut -d: -f6)
     mkdir -p "$fed_home"
     # sshd: home must be owned by the user (or root) and not group/other-writable.
-    chown "$fed_user:$fed_user" "$fed_home"
+    chown "$fed_user:$fed_group" "$fed_home"
     chmod 755 "$fed_home"
     if [[ -n "$cur_home" && "$cur_home" != "$fed_home" ]]; then
       # Migrate inbound keys from the old home (often PREFIX/federation).
@@ -338,10 +372,10 @@ apply_federation_permissions() {
       fi
     fi
     mkdir -p "$fed_home/.ssh"
-    chown "$fed_user:$fed_user" "$fed_home/.ssh"
+    chown "$fed_user:$fed_group" "$fed_home/.ssh"
     chmod 700 "$fed_home/.ssh"
     if [[ -f "$fed_home/.ssh/authorized_keys" ]]; then
-      chown "$fed_user:$fed_user" "$fed_home/.ssh/authorized_keys"
+      chown "$fed_user:$fed_group" "$fed_home/.ssh/authorized_keys"
       chmod 600 "$fed_home/.ssh/authorized_keys"
     fi
   fi
@@ -516,6 +550,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_SYSTEMD=0
       shift
       ;;
+    --no-openrc)
+      INSTALL_OPENRC=0
+      shift
+      ;;
     --run-user)
       RUN_USER=${2:?}
       shift 2
@@ -571,10 +609,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cloudflare)
       USE_CLOUDFLARE=1
+      CLOUDFLARE_EXPLICIT=1
       shift
       ;;
     --no-cloudflare)
       USE_CLOUDFLARE=0
+      CLOUDFLARE_EXPLICIT=1
       shift
       ;;
     -h|--help)
@@ -604,6 +644,39 @@ if is_darwin && [[ "${SSHCHAT_NO_MAC_ADAPT:-}" != "1" ]]; then
     echo "info: macOS: use $PREFIX/server.sh to run the server; set SSHCHAT_SERVER in $PREFIX/sshchat.env for LAN clients" >&2
     CREATE_RUN_USER=0
     INSTALL_SYSTEMD=0
+  fi
+fi
+
+if is_ish && [[ "${SSHCHAT_NO_ISH_ADAPT:-}" != "1" ]]; then
+  echo "info: iSH detected (Alpine under iOS emulator)" >&2
+  INSTALL_SYSTEMD=0
+  # cloudflared has no i686 build; LAN / --file-domain only unless forced.
+  if [[ "$CLOUDFLARE_EXPLICIT" -eq 0 && "$USE_CLOUDFLARE" -eq 1 ]]; then
+    USE_CLOUDFLARE=0
+    FILE_USE_HTTPS=0
+    echo "info: iSH: disabling Cloudflare Quick Tunnel (no i686 cloudflared); use LAN --client-ssh-host or --file-domain" >&2
+  fi
+  # Prefer a China-friendly mirror when none set (iSH networking is slow/fragile).
+  if [[ -z "$PIP_INDEX_URL_ARG" ]]; then
+    PIP_INDEX_URL_ARG="https://pypi.tuna.tsinghua.edu.cn/simple"
+    echo "info: iSH: defaulting pip index to $PIP_INDEX_URL_ARG" >&2
+  fi
+  # Fresh pip upgrade often hangs for many minutes on iSH; skip unless asked.
+  if [[ -z "${SSHCHAT_SKIP_PIP_UPGRADE:-}" ]]; then
+    export SSHCHAT_SKIP_PIP_UPGRADE=1
+    echo "info: iSH: skipping pip self-upgrade (set SSHCHAT_SKIP_PIP_UPGRADE=0 to force)" >&2
+  fi
+  # Give pip more room; large downloads + ensurepip are slow under the emulator.
+  if [[ -z "${SSHCHAT_PIP_TIMEOUT:-}" ]]; then
+    PIP_TIMEOUT=300
+  fi
+  if [[ -z "${SSHCHAT_PIP_CMD_RETRIES:-}" ]]; then
+    PIP_CMD_RETRIES=5
+  fi
+  # Soft deps from Alpine apk so venv can use --system-site-packages (avoids compiling lxml).
+  if command -v apk &>/dev/null; then
+    echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+    apk add --no-cache py3-lxml py3-pip 2>/dev/null || apk add py3-lxml py3-pip || true
   fi
 fi
 
@@ -677,9 +750,17 @@ if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
       useradd -r -s /usr/sbin/nologin "$RUN_USER"
       echo "info: created system user $RUN_USER"
     elif command -v adduser &>/dev/null; then
-      # Alpine/BusyBox adduser: -S for system user, -D for no password, -s for shell
-      adduser -S -D -s /sbin/nologin "$RUN_USER" 2>/dev/null || adduser -S -D -s /bin/false "$RUN_USER"
-      echo "info: created system user $RUN_USER"
+      # Alpine: create a same-named group first so later chown user:user works.
+      if command -v addgroup &>/dev/null && ! getent group "$RUN_USER" &>/dev/null 2>&1; then
+        addgroup -S "$RUN_USER" 2>/dev/null || addgroup "$RUN_USER" || true
+      fi
+      if getent group "$RUN_USER" &>/dev/null 2>&1; then
+        adduser -S -D -G "$RUN_USER" -s /sbin/nologin "$RUN_USER" 2>/dev/null || \
+          adduser -S -D -G "$RUN_USER" -s /bin/false "$RUN_USER"
+      else
+        adduser -S -D -s /sbin/nologin "$RUN_USER" 2>/dev/null || adduser -S -D -s /bin/false "$RUN_USER"
+      fi
+      echo "info: created system user $RUN_USER (group $(primary_group_of "$RUN_USER"))"
     else
       echo "error: neither useradd nor adduser found; install shadow-utils or use --no-run-user" >&2
       exit 1
@@ -710,32 +791,74 @@ chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PRE
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PREFIX" -maxdepth 2 -name '*.pyc' -delete 2>/dev/null || true
 
-rm -rf "$PREFIX/venv"
-# Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
-DEPLOY_TMP="$PREFIX/.deploy-tmp"
-rm -rf "$DEPLOY_TMP"
-mkdir -p "$DEPLOY_TMP"
-export TMPDIR="$DEPLOY_TMP"
-export PIP_NO_CACHE_DIR=1
+REUSE_VENV=0
+if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
+  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+    REUSE_VENV=1
+    echo "info: iSH: reusing existing venv (deps already importable)" >&2
+  fi
+fi
 
-python3 -m venv "$PREFIX/venv"
+if [[ "$REUSE_VENV" -eq 0 ]]; then
+  rm -rf "$PREFIX/venv"
+  # Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
+  DEPLOY_TMP="$PREFIX/.deploy-tmp"
+  rm -rf "$DEPLOY_TMP"
+  mkdir -p "$DEPLOY_TMP"
+  export TMPDIR="$DEPLOY_TMP"
+  export PIP_NO_CACHE_DIR=1
 
-PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
-if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
-  PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
-  echo "info: using pip index $PIP_INDEX_URL_ARG (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES})"
+  VENV_ARGS=()
+  REQ_FILE="$SCRIPT_DIR/requirements-server.txt"
+  if is_ish; then
+    # Reuse Alpine py3-lxml (and any other system site packages) so ebooklib
+    # does not compile lxml from source under the i686 emulator.
+    VENV_ARGS+=(--system-site-packages)
+    if [[ -f "$SCRIPT_DIR/requirements-server-ish.txt" ]]; then
+      REQ_FILE="$SCRIPT_DIR/requirements-server-ish.txt"
+      echo "info: iSH: using $REQ_FILE (pymupdf skipped; PDF via pypdf)" >&2
+    fi
+  fi
+
+  echo "info: creating venv at $PREFIX/venv (on iSH this can take several minutes)..."
+  python3 -m venv "${VENV_ARGS[@]}" "$PREFIX/venv"
+
+  PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
+  if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
+    PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
+    echo "info: using pip index $PIP_INDEX_URL_ARG (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES})"
+  else
+    echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
+  fi
+
+  # Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
+  # republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
+  if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
+    echo "info: upgrading pip in $PREFIX/venv"
+    pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
+  fi
+  # Prefer binary wheels; never try to build pymupdf/lxml from source on constrained hosts.
+  echo "info: installing Python deps from $REQ_FILE"
+  if is_ish; then
+    # Install pure-python / wheel deps first; ebooklib needs lxml which comes from apk
+    # via --system-site-packages — avoid pip compiling lxml for i686.
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary \
+      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0'
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary --no-deps \
+      'ebooklib>=0.18'
+    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+      echo "error: iSH venv missing required modules after install" >&2
+      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
+      exit 1
+    fi
+    echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
+  else
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
+  fi
+  rm -rf "$DEPLOY_TMP"
 else
-  echo "info: using default pip index (timeout=${PIP_TIMEOUT}s, retries=${PIP_RETRIES}); on slow links use --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple"
+  echo "info: skipped venv recreate / pip install"
 fi
-
-# Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
-# republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
-if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
-  echo "info: upgrading pip in $PREFIX/venv"
-  pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
-fi
-pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" -r "$SCRIPT_DIR/requirements-server.txt"
-rm -rf "$DEPLOY_TMP"
 
 umask 022
 if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
@@ -964,15 +1087,52 @@ EOF
   systemctl enable sshchat.service
   systemctl restart sshchat.service
   echo "info: systemd service sshchat.service enabled and restarted"
+elif [[ "$INSTALL_OPENRC" -eq 1 ]] && command -v rc-update &>/dev/null && [[ -d /etc/init.d ]]; then
+  OPENRC_SRC="$SCRIPT_DIR/scripts/sshchat.openrc"
+  OPENRC_DST=/etc/init.d/sshchat
+  if [[ -f "$OPENRC_SRC" ]]; then
+    sed -e "s|__SSHCHAT_PREFIX__|$PREFIX|g" -e "s|__SSHCHAT_RUN_USER__|$RUN_USER|g" \
+      "$OPENRC_SRC" >"$OPENRC_DST"
+  else
+    cat >"$OPENRC_DST" <<EOF
+#!/sbin/openrc-run
+description="SSHChat TCP chat server"
+command="$PREFIX/server.sh"
+command_user="$RUN_USER"
+directory="$PREFIX"
+command_background=true
+pidfile="/run/sshchat.pid"
+output_log="$PREFIX/server.log"
+error_log="$PREFIX/server.log"
+depend() { use net dns; }
+start_pre() { mkdir -p /run; export PYTHONUNBUFFERED=1; }
+EOF
+  fi
+  chmod 755 "$OPENRC_DST"
+  # Ensure service user can write the log / runtime files.
+  touch "$PREFIX/server.log" 2>/dev/null || true
+  if [[ "$RUN_USER" != "root" ]] && id "$RUN_USER" &>/dev/null; then
+    chown "$RUN_USER:$(primary_group_of "$RUN_USER")" "$PREFIX/server.log" 2>/dev/null || true
+  fi
+  rc-update add sshchat default 2>/dev/null || true
+  stop_existing_server "$PREFIX"
+  if ! rc-service sshchat restart && ! rc-service sshchat start; then
+    echo "warning: OpenRC sshchat failed to start; falling back to nohup" >&2
+    nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
+    echo "info: started $PREFIX/server.sh in background (pid $!)"
+  else
+    echo "info: OpenRC service sshchat enabled and started"
+  fi
+  echo "info: server log: $PREFIX/server.log"
 else
-  # Non-systemd platforms (e.g. macOS): restart a detached server process.
+  # Non-systemd / non-OpenRC platforms (e.g. macOS): restart a detached server process.
   # stop_existing_server already ran before the file copy; this catches anything
   # that respawned during the install (unlikely, but cheap insurance) and frees
   # the listening port before we start the fresh interpreter.
   stop_existing_server "$PREFIX"
   nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
   SERVER_PID=$!
-  echo "info: systemd skipped; started $PREFIX/server.sh in background (pid $SERVER_PID)"
+  echo "info: systemd/OpenRC skipped; started $PREFIX/server.sh in background (pid $SERVER_PID)"
   echo "info: server log: $PREFIX/server.log"
 fi
 
@@ -995,7 +1155,7 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
       chmod 640 "$PREFIX/sshchat.env"
     fi
     if [[ -d "$FILE_STORAGE_DIR" && "$CREATE_RUN_USER" -eq 1 ]]; then
-      chown -R "$RUN_USER:$RUN_USER" "$FILE_STORAGE_DIR"
+      chown -R "$RUN_USER:$(primary_group_of "$RUN_USER")" "$FILE_STORAGE_DIR"
       chmod 750 "$FILE_STORAGE_DIR"
     fi
     # Hard check: env host must match the live tunnel file
