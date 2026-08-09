@@ -201,16 +201,19 @@ class FederationHub:
                 pass
 
     def reload_peers(self) -> int:
-        """Re-read peers.json and start outbound loops for newly added peers.
+        """Re-read peers.json: start new outbound peers and drop removed ones.
 
-        Inbound trust is already applied when admin-add-peer.sh updates
-        authorized_keys; this only picks up new outbound targets without a
-        process restart. Returns how many new outbound loops were started.
+        Inbound trust is applied when admin-*-peer.sh updates authorized_keys;
+        this picks up peers.json without a process restart. Removed peers are
+        disconnected and announced (nodedown) when a live link existed.
+        Returns how many new outbound loops were started.
         """
         if not self.enabled:
             return 0
         peers = self._load_peers()
-        self._ingest_peer_configs(peers, start_outbound=False)
+        removed = self._ingest_peer_configs(peers, start_outbound=False)
+        for nid in removed:
+            self._drop_configured_peer(nid)
         started = self._start_missing_outbound_loops()
         path = _peers_path()
         try:
@@ -219,24 +222,45 @@ class FederationHub:
             self._peers_mtime = None
         print(
             f"federation: reloaded peers.json "
-            f"({len(self._peer_configs_by_id)} peer(s), {started} new outbound)"
+            f"({len(self._peer_configs_by_id)} peer(s), "
+            f"{started} new outbound, {len(removed)} removed)"
         )
         return started
 
     def _ingest_peer_configs(
         self, peers: list[dict[str, Any]], *, start_outbound: bool
-    ) -> None:
+    ) -> list[str]:
+        """Replace peer config from peers.json. Returns node_ids that were dropped."""
         with self._config_lock:
+            new_by_id: dict[str, dict[str, Any]] = {}
             for p in peers:
                 if not isinstance(p, dict):
                     continue
                 nid = str(p.get("node_id") or "").strip()
                 if not nid or nid == self.node_id:
                     continue
-                self._peer_configs_by_id[nid] = dict(p)
+                new_by_id[nid] = dict(p)
+            removed = [nid for nid in self._peer_configs_by_id if nid not in new_by_id]
+            self._peer_configs_by_id = new_by_id
             self._peer_configs = list(self._peer_configs_by_id.values())
         if start_outbound:
             self._start_missing_outbound_loops()
+        return removed
+
+    def _drop_configured_peer(self, node_id: str) -> None:
+        """Admin removed a peer from peers.json: tear down link and announce."""
+        node_id = str(node_id or "").strip()
+        if not node_id:
+            return
+        link = self._peers.get(node_id)
+        if link is not None:
+            if self._unregister_peer(node_id, link):
+                self._notify_peer_down(node_id)
+            print(f"federation: peer {node_id!r} removed from config (link closed)")
+            return
+        # Not currently linked: still drop any presence learned for that origin.
+        self._clear_origin(node_id)
+        print(f"federation: peer {node_id!r} removed from config")
 
     def _start_missing_outbound_loops(self) -> int:
         """Spawn reconnect loops for peers this node should dial."""

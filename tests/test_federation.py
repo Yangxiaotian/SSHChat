@@ -269,6 +269,77 @@ class FederationProtocolTests(unittest.TestCase):
                     self.assertEqual(hub.reload_peers(), 0)
                     self.assertEqual(started_ids, ["node-b"])
 
+    def test_reload_peers_drops_removed_peer_and_notifies(self) -> None:
+        events: list[tuple[str, str, str]] = []
+
+        class FakeLink:
+            def __init__(self) -> None:
+                self.closed = False
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+            def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as td:
+            peers_path = Path(td) / "peers.json"
+            peers_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": 9,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                "SSHCHAT_NODE_ID": "node-a",
+                "SSHCHAT_FEDERATION_PEERS": str(peers_path),
+                "SSHCHAT_FED_PEERS_WATCH_SECONDS": "0",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                hub = federation.FederationHub(
+                    12345,
+                    server.lock,
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_peer_event=lambda ev, peer, rep: events.append((ev, peer, rep)),
+                )
+                hub.enabled = True
+                hub.node_id = "node-a"
+                link_b = FakeLink()
+                link_c = FakeLink()
+                hub._peers["node-b"] = link_b
+                hub._peers["node-c"] = link_c
+                hub._routes["node-b"] = "node-b"
+                hub._routes["node-c"] = "node-c"
+                hub._peer_configs_by_id["node-b"] = {
+                    "node_id": "node-b",
+                    "host": "127.0.0.1",
+                }
+                hub._remote_join("node-b", "bob", "lobby")
+
+                peers_path.write_text("[]\n", encoding="utf-8")
+                self.assertEqual(hub.reload_peers(), 0)
+
+                self.assertNotIn("node-b", hub._peers)
+                self.assertNotIn("node-b", hub._peer_configs_by_id)
+                self.assertTrue(link_b.closed)
+                self.assertEqual(hub.names_in_room("lobby"), [])
+                self.assertEqual(events[-1], ("down", "node-b", "node-a"))
+                # Remaining peer is told about the drop.
+                self.assertTrue(
+                    any(l.startswith("nodedown\tnode-a\tnode-b") for l in link_c.lines)
+                )
+
     def test_peer_up_down_notifies_other_peers(self) -> None:
         events: list[tuple[str, str, str]] = []
 

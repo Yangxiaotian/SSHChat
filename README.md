@@ -176,7 +176,7 @@ sudo ufw allow 80/tcp   # 仅 Let's Encrypt 签发/续期需要
 
 ### 4. 联邦扩网（可选）
 
-两台及以上服务器合并聊天网时，用 `admin-add-peer.sh` **按边互加**联邦公钥即可（A↔B、B↔C 即可三者互通，不必全互连）；**一般不必重启**（脚本会 SIGHUP 热加载，服务也会监视 `peers.json`）。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
+两台及以上服务器合并聊天网时，用 `admin-add-peer.sh` **按边互加**联邦公钥即可（A↔B、B↔C 即可三者互通，不必全互连）；拆除用 `admin-remove-peer.sh`。加/拆都会 **SIGHUP 热加载**并通知在线用户（加入/退出提示），**一般不必重启**。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
 
 **升级：** 在新版本仓库里再执行一次，**`--prefix` 与当初相同**，一般要加 **`--keep-env`** 保留你已改过的端口等配置：
 
@@ -296,7 +296,21 @@ sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /path/to/a-fed
 
 #### 4. 不必重启聊天服务
 
-`admin-add-peer.sh` 会更新 `peers.json` / `authorized_keys`，并向运行中的 `sshchat` 发送 **SIGHUP** 热加载新对端；若信号未送达，服务也会在数秒内监视到 `peers.json` 变更并自动加载。
+`admin-add-peer.sh` 会更新 `peers.json` / `authorized_keys`，并向运行中的 `sshchat` 发送 **SIGHUP** 热加载新对端；连上后本机用户会收到「联邦节点已加入」提示（并洪泛通报邻居）。若信号未送达，服务也会在数秒内监视到 `peers.json` 变更并自动加载。
+
+#### 拆除一条联邦边
+
+两端各执行（`peer_node_id` 必须是对方真实 `SSHCHAT_NODE_ID`）：
+
+```bash
+# 在 A 上拆掉 B
+sudo /opt/sshchat/admin-remove-peer.sh server-b
+
+# 在 B 上拆掉 A
+sudo /opt/sshchat/admin-remove-peer.sh server-a
+```
+
+脚本会从 `peers.json` 删除该节点、从联邦 `authorized_keys` 去掉对方公钥（若登记时已写入 `peer_pubkey`），并 **SIGHUP** 热加载：已建立的链路会断开，本机用户收到「联邦节点已退出」提示。不必整机重启。旧条目若没有存公钥，可把公钥作为第二参数传入，或手动编辑 `authorized_keys`。
 
 #### 5. 防火墙（若节点间无法直连）
 
@@ -608,6 +622,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `deploy.sh` | 一键部署 |
 | `admin-add-user.sh` | 添加用户与公钥 |
 | `admin-add-peer.sh` | 登记联邦互信节点（多服扩网） |
+| `admin-remove-peer.sh` | 拆除联邦互信节点（热加载并通知用户） |
 | `federation.py` / `federation-bridge.sh` | 服务器间联邦协议与 SSH 桥接 |
 | `server.py` / `client.py` | 服务端与终端客户端 |
 | `games.py` | 房间小游戏逻辑 |

@@ -121,6 +121,7 @@ SSHCHAT__SSH_PORT="$PEER_SSH_PORT" \
 SSHCHAT__FED_PORT="$PEER_FED_PORT" \
 SSHCHAT__MODE="$PEER_MODE" \
 SSHCHAT__KEY="$KEY_PRIV" \
+SSHCHAT__PEER_PUBKEY="$PEER_PUBKEY" \
 python3 - <<'PY'
 import json, os, pathlib
 
@@ -143,6 +144,7 @@ entry = {
     "ssh_user": os.environ.get("SSHCHAT_FEDERATION_USER", "sshchat-federation"),
     "ssh_key": os.environ["SSHCHAT__KEY"],
     "mode": os.environ["SSHCHAT__MODE"],
+    "peer_pubkey": os.environ.get("SSHCHAT__PEER_PUBKEY", "").strip(),
 }
 peers = [p for p in peers if isinstance(p, dict) and p.get("node_id") != node]
 peers.append(entry)
