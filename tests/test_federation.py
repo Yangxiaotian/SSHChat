@@ -219,6 +219,116 @@ class FederationProtocolTests(unittest.TestCase):
         self.assertEqual(received[0][2]["download_url"], notice["download_url"])
         self.assertEqual(received[0][2]["download_key"], "ABC123")
 
+    def test_file_leave_broadcast_seeds_offline_peer(self) -> None:
+        """Fully offline recipients get fleave fan-out (not presence-gated fnotice)."""
+        received: list[tuple[str, str, dict]] = []
+
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        origin = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        origin.enabled = True
+        origin.node_id = "node-a"
+        link = FakeLink()
+        origin._peers["node-b"] = link
+        # Recipient is NOT in remote presence — send_file_notice would no-op.
+        self.assertFalse(origin.has_remote_user("ghost"))
+
+        notice = {
+            "filename": "x.bin",
+            "file_size": 3,
+            "download_url": "https://a.example/download/t1",
+            "download_key": "KEY123",
+            "download_token": "t1",
+            "transfer_id": "xfer-1",
+        }
+        self.assertTrue(origin.broadcast_file_leave("ghost", "alice", notice))
+        self.assertEqual(len(link.lines), 1)
+        self.assertTrue(link.lines[0].startswith("fleave\tnode-a\tghost\talice\t"))
+
+        peer = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_file_notice=lambda to, frm, n: received.append((to, frm, n)),
+        )
+        peer.enabled = True
+        peer.node_id = "node-b"
+        peer._on_peer_line("node-a", link.lines[0].rstrip("\n"))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "ghost")
+        self.assertEqual(received[0][2]["transfer_id"], "xfer-1")
+
+    def test_notify_file_ready_seeds_federation_when_offline(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        prev_bm = server.offline_messages
+        store_path = str(Path(tmp.name) / "off.json")
+        server.offline_messages = __import__("offline_messages").OfflineMessageStore(
+            store_path
+        )
+        self.addCleanup(lambda: setattr(server, "offline_messages", prev_bm))
+
+        seeded: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+
+            def has_remote_user(self, nick):
+                return False
+
+            def send_file_notice(self, *a, **k):
+                return False
+
+            def broadcast_file_leave(self, to, frm, notice):
+                seeded.append((to, frm, notice))
+                return True
+
+            def clear_file_leave(self, *a, **k):
+                return True
+
+        class FakeHTTP:
+            def get_base_url(self):
+                return "https://files.example"
+
+        class FakeTransfer:
+            transfer_id = "tid-off"
+            sender = "alice"
+            filename = "doc.pdf"
+            file_size = 10
+            room = None
+            download_tokens = {"bob": "tok-bob"}
+            download_keys = {"bob": "KEYBOB"}
+
+        prev_http = server.file_http
+        server.file_http = FakeHTTP()
+        self.addCleanup(lambda: setattr(server, "file_http", prev_http))
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            server._notify_file_ready(FakeTransfer())
+
+        self.assertEqual(server.offline_messages.count("bob"), 1)
+        self.assertEqual(len(seeded), 1)
+        self.assertEqual(seeded[0][0], "bob")
+        self.assertEqual(seeded[0][2]["download_key"], "KEYBOB")
+        self.assertTrue(
+            seeded[0][2]["download_url"].startswith("https://files.example/download/")
+        )
+
     def test_reload_peers_starts_new_outbound_without_restart(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             peers_path = Path(td) / "peers.json"

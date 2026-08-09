@@ -956,6 +956,39 @@ def _revoke_recalled_file(removed: dict, recipient: str) -> None:
         file_sharing.file_transfer_store.revoke_recipient(transfer_id, recipient)
     except Exception as e:
         print(f"[FileTransfer] Failed to revoke recalled file for {recipient}: {e}")
+    _federation_clear_file_leave(recipient, transfer_id)
+
+
+def _federation_clear_file_leave(recipient: str, transfer_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.clear_file_leave(recipient, transfer_id)
+    except Exception as e:
+        print(f"federation: clear_file_leave failed: {e!r}")
+
+
+def _federation_clear_offline_pm(recipient: str, leave_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.clear_offline_pm(recipient, leave_id)
+    except Exception as e:
+        print(f"federation: clear_offline_pm failed: {e!r}")
+
+
+def _federation_seed_file_leave(
+    recipient: str, sender: str, notice: dict
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.broadcast_file_leave(recipient, sender, notice)
+    except Exception as e:
+        print(f"federation: broadcast_file_leave failed: {e!r}")
 
 
 def deliver_offline_messages(conn, recipient_name: str) -> int:
@@ -976,9 +1009,16 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
             else:
                 text = item.get("text") or "[文件]"
                 send_line(conn, f"[PM from {sender}] (离线文件 {when}) {text}\n")
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            if tid:
+                _federation_clear_file_leave(recipient_name, tid)
             continue
         text = item.get("text") or ""
         send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
+        lid = str(item.get("id") or "").strip()
+        if lid:
+            _federation_clear_offline_pm(recipient_name, lid)
     return n
 
 
@@ -1067,6 +1107,9 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
         )
         return
     _revoke_recalled_file(removed, target)
+    lid = str(removed.get("id") or "").strip()
+    if lid and (removed.get("kind") or "pm") != "file":
+        _federation_clear_offline_pm(target, lid)
     when = _format_offline_ts(removed.get("ts", 0))
     label = "文件" if (removed.get("kind") or "pm") == "file" else "留言"
     send_line(
@@ -1091,6 +1134,16 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
                 f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
             )
             return
+        if hub is not None and hub.enabled:
+            try:
+                hub.broadcast_offline_pm(
+                    target_nick,
+                    sender_name,
+                    text,
+                    leave_id=str(stored.get("id") or ""),
+                )
+            except Exception as e:
+                print(f"federation: broadcast_offline_pm failed: {e!r}")
         send_line(
             conn,
             f"[*] {target_nick!r} 当前不在线，已留言；对方下次上线时会收到。\n",
@@ -2635,20 +2688,35 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
             continue
 
         # Offline: leave a mailbox entry the sender can also see/recall via /leave.
+        # Also seed every federation peer so login on another node still delivers.
         summary = _format_file_leave_summary(transfer.filename, transfer.file_size)
+        meta = {
+            "transfer_id": transfer.transfer_id,
+            "filename": transfer.filename,
+            "file_size": transfer.file_size,
+            "download_token": token,
+            "download_key": key,
+            "download_url": download_url,
+            "room": transfer.room,
+        }
         offline_messages.leave(
             recipient,
             transfer.sender,
             summary,
             kind="file",
-            meta={
-                "transfer_id": transfer.transfer_id,
+            meta=meta,
+        )
+        _federation_seed_file_leave(
+            recipient,
+            transfer.sender,
+            {
                 "filename": transfer.filename,
                 "file_size": transfer.file_size,
-                "download_token": token,
-                "download_key": key,
                 "download_url": download_url,
+                "download_key": key,
+                "download_token": token,
                 "room": transfer.room,
+                "transfer_id": transfer.transfer_id,
             },
         )
 
@@ -3333,6 +3401,11 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
                 send_line(peer_conn, message)
             except Exception as e:
                 print(f"[FileTransfer] Federated notify failed for {to_name}: {e}")
+        # Live delivery — drop any seeded offline copies (including origin).
+        tid = str(notice.get("transfer_id") or "").strip()
+        if tid:
+            offline_messages.remove_file_by_transfer(to_name, tid)
+            _federation_clear_file_leave(to_name, tid)
         return
 
     # Recipient is offline on this node — store absolute origin URL for later login.
@@ -3353,6 +3426,29 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
             "federated": True,
         },
     )
+
+
+def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
+    offline_messages.remove_file_by_transfer(to_name, transfer_id)
+
+
+def _fed_on_offline_pm(
+    to_name: str, from_name: str, text: str, leave_id: str = ""
+) -> None:
+    """Seed or deliver an offline text leave that originated on another node."""
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+        if leave_id:
+            offline_messages.remove_by_id(to_name, leave_id)
+            _federation_clear_offline_pm(to_name, leave_id)
+        return
+    offline_messages.leave(to_name, from_name, text, leave_id=leave_id or None)
+
+
+def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
+    offline_messages.remove_by_id(to_name, leave_id)
 
 
 def _ensure_federation_hub() -> None:
@@ -3381,6 +3477,9 @@ def _ensure_federation_hub() -> None:
     )
     _fed_hub.start()
     _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
+    _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
+    _fed_hub.on_offline_pm = _fed_on_offline_pm
+    _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _federation_sync_library_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():

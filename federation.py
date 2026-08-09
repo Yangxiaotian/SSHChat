@@ -150,6 +150,12 @@ class FederationHub:
         self.on_game_cmd = on_game_cmd
         self.on_game_priv = on_game_priv
         self.on_file_notice = on_file_notice
+        # nick, transfer_id — drop seeded offline file leave copies
+        self.on_file_leave_clear: Optional[Callable[[str, str], None]] = None
+        # to_nick, from_name, text — seed offline text leave on this node
+        self.on_offline_pm: Optional[Callable[[str, str, str, str], None]] = None
+        # to_nick, leave_id
+        self.on_offline_pm_clear: Optional[Callable[[str, str], None]] = None
         # event in {"up","down"}, peer_node, reporter_node
         self.on_peer_event = on_peer_event
         # peer_node, room — ask holders to re-push gsync for that room
@@ -536,6 +542,89 @@ class FederationHub:
             if self._send_toward(user.node_id, line):
                 sent = True
         return sent
+
+    def broadcast_file_leave(
+        self, to_nick: str, from_name: str, notice: dict[str, Any]
+    ) -> bool:
+        """Fan-out an offline file leave so any peer can deliver it on login.
+
+        Unlike send_file_notice (presence-unicast), this reaches every peer even
+        when the recipient is fully offline.
+        """
+        if not self.enabled or not self._peers:
+            return False
+        to_nick = str(to_nick or "").strip()
+        from_name = str(from_name or "").strip() or "?"
+        if not to_nick or not isinstance(notice, dict):
+            return False
+        try:
+            blob = base64.b64encode(
+                json.dumps(notice, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return False
+        nonce = str(time.time_ns())
+        line = (
+            f"fleave\t{self.node_id}\t{to_nick}\t{from_name}\t{blob}\t{nonce}\n"
+        )
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
+
+    def clear_file_leave(self, to_nick: str, transfer_id: str) -> bool:
+        """Fan-out: drop pending file leave copies after delivery or recall."""
+        if not self.enabled or not self._peers:
+            return False
+        to_nick = str(to_nick or "").strip()
+        transfer_id = str(transfer_id or "").strip()
+        if not to_nick or not transfer_id:
+            return False
+        nonce = str(time.time_ns())
+        line = f"fleave_clear\t{self.node_id}\t{to_nick}\t{transfer_id}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
+
+    def broadcast_offline_pm(
+        self,
+        to_nick: str,
+        from_name: str,
+        text: str,
+        *,
+        leave_id: str = "",
+    ) -> bool:
+        """Fan-out an offline text leave so login on any peer can deliver it."""
+        if not self.enabled or not self._peers:
+            return False
+        to_nick = str(to_nick or "").strip()
+        from_name = str(from_name or "").strip() or "?"
+        text = str(text or "")
+        leave_id = str(leave_id or "").strip() or "-"
+        if not to_nick or not text.strip():
+            return False
+        payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        nonce = str(time.time_ns())
+        line = (
+            f"pleave\t{self.node_id}\t{to_nick}\t{from_name}\t"
+            f"{payload}\t{leave_id}\t{nonce}\n"
+        )
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
+
+    def clear_offline_pm(self, to_nick: str, leave_id: str) -> bool:
+        """Fan-out: drop a seeded offline text leave after delivery or recall."""
+        if not self.enabled or not self._peers:
+            return False
+        to_nick = str(to_nick or "").strip()
+        leave_id = str(leave_id or "").strip()
+        if not to_nick or not leave_id:
+            return False
+        nonce = str(time.time_ns())
+        line = f"pleave_clear\t{self.node_id}\t{to_nick}\t{leave_id}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
 
     def sync_game(
         self,
@@ -1230,6 +1319,76 @@ class FederationHub:
             if isinstance(notice, dict):
                 self.on_file_notice(to_name, from_name, notice)
             self._forward_unicast_for_nick(line + "\n", to_name, ingress=peer_node)
+            return
+        if kind == "fleave" and len(parts) >= 5 and self.on_file_notice:
+            # Offline file leave seed — fan-out to all peers (not presence-gated).
+            if self._remember_seen(line):
+                return
+            origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                notice = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(notice, dict):
+                try:
+                    self.on_file_notice(to_name, from_name, notice)
+                except Exception as e:
+                    print(f"federation: on_file_notice (fleave) error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "fleave_clear" and len(parts) >= 4:
+            if self._remember_seen(line):
+                return
+            origin, to_name, transfer_id = parts[1], parts[2], parts[3]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if self.on_file_leave_clear is not None:
+                try:
+                    self.on_file_leave_clear(to_name, transfer_id)
+                except Exception as e:
+                    print(f"federation: on_file_leave_clear error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "pleave" and len(parts) >= 5:
+            if self._remember_seen(line):
+                return
+            origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
+            leave_id = parts[5].strip() if len(parts) >= 6 else ""
+            if leave_id in {"", "-"}:
+                leave_id = ""
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                text = base64.b64decode(b64.encode("ascii")).decode("utf-8")
+            except Exception:
+                return
+            if self.on_offline_pm is not None:
+                try:
+                    self.on_offline_pm(to_name, from_name, text, leave_id)
+                except Exception as e:
+                    print(f"federation: on_offline_pm error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "pleave_clear" and len(parts) >= 4:
+            if self._remember_seen(line):
+                return
+            origin, to_name, leave_id = parts[1], parts[2], parts[3]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if self.on_offline_pm_clear is not None:
+                try:
+                    self.on_offline_pm_clear(to_name, leave_id)
+                except Exception as e:
+                    print(f"federation: on_offline_pm_clear error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
             if self._remember_seen(line):
