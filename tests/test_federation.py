@@ -850,6 +850,125 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(server.room_game_authority["lobby"], "node-a")
         self.assertEqual(pushed, ["lobby"])
 
+    def test_lcatalog_stores_and_fanouts(self) -> None:
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        peer_b = FakeLink("node-b")
+        peer_c = FakeLink("node-c")
+        hub._peers["node-b"] = peer_b
+        hub._peers["node-c"] = peer_c
+        books = [{"name": "shared.txt", "ext": "txt", "size_bytes": 12}]
+        blob = base64.b64encode(
+            json.dumps(books, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"lcatalog\tnode-b\t{blob}\t1"
+        hub._on_peer_line("node-b", line)
+        self.assertEqual(
+            hub.remote_library_catalogs()["node-b"][0]["name"], "shared.txt"
+        )
+        self.assertTrue(any(l.startswith("lcatalog\tnode-b\t") for l in peer_c.lines))
+        self.assertFalse(any(l.startswith("lcatalog\t") for l in peer_b.lines))
+
+    def test_lpage_round_trip_invokes_handlers(self) -> None:
+        requests: list[tuple] = []
+        results: list[tuple] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        owner = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_request=lambda *a: requests.append(a),
+        )
+        owner.enabled = True
+        owner.node_id = "node-owner"
+        owner._peers["node-reader"] = FakeLink("node-reader")
+
+        reader = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_result=lambda *a: results.append(a),
+        )
+        reader.enabled = True
+        reader.node_id = "node-reader"
+        reader._peers["node-owner"] = FakeLink("node-owner")
+        reader._routes["node-owner"] = "node-owner"
+
+        self.assertTrue(reader.request_library_page("node-owner", "req1", "a.txt", 2))
+        req_line = reader._peers["node-owner"].lines[-1].rstrip("\n")
+        owner._on_peer_line("node-reader", req_line)
+        self.assertEqual(requests[-1][:4], ("node-owner", "req1", "a.txt", 2))
+        self.assertEqual(requests[-1][4], "node-reader")
+
+        payload = {"ok": True, "text": "hello", "page": 2, "total_pages": 5}
+        owner.reply_library_page("node-reader", "req1", payload)
+        ok_line = owner._peers["node-reader"].lines[-1].rstrip("\n")
+        reader._on_peer_line("node-owner", ok_line)
+        self.assertEqual(results[-1][0], "node-owner")
+        self.assertEqual(results[-1][1], "req1")
+        self.assertEqual(results[-1][2]["text"], "hello")
+
+    def test_sync_library_catalog_fanout(self) -> None:
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            get_local_library=lambda: [
+                {"name": "local.md", "ext": "md", "size_bytes": 8}
+            ],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = FakeLink()
+        hub._peers["node-b"] = link
+        hub.sync_library_catalog()
+        self.assertEqual(len(link.lines), 1)
+        parts = link.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "lcatalog")
+        self.assertEqual(parts[1], "node-a")
+        books = json.loads(base64.b64decode(parts[2]).decode("utf-8"))
+        self.assertEqual(books[0]["name"], "local.md")
+
 
 if __name__ == "__main__":
     unittest.main()

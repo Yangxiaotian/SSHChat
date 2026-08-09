@@ -87,8 +87,11 @@ room_game_tokens: dict[str, str] = {}
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
-# conn -> {"path": str, "page": int (0-based)}
+# conn -> {"path": str, "page": int (0-based)}  (remote: also origin/name/title/total_pages)
 library_reading: dict[object, dict[str, object]] = {}
+# req_id -> {"event": Event, "payload": dict|None, "error": str}
+_library_page_waiters: dict[str, dict[str, object]] = {}
+_library_page_waiters_lock = threading.Lock()
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
 lock = threading.Lock()
@@ -1715,11 +1718,159 @@ def _client_name(conn) -> str:
     return str(info["name"]) if info else "Unknown"
 
 
+def _library_bookmark_key(origin: str, name: str) -> str:
+    name = Path(str(name or "")).name
+    origin = (origin or "").strip()
+    if not origin:
+        return name
+    return f"{origin}::{name}"
+
+
+def _fed_local_library_snapshot() -> list[dict]:
+    lib_dir = _library_dir()
+    if not lib_dir.is_dir():
+        return []
+    return [library.book_entry_to_meta(entry) for entry in library.list_books(lib_dir)]
+
+
+def _union_library_catalog() -> list[library.CatalogItem]:
+    lib_dir = _library_dir()
+    local = library.list_books(lib_dir) if lib_dir.is_dir() else []
+    remote: dict[str, list[dict]] = {}
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        remote = hub.remote_library_catalogs()
+    return library.merge_federated_catalog(local, remote)
+
+
+def _federation_sync_library_catalog() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.sync_library_catalog(_fed_local_library_snapshot())
+    except Exception as e:
+        print(f"federation: library catalog sync failed: {e!r}")
+
+
+def _fed_on_library_page_request(
+    _owner: str, req_id: str, book_name: str, page: int, requester: str
+) -> None:
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    book_name = Path(str(book_name or "")).name
+    payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
+    try:
+        lib_dir = _library_dir()
+        catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
+        entry = next((e for e in catalog if e.name == book_name), None)
+        if entry is None:
+            payload["error"] = f"book not found: {book_name}"
+        else:
+            doc = _get_cached_book(entry.path)
+            total = doc.total_pages
+            page = max(0, min(int(page), total - 1))
+            payload = {
+                "ok": True,
+                "req_id": req_id,
+                "name": entry.name,
+                "title": doc.title,
+                "page": page,
+                "total_pages": total,
+                "text": doc.pages[page],
+                "ext": entry.ext,
+                "size_bytes": entry.size_bytes,
+            }
+    except Exception as e:
+        payload = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_library_page(requester, req_id, payload)
+    except Exception as e:
+        print(f"federation: reply_library_page failed: {e!r}")
+
+
+def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _library_page_waiters_lock:
+        waiter = _library_page_waiters.get(req_id)
+        if not waiter:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fetch_remote_library_page(
+    owner: str, book_name: str, page: int, timeout: float = 45.0
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _library_page_waiters_lock:
+        _library_page_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_library_page(owner, req_id, book_name, page):
+            return {"ok": False, "error": f"无法联系图书所在节点 {owner}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待对端图书页超时"}
+        with _library_page_waiters_lock:
+            payload = _library_page_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _library_page_waiters_lock:
+            _library_page_waiters.pop(req_id, None)
+
+
 def _set_library_page(conn, user: str, path: Path, page: int) -> None:
     page = max(0, int(page))
     with lock:
-        library_reading[conn] = {"path": str(path.resolve()), "page": page}
+        library_reading[conn] = {"path": str(path.resolve()), "page": page, "origin": ""}
     library_bookmarks.set_page(user, path.name, page)
+
+
+def _set_library_session(
+    conn,
+    user: str,
+    *,
+    origin: str,
+    name: str,
+    page: int,
+    path: Optional[Path] = None,
+    title: str = "",
+    total_pages: int = 0,
+) -> None:
+    page = max(0, int(page))
+    origin = (origin or "").strip()
+    name = Path(str(name or "")).name
+    with lock:
+        library_reading[conn] = {
+            "path": str(path.resolve()) if path is not None else "",
+            "page": page,
+            "origin": origin,
+            "name": name,
+            "title": title,
+            "total_pages": int(total_pages or 0),
+        }
+    library_bookmarks.set_page(user, _library_bookmark_key(origin, name), page)
+
+
+def _send_library_page_payload(
+    conn, title: str, page_idx: int, total: int, text: str
+) -> None:
+    total = max(1, int(total))
+    page_idx = max(0, min(int(page_idx), total - 1))
+    send_line(conn, f"[*] --- 《{title}》 第 {page_idx + 1}/{total} 页 ---\n")
+    for ln in library.wrap_page_lines(text or ""):
+        send_line(conn, f"[*]    {ln}\n")
+    send_line(
+        conn,
+        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
+    )
 
 
 def _get_cached_book(path: Path) -> library.BookDocument:
@@ -1739,68 +1890,98 @@ def _get_cached_book(path: Path) -> library.BookDocument:
 def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     total = doc.total_pages
     page_idx = max(0, min(page_idx, total - 1))
-    send_line(conn, f"[*] --- 《{doc.title}》 第 {page_idx + 1}/{total} 页 ---\n")
-    for ln in library.wrap_page_lines(doc.pages[page_idx]):
-        send_line(conn, f"[*]    {ln}\n")
-    send_line(
-        conn,
-        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
-    )
+    _send_library_page_payload(conn, doc.title, page_idx, total, doc.pages[page_idx])
+
+
+def _library_read_session_page(session: dict) -> tuple[str, int, int, str]:
+    """Return (title, page, total, text) for a library_reading session."""
+    origin = str(session.get("origin") or "").strip()
+    page = int(session.get("page") or 0)
+    if origin:
+        name = str(session.get("name") or "").strip()
+        payload = _fetch_remote_library_page(origin, name, page)
+        if not payload.get("ok"):
+            raise RuntimeError(str(payload.get("error") or "remote page failed"))
+        title = str(payload.get("title") or name)
+        total = int(payload.get("total_pages") or 1)
+        page = int(payload.get("page") or page)
+        text = str(payload.get("text") or "")
+        session["title"] = title
+        session["total_pages"] = total
+        session["page"] = page
+        return title, page, total, text
+    path = Path(str(session.get("path") or ""))
+    doc = _get_cached_book(path)
+    page = max(0, min(page, doc.total_pages - 1))
+    return doc.title, page, doc.total_pages, doc.pages[page]
 
 
 def _send_library_catalog(conn, user: str, query: str = "") -> None:
     lib_dir = _library_dir()
     send_line(conn, "[*] --- 图书馆 ---\n")
-    if not lib_dir.is_dir():
-        send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-        send_line(conn, "[*] 请将 epub / txt / md / pdf 放入该目录后重试。\n")
-        return
-    catalog = library.list_books(lib_dir)
+    catalog = _union_library_catalog()
+    local_count = sum(1 for e in catalog if not e.origin)
+    remote_count = len(catalog) - local_count
     if not catalog:
-        send_line(conn, f"[*] 目录为空：{lib_dir}\n")
-        send_line(conn, "[*] 支持格式：.epub、.txt、.md、.pdf\n")
+        if not lib_dir.is_dir():
+            send_line(conn, f"[*] 本机图书馆目录不存在：{lib_dir}\n")
+        else:
+            send_line(conn, f"[*] 本机目录为空：{lib_dir}\n")
+        if remote_count == 0:
+            send_line(conn, "[*] 联邦暂无共享图书；支持格式：.epub、.txt、.md、.pdf\n")
         return
     query = (query or "").strip()
-    books = library.search_catalog(catalog, query) if query else catalog
+    books = library.search_catalog_items(catalog, query) if query else catalog
     if query:
         send_line(
             conn,
-            f"[*] 查找「{query}」，共 {len(books)} 本（全库 {len(catalog)} 本）。\n",
+            f"[*] 查找「{query}」，共 {len(books)} 本（联邦并集 {len(catalog)} 本："
+            f"本机 {local_count}，对端 {remote_count}）。\n",
         )
         if not books:
             send_line(conn, "[*] 未找到匹配的图书，请换关键词重试。\n")
             send_line(conn, "[*] 用 /library 查看全部书目。\n")
             return
+    else:
+        send_line(
+            conn,
+            f"[*] 联邦并集共 {len(catalog)} 本（本机 {local_count}，对端 {remote_count}）。\n",
+        )
     user_marks = library_bookmarks.list_for_user(user)
     for entry in books:
-        mark = user_marks.get(entry.name)
+        mark = user_marks.get(_library_bookmark_key(entry.origin, entry.name))
         mark_suffix = f" · 书签第 {mark + 1} 页" if mark is not None else ""
         send_line(
             conn,
-            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
+            f"({library.format_size(entry.size_bytes)}){entry.display_origin()}{mark_suffix}\n",
         )
-    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名[@节点]>\n")
     if len(catalog) > 10:
         send_line(conn, "[*] 查找：/library find <关键词>\n")
     send_line(conn, "[*] 我的书签：/library bookmarks\n")
 
 
 def _send_library_bookmarks(conn, user: str) -> None:
-    lib_dir = _library_dir()
     marks = library_bookmarks.list_for_user(user)
     send_line(conn, "[*] --- 我的书签 ---\n")
     if not marks:
         send_line(conn, "[*] 暂无书签；打开图书并翻页后会自动保存。\n")
         return
-    catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
-    name_by_file = {entry.name: entry for entry in catalog}
-    for book_name in sorted(marks, key=lambda n: n.lower()):
-        page = marks[book_name]
-        entry = name_by_file.get(book_name)
+    catalog = _union_library_catalog()
+    by_key = {
+        _library_bookmark_key(entry.origin, entry.name): entry for entry in catalog
+    }
+    for book_key in sorted(marks, key=lambda n: n.lower()):
+        page = marks[book_key]
+        entry = by_key.get(book_key)
         if entry:
-            label = f"{entry.index}. [{entry.ext.upper()}] {book_name}"
+            label = (
+                f"{entry.index}. [{entry.ext.upper()}] {entry.name}"
+                f"{entry.display_origin()}"
+            )
         else:
-            label = book_name
+            label = book_key
         send_line(conn, f"[*] {label} · 第 {page + 1} 页\n")
     send_line(conn, "[*] 打开对应图书会自动从书签继续。\n")
 
@@ -1818,19 +1999,18 @@ def _handle_library(conn, payload: str) -> None:
     if not raw:
         _send_library_catalog(conn, user)
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if session:
-            path = session.get("path")
-            page = int(session.get("page") or 0)
-            if path:
-                try:
-                    doc = _get_cached_book(Path(str(path)))
-                    send_line(
-                        conn,
-                        f"[*] 当前在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页\n",
-                    )
-                except Exception:
-                    library_reading.pop(conn, None)
+            try:
+                title, page, total, _text = _library_read_session_page(session)
+                origin = str(session.get("origin") or "")
+                where = f" @{origin}" if origin else ""
+                send_line(
+                    conn,
+                    f"[*] 当前在读：《{title}》第 {page + 1}/{total} 页{where}\n",
+                )
+            except Exception:
+                library_reading.pop(conn, None)
         return
 
     parts = raw.split()
@@ -1838,19 +2018,22 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"help", "?", "帮助"}:
         send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
+        send_line(conn, "[*]   /library | /lib                 联邦并集书目（含书签进度）\n")
         send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
-        send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
+        send_line(
+            conn,
+            "[*]   /library open <序号|文件名[@节点]>  打开（有书签则从书签继续）\n",
+        )
         send_line(conn, "[*]   /library show | 显示               显示当前页内容\n")
         send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
         send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
-        send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
+        send_line(conn, "[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n")
         send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
-        send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
+        send_line(conn, "[*]   /library reset <序号|文件名[@节点]> 清除某本书的书签\n")
         send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
-        send_line(conn, f"[*] 目录：{lib_dir}\n")
+        send_line(conn, f"[*] 本机目录：{lib_dir}（对端图书按页拉取，不复制整本）\n")
         return
 
     if head in {"bookmarks", "bookmark", "书签"}:
@@ -1859,19 +2042,21 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"reset", "清除"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library reset <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library reset <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
-        book_name = entry.name if entry else Path(token).name
-        if library_bookmarks.clear_book(user, book_name):
-            send_line(conn, f"[*] 已清除《{book_name}》的书签。\n")
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
+        if entry:
+            book_key = _library_bookmark_key(entry.origin, entry.name)
+            label = f"{entry.name}{entry.display_origin()}"
         else:
-            send_line(conn, f"[*] 《{book_name}》没有保存的书签。\n")
+            book_key = Path(token).name
+            label = book_key
+        if library_bookmarks.clear_book(user, book_key):
+            send_line(conn, f"[*] 已清除《{label}》的书签。\n")
+        else:
+            send_line(conn, f"[*] 《{label}》没有保存的书签。\n")
         return
 
     if head in {"close", "关闭"}:
@@ -1882,80 +2067,112 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"info", "状态"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 当前没有在阅读的图书。\n")
             return
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, _text = _library_read_session_page(session)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取当前图书：{exc}\n")
             return
-        page = int(session.get("page") or 0)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        where = f" @{origin}" if origin else ""
         send_line(
             conn,
-            f"[*] 在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页（{doc.source_path.name}）\n",
+            f"[*] 在读：《{title}》第 {page + 1}/{total} 页（{name}{where}）\n",
         )
         return
 
     if head in {"show", "显示"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(session)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = int(session.get("page") or 0)
-        _send_library_page(conn, doc, page)
+        with lock:
+            if conn in library_reading:
+                library_reading[conn]["page"] = page
+                library_reading[conn]["title"] = title
+                library_reading[conn]["total_pages"] = total
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"next", "n", "下一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        requested = int(session.get("page") or 0) + 1
+        session["page"] = requested
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(session)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = int(session.get("page") or 0) + 1
-        if page >= doc.total_pages:
+        if requested > page:
             send_line(conn, "[*] 已是最后一页。\n")
-            page = doc.total_pages - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"prev", "p", "上一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        old_page = int(session.get("page") or 0)
+        page = max(0, old_page - 1)
+        if page == old_page:
+            send_line(conn, "[*] 已是第一页。\n")
+        session["page"] = page
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(session)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = max(0, int(session.get("page") or 0) - 1)
-        if page == int(session.get("page") or 0):
-            send_line(conn, "[*] 已是第一页。\n")
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"page", "页"}:
@@ -1968,26 +2185,38 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 页码须为整数，例如：/library page 3\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        session["page"] = max(0, page_1based - 1)
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(session)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        if page_1based < 1 or page_1based > doc.total_pages:
+        if page_1based < 1 or page_1based > total:
             send_line(
                 conn,
-                f"[*] 无效页码：共 {doc.total_pages} 页，请用 1～{doc.total_pages}。\n",
+                f"[*] 无效页码：共 {total} 页，请用 1～{total}。\n",
             )
             return
-        page = page_1based - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"search", "find", "搜索", "查找", "检索"}:
@@ -1996,9 +2225,16 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 用法：/library find <关键词>（查找书目）或打开书后 search <关键词>（书内检索）\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             _send_library_catalog(conn, user, query)
+            return
+        if str(session.get("origin") or "").strip():
+            send_line(
+                conn,
+                "[*] 联邦图书暂不支持书内全文检索；可用 /library find <关键词> 查书目，"
+                "或 /library page <页码> 翻页。\n",
+            )
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))
@@ -2019,7 +2255,16 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
         if len(results) == 1:
             page_idx = results[0][0]
-            _set_library_page(conn, user, Path(str(session["path"])), page_idx)
+            _set_library_session(
+                conn,
+                user,
+                origin="",
+                name=Path(str(session["path"])).name,
+                page=page_idx,
+                path=Path(str(session["path"])),
+                title=doc.title,
+                total_pages=doc.total_pages,
+            )
             send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
             _send_library_page(conn, doc, page_idx)
         else:
@@ -2028,17 +2273,64 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"open", "read", "读", "打开"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library open <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library open <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
         if not entry:
             send_line(conn, f"[*] 未找到图书：{token}\n")
-            send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
+            send_line(conn, "[*] 用 /library 查看可用序号与文件名[@节点]。\n")
+            return
+        bookmark_key = _library_bookmark_key(entry.origin, entry.name)
+        saved = library_bookmarks.get_page(user, bookmark_key)
+        page = saved if saved is not None else 0
+        if entry.is_remote:
+            send_line(
+                conn,
+                f"[*] 正在从节点 {entry.origin} 拉取 "
+                f"[{entry.ext.upper()}] {entry.name}…\n",
+            )
+            try:
+                payload = _fetch_remote_library_page(entry.origin, entry.name, page)
+            except Exception as exc:
+                send_line(conn, f"[*] 打开失败：{exc}\n")
+                return
+            if not payload.get("ok"):
+                send_line(
+                    conn,
+                    f"[*] 打开失败：{payload.get('error') or '对端无响应'}\n",
+                )
+                return
+            title = str(payload.get("title") or entry.name)
+            total = max(1, int(payload.get("total_pages") or 1))
+            page = max(0, min(int(payload.get("page") or page), total - 1))
+            text = str(payload.get("text") or "")
+            _set_library_session(
+                conn,
+                user,
+                origin=entry.origin,
+                name=entry.name,
+                page=page,
+                title=title,
+                total_pages=total,
+            )
+            if saved is not None and saved > 0:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"从书签第 {page + 1}/{total} 页继续。\n",
+                )
+            else:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"共 {total} 页。\n",
+                )
+            _send_library_page_payload(conn, title, page, total, text)
+            return
+        if entry.path is None:
+            send_line(conn, f"[*] 本机图书缺少路径：{entry.name}\n")
             return
         if entry.ext == "pdf" or entry.size_bytes >= 2 * 1024 * 1024:
             send_line(
@@ -2051,14 +2343,22 @@ def _handle_library(conn, payload: str) -> None:
         except Exception as exc:
             send_line(conn, f"[*] 打开失败：{exc}\n")
             return
-        saved = library_bookmarks.get_page(user, entry.name)
-        page = saved if saved is not None else 0
         page = min(page, doc.total_pages - 1)
-        _set_library_page(conn, user, entry.path, page)
+        _set_library_session(
+            conn,
+            user,
+            origin="",
+            name=entry.name,
+            page=page,
+            path=entry.path,
+            title=doc.title,
+            total_pages=doc.total_pages,
+        )
         if saved is not None and saved > 0:
             send_line(
                 conn,
-                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
+                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，"
+                f"从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
             )
         else:
             send_line(
@@ -2794,6 +3094,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_push_all_game_snapshots()
             except Exception as e:
                 print(f"federation: peer-up game catch-up error: {e!r}")
+            try:
+                _federation_sync_library_catalog()
+            except Exception as e:
+                print(f"federation: peer-up library catalog sync error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -2896,8 +3200,12 @@ def _ensure_federation_hub() -> None:
         _fed_on_file_notice,
         _fed_on_peer_event,
         _fed_on_game_request,
+        _fed_local_library_snapshot,
+        _fed_on_library_page_request,
+        _fed_on_library_page_result,
     )
     _fed_hub.start()
+    _federation_sync_library_catalog()
 
 
 def broadcast_room(

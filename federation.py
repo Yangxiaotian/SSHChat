@@ -123,6 +123,13 @@ class FederationHub:
         on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
         on_peer_event: Optional[Callable[[str, str, str], None]] = None,
         on_game_request: Optional[Callable[[str, str], None]] = None,
+        get_local_library: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        on_library_page_request: Optional[
+            Callable[[str, str, str, int, str], None]
+        ] = None,
+        on_library_page_result: Optional[
+            Callable[[str, str, dict[str, Any]], None]
+        ] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -141,6 +148,11 @@ class FederationHub:
         self.on_peer_event = on_peer_event
         # peer_node, room — ask holders to re-push gsync for that room
         self.on_game_request = on_game_request
+        self.get_local_library = get_local_library
+        # owner_node, req_id, book_name, page, requester_node
+        self.on_library_page_request = on_library_page_request
+        # from_peer, req_id, payload(dict)
+        self.on_library_page_result = on_library_page_result
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -155,6 +167,8 @@ class FederationHub:
         self._routes: dict[str, str] = {}
         self._remote_users: dict[tuple[str, str], RemoteUser] = {}
         self._room_remotes: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        # node_id -> list of book metadata dicts
+        self._remote_catalogs: dict[str, list[dict[str, Any]]] = {}
         self._seen_lock = threading.Lock()
         self._seen_keys: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -415,6 +429,7 @@ class FederationHub:
         if not origin or origin == self.node_id:
             return
         self._routes.pop(origin, None)
+        self._remote_catalogs.pop(origin, None)
         to_remove = [k for k in self._remote_users if k[0] == origin]
         for k in to_remove:
             user = self._remote_users.pop(k, None)
@@ -528,6 +543,69 @@ class FederationHub:
         )
         self._remember_seen(line)
         self._fanout(line)
+
+    def remote_library_catalogs(self) -> dict[str, list[dict[str, Any]]]:
+        """Copy of peer catalogs for union listing."""
+        return {node: list(rows) for node, rows in self._remote_catalogs.items()}
+
+    def sync_library_catalog(self, books: Optional[list[dict[str, Any]]] = None) -> None:
+        """Fan-out local library metadata (presence-style replace-by-origin)."""
+        if not self.enabled or not self._peers:
+            return
+        if books is None:
+            if self.get_local_library is None:
+                return
+            try:
+                books = self.get_local_library()
+            except Exception as e:
+                print(f"federation: get_local_library error: {e!r}")
+                return
+        if not isinstance(books, list):
+            return
+        blob = json.dumps(books, ensure_ascii=False)
+        b64 = base64.b64encode(blob.encode("utf-8")).decode("ascii")
+        nonce = str(time.time_ns())
+        line = f"lcatalog\t{self.node_id}\t{b64}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def request_library_page(
+        self, owner_node: str, req_id: str, book_name: str, page: int
+    ) -> bool:
+        """Ask owner_node for one page of book_name (0-based page)."""
+        if not self.enabled:
+            return False
+        owner_node = str(owner_node or "").strip()
+        req_id = str(req_id or "").strip()
+        book_name = Path(str(book_name or "").strip()).name
+        if not owner_node or not req_id or not book_name:
+            return False
+        try:
+            page_i = int(page)
+        except (TypeError, ValueError):
+            return False
+        line = (
+            f"lpage\t{self.node_id}\t{owner_node}\t{req_id}\t"
+            f"{book_name}\t{page_i}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(owner_node, line)
+
+    def reply_library_page(
+        self, requester_node: str, req_id: str, payload: dict[str, Any]
+    ) -> bool:
+        if not self.enabled:
+            return False
+        requester_node = str(requester_node or "").strip()
+        req_id = str(req_id or "").strip()
+        if not requester_node or not req_id or not isinstance(payload, dict):
+            return False
+        blob = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"lpage_ok\t{self.node_id}\t{requester_node}\t{req_id}\t{blob}\n"
+        self._remember_seen(line)
+        return self._send_toward(requester_node, line)
 
     def request_game(self, room: str) -> None:
         """Ask peers that hold room's game to re-push a gsync snapshot."""
@@ -697,6 +775,7 @@ class FederationHub:
                 lost.add(dest)
                 self._routes.pop(dest, None)
         for origin in lost:
+            self._remote_catalogs.pop(origin, None)
             to_remove = [k for k in self._remote_users if k[0] == origin]
             for k in to_remove:
                 user = self._remote_users.pop(k, None)
@@ -733,6 +812,34 @@ class FederationHub:
                 continue
             remote_blob = json.dumps(ulist, ensure_ascii=False)
             line = f"presence\t{origin}\t{remote_blob}\n"
+            self._remember_seen(line)
+            link.send_line(line)
+        self._push_library_catalog(link)
+
+    def _push_library_catalog(self, link: _PeerLink) -> None:
+        """Send local + known remote library catalogs to a newly connected peer."""
+        books: list[dict[str, Any]] = []
+        if self.get_local_library is not None:
+            try:
+                books = self.get_local_library() or []
+            except Exception as e:
+                print(f"federation: get_local_library error: {e!r}")
+                books = []
+        if not isinstance(books, list):
+            books = []
+        local_blob = base64.b64encode(
+            json.dumps(books, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        local_line = f"lcatalog\t{self.node_id}\t{local_blob}\t{time.time_ns()}\n"
+        self._remember_seen(local_line)
+        link.send_line(local_line)
+        for origin, rows in self._remote_catalogs.items():
+            if origin == link.node_id:
+                continue
+            remote_blob = base64.b64encode(
+                json.dumps(rows, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            line = f"lcatalog\t{origin}\t{remote_blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
 
@@ -825,6 +932,82 @@ class FederationHub:
                 self._learn_route(origin, peer_node)
                 self._remote_presence_bulk(origin, pres_parts[2])
                 self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lcatalog" and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
+            cat_parts = line.split("\t", 3)
+            if len(cat_parts) < 3:
+                return
+            origin, b64 = cat_parts[1], cat_parts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            self._remote_library_bulk(origin, b64)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lpage":
+            page_parts = line.split("\t", 5)
+            if len(page_parts) < 6:
+                return
+            if self._remember_seen(line):
+                return
+            origin, owner, req_id, book_name, page_s = (
+                page_parts[1],
+                page_parts[2],
+                page_parts[3],
+                page_parts[4],
+                page_parts[5],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                page_i = int(str(page_s).strip())
+            except ValueError:
+                return
+            if owner == self.node_id:
+                if self.on_library_page_request is not None:
+                    try:
+                        self.on_library_page_request(
+                            owner, req_id, book_name, page_i, origin
+                        )
+                    except Exception as e:
+                        print(f"federation: on_library_page_request error: {e!r}")
+            else:
+                self._learn_route(owner, peer_node)
+                self._send_toward(owner, line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lpage_ok":
+            ok_parts = line.split("\t", 4)
+            if len(ok_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, requester, req_id, b64 = (
+                ok_parts[1],
+                ok_parts[2],
+                ok_parts[3],
+                ok_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if requester == self.node_id:
+                try:
+                    payload = json.loads(
+                        base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                    )
+                except Exception:
+                    return
+                if isinstance(payload, dict) and self.on_library_page_result is not None:
+                    try:
+                        self.on_library_page_result(origin, req_id, payload)
+                    except Exception as e:
+                        print(f"federation: on_library_page_result error: {e!r}")
+            else:
+                self._learn_route(requester, peer_node)
+                self._send_toward(requester, line + "\n", exclude_node=peer_node)
             return
         if kind == "pm" and len(parts) >= 5:
             if self._remember_seen(line):
@@ -1082,6 +1265,34 @@ class FederationHub:
         print(
             f"federation: presence from {node_id}: "
             f"{len(users)} user(s) → tracking {sum(1 for k in self._remote_users if k[0] == node_id)}"
+        )
+
+    def _remote_library_bulk(self, node_id: str, b64: str) -> None:
+        if node_id == self.node_id:
+            return
+        try:
+            raw = base64.b64decode(b64.encode("ascii")).decode("utf-8")
+            books = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(books, list):
+            return
+        cleaned: list[dict[str, Any]] = []
+        for item in books:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or Path(name).name != name:
+                continue
+            ext = str(item.get("ext") or Path(name).suffix.lstrip(".")).lower()
+            try:
+                size = int(item.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            cleaned.append({"name": name, "ext": ext, "size_bytes": size})
+        self._remote_catalogs[node_id] = cleaned
+        print(
+            f"federation: library from {node_id}: {len(cleaned)} book(s)"
         )
 
     def _listen_loop(self) -> None:
@@ -1413,6 +1624,13 @@ def init_hub(
     on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
     on_peer_event: Optional[Callable[[str, str, str], None]] = None,
     on_game_request: Optional[Callable[[str, str], None]] = None,
+    get_local_library: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        on_library_page_request: Optional[
+            Callable[[str, str, str, int, str], None]
+        ] = None,
+    on_library_page_result: Optional[
+        Callable[[str, str, dict[str, Any]], None]
+    ] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -1429,5 +1647,8 @@ def init_hub(
         on_file_notice,
         on_peer_event,
         on_game_request,
+        get_local_library,
+        on_library_page_request,
+        on_library_page_result,
     )
     return _hub

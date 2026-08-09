@@ -146,6 +146,138 @@ class BookEntry:
     path: Path
 
 
+@dataclass(frozen=True)
+class CatalogItem:
+    """Unified library row for local + federated catalogs."""
+
+    index: int
+    name: str
+    ext: str
+    size_bytes: int
+    origin: str  # "" = local; otherwise owning peer node_id
+    path: Optional[Path] = None
+
+    @property
+    def is_remote(self) -> bool:
+        return bool(self.origin)
+
+    def display_origin(self) -> str:
+        return f" @{self.origin}" if self.origin else ""
+
+
+def book_entry_to_meta(entry: BookEntry) -> dict[str, Any]:
+    return {
+        "name": entry.name,
+        "ext": entry.ext,
+        "size_bytes": int(entry.size_bytes),
+    }
+
+
+def merge_federated_catalog(
+    local: list[BookEntry],
+    remote_by_node: dict[str, list[dict[str, Any]]],
+) -> list[CatalogItem]:
+    """Union local books with remote catalogs; stable sort by name then origin."""
+    items: list[CatalogItem] = []
+    for entry in local:
+        items.append(
+            CatalogItem(
+                index=0,
+                name=entry.name,
+                ext=entry.ext,
+                size_bytes=entry.size_bytes,
+                origin="",
+                path=entry.path,
+            )
+        )
+    for node_id, rows in (remote_by_node or {}).items():
+        node_id = str(node_id or "").strip()
+        if not node_id:
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name or Path(name).name != name:
+                continue
+            ext = str(row.get("ext") or Path(name).suffix.lstrip(".")).lower()
+            try:
+                size = int(row.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            items.append(
+                CatalogItem(
+                    index=0,
+                    name=name,
+                    ext=ext,
+                    size_bytes=size,
+                    origin=node_id,
+                    path=None,
+                )
+            )
+    items.sort(key=lambda it: (it.name.lower(), it.origin.lower()))
+    return [
+        CatalogItem(
+            index=i + 1,
+            name=it.name,
+            ext=it.ext,
+            size_bytes=it.size_bytes,
+            origin=it.origin,
+            path=it.path,
+        )
+        for i, it in enumerate(items)
+    ]
+
+
+def search_catalog_items(catalog: list[CatalogItem], query: str) -> list[CatalogItem]:
+    query = (query or "").strip().lower()
+    if not query:
+        return list(catalog)
+    terms = query.split()
+    results: list[CatalogItem] = []
+    for entry in catalog:
+        haystack = f"{entry.name} {entry.ext} {entry.origin}".lower()
+        if all(term in haystack for term in terms):
+            results.append(entry)
+    return results
+
+
+def resolve_catalog_item(
+    token: str, catalog: list[CatalogItem]
+) -> Optional[CatalogItem]:
+    token = (token or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        idx = int(token)
+        for entry in catalog:
+            if entry.index == idx:
+                return entry
+        return None
+    # Optional "name@node" form for disambiguation.
+    origin = ""
+    name = token
+    if "@" in token and not token.startswith("@"):
+        name, origin = token.rsplit("@", 1)
+        name = name.strip()
+        origin = origin.strip()
+    safe_name = Path(name).name
+    if safe_name != name or ".." in name or "/" in name or "\\" in name:
+        return None
+    matches = [
+        entry
+        for entry in catalog
+        if entry.name == safe_name and (not origin or entry.origin == origin)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not origin:
+        local = [entry for entry in matches if not entry.origin]
+        if len(local) == 1:
+            return local[0]
+    return None
+
+
 @dataclass
 class BookDocument:
     title: str

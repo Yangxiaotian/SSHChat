@@ -295,5 +295,59 @@ class TestLibraryPdfExtract(unittest.TestCase):
         self.assertEqual(full[idx : idx + len(phrase)], phrase)
 
 
+class TestFederatedCatalog(unittest.TestCase):
+    def test_merge_union_sorts_and_indexes(self) -> None:
+        local = [
+            library.BookEntry(1, "zeta.txt", "txt", 10, Path("/z")),
+            library.BookEntry(2, "alpha.txt", "txt", 20, Path("/a")),
+        ]
+        remote = {
+            "node-b": [
+                {"name": "alpha.txt", "ext": "txt", "size_bytes": 99},
+                {"name": "beta.md", "ext": "md", "size_bytes": 5},
+            ],
+            "node-c": [{"name": "gamma.pdf", "ext": "pdf", "size_bytes": 1000}],
+        }
+        catalog = library.merge_federated_catalog(local, remote)
+        names = [(it.name, it.origin) for it in catalog]
+        self.assertEqual(
+            names,
+            [
+                ("alpha.txt", ""),
+                ("alpha.txt", "node-b"),
+                ("beta.md", "node-b"),
+                ("gamma.pdf", "node-c"),
+                ("zeta.txt", ""),
+            ],
+        )
+        self.assertEqual([it.index for it in catalog], [1, 2, 3, 4, 5])
+        self.assertTrue(catalog[1].is_remote)
+        self.assertFalse(catalog[0].is_remote)
+
+    def test_resolve_prefers_local_then_name_at_node(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [library.BookEntry(1, "same.txt", "txt", 1, Path("/s"))],
+            {"peer": [{"name": "same.txt", "ext": "txt", "size_bytes": 2}]},
+        )
+        local = library.resolve_catalog_item("same.txt", catalog)
+        assert local is not None
+        self.assertEqual(local.origin, "")
+        remote = library.resolve_catalog_item("same.txt@peer", catalog)
+        assert remote is not None
+        self.assertEqual(remote.origin, "peer")
+        by_idx = library.resolve_catalog_item("2", catalog)
+        assert by_idx is not None
+        self.assertEqual(by_idx.origin, "peer")
+
+    def test_search_catalog_items_matches_origin(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [],
+            {"math": [{"name": "calc.txt", "ext": "txt", "size_bytes": 3}]},
+        )
+        hits = library.search_catalog_items(catalog, "math")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "calc.txt")
+
+
 if __name__ == "__main__":
     unittest.main()
