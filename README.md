@@ -156,6 +156,16 @@ sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22 \
 sudo ./deploy.sh --client-ssh-host 10.0.0.5 --no-cloudflare
 ```
 
+**在 iPhone/iPad 的 iSH（Alpine）上当服务器部署：**
+
+```bash
+cd ~/SSHChat
+git pull github develop   # 或你跟踪的分支
+./deploy.sh --client-ssh-host 10.147.17.226 --client-ssh-port 22 --no-cloudflare
+```
+
+`deploy.sh` 会自动识别 `/ish`：跳过 Cloudflare（无 i686 二进制）、用精简依赖（无 pymupdf，PDF 走 pypdf）、venv 带 `--system-site-packages`（复用 apk 的 `py3-lxml`，避免源码编译）、并用 **OpenRC** 拉起 `/etc/init.d/sshchat`。iSH 上建 venv / pip 可能要十几分钟，属正常。手机端用户连聊天室仍用 SSH 客户端说明书（见 `小白使用说明书-iSH.md`）。
+
 装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务；Cloudflare 模式下公网域名一般由 `sshchat-cloudflared` 自动改写）：
 
 | 变量 | 说明 |

@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# OpenRC unit for SSHChat (iSH / Alpine without systemd).
+# deploy.sh installs this to /etc/init.d/sshchat with PREFIX / RUN_USER substituted.
+
+description="SSHChat TCP chat server"
+command="__SSHCHAT_PREFIX__/server.sh"
+command_user="__SSHCHAT_RUN_USER__"
+directory="__SSHCHAT_PREFIX__"
+command_background=true
+pidfile="/run/sshchat.pid"
+output_log="__SSHCHAT_PREFIX__/server.log"
+error_log="__SSHCHAT_PREFIX__/server.log"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -m 0755 -o root:root /run 2>/dev/null || mkdir -p /run
+	export PYTHONUNBUFFERED=1
+}

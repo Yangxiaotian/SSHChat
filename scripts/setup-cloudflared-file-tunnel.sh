@@ -99,6 +99,10 @@ install_cloudflared_bin() {
       x86_64|amd64) asset=cloudflared-linux-amd64 ;;
       aarch64|arm64) asset=cloudflared-linux-arm64 ;;
       armv7l) asset=cloudflared-linux-arm ;;
+      i386|i686|x86)
+        echo "error: cloudflared has no $arch build (common on iSH); use --no-cloudflare / LAN file URLs" >&2
+        return 1
+        ;;
       *) echo "error: unsupported arch for cloudflared: $arch" >&2; return 1 ;;
     esac
     url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"

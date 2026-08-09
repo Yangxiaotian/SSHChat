@@ -1,0 +1,6 @@
+# Lightweight server deps for iSH / i686 musl Alpine.
+# pymupdf has no usable wheel there; library.py already falls back to pypdf.
+prompt_toolkit
+chess>=1.10
+pypdf>=4.0
+ebooklib>=0.18
