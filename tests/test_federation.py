@@ -215,6 +215,60 @@ class FederationProtocolTests(unittest.TestCase):
         self.assertEqual(received[0][2]["download_url"], notice["download_url"])
         self.assertEqual(received[0][2]["download_key"], "ABC123")
 
+    def test_reload_peers_starts_new_outbound_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            peers_path = Path(td) / "peers.json"
+            peers_path.write_text("[]\n", encoding="utf-8")
+            env = {
+                "SSHCHAT_NODE_ID": "node-a",
+                "SSHCHAT_FEDERATION_PEERS": str(peers_path),
+                "SSHCHAT_FED_PEERS_WATCH_SECONDS": "0",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                hub = federation.FederationHub(
+                    12345,
+                    server.lock,
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                )
+                hub.enabled = True
+                hub.node_id = "node-a"
+                started_ids: list[str] = []
+
+                class FakeThread:
+                    def __init__(self, target=None, args=(), name=None, daemon=None):
+                        self.target = target
+                        self.args = args
+
+                    def start(self):
+                        if self.args:
+                            started_ids.append(self.args[0])
+
+                with mock.patch("federation.threading.Thread", FakeThread):
+                    self.assertEqual(hub.reload_peers(), 0)
+                    peers_path.write_text(
+                        json.dumps(
+                            [
+                                {
+                                    "node_id": "node-b",
+                                    "host": "127.0.0.1",
+                                    "mode": "tcp",
+                                    "federation_port": 9,
+                                }
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    # node-a < node-b ⇒ this node initiates outbound
+                    self.assertEqual(hub.reload_peers(), 1)
+                    self.assertEqual(started_ids, ["node-b"])
+                    self.assertIn("node-b", hub._outbound_started)
+                    # Idempotent: second reload must not spawn another loop
+                    self.assertEqual(hub.reload_peers(), 0)
+                    self.assertEqual(started_ids, ["node-b"])
+
 
 class FederationServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:

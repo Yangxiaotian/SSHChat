@@ -3767,6 +3767,23 @@ def run_server() -> int:
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
 
+    def _handle_federation_reload(signum, _frame) -> None:
+        hub = federation.get_hub()
+        if hub is None or not hub.enabled:
+            print(f"federation reload signal {signum}: hub not active")
+            return
+        try:
+            started = hub.reload_peers()
+            print(f"federation reload signal {signum}: {started} new outbound loop(s)")
+        except Exception as e:
+            print(f"federation reload signal {signum} failed: {e!r}")
+
+    if hasattr(signal, "SIGHUP"):
+        try:
+            signal.signal(signal.SIGHUP, _handle_federation_reload)
+        except (ValueError, OSError) as e:
+            print(f"warning: could not install SIGHUP handler for federation reload: {e!r}")
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PORT))

@@ -237,20 +237,22 @@ sudo ./deploy.sh --prefix /opt/sshchat --keep-env
    sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /opt/sshchat/federation/id_ed25519.pub)"
    ```
 
-4. 重启聊天服务（`systemctl restart sshchat` 或重新运行 `server.sh`）。
+4. **不必重启聊天服务。** `admin-add-peer.sh` 会更新 `peers.json` / `authorized_keys`，并向运行中的 `sshchat` 发送 **SIGHUP** 热加载新对端；若信号未送达，服务也会在数秒内监视到 `peers.json` 变更并自动加载。
 
-5. **防火墙（若节点间无法直连）**：除 SSH 外，确保各节点能访问对端的 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1，如 `12346`），或仅依赖 SSH 隧道（`ssh -W`，默认走 22 端口，通常无需额外放行联邦端口）。
+5. **防火墙（若节点间无法直连）**：默认走 SSH 隧道（`ssh -W`，通常只需对方 **22** 可达）。若改用直连 TCP，再放行 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1）。
 
 脚本会：
 
-- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（强制命令走 `federation-bridge.sh` → 本机联邦端口）；
-- 更新 `federation/peers.json`，由本机主动发起 SSH 隧道（`ssh -W`）连到对方联邦端口。
+- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（允许对方隧道连进来；sshd 即时生效）
+- 更新 `federation/peers.json`，并触发本机热加载出站连接
 
 **查看本机联邦公钥：**
 
 ```bash
 cat /opt/sshchat/federation/id_ed25519.pub
 ```
+
+联邦公钥在首次部署时生成，之后重复跑 `deploy.sh` **不会更换**（除非有人删掉密钥文件）。
 
 **环境变量（`sshchat.env`）：**
 
@@ -260,6 +262,7 @@ cat /opt/sshchat/federation/id_ed25519.pub
 | `SSHCHAT_FEDERATION_PORT` | 联邦 TCP 端口（默认聊天端口 +1） |
 | `SSHCHAT_FEDERATION_DISABLE=1` | 关闭联邦 |
 | `SSHCHAT_FEDERATION_PEERS` | 可选，覆盖 `federation/peers.json` 路径 |
+| `SSHCHAT_FED_PEERS_WATCH_SECONDS` | 监视 `peers.json` 的间隔（默认 `5`；`0` 关闭监视，仍可用 SIGHUP） |
 
 **说明：** 房间小游戏（`/game`）在联邦网络中由开局节点作为权威主机同步局面；跨服玩家以联邦席位入座，可正常 `/game join`、`/game move` 等。棋类积分仍按用户名在本机持久化。
 

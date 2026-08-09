@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional
 PROTOCOL_VERSION = "1"
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
+_PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
 
 
 def _node_id() -> str:
@@ -135,13 +136,19 @@ class FederationHub:
             "true",
             "yes",
         )
-        self._peer_configs = self._load_peers()
+        self._config_lock = threading.Lock()
+        self._peer_configs: list[dict[str, Any]] = []
+        self._peer_configs_by_id: dict[str, dict[str, Any]] = {}
+        self._outbound_started: set[str] = set()
         self._peers: dict[str, _PeerLink] = {}
         self._remote_users: dict[tuple[str, str], RemoteUser] = {}
         self._room_remotes: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self._listen_socket: Optional[socket.socket] = None
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._peers_mtime: Optional[float] = None
+        # Load initial peer list (outbound threads start in start()).
+        self._ingest_peer_configs(self._load_peers(), start_outbound=False)
 
     @property
     def peer_count(self) -> int:
@@ -154,28 +161,128 @@ class FederationHub:
         t = threading.Thread(target=self._listen_loop, name="fed-listen", daemon=True)
         t.start()
         self._threads.append(t)
-        for peer in self._peer_configs:
-            ct = threading.Thread(
-                target=self._outbound_loop,
-                args=(peer,),
-                name=f"fed-out-{peer.get('node_id', '?')}",
-                daemon=True,
+        started = self._start_missing_outbound_loops()
+        if _PEERS_WATCH_SECONDS > 0:
+            wt = threading.Thread(
+                target=self._peers_watch_loop, name="fed-peers-watch", daemon=True
             )
-            ct.start()
-            self._threads.append(ct)
+            wt.start()
+            self._threads.append(wt)
         print(
             f"federation: node={self.node_id!r} listen=0.0.0.0:{self.port} "
-            f"peers={len(self._peer_configs)}"
+            f"peers={len(self._peer_configs_by_id)} outbound_started={started}"
         )
 
     def stop(self) -> None:
         self._stop.set()
         sock = self._listen_socket
+        if self._peers:
+            for link in list(self._peers.values()):
+                try:
+                    link.close()
+                except Exception:
+                    pass
         if sock is not None:
             try:
                 sock.close()
             except OSError:
                 pass
+
+    def reload_peers(self) -> int:
+        """Re-read peers.json and start outbound loops for newly added peers.
+
+        Inbound trust is already applied when admin-add-peer.sh updates
+        authorized_keys; this only picks up new outbound targets without a
+        process restart. Returns how many new outbound loops were started.
+        """
+        if not self.enabled:
+            return 0
+        peers = self._load_peers()
+        self._ingest_peer_configs(peers, start_outbound=False)
+        started = self._start_missing_outbound_loops()
+        path = _peers_path()
+        try:
+            self._peers_mtime = path.stat().st_mtime if path.is_file() else None
+        except OSError:
+            self._peers_mtime = None
+        print(
+            f"federation: reloaded peers.json "
+            f"({len(self._peer_configs_by_id)} peer(s), {started} new outbound)"
+        )
+        return started
+
+    def _ingest_peer_configs(
+        self, peers: list[dict[str, Any]], *, start_outbound: bool
+    ) -> None:
+        with self._config_lock:
+            for p in peers:
+                if not isinstance(p, dict):
+                    continue
+                nid = str(p.get("node_id") or "").strip()
+                if not nid or nid == self.node_id:
+                    continue
+                self._peer_configs_by_id[nid] = dict(p)
+            self._peer_configs = list(self._peer_configs_by_id.values())
+        if start_outbound:
+            self._start_missing_outbound_loops()
+
+    def _start_missing_outbound_loops(self) -> int:
+        """Spawn reconnect loops for peers this node should dial."""
+        to_start: list[str] = []
+        with self._config_lock:
+            for nid, peer in self._peer_configs_by_id.items():
+                if nid in self._outbound_started:
+                    continue
+                # Lower node_id initiates; higher waits for inbound.
+                if self.node_id > nid:
+                    self._outbound_started.add(nid)
+                    print(
+                        f"federation: peer {nid!r} registered "
+                        f"(this node waits for inbound)"
+                    )
+                    continue
+                self._outbound_started.add(nid)
+                to_start.append(nid)
+                # Keep a copy for the loop; it re-reads by id on each attempt.
+                _ = peer
+        started = 0
+        for nid in to_start:
+            ct = threading.Thread(
+                target=self._outbound_loop,
+                args=(nid,),
+                name=f"fed-out-{nid}",
+                daemon=True,
+            )
+            ct.start()
+            self._threads.append(ct)
+            started += 1
+            print(f"federation: starting outbound loop toward {nid!r}")
+        return started
+
+    def _peers_watch_loop(self) -> None:
+        """Pick up peers.json edits even if SIGHUP was not delivered."""
+        path = _peers_path()
+        try:
+            self._peers_mtime = path.stat().st_mtime if path.is_file() else None
+        except OSError:
+            self._peers_mtime = None
+        while not self._stop.is_set():
+            time.sleep(max(1.0, _PEERS_WATCH_SECONDS))
+            if self._stop.is_set():
+                break
+            try:
+                mtime = path.stat().st_mtime if path.is_file() else None
+            except OSError:
+                continue
+            if mtime is None:
+                continue
+            if self._peers_mtime is not None and mtime <= self._peers_mtime:
+                continue
+            self._peers_mtime = mtime
+            try:
+                self.reload_peers()
+            except Exception as e:
+                print(f"federation: peers watch reload error: {e!r}")
 
     def _load_peers(self) -> list[dict[str, Any]]:
         path = _peers_path()
@@ -670,14 +777,19 @@ class FederationHub:
             except Exception:
                 pass
 
-    def _outbound_loop(self, peer: dict[str, Any]) -> None:
-        node_id = str(peer["node_id"]).strip()
+    def _outbound_loop(self, node_id: str) -> None:
+        node_id = str(node_id).strip()
         if not node_id or node_id == self.node_id:
             return
         # Avoid duplicate links when both nodes list each other: lower id initiates.
         if self.node_id > node_id:
             return
         while not self._stop.is_set():
+            with self._config_lock:
+                peer = dict(self._peer_configs_by_id.get(node_id) or {})
+            if not peer:
+                time.sleep(_RECONNECT_DELAY)
+                continue
             existing = self._peers.get(node_id)
             if existing is not None and not existing._closed:
                 # Already linked; do not open parallel outbound sessions.

@@ -151,6 +151,29 @@ print(f"info: updated {path}")
 PY
 
 chmod 640 "$PEERS_JSON"
+
+# Hot-reload running sshchat so new peers connect without a full restart.
+# authorized_keys is already live for inbound; this picks up peers.json outbound.
+signal_sshchat_reload() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sshchat.service 2>/dev/null; then
+    if systemctl kill -s HUP sshchat.service 2>/dev/null; then
+      echo "info: sent SIGHUP to sshchat.service (reload federation peers)"
+      return 0
+    fi
+  fi
+  # Fallback: signal the python server process for this PREFIX.
+  if command -v pkill >/dev/null 2>&1; then
+    if pkill -HUP -f "$PREFIX/venv/bin/python $PREFIX/server.py" 2>/dev/null \
+      || pkill -HUP -f "$PREFIX/server.py" 2>/dev/null; then
+      echo "info: sent SIGHUP to sshchat server process (reload federation peers)"
+      return 0
+    fi
+  fi
+  echo "info: sshchat not signaled (not running?). New peers load on next start, or within a few seconds if the service is up (peers.json watch)."
+}
+
+signal_sshchat_reload
+
 echo
 echo "=== This server's federation public key (add on peer with their admin-add-peer.sh) ==="
 cat "$KEY_PUB"
@@ -158,4 +181,5 @@ echo
 echo "=== Local node id (set SSHCHAT_NODE_ID in sshchat.env if you want a fixed name) ==="
 echo "${SSHCHAT_NODE_ID:-$(hostname)}"
 echo
-echo "Restart sshchat service to apply peer connections."
+echo "No full restart required: peers.json was updated and sshchat was signaled to reload."
+echo "Remember: the other server must also run admin-add-peer.sh for this node (mutual trust)."
