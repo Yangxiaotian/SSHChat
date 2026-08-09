@@ -1,5 +1,10 @@
 # SSHChat
 
+## Update (2026-08 iSH 服务器部署)
+
+- **可在 iPhone/iPad 的 iSH（Alpine）上部署聊天服务器**：`deploy.sh` 自动识别 `/ish`，默认关 Cloudflare、精简依赖、OpenRC 保活。说明见 **`DEPLOY-iSH.md`**。
+- 手机端只当 SSH **客户端**登录时，仍用 **`小白使用说明书-iSH.md`**。
+
 ## Update (2026-08 安全文件收发)
 
 - **新增 `/sendfile`**：不再走 SSH 通道传文件，而是由服务端起一个 HTTP/HTTPS 页面收发。
@@ -155,6 +160,17 @@ sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22 \
 ```bash
 sudo ./deploy.sh --client-ssh-host 10.0.0.5 --no-cloudflare
 ```
+
+**在 iPhone/iPad 的 iSH（Alpine）上当服务器部署：** 详见 **[DEPLOY-iSH.md](DEPLOY-iSH.md)**。摘要：
+
+```bash
+cd ~/SSHChat
+git fetch github develop && git checkout -B develop github/develop
+./deploy.sh --client-ssh-host 手机局域网IP --client-ssh-port 22 \
+  --no-cloudflare --no-file-https
+```
+
+`deploy.sh` 会自动识别 `/ish`：跳过 Cloudflare（无 i686 二进制）、用精简依赖（无 pymupdf，PDF 走 pypdf）、venv 带 `--system-site-packages`（复用 apk 的 `py3-lxml`）、并用 **OpenRC** 拉起 `/etc/init.d/sshchat`。首次建 venv 可能要十几分钟。手机端用户只连聊天室时看 `小白使用说明书-iSH.md`。
 
 装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务；Cloudflare 模式下公网域名一般由 `sshchat-cloudflared` 自动改写）：
 
@@ -643,6 +659,8 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | 文件 | 用途 |
 |------|------|
 | `deploy.sh` | 一键部署 |
+| `DEPLOY-iSH.md` | iPhone/iPad iSH 上当**服务器**部署说明 |
+| `小白使用说明书-iSH.md` | iSH 上当 **SSH 客户端**连聊天室（给小白） |
 | `admin-add-user.sh` | 添加用户与公钥 |
 | `admin-add-peer.sh` | 登记联邦互信节点（多服扩网） |
 | `admin-remove-peer.sh` | 拆除联邦互信节点（热加载并通知用户） |
