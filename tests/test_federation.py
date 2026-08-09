@@ -304,7 +304,7 @@ class FederationProtocolTests(unittest.TestCase):
         self.assertTrue(any(l.startswith("nodeup\tnode-a\tnode-c") for l in link_b.lines))
         self.assertFalse(any(l.startswith("nodeup\t") for l in link_c.lines))
 
-        # Peer B receives the relay and announces locally without re-flooding.
+        # Peer B receives the relay, announces locally, and fanouts further.
         peer_b = federation.FederationHub(
             12346,
             server.lock,
@@ -318,13 +318,241 @@ class FederationProtocolTests(unittest.TestCase):
         peer_b.node_id = "node-b"
         other = FakeLink()
         peer_b._peers["node-d"] = other
+        peer_b._routes["node-d"] = "node-d"
         peer_b._on_peer_line("node-a", "nodeup\tnode-a\tnode-c")
         self.assertEqual(events[-1], ("up", "node-c", "node-a"))
-        self.assertEqual(other.lines, [])
+        self.assertTrue(any(l.startswith("nodeup\tnode-a\tnode-c") for l in other.lines))
 
         hub._notify_peer_down("node-c")
         self.assertEqual(events[-1], ("down", "node-c", "node-a"))
         self.assertTrue(any(l.startswith("nodedown\tnode-a\tnode-c") for l in link_b.lines))
+
+    def test_line_topology_message_and_presence_and_pm(self) -> None:
+        """A—B—C: room msg, presence, and PM traverse the middle hop."""
+        chat_a, chat_b, chat_c = self._free_port(), self._free_port(), self._free_port()
+        fed_a, fed_b, fed_c = self._free_port(), self._free_port(), self._free_port()
+
+        with tempfile.TemporaryDirectory() as td:
+            peers_a = Path(td) / "peers_a.json"
+            peers_b = Path(td) / "peers_b.json"
+            peers_c = Path(td) / "peers_c.json"
+            # Line: A—B—C (no A—C edge).
+            peers_a.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_b,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peers_b.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-a",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_a,
+                        },
+                        {
+                            "node_id": "node-c",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_c,
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peers_c.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_b,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            env_a = {
+                "SSHCHAT_NODE_ID": "node-a",
+                "SSHCHAT_FEDERATION_PORT": str(fed_a),
+                "SSHCHAT_FEDERATION_PEERS": str(peers_a),
+                "SSHCHAT_FED_PEERS_WATCH_SECONDS": "0",
+            }
+            env_b = {
+                "SSHCHAT_NODE_ID": "node-b",
+                "SSHCHAT_FEDERATION_PORT": str(fed_b),
+                "SSHCHAT_FEDERATION_PEERS": str(peers_b),
+                "SSHCHAT_FED_PEERS_WATCH_SECONDS": "0",
+            }
+            env_c = {
+                "SSHCHAT_NODE_ID": "node-c",
+                "SSHCHAT_FEDERATION_PORT": str(fed_c),
+                "SSHCHAT_FEDERATION_PEERS": str(peers_c),
+                "SSHCHAT_FED_PEERS_WATCH_SECONDS": "0",
+            }
+
+            received_c: list[bytes] = []
+            pm_a: list[tuple[str, str, str]] = []
+
+            def on_msg_c(room, msg, _peer):
+                received_c.append(msg)
+
+            hubs = []
+            with mock.patch.dict(os.environ, env_a, clear=False):
+                hub_a = federation.FederationHub(
+                    chat_a,
+                    server.lock,
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: pm_a.append((t, f, x)),
+                    lambda: [
+                        {
+                            "name": "alice",
+                            "rooms": ["lobby"],
+                            "current_room": "lobby",
+                        }
+                    ],
+                )
+                hub_a.start()
+                hubs.append(hub_a)
+
+            with mock.patch.dict(os.environ, env_b, clear=False):
+                hub_b = federation.FederationHub(
+                    chat_b,
+                    server.lock,
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                )
+                hub_b.start()
+                hubs.append(hub_b)
+
+            with mock.patch.dict(os.environ, env_c, clear=False):
+                hub_c = federation.FederationHub(
+                    chat_c,
+                    server.lock,
+                    on_msg_c,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [
+                        {
+                            "name": "carol",
+                            "rooms": ["lobby"],
+                            "current_room": "lobby",
+                        }
+                    ],
+                )
+                hub_c.start()
+                hubs.append(hub_c)
+
+            try:
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if (
+                        hub_a.peer_count >= 1
+                        and hub_b.peer_count >= 2
+                        and hub_c.peer_count >= 1
+                    ):
+                        break
+                    time.sleep(0.05)
+                self.assertGreaterEqual(hub_a.peer_count, 1)
+                self.assertGreaterEqual(hub_b.peer_count, 2)
+                self.assertGreaterEqual(hub_c.peer_count, 1)
+
+                # Seed presence across the line (join from A reaches C via B).
+                hub_a.notify_join("alice", "lobby")
+                deadline = time.time() + 5
+                while time.time() < deadline and "alice" not in hub_c.names_in_room("lobby"):
+                    time.sleep(0.05)
+                self.assertIn("alice", hub_c.names_in_room("lobby"))
+                self.assertEqual(hub_c._routes.get("node-a"), "node-b")
+
+                hub_c.notify_join("carol", "lobby")
+                deadline = time.time() + 5
+                while time.time() < deadline and "carol" not in hub_a.names_in_room("lobby"):
+                    time.sleep(0.05)
+                self.assertIn("carol", hub_a.names_in_room("lobby"))
+
+                payload = b"[#lobby] [alice] hello across the graph\n"
+                hub_a.broadcast_room("lobby", payload)
+                deadline = time.time() + 5
+                while time.time() < deadline and not received_c:
+                    time.sleep(0.05)
+                self.assertTrue(received_c)
+                self.assertIn(b"hello across the graph", received_c[0])
+
+                self.assertTrue(hub_c.send_pm("alice", "carol", "ping-from-c"))
+                deadline = time.time() + 5
+                while time.time() < deadline and not pm_a:
+                    time.sleep(0.05)
+                self.assertEqual(pm_a[-1], ("alice", "carol", "ping-from-c"))
+            finally:
+                for h in hubs:
+                    h.stop()
+
+    def test_cycle_dedup_delivers_msg_once(self) -> None:
+        """Triangle A—B—C—A: same room msg lands once per hub."""
+        deliveries: dict[str, list[bytes]] = {"a": [], "b": [], "c": []}
+
+        hubs: dict[str, federation.FederationHub] = {}
+        for nid, key in (("node-a", "a"), ("node-b", "b"), ("node-c", "c")):
+            hub = federation.FederationHub(
+                12345,
+                server.lock,
+                lambda r, m, p, k=key: deliveries[k].append(m),
+                lambda r, m: None,
+                lambda t, f, x: None,
+                lambda: [],
+            )
+            hub.enabled = True
+            hub.node_id = nid
+            hubs[nid] = hub
+
+        def wire(src: str, dst: str) -> None:
+            sh, dh = hubs[src], hubs[dst]
+
+            class Link:
+                def __init__(self, target_hub, ingress_id):
+                    self.target_hub = target_hub
+                    self.ingress_id = ingress_id
+                    self._closed = False
+
+                def send_line(self, line: str) -> None:
+                    self.target_hub._on_peer_line(self.ingress_id, line)
+
+                def close(self) -> None:
+                    self._closed = True
+
+            sh._peers[dst] = Link(dh, src)
+            sh._routes[dst] = dst
+
+        wire("node-a", "node-b")
+        wire("node-b", "node-a")
+        wire("node-b", "node-c")
+        wire("node-c", "node-b")
+        wire("node-c", "node-a")
+        wire("node-a", "node-c")
+
+        payload = b"[#lobby] once only\n"
+        hubs["node-a"].broadcast_room("lobby", payload)
+        self.assertEqual(len(deliveries["b"]), 1)
+        self.assertEqual(len(deliveries["c"]), 1)
+        self.assertEqual(deliveries["b"][0], payload)
+        self.assertEqual(deliveries["c"][0], payload)
+        # Origin does not deliver its own outbound msg locally via federation.
+        self.assertEqual(deliveries["a"], [])
 
 
 class FederationServerIntegrationTests(unittest.TestCase):

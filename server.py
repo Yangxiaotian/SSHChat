@@ -2620,7 +2620,8 @@ def _should_forward_game(room: str, sub: str) -> bool:
 
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
-    broadcast_room(room, msg, via_federation_from=from_peer)
+    # Hub already fanouts the original msg line; only deliver locally.
+    broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
 
 
 def _fed_on_join_notice(room: str, msg: bytes) -> None:

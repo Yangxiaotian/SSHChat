@@ -1,6 +1,8 @@
 """Inter-server federation: merge rooms and users across trusted SSHChat nodes.
 
-Servers connect over TCP (direct or via SSH stdio forward). Same nickname on
+Servers connect over TCP (direct or via SSH stdio forward). Topology is a
+graph: only adjacent nodes exchange keys, but messages flood (with dedup) and
+unicasts next-hop so A—B—C is enough for A and C to talk. Same nickname on
 different nodes is treated as one account; same room name shares messages.
 """
 
@@ -15,7 +17,7 @@ import subprocess
 import threading
 import time
 import traceback
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -23,6 +25,8 @@ PROTOCOL_VERSION = "1"
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
 _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
+# Bound flood dedup memory (graph cycles / rebroadcast).
+_SEEN_MAX = int(os.environ.get("SSHCHAT_FED_SEEN_MAX", "4096"))
 
 
 def _node_id() -> str:
@@ -144,8 +148,13 @@ class FederationHub:
         self._peer_configs_by_id: dict[str, dict[str, Any]] = {}
         self._outbound_started: set[str] = set()
         self._peers: dict[str, _PeerLink] = {}
+        # dest node_id -> next-hop peer (direct neighbor).
+        self._routes: dict[str, str] = {}
         self._remote_users: dict[tuple[str, str], RemoteUser] = {}
         self._room_remotes: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        self._seen_lock = threading.Lock()
+        self._seen_keys: set[str] = set()
+        self._seen_order: deque[str] = deque()
         self._listen_socket: Optional[socket.socket] = None
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -300,35 +309,126 @@ class FederationHub:
             return []
         return [p for p in data if isinstance(p, dict) and p.get("node_id")]
 
+    def _remember_seen(self, key: str) -> bool:
+        """Record a flood/unicast line. Returns True if it was already seen."""
+        key = key.strip("\r\n")
+        if not key:
+            return True
+        with self._seen_lock:
+            if key in self._seen_keys:
+                return True
+            self._seen_keys.add(key)
+            self._seen_order.append(key)
+            while len(self._seen_order) > max(64, _SEEN_MAX):
+                old = self._seen_order.popleft()
+                self._seen_keys.discard(old)
+            return False
+
+    def _fanout(
+        self,
+        line: str,
+        *,
+        exclude_node: Optional[str] = None,
+        exclude_nodes: Optional[set[str]] = None,
+    ) -> None:
+        """Send an already-formatted protocol line to all direct peers except exclusions."""
+        if not self.enabled or not self._peers:
+            return
+        if not line.endswith("\n"):
+            line = line + "\n"
+        skip: set[str] = set()
+        if exclude_node:
+            skip.add(exclude_node)
+        if exclude_nodes:
+            skip.update(exclude_nodes)
+        for node_id, link in list(self._peers.items()):
+            if node_id in skip:
+                continue
+            link.send_line(line)
+
+    def _learn_route(self, dest: str, via: str) -> None:
+        dest = str(dest or "").strip()
+        via = str(via or "").strip()
+        if not dest or not via or dest == self.node_id:
+            return
+        # Prefer a direct edge when we have one.
+        if dest in self._peers:
+            self._routes[dest] = dest
+            return
+        self._routes[dest] = via
+
+    def _link_toward(self, dest: str) -> Optional[_PeerLink]:
+        dest = str(dest or "").strip()
+        if not dest:
+            return None
+        direct = self._peers.get(dest)
+        if direct is not None:
+            return direct
+        hop = self._routes.get(dest)
+        if hop:
+            return self._peers.get(hop)
+        return None
+
+    def _send_toward(
+        self, dest: str, line: str, *, exclude_node: Optional[str] = None
+    ) -> bool:
+        link = self._link_toward(dest)
+        if link is None:
+            return False
+        if exclude_node and link.node_id == exclude_node:
+            return False
+        if not line.endswith("\n"):
+            line = line + "\n"
+        link.send_line(line)
+        return True
+
+    def _clear_origin(self, origin: str) -> None:
+        """Drop presence and routes for a destination node (multi-hop unreachable)."""
+        origin = str(origin or "").strip()
+        if not origin or origin == self.node_id:
+            return
+        self._routes.pop(origin, None)
+        to_remove = [k for k in self._remote_users if k[0] == origin]
+        for k in to_remove:
+            user = self._remote_users.pop(k, None)
+            if user:
+                for room in list(user.rooms):
+                    self._room_remotes[room].discard(k)
+                    self.on_join_notice(
+                        room,
+                        f"[!] {user.name} left #{room} (node {origin} unreachable)\n".encode(
+                            "utf-8"
+                        ),
+                    )
+
     def broadcast_room(self, room: str, msg: bytes, exclude_node: Optional[str] = None) -> None:
         if not self.enabled or not self._peers:
             return
         payload = base64.b64encode(msg).decode("ascii")
         line = f"msg\t{self.node_id}\t{room}\t{payload}\n"
-        for node_id, link in list(self._peers.items()):
-            if node_id != exclude_node:
-                link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line, exclude_node=exclude_node)
 
     def notify_join(self, name: str, room: str) -> None:
         if not self.enabled or not self._peers:
             return
         line = f"join\t{self.node_id}\t{name}\t{room}\n"
-        for link in self._peers.values():
-            link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line)
 
     def notify_leave(self, name: str, room: str) -> None:
         if not self.enabled or not self._peers:
             return
         line = f"leave\t{self.node_id}\t{name}\t{room}\n"
-        for link in self._peers.values():
-            link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line)
 
     def notify_switch(self, name: str, room: str) -> None:
         if not self.enabled or not self._peers:
             return
         line = f"switch\t{self.node_id}\t{name}\t{room}\n"
-        for link in self._peers.values():
-            link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line)
 
     def send_pm(self, to_nick: str, from_name: str, text: str) -> bool:
         """Route PM to remote user(s) on peer nodes. Returns True if any sent."""
@@ -346,9 +446,8 @@ class FederationHub:
         sent = False
         for user in targets:
             line = f"pm\t{self.node_id}\t{user.name}\t{from_name}\t{payload}\n"
-            link = self._peers.get(user.node_id)
-            if link is not None:
-                link.send_line(line)
+            self._remember_seen(line)
+            if self._send_toward(user.node_id, line):
                 sent = True
         return sent
 
@@ -379,9 +478,8 @@ class FederationHub:
         sent = False
         for user in targets:
             line = f"fnotice\t{self.node_id}\t{user.name}\t{from_name}\t{blob}\n"
-            link = self._peers.get(user.node_id)
-            if link is not None:
-                link.send_line(line)
+            self._remember_seen(line)
+            if self._send_toward(user.node_id, line):
                 sent = True
         return sent
 
@@ -389,15 +487,15 @@ class FederationHub:
         if not self.enabled or not self._peers:
             return
         line = f"gsync\t{self.node_id}\t{room}\t{authority}\t{pickle_b64}\n"
-        for link in self._peers.values():
-            link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line)
 
     def end_game(self, room: str, authority: str) -> None:
         if not self.enabled or not self._peers:
             return
         line = f"gend\t{self.node_id}\t{room}\t{authority}\n"
-        for link in self._peers.values():
-            link.send_line(line)
+        self._remember_seen(line)
+        self._fanout(line)
 
     def forward_game_cmd(
         self,
@@ -410,27 +508,27 @@ class FederationHub:
     ) -> bool:
         if not self.enabled:
             return False
-        link = self._peers.get(authority_node)
-        if link is None:
-            return False
         safe_rest = rest.replace("\t", " ").replace("\n", " ")
-        line = f"gcmd\t{self.node_id}\t{room}\t{player_node}\t{name}\t{sub}\t{safe_rest}\n"
-        link.send_line(line)
-        return True
+        # Include authority so multi-hop relays can next-hop without flooding.
+        line = (
+            f"gcmd\t{self.node_id}\t{authority_node}\t{room}\t"
+            f"{player_node}\t{name}\t{sub}\t{safe_rest}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(authority_node, line)
 
     def send_game_private_to(
         self, to_node: str, room: str, to_name: str, lines: list[str]
     ) -> None:
         if not self.enabled or not lines:
             return
-        link = self._peers.get(to_node)
-        if link is None:
-            return
         blob = base64.b64encode(
             json.dumps(lines, ensure_ascii=False).encode("utf-8")
         ).decode("ascii")
-        line = f"gpriv\t{self.node_id}\t{room}\t{to_name}\t{blob}\n"
-        link.send_line(line)
+        # to_node kept in the line for multi-hop routing.
+        line = f"gpriv\t{self.node_id}\t{to_node}\t{room}\t{to_name}\t{blob}\n"
+        self._remember_seen(line)
+        self._send_toward(to_node, line)
 
     def rooms_for_name(self, name: str) -> set[str]:
         """Rooms occupied by same nickname on peer nodes (for session sync)."""
@@ -475,6 +573,7 @@ class FederationHub:
         if old is not None and old is not link:
             old.close()
         self._peers[node_id] = link
+        self._routes[node_id] = node_id
 
     def _notify_peer_up(self, peer_node: str) -> None:
         """Local peer just connected: tell local users and other online peers."""
@@ -522,13 +621,11 @@ class FederationHub:
             return
         kind = "nodeup" if event == "up" else "nodedown"
         line = f"{kind}\t{reporter}\t{peer_node}\n"
-        for node_id, link in list(self._peers.items()):
-            if exclude_node and node_id == exclude_node:
-                continue
-            # Don't bounce the event back to the peer it is about if still linked.
-            if node_id == peer_node:
-                continue
-            link.send_line(line)
+        self._remember_seen(line)
+        skip = {peer_node}
+        if exclude_node:
+            skip.add(exclude_node)
+        self._fanout(line, exclude_nodes=skip)
 
     def _unregister_peer(
         self, node_id: str, link: Optional[_PeerLink] = None
@@ -542,25 +639,77 @@ class FederationHub:
         old = self._peers.pop(node_id, None)
         if old is not None:
             old.close()
-        to_remove = [k for k in self._remote_users if k[0] == node_id]
-        for k in to_remove:
-            user = self._remote_users.pop(k, None)
-            if user:
-                for room in list(user.rooms):
-                    self._room_remotes[room].discard(k)
-                    self.on_join_notice(
-                        room,
-                        f"[!] {user.name} left #{room} (peer {node_id} disconnected)\n".encode(
-                            "utf-8"
-                        ),
-                    )
+        # Drop this direct peer and every destination that was only reachable via it.
+        lost = {node_id}
+        for dest, hop in list(self._routes.items()):
+            if hop == node_id or dest == node_id:
+                lost.add(dest)
+                self._routes.pop(dest, None)
+        for origin in lost:
+            to_remove = [k for k in self._remote_users if k[0] == origin]
+            for k in to_remove:
+                user = self._remote_users.pop(k, None)
+                if user:
+                    for room in list(user.rooms):
+                        self._room_remotes[room].discard(k)
+                        self.on_join_notice(
+                            room,
+                            f"[!] {user.name} left #{room} (peer {node_id} disconnected)\n".encode(
+                                "utf-8"
+                            ),
+                        )
         return old is not None
 
     def _push_presence(self, link: _PeerLink) -> None:
-        """Send local online users snapshot to a newly connected peer."""
+        """Send local + known remote online snapshots to a newly connected peer."""
         users = self.get_local_clients()
         blob = json.dumps(users, ensure_ascii=False)
-        link.send_line(f"presence\t{self.node_id}\t{blob}\n")
+        local_line = f"presence\t{self.node_id}\t{blob}\n"
+        self._remember_seen(local_line)
+        link.send_line(local_line)
+
+        by_origin: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for u in self._remote_users.values():
+            by_origin[u.node_id].append(
+                {
+                    "name": u.name,
+                    "rooms": sorted(u.rooms),
+                    "current_room": u.current_room,
+                }
+            )
+        for origin, ulist in by_origin.items():
+            if origin == link.node_id:
+                continue
+            remote_blob = json.dumps(ulist, ensure_ascii=False)
+            line = f"presence\t{origin}\t{remote_blob}\n"
+            self._remember_seen(line)
+            link.send_line(line)
+
+    def _forward_unicast_for_nick(
+        self,
+        line: str,
+        nick: str,
+        *,
+        ingress: str,
+        prefer_nodes: Optional[set[str]] = None,
+    ) -> None:
+        """Next-hop forward a unicast line toward remote users with this nick."""
+        key = _nick_key(nick)
+        targets = [
+            u
+            for u in self._remote_users.values()
+            if _nick_key(u.name) == key
+            and (prefer_nodes is None or u.node_id in prefer_nodes)
+        ]
+        sent_hops: set[str] = set()
+        for user in targets:
+            link = self._link_toward(user.node_id)
+            if link is None or link.node_id == ingress:
+                continue
+            if link.node_id in sent_hops:
+                continue
+            sent_hops.add(link.node_id)
+            link.send_line(line if line.endswith("\n") else line + "\n")
 
     def _on_peer_line(self, peer_node: str, line: str) -> None:
         line = line.strip("\r\n")
@@ -578,54 +727,97 @@ class FederationHub:
             return
         kind = parts[0]
         if kind == "msg" and len(parts) >= 4:
+            if self._remember_seen(line):
+                return
             origin, room, b64 = parts[1], parts[2], parts[3]
             if origin == self.node_id:
                 return
+            self._learn_route(origin, peer_node)
             try:
                 msg = base64.b64decode(b64.encode("ascii"))
             except Exception:
                 return
             self.on_room_msg(room, msg, peer_node)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "join" and len(parts) >= 4:
-            self._remote_join(parts[1], parts[2], parts[3])
+            if self._remember_seen(line):
+                return
+            origin, name, room = parts[1], parts[2], parts[3]
+            self._learn_route(origin, peer_node)
+            self._remote_join(origin, name, room)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "leave" and len(parts) >= 4:
-            self._remote_leave(parts[1], parts[2], parts[3])
+            if self._remember_seen(line):
+                return
+            origin, name, room = parts[1], parts[2], parts[3]
+            self._learn_route(origin, peer_node)
+            self._remote_leave(origin, name, room)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "switch" and len(parts) >= 4:
-            self._remote_switch(parts[1], parts[2], parts[3])
+            if self._remember_seen(line):
+                return
+            origin, name, room = parts[1], parts[2], parts[3]
+            self._learn_route(origin, peer_node)
+            self._remote_switch(origin, name, room)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "presence" and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
             # Keep JSON blob intact even if it ever contains tabs.
             pres_parts = line.split("\t", 2)
             if len(pres_parts) >= 3:
-                self._remote_presence_bulk(pres_parts[1], pres_parts[2])
+                origin = pres_parts[1]
+                self._learn_route(origin, peer_node)
+                self._remote_presence_bulk(origin, pres_parts[2])
+                self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "pm" and len(parts) >= 5:
+            if self._remember_seen(line):
+                return
             origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
             if origin == self.node_id:
                 return
+            self._learn_route(origin, peer_node)
             try:
                 text = base64.b64decode(b64.encode("ascii")).decode("utf-8")
             except Exception:
                 return
             self.on_pm(to_name, from_name, text)
+            self._forward_unicast_for_nick(line + "\n", to_name, ingress=peer_node)
             return
         if kind in ("nodeup", "nodedown") and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
             reporter, subject = parts[1], parts[2]
             if reporter == self.node_id or subject == self.node_id:
                 return
+            self._learn_route(reporter, peer_node)
             event = "up" if kind == "nodeup" else "down"
-            # One-hop only: show locally, do not flood further.
+            if event == "up":
+                self._learn_route(subject, peer_node)
+            else:
+                # Only drop if this subject was reached via the ingress neighbor.
+                if self._routes.get(subject) == peer_node and subject not in self._peers:
+                    self._clear_origin(subject)
             self._emit_peer_event(
                 event, subject, reporter=reporter, relay=False
             )
+            self._fanout(
+                line + "\n",
+                exclude_nodes={peer_node, subject},
+            )
             return
         if kind == "fnotice" and len(parts) >= 5 and self.on_file_notice:
+            if self._remember_seen(line):
+                return
             origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
             if origin == self.node_id:
                 return
+            self._learn_route(origin, peer_node)
             try:
                 notice = json.loads(
                     base64.b64decode(b64.encode("ascii")).decode("utf-8")
@@ -634,44 +826,115 @@ class FederationHub:
                 return
             if isinstance(notice, dict):
                 self.on_file_notice(to_name, from_name, notice)
+            self._forward_unicast_for_nick(line + "\n", to_name, ingress=peer_node)
             return
         if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
+            if self._remember_seen(line):
+                return
             origin, room, authority, b64 = parts[1], parts[2], parts[3], parts[4]
             if origin == self.node_id:
                 return
+            self._learn_route(origin, peer_node)
+            if authority and authority != self.node_id:
+                self._learn_route(authority, peer_node)
             self.on_game_sync(peer_node, room, authority, b64)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gend" and len(parts) >= 3 and self.on_game_end:
+            if self._remember_seen(line):
+                return
             origin, room, authority = parts[1], parts[2], parts[3]
             if origin == self.node_id:
                 return
+            self._learn_route(origin, peer_node)
             self.on_game_end(room, authority)
+            self._fanout(line + "\n", exclude_node=peer_node)
             return
 
-        parts6 = line.split("\t", 6)
-        if parts6[0] == "gcmd" and len(parts6) >= 6 and self.on_game_cmd:
-            origin, room, player_node, pname, sub = (
-                parts6[1],
-                parts6[2],
-                parts6[3],
-                parts6[4],
-                parts6[5],
-            )
-            rest = parts6[6] if len(parts6) > 6 else ""
+        # gcmd: new form includes authority for multi-hop next-hop.
+        #   gcmd\torigin\tauthority\troom\tplayer_node\tname\tsub\trest
+        # legacy (direct-only):
+        #   gcmd\torigin\troom\tplayer_node\tname\tsub\trest
+        parts7 = line.split("\t", 7)
+        if parts7[0] == "gcmd" and self.on_game_cmd:
+            if self._remember_seen(line):
+                return
+            if len(parts7) >= 8:
+                origin, authority, room, player_node, pname, sub = (
+                    parts7[1],
+                    parts7[2],
+                    parts7[3],
+                    parts7[4],
+                    parts7[5],
+                    parts7[6],
+                )
+                rest = parts7[7] if len(parts7) > 7 else ""
+            elif len(parts7) >= 6:
+                # Legacy: treat room field as room; no authority → flood.
+                origin, room, player_node, pname, sub = (
+                    parts7[1],
+                    parts7[2],
+                    parts7[3],
+                    parts7[4],
+                    parts7[5],
+                )
+                rest = parts7[6] if len(parts7) > 6 else ""
+                authority = ""
+            else:
+                return
             if origin == self.node_id:
                 return
-            self.on_game_cmd(peer_node, room, player_node, pname, sub, rest)
+            self._learn_route(origin, peer_node)
+            if authority == self.node_id or not authority:
+                self.on_game_cmd(peer_node, room, player_node, pname, sub, rest)
+            if authority and authority != self.node_id:
+                self._learn_route(authority, peer_node)
+                self._send_toward(authority, line + "\n", exclude_node=peer_node)
+            elif not authority:
+                self._fanout(line + "\n", exclude_node=peer_node)
             return
-        if parts6[0] == "gpriv" and len(parts6) >= 5 and self.on_game_priv:
-            origin, room, pname, b64 = parts6[1], parts6[2], parts6[3], parts6[4]
+
+        # gpriv: new form gpriv\torigin\tto_node\troom\tto_name\tblob
+        # legacy: gpriv\torigin\troom\tto_name\tblob
+        parts5 = line.split("\t", 5)
+        if parts5[0] == "gpriv" and self.on_game_priv:
+            if self._remember_seen(line):
+                return
+            to_node = ""
+            if len(parts5) >= 6:
+                origin, to_node, room, pname, b64 = (
+                    parts5[1],
+                    parts5[2],
+                    parts5[3],
+                    parts5[4],
+                    parts5[5],
+                )
+            elif len(parts5) >= 5:
+                origin, room, pname, b64 = (
+                    parts5[1],
+                    parts5[2],
+                    parts5[3],
+                    parts5[4],
+                )
+            else:
+                return
             if origin == self.node_id:
                 return
-            try:
-                lines = json.loads(base64.b64decode(b64.encode("ascii")).decode("utf-8"))
-            except Exception:
-                return
-            if isinstance(lines, list):
-                self.on_game_priv(room, pname, [str(x) for x in lines])
+            self._learn_route(origin, peer_node)
+            deliver = (not to_node) or (to_node == self.node_id)
+            if deliver:
+                try:
+                    lines = json.loads(
+                        base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                    )
+                except Exception:
+                    return
+                if isinstance(lines, list):
+                    self.on_game_priv(room, pname, [str(x) for x in lines])
+            if to_node and to_node != self.node_id:
+                self._send_toward(to_node, line + "\n", exclude_node=peer_node)
+            elif not to_node:
+                self._forward_unicast_for_nick(line + "\n", pname, ingress=peer_node)
             return
 
     def _remote_key(self, node_id: str, name: str) -> tuple[str, str]:
