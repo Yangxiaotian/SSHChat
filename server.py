@@ -1795,13 +1795,31 @@ def _fed_on_library_bookmarks(_origin: str, nick: str, books: dict) -> None:
         print(f"federation: merge library bookmarks failed: {e!r}")
 
 
+def _fed_on_library_bookmark_clear(nick: str, book_name: str) -> None:
+    """Owner-node handler: clear a nick's bookmark for a local book."""
+    cleared = library_bookmarks.clear_book(nick, book_name)
+    if cleared:
+        _federation_sync_library_bookmarks(nick, cleared)
+
+
 def _fed_on_library_page_request(
-    _owner: str, req_id: str, book_name: str, page: int, requester: str
+    _owner: str,
+    req_id: str,
+    book_name: str,
+    page: int,
+    requester: str,
+    nick: str = "",
+    flags: str = "",
 ) -> None:
+    """Serve one page from this node's library; bookmarks live on the owner node."""
     hub = federation.get_hub()
     if hub is None:
         return
     book_name = Path(str(book_name or "")).name
+    nick = str(nick or "").strip()
+    flags = str(flags or "").lower()
+    resume = "r" in flags
+    save = "s" in flags
     payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
     try:
         lib_dir = _library_dir()
@@ -1812,7 +1830,17 @@ def _fed_on_library_page_request(
         else:
             doc = _get_cached_book(entry.path)
             total = doc.total_pages
+            bookmark_page = (
+                library_bookmarks.get_page(nick, book_name) if nick else None
+            )
+            had_bookmark = bookmark_page is not None
+            if resume:
+                page = bookmark_page if had_bookmark else 0
             page = max(0, min(int(page), total - 1))
+            if nick and save:
+                entries = library_bookmarks.set_page(nick, book_name, page)
+                _federation_sync_library_bookmarks(nick, entries)
+                bookmark_page = page
             text = str(doc.pages[page] or "")
             if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
                 text = (
@@ -1829,6 +1857,10 @@ def _fed_on_library_page_request(
                 "text": text,
                 "ext": entry.ext,
                 "size_bytes": entry.size_bytes,
+                "bookmark_page": (
+                    bookmark_page if bookmark_page is not None else page
+                ),
+                "resumed": bool(resume and had_bookmark),
             }
     except Exception as e:
         payload = {"ok": False, "error": str(e), "req_id": req_id}
@@ -1863,7 +1895,13 @@ def _fail_library_page_waiters(error: str) -> None:
 
 
 def _fetch_remote_library_page(
-    owner: str, book_name: str, page: int, timeout: float = 90.0
+    owner: str,
+    book_name: str,
+    page: int,
+    *,
+    nick: str = "",
+    flags: str = "",
+    timeout: float = 90.0,
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -1873,7 +1911,9 @@ def _fetch_remote_library_page(
     with _library_page_waiters_lock:
         _library_page_waiters[req_id] = {"event": event, "payload": None}
     try:
-        if not hub.request_library_page(owner, req_id, book_name, page):
+        if not hub.request_library_page(
+            owner, req_id, book_name, page, nick=nick, flags=flags
+        ):
             return {"ok": False, "error": f"无法联系图书所在节点 {owner}"}
         if not event.wait(timeout):
             return {"ok": False, "error": "等待对端图书页超时"}
@@ -1908,6 +1948,7 @@ def _set_library_session(
     path: Optional[Path] = None,
     title: str = "",
     total_pages: int = 0,
+    persist_bookmark: bool = True,
 ) -> None:
     page = max(0, int(page))
     origin = (origin or "").strip()
@@ -1921,9 +1962,16 @@ def _set_library_session(
             "title": title,
             "total_pages": int(total_pages or 0),
         }
+    if not persist_bookmark:
+        return
     book_key = _library_bookmark_key(origin, name)
-    # Avoid creating/syncing a page-0 bookmark on first open — that would LWW-stomp
-    # a peer's real progress when keys were mismatched or sync arrived late.
+    if origin:
+        # Remote books: authoritative bookmark is on the owner node (via lpage).
+        # Keep a local mirror for /library list only — do not fan out lmarks.
+        if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+            return
+        library_bookmarks.set_page(user, book_key, page)
+        return
     if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
         return
     entries = library_bookmarks.set_page(user, book_key, page)
@@ -1970,13 +2018,18 @@ def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     _send_library_page_payload(conn, doc.title, page_idx, total, doc.pages[page_idx])
 
 
-def _library_read_session_page(session: dict) -> tuple[str, int, int, str]:
+def _library_read_session_page(
+    session: dict, *, user: str = "", save_bookmark: bool = False
+) -> tuple[str, int, int, str]:
     """Return (title, page, total, text) for a library_reading session."""
     origin = str(session.get("origin") or "").strip()
     page = int(session.get("page") or 0)
     if origin:
         name = str(session.get("name") or "").strip()
-        payload = _fetch_remote_library_page(origin, name, page)
+        flags = "s" if (save_bookmark and user) else ""
+        payload = _fetch_remote_library_page(
+            origin, name, page, nick=user, flags=flags
+        )
         if not payload.get("ok"):
             raise RuntimeError(str(payload.get("error") or "remote page failed"))
         title = str(payload.get("title") or name)
@@ -2079,7 +2132,9 @@ def _handle_library(conn, payload: str) -> None:
             session = dict(library_reading.get(conn) or {})
         if session:
             try:
-                title, page, total, _text = _library_read_session_page(session)
+                title, page, total, _text = _library_read_session_page(
+                    session, user=user
+                )
                 origin = str(session.get("origin") or "")
                 where = f" @{origin}" if origin else ""
                 send_line(
@@ -2106,7 +2161,7 @@ def _handle_library(conn, payload: str) -> None:
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
         send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
         send_line(conn, "[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n")
-        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签（联邦同名同步）\n")
+        send_line(conn, "[*]   /library bookmarks | 书签           列出书签（进度以图书所在节点为准）\n")
         send_line(conn, "[*]   /library reset <序号|文件名[@节点]> 清除某本书的书签\n")
         send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
@@ -2124,15 +2179,26 @@ def _handle_library(conn, payload: str) -> None:
         token = raw.split(None, 1)[1].strip()
         catalog = _union_library_catalog()
         entry = library.resolve_catalog_item(token, catalog)
+        remote_cleared = False
         if entry:
             book_key = _library_bookmark_key(entry.origin, entry.name)
             label = f"{entry.name}{entry.display_origin()}"
+            if entry.is_remote:
+                hub = federation.get_hub()
+                if hub is not None and hub.enabled:
+                    try:
+                        remote_cleared = hub.clear_remote_library_bookmark(
+                            entry.origin, user, entry.name
+                        )
+                    except Exception as e:
+                        print(f"federation: remote bookmark clear failed: {e!r}")
         else:
             book_key = library.bookmark_book_key(token) or Path(token).name
             label = book_key
         cleared = library_bookmarks.clear_book(user, book_key)
-        if cleared:
+        if cleared and not (entry and entry.is_remote):
             _federation_sync_library_bookmarks(user, cleared)
+        if cleared or remote_cleared:
             send_line(conn, f"[*] 已清除《{label}》的书签。\n")
         else:
             send_line(conn, f"[*] 《{label}》没有保存的书签。\n")
@@ -2151,7 +2217,7 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 当前没有在阅读的图书。\n")
             return
         try:
-            title, page, total, _text = _library_read_session_page(session)
+            title, page, total, _text = _library_read_session_page(session, user=user)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
@@ -2173,7 +2239,7 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
         try:
-            title, page, total, text = _library_read_session_page(session)
+            title, page, total, text = _library_read_session_page(session, user=user)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
@@ -2196,7 +2262,9 @@ def _handle_library(conn, payload: str) -> None:
         requested = int(session.get("page") or 0) + 1
         session["page"] = requested
         try:
-            title, page, total, text = _library_read_session_page(session)
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
@@ -2232,7 +2300,9 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 已是第一页。\n")
         session["page"] = page
         try:
-            title, page, total, text = _library_read_session_page(session)
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
@@ -2270,7 +2340,9 @@ def _handle_library(conn, payload: str) -> None:
             return
         session["page"] = max(0, page_1based - 1)
         try:
-            title, page, total, text = _library_read_session_page(session)
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
@@ -2362,8 +2434,6 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 用 /library 查看可用序号与文件名[@节点]。\n")
             return
         bookmark_key = _library_bookmark_key(entry.origin, entry.name)
-        saved = library_bookmarks.get_page(user, bookmark_key)
-        page = saved if saved is not None else 0
         if entry.is_remote:
             send_line(
                 conn,
@@ -2371,7 +2441,10 @@ def _handle_library(conn, payload: str) -> None:
                 f"[{entry.ext.upper()}] {entry.name}…（请稍候）\n",
             )
             try:
-                payload = _fetch_remote_library_page(entry.origin, entry.name, page)
+                # Resume from the book-owner node's bookmark for this nick.
+                payload = _fetch_remote_library_page(
+                    entry.origin, entry.name, 0, nick=user, flags="r"
+                )
             except Exception as exc:
                 send_line(conn, f"[*] 打开失败：{exc}\n")
                 return
@@ -2383,8 +2456,9 @@ def _handle_library(conn, payload: str) -> None:
                 return
             title = str(payload.get("title") or entry.name)
             total = max(1, int(payload.get("total_pages") or 1))
-            page = max(0, min(int(payload.get("page") or page), total - 1))
+            page = max(0, min(int(payload.get("page") or 0), total - 1))
             text = str(payload.get("text") or "")
+            resumed = bool(payload.get("resumed"))
             _set_library_session(
                 conn,
                 user,
@@ -2394,7 +2468,7 @@ def _handle_library(conn, payload: str) -> None:
                 title=title,
                 total_pages=total,
             )
-            if saved is not None and saved > 0:
+            if resumed and page > 0:
                 send_line(
                     conn,
                     f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
@@ -2408,6 +2482,8 @@ def _handle_library(conn, payload: str) -> None:
                 )
             _send_library_page_payload(conn, title, page, total, text)
             return
+        saved = library_bookmarks.get_page(user, bookmark_key)
+        page = saved if saved is not None else 0
         if entry.path is None:
             send_line(conn, f"[*] 本机图书缺少路径：{entry.name}\n")
             return
@@ -3304,6 +3380,7 @@ def _ensure_federation_hub() -> None:
         _fed_on_library_bookmarks,
     )
     _fed_hub.start()
+    _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
     _federation_sync_library_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():

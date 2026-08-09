@@ -125,7 +125,7 @@ class FederationHub:
         on_game_request: Optional[Callable[[str, str], None]] = None,
         get_local_library: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_library_page_request: Optional[
-            Callable[[str, str, str, int, str], None]
+            Callable[..., None]
         ] = None,
         on_library_page_result: Optional[
             Callable[[str, str, dict[str, Any]], None]
@@ -163,6 +163,8 @@ class FederationHub:
         self.get_local_library_bookmarks = get_local_library_bookmarks
         # origin_node, nick, books_dict
         self.on_library_bookmarks = on_library_bookmarks
+        # nick, book_name — clear bookmark on this (owner) node
+        self.on_library_bookmark_clear: Optional[Callable[[str, str], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -597,9 +599,21 @@ class FederationHub:
         self._fanout(line)
 
     def request_library_page(
-        self, owner_node: str, req_id: str, book_name: str, page: int
+        self,
+        owner_node: str,
+        req_id: str,
+        book_name: str,
+        page: int,
+        *,
+        nick: str = "",
+        flags: str = "",
     ) -> bool:
-        """Ask owner_node for one page of book_name (0-based page)."""
+        """Ask owner_node for one page of book_name (0-based page).
+
+        flags may include:
+          r — resume from owner's bookmark for nick (ignore page)
+          s — save this page as nick's bookmark on the owner node
+        """
         if not self.enabled:
             return False
         owner_node = str(owner_node or "").strip()
@@ -611,9 +625,32 @@ class FederationHub:
             page_i = int(page)
         except (TypeError, ValueError):
             return False
+        safe_nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip() or "-"
+        safe_flags = (
+            "".join(ch for ch in str(flags or "").lower() if ch in "rs") or "-"
+        )
         line = (
             f"lpage\t{self.node_id}\t{owner_node}\t{req_id}\t"
-            f"{book_name}\t{page_i}\n"
+            f"{book_name}\t{page_i}\t{safe_nick}\t{safe_flags}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(owner_node, line)
+
+    def clear_remote_library_bookmark(
+        self, owner_node: str, nick: str, book_name: str
+    ) -> bool:
+        """Ask owner_node to clear nick's bookmark for book_name."""
+        if not self.enabled:
+            return False
+        owner_node = str(owner_node or "").strip()
+        nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip()
+        book_name = Path(str(book_name or "").strip()).name
+        if not owner_node or not nick or not book_name:
+            return False
+        nonce = str(time.time_ns())
+        line = (
+            f"lmark_clear\t{self.node_id}\t{owner_node}\t{nick}\t"
+            f"{book_name}\t{nonce}\n"
         )
         self._remember_seen(line)
         return self._send_toward(owner_node, line)
@@ -1029,8 +1066,35 @@ class FederationHub:
                     print(f"federation: on_library_bookmarks error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
+        if kind == "lmark_clear":
+            clear_parts = line.split("\t", 5)
+            if len(clear_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, owner, nick, book_name = (
+                clear_parts[1],
+                clear_parts[2],
+                clear_parts[3],
+                clear_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if owner == self.node_id:
+                if self.on_library_bookmark_clear is not None:
+                    try:
+                        self.on_library_bookmark_clear(nick, book_name)
+                    except Exception as e:
+                        print(f"federation: on_library_bookmark_clear error: {e!r}")
+            else:
+                self._learn_route(owner, peer_node)
+                self._send_toward(owner, line + "\n", exclude_node=peer_node)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
         if kind == "lpage":
-            page_parts = line.split("\t", 5)
+            # lpage\torigin\towner\treq_id\tbook\tpage[\tnick\tflags]
+            page_parts = line.split("\t", 7)
             if len(page_parts) < 6:
                 return
             if self._remember_seen(line):
@@ -1042,6 +1106,12 @@ class FederationHub:
                 page_parts[4],
                 page_parts[5],
             )
+            nick = page_parts[6].strip() if len(page_parts) >= 7 else ""
+            flags = page_parts[7].strip() if len(page_parts) >= 8 else ""
+            if nick in {"", "-"}:
+                nick = ""
+            if flags in {"", "-"}:
+                flags = ""
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -1055,7 +1125,7 @@ class FederationHub:
                     # federation I/O thread — that stalls the duplex link and
                     # SSH tunnels drop mid-request.
                     cb = self.on_library_page_request
-                    args = (owner, req_id, book_name, page_i, origin)
+                    args = (owner, req_id, book_name, page_i, origin, nick, flags)
 
                     def _run_library_page(
                         _cb=cb, _args=args, _req=req_id
@@ -1740,7 +1810,7 @@ def init_hub(
     on_game_request: Optional[Callable[[str, str], None]] = None,
     get_local_library: Optional[Callable[[], list[dict[str, Any]]]] = None,
     on_library_page_request: Optional[
-        Callable[[str, str, str, int, str], None]
+        Callable[..., None]
     ] = None,
     on_library_page_result: Optional[
         Callable[[str, str, dict[str, Any]], None]

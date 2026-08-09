@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import federation
+import library
 import server
 
 
@@ -935,6 +936,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertTrue(done.wait(2.0), "lpage handler thread did not run")
         self.assertEqual(requests[-1][:4], ("node-owner", "req1", "a.txt", 2))
         self.assertEqual(requests[-1][4], "node-reader")
+        # nick/flags trailing args (may be empty defaults)
+        self.assertGreaterEqual(len(requests[-1]), 5)
 
         payload = {"ok": True, "text": "hello", "page": 2, "total_pages": 5}
         owner.reply_library_page("node-reader", "req1", payload)
@@ -943,6 +946,140 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(results[-1][0], "node-owner")
         self.assertEqual(results[-1][1], "req1")
         self.assertEqual(results[-1][2]["text"], "hello")
+
+    def test_lpage_resume_and_save_flags_reach_owner(self) -> None:
+        got: list[tuple] = []
+        done = threading.Event()
+
+        def on_req(*a):
+            got.append(a)
+            done.set()
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        owner = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_request=on_req,
+        )
+        owner.enabled = True
+        owner.node_id = "node-owner"
+        owner._peers["node-b"] = FakeLink("node-b")
+
+        reader = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        reader.enabled = True
+        reader.node_id = "node-b"
+        reader._peers["node-owner"] = FakeLink("node-owner")
+        reader._routes["node-owner"] = "node-owner"
+
+        self.assertTrue(
+            reader.request_library_page(
+                "node-owner", "req2", "book.epub", 0, nick="yxt", flags="r"
+            )
+        )
+        owner._on_peer_line(
+            "node-b", reader._peers["node-owner"].lines[-1].rstrip("\n")
+        )
+        self.assertTrue(done.wait(2.0))
+        self.assertEqual(got[-1][5], "yxt")
+        self.assertEqual(got[-1][6], "r")
+
+    def test_owner_page_request_resumes_bookmark(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lib_dir = Path(tmp.name)
+        book = lib_dir / "tale.txt"
+        book.write_text("word " * 800, encoding="utf-8")
+        old_chars = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 200
+        self.addCleanup(lambda: setattr(library, "LIBRARY_PAGE_CHARS", old_chars))
+
+        prev_dir = os.environ.get("SSHCHAT_LIBRARY_DIR")
+        os.environ["SSHCHAT_LIBRARY_DIR"] = str(lib_dir)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("SSHCHAT_LIBRARY_DIR", prev_dir)
+            if prev_dir is not None
+            else os.environ.pop("SSHCHAT_LIBRARY_DIR", None)
+        )
+        # Point server library bookmarks at temp store.
+        prev_bm = server.library_bookmarks
+        store_path = str(Path(tmp.name) / "bm.json")
+        server.library_bookmarks = library.LibraryBookmarkStore(store_path)
+        self.addCleanup(lambda: setattr(server, "library_bookmarks", prev_bm))
+        server.library_bookmarks.set_page("yxt", "tale.txt", 2)
+
+        replies: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "owner"
+
+            def reply_library_page(self, requester, req_id, payload):
+                replies.append((requester, req_id, payload))
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_federation_sync_library_bookmarks"):
+                server._fed_on_library_page_request(
+                    "owner", "rid", "tale.txt", 0, "reader", "yxt", "r"
+                )
+        self.assertEqual(len(replies), 1)
+        payload = replies[0][2]
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload.get("page"), 2)
+        self.assertTrue(payload.get("resumed"))
+
+    def test_owner_page_request_saves_bookmark(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lib_dir = Path(tmp.name)
+        book = lib_dir / "tale.txt"
+        book.write_text("word " * 800, encoding="utf-8")
+        old_chars = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 200
+        self.addCleanup(lambda: setattr(library, "LIBRARY_PAGE_CHARS", old_chars))
+
+        prev_dir = os.environ.get("SSHCHAT_LIBRARY_DIR")
+        os.environ["SSHCHAT_LIBRARY_DIR"] = str(lib_dir)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("SSHCHAT_LIBRARY_DIR", prev_dir)
+            if prev_dir is not None
+            else os.environ.pop("SSHCHAT_LIBRARY_DIR", None)
+        )
+        prev_bm = server.library_bookmarks
+        store_path = str(Path(tmp.name) / "bm.json")
+        server.library_bookmarks = library.LibraryBookmarkStore(store_path)
+        self.addCleanup(lambda: setattr(server, "library_bookmarks", prev_bm))
+
+        class FakeHub:
+            enabled = True
+            node_id = "owner"
+
+            def reply_library_page(self, requester, req_id, payload):
+                pass
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_federation_sync_library_bookmarks"):
+                server._fed_on_library_page_request(
+                    "owner", "rid", "tale.txt", 3, "reader", "yxt", "s"
+                )
+        self.assertEqual(server.library_bookmarks.get_page("yxt", "tale.txt"), 3)
 
     def test_lpage_handler_does_not_block_peer_line(self) -> None:
         """Slow book loads must not stall federation I/O."""
