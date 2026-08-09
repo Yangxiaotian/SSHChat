@@ -785,6 +785,8 @@ if [[ "$CREATE_RUN_USER" -eq 1 ]] || is_darwin; then
   echo "Chat login group: $CLIENT_GROUP (admin-add-user adds each user to this group)"
 fi
 echo "Add SSH users:    sudo $PREFIX/admin-add-user.sh <user> <pasted-pubkey-line|key.pub|->"
+echo "Add federation:   sudo $PREFIX/admin-add-peer.sh <peer_node_id> <peer_host> <peer-pubkey|file>"
+echo "Remove federation: sudo $PREFIX/admin-remove-peer.sh <peer_node_id>"
 if [[ "$MIGRATE_KEYS" -eq 1 ]]; then
   echo "authorized_keys:  command= paths normalized to $CHAT_ABS"
 else
@@ -792,6 +794,22 @@ else
 fi
 echo "Optional: open firewall for TCP $PORT"
 echo "GUI bundle:     $CLIENT_BUNDLE_JSON  (host=$CLIENT_SSH_HOST ssh_port=$CLIENT_SSH_PORT)"
+
+# Always show federation identity (needed to peer with other servers).
+if [[ -f "$PREFIX/sshchat.env" ]]; then
+  # shellcheck disable=SC1091
+  . "$PREFIX/sshchat.env"
+fi
+echo
+echo "=== Federation (for admin-add-peer.sh on the other server) ==="
+echo "Local node id:  ${SSHCHAT_NODE_ID:-$(hostname -f 2>/dev/null || hostname)}"
+if [[ -f "$FED_DIR/id_ed25519.pub" ]]; then
+  echo "Federation pubkey ($FED_DIR/id_ed25519.pub):"
+  cat "$FED_DIR/id_ed25519.pub"
+else
+  echo "warning: federation pubkey missing at $FED_DIR/id_ed25519.pub" >&2
+fi
+echo
 if [[ "$BUILD_GUI_PACKAGES" -eq 1 ]]; then
   if [[ -x "$SCRIPT_DIR/scripts/build-gui-packages.sh" ]]; then
     echo "info: running scripts/build-gui-packages.sh ..."
