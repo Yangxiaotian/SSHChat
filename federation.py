@@ -1181,21 +1181,22 @@ class FederationHub:
         ssh_user = str(peer.get("ssh_user") or "sshchat-federation").strip()
         key = str(peer.get("ssh_key") or _ssh_key_path())
         target = f"{ssh_user}@{host}"
-        remote = f"127.0.0.1:{fed_port}"
+        # Do NOT use ssh -W: authorized_keys sets command=federation-bridge.sh
+        # and no-port-forwarding, so -W is refused. The forced command already
+        # bridges stdio to the local federation port via nc.
         cmd = [
             "ssh",
             "-i",
             key,
             "-p",
             str(ssh_port),
+            "-T",
             "-o",
             "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-o",
             "ConnectTimeout=15",
-            "-W",
-            remote,
             target,
         ]
         try:
@@ -1204,6 +1205,7 @@ class FederationHub:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                bufsize=0,
             )
         except OSError as e:
             print(f"federation: ssh to {node_id} ({target}) failed: {e!r}")
@@ -1236,11 +1238,21 @@ class FederationHub:
     def _run_stdio_session(self, proc, peer_node: str) -> None:
         assert proc.stdin and proc.stdout
         conn = proc.stdout
-        # proc.stdin is same socket for tcp mode
+        # proc.stdin is same socket for tcp mode; pipe for ssh forced-command.
         send_sock = proc.stdin
 
         def _send(data: bytes) -> None:
-            send_sock.sendall(data)
+            if hasattr(send_sock, "sendall"):
+                send_sock.sendall(data)
+            else:
+                send_sock.write(data)
+                send_sock.flush()
+
+        def _recv(n: int) -> bytes:
+            if hasattr(conn, "recv"):
+                return conn.recv(n)
+            chunk = conn.read(n)
+            return chunk if chunk is not None else b""
 
         hello = f"@fed\t{self.node_id}\n".encode("utf-8")
         _send(hello)
@@ -1250,7 +1262,7 @@ class FederationHub:
         while not self._stop.is_set():
             if b"\n" not in buffer:
                 try:
-                    chunk = conn.recv(4096)
+                    chunk = _recv(4096)
                 except OSError as e:
                     if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
                         break
@@ -1286,7 +1298,7 @@ class FederationHub:
                         except (OSError, AttributeError):
                             pass
                         while b"\n" not in buffer:
-                            chunk = conn.recv(4096)
+                            chunk = _recv(4096)
                             if not chunk:
                                 break
                             buffer += chunk
