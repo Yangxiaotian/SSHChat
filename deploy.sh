@@ -1104,7 +1104,7 @@ command_background=true
 pidfile="/run/sshchat.pid"
 output_log="$PREFIX/server.log"
 error_log="$PREFIX/server.log"
-depend() { need net; }
+depend() { use net dns; }
 start_pre() { mkdir -p /run; export PYTHONUNBUFFERED=1; }
 EOF
   fi

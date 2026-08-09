@@ -12,7 +12,9 @@ output_log="__SSHCHAT_PREFIX__/server.log"
 error_log="__SSHCHAT_PREFIX__/server.log"
 
 depend() {
-	need net
+	# iSH's OpenRC "networking"/"net" often fail (broken /etc/network/interfaces);
+	# use soft deps so the chat service can still start.
+	use net dns
 	after firewall
 }
 
