@@ -153,6 +153,46 @@ print(f"info: updated {path}")
 PY
 
 chmod 640 "$PEERS_JSON"
+# Service user (sshchat) must read peers.json; root:root 640 breaks federation reload.
+if [[ -f "$PREFIX/sshchat.env" ]]; then
+  # shellcheck disable=SC1091
+  . "$PREFIX/sshchat.env"
+fi
+SVC_USER=${SSHCHAT_RUN_USER:-}
+if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
+  SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
+fi
+SVC_USER=${SVC_USER:-sshchat}
+if id "$SVC_USER" &>/dev/null; then
+  chown "$SVC_USER:$SVC_USER" "$PEERS_JSON" 2>/dev/null || true
+  # Keep federation SSH user able to traverse into .ssh under FED_DIR.
+  chmod 751 "$FED_DIR" 2>/dev/null || true
+  chown "$SVC_USER:$SVC_USER" "$FED_DIR" 2>/dev/null || true
+  if [[ -f "$KEY_PRIV" ]]; then
+    chown "$SVC_USER:$SVC_USER" "$KEY_PRIV" "$KEY_PUB" 2>/dev/null || true
+    chmod 600 "$KEY_PRIV" 2>/dev/null || true
+    chmod 644 "$KEY_PUB" 2>/dev/null || true
+  fi
+fi
+if ! is_darwin && id "$FED_USER" &>/dev/null; then
+  # Need group access to traverse /opt/sshchat (750) and read sshchat.env for bridge.
+  CLIENT_GROUP_NAME=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
+  if [[ -f "$PREFIX/sshchat.env" ]]; then
+    # shellcheck disable=SC1091
+    . "$PREFIX/sshchat.env"
+  fi
+  CLIENT_GROUP_NAME=${SSHCHAT_CLIENT_GROUP:-$CLIENT_GROUP_NAME}
+  if getent group "$CLIENT_GROUP_NAME" >/dev/null 2>&1; then
+    usermod -aG "$CLIENT_GROUP_NAME" "$FED_USER" 2>/dev/null || true
+  fi
+  if [[ -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
+    chown "$FED_USER:$FED_USER" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
+    chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
+    chmod 600 "$AUTH_KEYS" 2>/dev/null || true
+  fi
+fi
+# Bridge is forced-command for inbound peers.
+chmod 755 "$BRIDGE" 2>/dev/null || true
 
 # Hot-reload running sshchat so new peers connect without a full restart.
 # authorized_keys is already live for inbound; this picks up peers.json outbound.

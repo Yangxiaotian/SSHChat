@@ -252,11 +252,67 @@ apply_data_plane_permissions() {
     chmod 660 "$PREFIX/offline_messages.json"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
-  chmod 700 "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+  chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 700 "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  # Bridge runs as sshchat-federation via forced-command; must be executable by that user.
+  chown "$ROOT_OWN" "$PREFIX/federation-bridge.sh"
+  chmod 755 "$PREFIX/federation-bridge.sh"
 
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+
+  apply_federation_permissions
+}
+
+# Federation needs two identities:
+# - RUN_USER (sshchat): read peers.json + private key, dial peers
+# - sshchat-federation: inbound SSH home under FED_DIR, run bridge
+apply_federation_permissions() {
+  local fed_dir="$PREFIX/federation"
+  local fed_user=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
+  local svc_user="$RUN_USER"
+  [[ -d "$fed_dir" ]] || return 0
+
+  mkdir -p "$fed_dir"
+  # Service user owns the dir; o+x so federation SSH user can reach .ssh/
+  # (PREFIX is 750 + federation user is in CLIENT_GROUP for traverse).
+  if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+    chown "$svc_user:$svc_user" "$fed_dir"
+  fi
+  chmod 751 "$fed_dir"
+
+  if [[ -f "$fed_dir/id_ed25519" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519"
+    fi
+    chmod 600 "$fed_dir/id_ed25519"
+  fi
+  if [[ -f "$fed_dir/id_ed25519.pub" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_user" "$fed_dir/id_ed25519.pub"
+    fi
+    chmod 644 "$fed_dir/id_ed25519.pub"
+  fi
+  if [[ -f "$fed_dir/peers.json" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_user" "$fed_dir/peers.json"
+    fi
+    chmod 640 "$fed_dir/peers.json"
+  fi
+
+  if ! is_darwin && id "$fed_user" &>/dev/null; then
+    add_user_to_client_group "$fed_user" || true
+    local auth_home
+    auth_home=$(getent passwd "$fed_user" | cut -d: -f6)
+    [[ -n "$auth_home" ]] || auth_home=$fed_dir
+    mkdir -p "$auth_home/.ssh"
+    chown "$fed_user:$fed_user" "$auth_home/.ssh"
+    chmod 700 "$auth_home/.ssh"
+    if [[ -f "$auth_home/.ssh/authorized_keys" ]]; then
+      chown "$fed_user:$fed_user" "$auth_home/.ssh/authorized_keys"
+      chmod 600 "$auth_home/.ssh/authorized_keys"
+    fi
+  fi
 }
 
 apply_root_group_permissions() {
@@ -271,9 +327,11 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
-  chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chown "$ROOT_OWN" "$PREFIX/federation-bridge.sh"
+  chmod 755 "$PREFIX/federation-bridge.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/game_ratings.json"
     chmod 660 "$PREFIX/game_ratings.json"
@@ -285,6 +343,7 @@ apply_root_group_permissions() {
 
   chown -R "root:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  apply_federation_permissions
 }
 
 user_in_group() {
@@ -657,7 +716,7 @@ fi
 
 FED_DIR="$PREFIX/federation"
 mkdir -p "$FED_DIR"
-chmod 700 "$FED_DIR"
+chmod 751 "$FED_DIR"
 if [[ ! -f "$FED_DIR/id_ed25519" ]]; then
   ssh-keygen -t ed25519 -f "$FED_DIR/id_ed25519" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)" >/dev/null
   echo "info: generated federation key $FED_DIR/id_ed25519.pub"
@@ -676,12 +735,11 @@ if [[ "$CREATE_RUN_USER" -eq 1 ]] && ! is_darwin; then
       echo "info: created federation user $FED_USER (for inbound peer SSH)"
     fi
   fi
+  if id "$FED_USER" &>/dev/null; then
+    add_user_to_client_group "$FED_USER" || true
+  fi
 fi
-if [[ "$RUN_USER" != "root" ]]; then
-  chown -R "$RUN_USER:$RUN_USER" "$FED_DIR"
-  chmod 600 "$FED_DIR/id_ed25519" 2>/dev/null || true
-  chmod 644 "$FED_DIR/id_ed25519.pub" 2>/dev/null || true
-fi
+apply_federation_permissions
 
 if [[ "$RESET_ALL_RATINGS" -eq 1 ]]; then
   echo "info: resetting all persisted board-game ratings"
@@ -724,9 +782,11 @@ elif is_darwin; then
 else
   chown -R "$ROOT_OWN" "$PREFIX"
   chmod 755 "$PREFIX"
-  chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+  chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 755 "$PREFIX/federation-bridge.sh"
   chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
+  apply_federation_permissions
 fi
 
 CHAT_ABS=$(cd "$(dirname "$PREFIX/chat.sh")" && pwd)/$(basename "$PREFIX/chat.sh")
@@ -754,6 +814,7 @@ After=network.target
 Type=simple
 ${SVC_USER}WorkingDirectory=$PREFIX
 EnvironmentFile=-$PREFIX/sshchat.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$PREFIX/venv/bin/python $PREFIX/server.py
 Restart=on-failure
 TimeoutStopSec=15

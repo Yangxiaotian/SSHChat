@@ -118,6 +118,16 @@ PY
 
 echo "info: removed $PEER_NODE_ID from $PEERS_JSON"
 
+chmod 640 "$PEERS_JSON" 2>/dev/null || true
+SVC_USER=${SSHCHAT_RUN_USER:-}
+if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
+  SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
+fi
+SVC_USER=${SVC_USER:-sshchat}
+if id "$SVC_USER" &>/dev/null; then
+  chown "$SVC_USER:$SVC_USER" "$PEERS_JSON" 2>/dev/null || true
+fi
+
 if [[ -z "$PEER_PUBKEY" && -n "$STORED_PUBKEY" ]]; then
   PEER_PUBKEY=$STORED_PUBKEY
 fi
