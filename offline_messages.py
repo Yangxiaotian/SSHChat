@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -101,6 +102,9 @@ class OfflineMessageStore:
             ts = 0.0
         kind = str(item.get("kind") or "pm").strip() or "pm"
         out: dict[str, Any] = {"from": sender, "text": text, "ts": ts, "kind": kind}
+        leave_id = str(item.get("id") or "").strip()
+        if leave_id:
+            out["id"] = leave_id
         meta = item.get("meta")
         if isinstance(meta, dict):
             out["meta"] = dict(meta)
@@ -114,6 +118,7 @@ class OfflineMessageStore:
         *,
         kind: str = "pm",
         meta: dict[str, Any] | None = None,
+        leave_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Enqueue a leave-message. Returns the stored entry, or None if invalid.
 
@@ -128,7 +133,9 @@ class OfflineMessageStore:
         msg_kind = (kind or "pm").strip() or "pm"
         if msg_kind != "file" and len(body) > self.max_text_len:
             body = body[: self.max_text_len]
+        lid = str(leave_id or "").strip() or secrets.token_hex(8)
         entry: dict[str, Any] = {
+            "id": lid,
             "from": sender_name,
             "to_display": (recipient or "").strip() or key,
             "text": body,
@@ -144,12 +151,71 @@ class OfflineMessageStore:
             box = mailboxes.get(key)
             if not isinstance(box, list):
                 box = []
+            # File leaves are keyed by transfer_id so federated seeding is idempotent.
+            if msg_kind == "file" and isinstance(meta, dict):
+                tid = str(meta.get("transfer_id") or "").strip()
+                if tid:
+                    for existing in box:
+                        if not isinstance(existing, dict):
+                            continue
+                        if str(existing.get("kind") or "") != "file":
+                            continue
+                        em = existing.get("meta")
+                        if (
+                            isinstance(em, dict)
+                            and str(em.get("transfer_id") or "").strip() == tid
+                        ):
+                            return dict(existing)
+            # Text/file leaves with the same federated id are idempotent.
+            for existing in box:
+                if not isinstance(existing, dict):
+                    continue
+                if str(existing.get("id") or "").strip() == lid:
+                    return dict(existing)
             box.append(entry)
             if len(box) > self.max_per_user:
                 box = box[-self.max_per_user :]
             mailboxes[key] = box
             self._save_locked()
             return dict(entry)
+
+    def remove_file_by_transfer(
+        self, recipient: str, transfer_id: str
+    ) -> list[dict[str, Any]]:
+        """Remove pending file leave(s) for recipient matching transfer_id."""
+        key = _normalize_user(recipient)
+        tid = str(transfer_id or "").strip()
+        if not key or not tid:
+            return []
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            mailboxes = self._cache["mailboxes"]
+            box = mailboxes.get(key)
+            if not isinstance(box, list) or not box:
+                return []
+            kept: list[Any] = []
+            removed: list[dict[str, Any]] = []
+            for item in box:
+                parsed = self._parse_entry(item)
+                if parsed is None:
+                    continue
+                if (parsed.get("kind") or "pm") != "file":
+                    kept.append(item)
+                    continue
+                meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+                if str(meta.get("transfer_id") or "").strip() == tid:
+                    removed.append(parsed)
+                else:
+                    kept.append(item)
+            if not removed:
+                return []
+            if kept:
+                mailboxes[key] = kept
+            else:
+                mailboxes.pop(key, None)
+            self._save_locked()
+            return removed
 
     def list_sent_unread(
         self,
@@ -249,6 +315,8 @@ class OfflineMessageStore:
                         "index": want,
                         "kind": parsed.get("kind") or "pm",
                     }
+                    if parsed.get("id"):
+                        removed["id"] = parsed["id"]
                     if "meta" in parsed:
                         removed["meta"] = parsed["meta"]
                     break
@@ -261,6 +329,34 @@ class OfflineMessageStore:
                 mailboxes.pop(to_key, None)
             self._save_locked()
             return removed
+
+    def remove_by_id(self, recipient: str, leave_id: str) -> dict[str, Any] | None:
+        """Remove one pending leave by federated id."""
+        key = _normalize_user(recipient)
+        lid = str(leave_id or "").strip()
+        if not key or not lid:
+            return None
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            mailboxes = self._cache["mailboxes"]
+            box = mailboxes.get(key)
+            if not isinstance(box, list) or not box:
+                return None
+            for i, item in enumerate(box):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("id") or "").strip() != lid:
+                    continue
+                parsed = self._parse_entry(item)
+                del box[i]
+                if box:
+                    mailboxes[key] = box
+                else:
+                    mailboxes.pop(key, None)
+                self._save_locked()
+                return parsed
+            return None
 
     def take_all(self, recipient: str) -> list[dict[str, Any]]:
         """Pop and return all pending messages for recipient (clears mailbox)."""
