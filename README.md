@@ -126,34 +126,49 @@ sudo ./deploy.sh --client-ssh-host 你的域名或公网IP --client-ssh-port 22
 
 没有域名、只有 IP，就把 IP 写在 `--client-ssh-host` 里。
 
-**文件收发（`/sendfile`）相关参数**，默认就已启用，装完即可用：
+**文件收发（`/sendfile`）相关参数**，默认就已启用，并用 **Cloudflare Quick Tunnel** 给出公网 `https://*.trycloudflare.com` 链接（无需开放 8443 端口）：
 
 | 参数 | 作用 |
 |------|------|
-| `--file-domain 域名` | 文件网页用这个域名申请 **Let's Encrypt** 证书（需要机器上有 `certbot`，且 80 端口可达）。不填则用自签名证书 |
-| `--file-port N` | 文件网页监听端口，默认 `8443` |
-| `--no-file-https` | 只用 HTTP，不加密（仅建议内网测试） |
+| `--cloudflare` | 强制启用 Cloudflare 隧道（**默认已开**） |
+| `--no-cloudflare` | 不用隧道：自签名 HTTPS，或配合 `--file-domain` |
+| `--file-domain 域名` | 文件网页用这个域名申请 **Let's Encrypt**（会自动关掉 Cloudflare 隧道；需要 `certbot` 且 80 可达） |
+| `--file-port N` | 本机文件网页端口，默认 `8443`（走 Cloudflare 时只监听本机，不必对公网开放） |
+| `--no-file-https` | 本机只用 HTTP（Cloudflare 模式下本来就是 HTTP） |
 | `--no-file-transfer` | 完全关闭文件收发功能 |
 
-有域名的话推荐这样装，用户点开链接不会看到证书警告：
+推荐（默认即可）：
+
+```bash
+sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22
+```
+
+有自己的域名、想用 Let's Encrypt 而不是临时 `trycloudflare.com`：
 
 ```bash
 sudo ./deploy.sh --client-ssh-host chat.example.com --client-ssh-port 22 \
   --file-domain chat.example.com
 ```
 
-只有 IP、没有域名时不用加 `--file-domain`，会自动生成自签名证书；浏览器首次打开会提示「不安全」，需要手动点继续。
+内网自测、不要公网隧道：
 
-装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务）：
+```bash
+sudo ./deploy.sh --client-ssh-host 10.0.0.5 --no-cloudflare
+```
+
+装完后这些值写在 `sshchat.env` 里，可直接改（改完重启服务；Cloudflare 模式下公网域名一般由 `sshchat-cloudflared` 自动改写）：
 
 | 变量 | 说明 |
 |------|------|
-| `SSHCHAT_FILE_PUBLIC_HOST` | **发给用户的网址用哪个地址**。部署时自动填成 `--client-ssh-host` 的值。服务监听的是 `0.0.0.0`，不能直接给用户，所以这个值填错的话用户点开链接会打不开 |
-| `SSHCHAT_FILE_STORAGE_DIR` | 文件存储目录，默认 `/tmp/sshchat_files`（注意重启机器会清空 `/tmp`，要长期保留就改到别处） |
+| `SSHCHAT_FILE_PUBLIC_HOST` | **发给用户的网址用哪个地址**。开 Cloudflare 时会自动写成 `*.trycloudflare.com`；关隧道时部署会填成 `--client-ssh-host` |
+| `SSHCHAT_FILE_PUBLIC_PORT` | 外链端口；Cloudflare 下为 `443` |
+| `SSHCHAT_FILE_STORAGE_DIR` | 文件存储目录；Cloudflare 默认 `/var/lib/sshchat/files`（比 `/tmp` 更耐重启） |
 | `SSHCHAT_MAX_FILE_SIZE` | 单文件大小上限，默认 100MB |
 | `SSHCHAT_ONE_TIME_DOWNLOAD` | 下载链接是否只能用一次，默认 `1`。设 `0` 才允许重复下载，会削弱安全性，不推荐 |
 | `SSHCHAT_TICKET_TTL_SECONDS` | 预览/下载一次性链接的有效期，默认 `600`（10 分钟） |
 | `SSHCHAT_MAX_PREVIEW_SIZE` | 超过这个大小就不预览、直接走下载，默认 25MB |
+
+Quick Tunnel 无账号、URL 会变；进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活。若被 Cloudflare 限流，可稍后执行仓库里的 `scripts/start-cloudflared-once.sh`。
 
 ### 2. 给聊天的人开账号并登记公钥
 
@@ -167,10 +182,15 @@ sudo /opt/sshchat/admin-add-user.sh 用户名 ssh-ed25519 AAAA... 备注可选
 
 除 SSH 端口外，若聊天服务监听非本机回环，可能还需放行 **`sshchat.env` 里配置的聊天端口**（默认常见为 `12345`，与 SSH 端口不是同一个）。云厂商安全组里一并放行。
 
-用到 `/sendfile` 还需放行**文件网页端口**（默认 `8443`）；若用 `--file-domain` 走 Let's Encrypt，申请证书时还要临时放行 **80** 端口：
+**默认走 Cloudflare 隧道时，不必放行文件端口 `8443`。** 仅在 `--no-cloudflare` 或用户要直连本机文件口时才需要：
 
 ```bash
 sudo ufw allow 8443/tcp
+```
+
+若用 `--file-domain` 走 Let's Encrypt，申请证书时还要临时放行 **80** 端口：
+
+```bash
 sudo ufw allow 80/tcp   # 仅 Let's Encrypt 签发/续期需要
 ```
 

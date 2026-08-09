@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-shot install: copy app under PREFIX, venv + prompt_toolkit, sshchat.env, systemd unit.
 # Linux: systemd + service user. macOS: auto local-dev (no useradd/groupadd/systemd).
+# File transfer defaults to Cloudflare Quick Tunnel (override with --no-cloudflare / --file-domain).
 #
 #   sudo ./deploy.sh
 #   sudo ./deploy.sh --prefix /Shared --server-ip 10.0.0.5 --port 12345
@@ -42,6 +43,10 @@ FILE_TRANSFER_ENABLED="${SSHCHAT_FILE_TRANSFER_ENABLED:-1}"
 FILE_HTTP_PORT="${SSHCHAT_FILE_HTTP_PORT:-8443}"
 FILE_DOMAIN="${SSHCHAT_FILE_DOMAIN:-}"
 FILE_USE_HTTPS="${SSHCHAT_FILE_USE_HTTPS:-1}"
+# Cloudflare Quick Tunnel for /sendfile public URLs (default on; skip with --no-cloudflare
+# or when --file-domain is set for Let's Encrypt).
+USE_CLOUDFLARE="${SSHCHAT_USE_CLOUDFLARE:-1}"
+FILE_STORAGE_DIR="${SSHCHAT_FILE_STORAGE_DIR:-/var/lib/sshchat/files}"
 
 is_darwin() {
   [[ "$(uname -s)" == "Darwin" ]]
@@ -112,10 +117,12 @@ Options:
   --run-user NAME    User to run the server as (default: $RUN_USER)
   --no-run-user      Do not create user; install as root (manual server only)
   --client-ssh-host HOST  Hostname/IP for end-user ssh / GUI installers (default: --server-ip if not loopback, else auto-detect)
-  --file-domain DOMAIN    Domain name for file transfer HTTPS (enables Let's Encrypt; default: none, uses self-signed)
-  --file-port N      HTTP/HTTPS port for file transfers (default: $FILE_HTTP_PORT)
-  --no-file-https    Disable HTTPS for file transfers (use HTTP only)
+  --file-domain DOMAIN    Domain for file HTTPS via Let's Encrypt (disables Cloudflare tunnel)
+  --file-port N      Local file HTTP port (default: $FILE_HTTP_PORT; behind Cloudflare this stays private)
+  --no-file-https    Disable HTTPS for file transfers (use HTTP only; implied by Cloudflare mode)
   --no-file-transfer Disable file transfer feature entirely
+  --cloudflare       Force-enable Cloudflare Quick Tunnel for /sendfile (default: on)
+  --no-cloudflare    Do not install/start Cloudflare tunnel (self-signed or --file-domain instead)
   --client-ssh-port PORT  sshd port embedded in client-bundle.json (default: $CLIENT_SSH_PORT)
   --build-gui-packages    After install, run scripts/build-gui-packages.sh if present (needs tkinter + PyInstaller)
   --reset-all-ratings     Reset all persisted chess/gomoku/xiangqi ratings before restart
@@ -260,6 +267,11 @@ apply_data_plane_permissions() {
 
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
   chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+
+  if [[ -d /var/lib/sshchat/files ]]; then
+    chown -R "$u:$u" /var/lib/sshchat/files
+    chmod 750 /var/lib/sshchat/files
+  fi
 
   apply_federation_permissions
 }
@@ -544,6 +556,14 @@ while [[ $# -gt 0 ]]; do
       FILE_TRANSFER_ENABLED=0
       shift
       ;;
+    --cloudflare)
+      USE_CLOUDFLARE=1
+      shift
+      ;;
+    --no-cloudflare)
+      USE_CLOUDFLARE=0
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -572,6 +592,18 @@ if is_darwin && [[ "${SSHCHAT_NO_MAC_ADAPT:-}" != "1" ]]; then
     CREATE_RUN_USER=0
     INSTALL_SYSTEMD=0
   fi
+fi
+
+if [[ "$FILE_TRANSFER_ENABLED" -eq 0 ]]; then
+  USE_CLOUDFLARE=0
+fi
+if [[ -n "$FILE_DOMAIN" && "$USE_CLOUDFLARE" -eq 1 ]]; then
+  echo "info: --file-domain set; skipping Cloudflare tunnel (Let's Encrypt mode)" >&2
+  USE_CLOUDFLARE=0
+fi
+if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
+  FILE_USE_HTTPS=0
+  echo "info: Cloudflare Quick Tunnel enabled for /sendfile (disable with --no-cloudflare)" >&2
 fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
@@ -696,7 +728,40 @@ umask 022
 if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
   echo "info: keeping existing $PREFIX/sshchat.env (--keep-env)"
 else
-  cat >"$PREFIX/sshchat.env" <<EOF
+  if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
+    cat >"$PREFIX/sshchat.env" <<EOF
+SSHCHAT_SERVER=$SERVER_IP
+SSHCHAT_PORT=$PORT
+SSHCHAT_FEDERATION_PORT=$((PORT + 1))
+SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
+SSHCHAT_ALERT_SOUND=auto
+# 联邦互联：互信节点用 admin-add-peer.sh / admin-remove-peer.sh 登记或拆除；同名用户/房间跨服合并。
+# 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
+# /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
+# 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
+# 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
+
+# 文件传输：本机 HTTP + Cloudflare Quick Tunnel（公网 https://*.trycloudflare.com）
+SSHCHAT_FILE_TRANSFER_ENABLED=$FILE_TRANSFER_ENABLED
+SSHCHAT_FILE_HTTP_HOST=127.0.0.1
+SSHCHAT_FILE_HTTP_PORT=$FILE_HTTP_PORT
+SSHCHAT_FILE_USE_HTTPS=0
+SSHCHAT_FILE_DOMAIN=
+# 隧道起来后由 sshchat-cloudflared 自动改写为 *.trycloudflare.com
+SSHCHAT_FILE_PUBLIC_HOST=$CLIENT_SSH_HOST
+SSHCHAT_FILE_PUBLIC_PORT=443
+SSHCHAT_FILE_STORAGE_DIR=$FILE_STORAGE_DIR
+# 最大文件大小（字节）：默认 100MB
+# SSHCHAT_MAX_FILE_SIZE=104857600
+# 下载链接是否只能用一次：默认 1（下载完成即作废）。设 0 会削弱安全性，不推荐
+# SSHCHAT_ONE_TIME_DOWNLOAD=0
+# 预览/下载一次性链接的有效期（秒）：默认 600
+# SSHCHAT_TICKET_TTL_SECONDS=600
+# 超过此大小不做在线预览，直接走下载：默认 25MB
+# SSHCHAT_MAX_PREVIEW_SIZE=26214400
+EOF
+  else
+    cat >"$PREFIX/sshchat.env" <<EOF
 SSHCHAT_SERVER=$SERVER_IP
 SSHCHAT_PORT=$PORT
 SSHCHAT_FEDERATION_PORT=$((PORT + 1))
@@ -726,6 +791,44 @@ SSHCHAT_FILE_PUBLIC_HOST=$CLIENT_SSH_HOST
 # 超过此大小不做在线预览，直接走下载：默认 25MB
 # SSHCHAT_MAX_PREVIEW_SIZE=26214400
 EOF
+  fi
+fi
+
+if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
+  mkdir -p "$FILE_STORAGE_DIR" /var/lib/sshchat/cloudflared
+  # Even with --keep-env, force tunnel-compatible local listener settings.
+  if [[ -f "$PREFIX/sshchat.env" ]]; then
+    python3 - <<PY
+from pathlib import Path
+p = Path("$PREFIX/sshchat.env")
+text = p.read_text(encoding="utf-8")
+lines = text.splitlines()
+keys = {
+    "SSHCHAT_FILE_TRANSFER_ENABLED": "1",
+    "SSHCHAT_FILE_HTTP_HOST": "127.0.0.1",
+    "SSHCHAT_FILE_HTTP_PORT": "$FILE_HTTP_PORT",
+    "SSHCHAT_FILE_USE_HTTPS": "0",
+    "SSHCHAT_FILE_PUBLIC_PORT": "443",
+    "SSHCHAT_FILE_STORAGE_DIR": "$FILE_STORAGE_DIR",
+}
+seen = set()
+out = []
+for line in lines:
+    if line.startswith("# File transfer via Cloudflare Tunnel"):
+        continue
+    if "=" in line and not line.lstrip().startswith("#"):
+        k = line.split("=", 1)[0]
+        if k in keys:
+            out.append(f"{k}={keys[k]}")
+            seen.add(k)
+            continue
+    out.append(line)
+for k, v in keys.items():
+    if k not in seen:
+        out.append(f"{k}={v}")
+p.write_text("\\n".join(out) + "\\n", encoding="utf-8")
+PY
+  fi
 fi
 
 FED_DIR="$PREFIX/federation"
@@ -855,6 +958,41 @@ else
   echo "info: server log: $PREFIX/server.log"
 fi
 
+if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
+  CF_SETUP="$SCRIPT_DIR/scripts/setup-cloudflared-file-tunnel.sh"
+  if [[ -f "$CF_SETUP" ]]; then
+    chmod +x "$CF_SETUP" "$SCRIPT_DIR/scripts/sshchat-cloudflared-tunnel.sh" 2>/dev/null || true
+    echo "info: configuring Cloudflare Quick Tunnel for file transfer..."
+    if ! "$CF_SETUP" --prefix "$PREFIX" --env-file "$PREFIX/sshchat.env" --port "$FILE_HTTP_PORT" --wait-url 90; then
+      echo "warning: Cloudflare tunnel setup reported issues; /sendfile public links may be unavailable until it recovers" >&2
+      echo "hint: sudo $CF_SETUP --prefix $PREFIX" >&2
+      echo "hint: if rate-limited: sudo $SCRIPT_DIR/scripts/start-cloudflared-once.sh" >&2
+    fi
+    # Re-apply env ownership if the tunnel helper rewrote sshchat.env as root
+    if [[ "$CREATE_RUN_USER" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
+      chown "$RUN_USER:$CLIENT_GROUP" "$PREFIX/sshchat.env"
+      chmod 640 "$PREFIX/sshchat.env"
+    elif is_darwin && [[ -f "$PREFIX/sshchat.env" ]]; then
+      chown "root:$CLIENT_GROUP" "$PREFIX/sshchat.env" 2>/dev/null || true
+      chmod 640 "$PREFIX/sshchat.env"
+    fi
+    if [[ -d "$FILE_STORAGE_DIR" && "$CREATE_RUN_USER" -eq 1 ]]; then
+      chown -R "$RUN_USER:$RUN_USER" "$FILE_STORAGE_DIR"
+      chmod 750 "$FILE_STORAGE_DIR"
+    fi
+  else
+    echo "warning: missing $CF_SETUP; skip Cloudflare tunnel" >&2
+  fi
+else
+  # Opting out: stop a previously installed tunnel so old trycloudflare URLs do not linger.
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files sshchat-cloudflared.service >/dev/null 2>&1; then
+    systemctl disable --now sshchat-cloudflared.service 2>/dev/null || true
+  fi
+  if is_darwin && [[ -f /Library/LaunchDaemons/com.sshchat.cloudflared.plist ]]; then
+    launchctl bootout system /Library/LaunchDaemons/com.sshchat.cloudflared.plist 2>/dev/null || true
+  fi
+fi
+
 echo
 echo "Install path:     $PREFIX"
 echo "Client connects:  $SERVER_IP port $PORT (see $PREFIX/sshchat.env)"
@@ -871,6 +1009,16 @@ else
 fi
 echo "Optional: open firewall for TCP $PORT"
 echo "GUI bundle:     $CLIENT_BUNDLE_JSON  (host=$CLIENT_SSH_HOST ssh_port=$CLIENT_SSH_PORT)"
+if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
+  if [[ -f /var/lib/sshchat/cloudflared/public_url ]]; then
+    echo "File URL:       $(cat /var/lib/sshchat/cloudflared/public_url)  (Cloudflare Quick Tunnel)"
+  else
+    echo "File URL:       Cloudflare tunnel pending (see /var/lib/sshchat/cloudflared/)"
+  fi
+  echo "Note:           with Cloudflare, no need to open firewall for file port $FILE_HTTP_PORT"
+elif [[ "$FILE_TRANSFER_ENABLED" -eq 1 ]]; then
+  echo "File port:      $FILE_HTTP_PORT (open firewall if users fetch files from outside)"
+fi
 
 # Always show federation identity (needed to peer with other servers).
 if [[ -f "$PREFIX/sshchat.env" ]]; then
