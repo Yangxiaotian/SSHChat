@@ -130,6 +130,12 @@ class FederationHub:
         on_library_page_result: Optional[
             Callable[[str, str, dict[str, Any]], None]
         ] = None,
+        get_local_library_bookmarks: Optional[
+            Callable[[], list[dict[str, Any]]]
+        ] = None,
+        on_library_bookmarks: Optional[
+            Callable[[str, str, dict[str, Any]], None]
+        ] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -153,6 +159,10 @@ class FederationHub:
         self.on_library_page_request = on_library_page_request
         # from_peer, req_id, payload(dict)
         self.on_library_page_result = on_library_page_result
+        # () -> [{"name": nick, "books": {book_key: {page, updated_ts, ...}}}]
+        self.get_local_library_bookmarks = get_local_library_bookmarks
+        # origin_node, nick, books_dict
+        self.on_library_bookmarks = on_library_bookmarks
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -569,6 +579,23 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
+    def sync_library_bookmarks(
+        self, nick: str, books: Optional[dict[str, Any]] = None
+    ) -> None:
+        """Fan-out one user's library bookmarks for same-nick merge on peers."""
+        if not self.enabled or not self._peers:
+            return
+        nick = str(nick or "").strip()
+        if not nick or not isinstance(books, dict) or not books:
+            return
+        blob = base64.b64encode(
+            json.dumps(books, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        nonce = str(time.time_ns())
+        line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
     def request_library_page(
         self, owner_node: str, req_id: str, book_name: str, page: int
     ) -> bool:
@@ -849,6 +876,32 @@ class FederationHub:
             line = f"lcatalog\t{origin}\t{remote_blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
+        self._push_library_bookmarks(link)
+
+    def _push_library_bookmarks(self, link: _PeerLink) -> None:
+        """Send local users' bookmarks (and known remote copies) to a new peer."""
+        rows: list[dict[str, Any]] = []
+        if self.get_local_library_bookmarks is not None:
+            try:
+                rows = self.get_local_library_bookmarks() or []
+            except Exception as e:
+                print(f"federation: get_local_library_bookmarks error: {e!r}")
+                rows = []
+        if not isinstance(rows, list):
+            rows = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            nick = str(item.get("name") or "").strip()
+            books = item.get("books")
+            if not nick or not isinstance(books, dict) or not books:
+                continue
+            blob = base64.b64encode(
+                json.dumps(books, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
+            self._remember_seen(line)
+            link.send_line(line)
 
     def _forward_unicast_for_nick(
         self,
@@ -951,6 +1004,29 @@ class FederationHub:
                 return
             self._learn_route(origin, peer_node)
             self._remote_library_bulk(origin, b64)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lmarks":
+            if self._remember_seen(line):
+                return
+            mark_parts = line.split("\t", 4)
+            if len(mark_parts) < 4:
+                return
+            origin, nick, b64 = mark_parts[1], mark_parts[2], mark_parts[3]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                books = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(books, dict) and self.on_library_bookmarks is not None:
+                try:
+                    self.on_library_bookmarks(origin, nick, books)
+                except Exception as e:
+                    print(f"federation: on_library_bookmarks error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "lpage":
@@ -1356,6 +1432,7 @@ class FederationHub:
                     buffer += chunk
                     if len(buffer) > 65536:
                         return
+                    continue
                 line_b, buffer = buffer.split(b"\n", 1)
                 line = line_b.decode("utf-8", errors="replace").strip()
                 if not line.startswith("@fed"):
@@ -1391,8 +1468,15 @@ class FederationHub:
                     if not chunk:
                         break
                     buffer += chunk
+                    # Large frames (lpage_ok, gsync) often span many recv()s; wait
+                    # for the terminating newline instead of splitting early.
                     if len(buffer) > 1048576:
+                        print(
+                            f"federation: dropping peer {peer_node}: "
+                            f"line exceeds 1 MiB without newline"
+                        )
                         break
+                    continue
                 line_b, buffer = buffer.split(b"\n", 1)
                 line = line_b.decode("utf-8", errors="replace")
                 link.handle_line(line)
@@ -1552,7 +1636,12 @@ class FederationHub:
                     break
                 buffer += chunk
                 if len(buffer) > 1048576:
+                    print(
+                        f"federation: dropping peer {peer_node}: "
+                        f"line exceeds 1 MiB without newline"
+                    )
                     break
+                continue
             line_b, buffer = buffer.split(b"\n", 1)
             line = line_b.decode("utf-8", errors="replace").strip()
             if not registered:
@@ -1656,6 +1745,12 @@ def init_hub(
     on_library_page_result: Optional[
         Callable[[str, str, dict[str, Any]], None]
     ] = None,
+    get_local_library_bookmarks: Optional[
+        Callable[[], list[dict[str, Any]]]
+    ] = None,
+    on_library_bookmarks: Optional[
+        Callable[[str, str, dict[str, Any]], None]
+    ] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -1675,5 +1770,7 @@ def init_hub(
         get_local_library,
         on_library_page_request,
         on_library_page_result,
+        get_local_library_bookmarks,
+        on_library_bookmarks,
     )
     return _hub

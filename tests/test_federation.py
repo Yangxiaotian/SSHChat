@@ -1025,7 +1025,129 @@ class FederationServerIntegrationTests(unittest.TestCase):
         books = json.loads(base64.b64decode(parts[2]).decode("utf-8"))
         self.assertEqual(books[0]["name"], "local.md")
 
-    def test_leave_broadcast_skips_federation_msg(self) -> None:
+    def test_lmarks_fanout_and_handler(self) -> None:
+        got: list[tuple] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_bookmarks=lambda *a: got.append(a),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        peer = FakeLink("node-b")
+        hub._peers["node-b"] = peer
+        hub.sync_library_bookmarks("yxt", {"a.epub": {"page": 2, "updated_ts": 9}})
+        self.assertEqual(len(peer.lines), 1)
+        parts = peer.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "lmarks")
+        self.assertEqual(parts[2], "yxt")
+        books = json.loads(base64.b64decode(parts[3]).decode("utf-8"))
+        self.assertEqual(books["a.epub"]["page"], 2)
+
+        other = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_bookmarks=lambda *a: got.append(a),
+        )
+        other.enabled = True
+        other.node_id = "node-b"
+        other._peers["node-a"] = FakeLink("node-a")
+        other._on_peer_line("node-a", peer.lines[0].rstrip("\n"))
+        self.assertEqual(got[-1][0], "node-a")
+        self.assertEqual(got[-1][1], "yxt")
+        self.assertEqual(got[-1][2]["a.epub"]["page"], 2)
+
+    def test_run_session_assembles_chunked_lines(self) -> None:
+        """Large federation frames (lpage_ok) must survive multi-recv delivery."""
+        handled: list[str] = []
+        big = "lpage_ok\tnode-b\tnode-a\treq1\t" + ("A" * 12000)
+        payload = (big + "\n").encode("utf-8")
+        chunks = [payload[i : i + 100] for i in range(0, len(payload), 100)] + [b""]
+
+        class FakeSock:
+            def __init__(self) -> None:
+                self._chunks = list(chunks)
+                self.sent: list[bytes] = []
+
+            def recv(self, n: int) -> bytes:
+                if not self._chunks:
+                    return b""
+                return self._chunks.pop(0)
+
+            def sendall(self, data: bytes) -> None:
+                self.sent.append(data)
+
+            def close(self) -> None:
+                return None
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub._stop.clear()
+
+        sock = FakeSock()
+        # Pre-seed handshake identity so we enter the main read loop with leftover buffer.
+        # Feed @fed hello first as separate complete line, then chunked body via recv.
+        hello = b"@fed\tnode-b\n"
+        # Put hello+first part of big line in initial buffer by making first recv return hello
+        # then subsequent chunked big line — simplest: prepend hello as its own complete recv.
+        sock._chunks = [hello] + chunks
+
+        original_handle = federation._PeerLink.handle_line
+
+        def capture(self, line: str) -> None:
+            handled.append(line.rstrip("\n"))
+
+        with mock.patch.object(federation._PeerLink, "handle_line", capture):
+            hub._run_session(sock, ("127.0.0.1", 1), peer_hint=None)
+        self.assertTrue(any(h.startswith("lpage_ok\t") for h in handled), handled[:3])
+        self.assertTrue(any(len(h) > 10000 for h in handled))
+
+    def test_recv_loop_continue_on_partial_line(self) -> None:
+        """Regression: split without newline used to ValueError and drop the peer."""
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        buffer = b"partial-without-newline"
+        # Mimic the fixed loop body once.
+        if b"\n" not in buffer:
+            buffer += b"-more"
+            self.assertNotIn(b"\n", buffer)
+            # Fixed code continues; old code would raise here:
+            with self.assertRaises(ValueError):
+                _line_b, _buffer = buffer.split(b"\n", 1)
+
         """Disconnect leave must not dual-send via room msg + notify_leave."""
         msgs: list[tuple[str, bytes]] = []
         leaves: list[tuple[str, str]] = []

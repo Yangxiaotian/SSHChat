@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -31,15 +32,52 @@ class TestLibraryBookmarks(unittest.TestCase):
 
     def test_clear_book(self) -> None:
         self.store.set_page("carol", "x.epub", 5)
-        self.assertTrue(self.store.clear_book("Carol", "x.epub"))
+        cleared = self.store.clear_book("Carol", "x.epub")
+        self.assertIsNotNone(cleared)
         self.assertIsNone(self.store.get_page("carol", "x.epub"))
-        self.assertFalse(self.store.clear_book("carol", "x.epub"))
+        self.assertIsNone(self.store.clear_book("carol", "x.epub"))
 
     def test_users_are_isolated(self) -> None:
         self.store.set_page("dave", "book.txt", 7)
         self.store.set_page("erin", "book.txt", 2)
         self.assertEqual(self.store.get_page("dave", "book.txt"), 7)
         self.assertEqual(self.store.get_page("erin", "book.txt"), 2)
+
+
+class TestLibraryBookmarkFederationMerge(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = library.LibraryBookmarkStore(
+            str(Path(self.tmp.name) / "bookmarks.json")
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_merge_lww_keeps_newer_page(self) -> None:
+        self.store.set_page("yxt", "a.epub", 1)
+        older = {"a.epub": {"page": 9, "updated_ts": 1}}
+        newer = {"a.epub": {"page": 3, "updated_ts": int(time.time()) + 10}}
+        self.assertTrue(self.store.merge_from_remote("YXT", newer))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+        self.assertFalse(self.store.merge_from_remote("yxt", older))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+
+    def test_merge_delete_tombstone(self) -> None:
+        self.store.set_page("yxt", "peer::b.txt", 4)
+        ts = int(time.time()) + 5
+        self.assertTrue(
+            self.store.merge_from_remote(
+                "yxt", {"peer::b.txt": {"deleted": True, "updated_ts": ts}}
+            )
+        )
+        self.assertIsNone(self.store.get_page("yxt", "peer::b.txt"))
+
+    def test_export_includes_federated_keys(self) -> None:
+        self.store.set_page("yxt", "Math::book.epub", 7)
+        exported = self.store.export_user("yxt")
+        self.assertIn("Math::book.epub", exported)
+        self.assertEqual(exported["Math::book.epub"]["page"], 7)
 
 
 class TestLibraryTxt(unittest.TestCase):

@@ -1758,6 +1758,45 @@ def _federation_sync_library_catalog() -> None:
         print(f"federation: library catalog sync failed: {e!r}")
 
 
+def _fed_local_library_bookmarks_snapshot() -> list[dict]:
+    """Bookmarks for locally connected nicks (for peer catch-up)."""
+    with lock:
+        names = {str(info.get("name") or "").strip() for info in clients.values()}
+    rows: list[dict] = []
+    for name in sorted(names, key=lambda n: n.lower()):
+        if not name:
+            continue
+        books = library_bookmarks.export_user(name)
+        if books:
+            rows.append({"name": name, "books": books})
+    return rows
+
+
+def _federation_sync_library_bookmarks(
+    user: str, entries: Optional[dict] = None
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if entries is None:
+        entries = library_bookmarks.export_user(user)
+    if not entries:
+        return
+    try:
+        hub.sync_library_bookmarks(user, entries)
+    except Exception as e:
+        print(f"federation: library bookmark sync failed: {e!r}")
+
+
+def _fed_on_library_bookmarks(_origin: str, nick: str, books: dict) -> None:
+    if not isinstance(books, dict) or not nick:
+        return
+    try:
+        library_bookmarks.merge_from_remote(nick, books)
+    except Exception as e:
+        print(f"federation: merge library bookmarks failed: {e!r}")
+
+
 def _fed_on_library_page_request(
     _owner: str, req_id: str, book_name: str, page: int, requester: str
 ) -> None:
@@ -1854,7 +1893,8 @@ def _set_library_page(conn, user: str, path: Path, page: int) -> None:
     page = max(0, int(page))
     with lock:
         library_reading[conn] = {"path": str(path.resolve()), "page": page, "origin": ""}
-    library_bookmarks.set_page(user, path.name, page)
+    entries = library_bookmarks.set_page(user, path.name, page)
+    _federation_sync_library_bookmarks(user, entries)
 
 
 def _set_library_session(
@@ -1880,7 +1920,10 @@ def _set_library_session(
             "title": title,
             "total_pages": int(total_pages or 0),
         }
-    library_bookmarks.set_page(user, _library_bookmark_key(origin, name), page)
+    entries = library_bookmarks.set_page(
+        user, _library_bookmark_key(origin, name), page
+    )
+    _federation_sync_library_bookmarks(user, entries)
 
 
 def _send_library_page_payload(
@@ -2059,7 +2102,7 @@ def _handle_library(conn, payload: str) -> None:
         send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
         send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
         send_line(conn, "[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n")
-        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
+        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签（联邦同名同步）\n")
         send_line(conn, "[*]   /library reset <序号|文件名[@节点]> 清除某本书的书签\n")
         send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
         send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
@@ -2081,9 +2124,11 @@ def _handle_library(conn, payload: str) -> None:
             book_key = _library_bookmark_key(entry.origin, entry.name)
             label = f"{entry.name}{entry.display_origin()}"
         else:
-            book_key = Path(token).name
+            book_key = library.bookmark_book_key(token) or Path(token).name
             label = book_key
-        if library_bookmarks.clear_book(user, book_key):
+        cleared = library_bookmarks.clear_book(user, book_key)
+        if cleared:
+            _federation_sync_library_bookmarks(user, cleared)
             send_line(conn, f"[*] 已清除《{label}》的书签。\n")
         else:
             send_line(conn, f"[*] 《{label}》没有保存的书签。\n")
@@ -2319,8 +2364,7 @@ def _handle_library(conn, payload: str) -> None:
             send_line(
                 conn,
                 f"[*] 正在从节点 {entry.origin} 拉取 "
-                f"[{entry.ext.upper()}] {entry.name}…"
-                "（对端首次解析在子进程中进行，请稍候）\n",
+                f"[{entry.ext.upper()}] {entry.name}…（请稍候）\n",
             )
             try:
                 payload = _fetch_remote_library_page(entry.origin, entry.name, page)
@@ -3252,9 +3296,14 @@ def _ensure_federation_hub() -> None:
         _fed_local_library_snapshot,
         _fed_on_library_page_request,
         _fed_on_library_page_result,
+        _fed_local_library_bookmarks_snapshot,
+        _fed_on_library_bookmarks,
     )
     _fed_hub.start()
     _federation_sync_library_catalog()
+    # Push bookmarks for currently connected users once hub is up.
+    for row in _fed_local_library_bookmarks_snapshot():
+        _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
 
 
 def broadcast_room(
@@ -4227,6 +4276,7 @@ def handle_client(conn, addr) -> None:
         if hub is not None and hub.enabled:
             for room in inherited_rooms:
                 hub.notify_join(name, room)
+            _federation_sync_library_bookmarks(name)
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
