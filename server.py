@@ -2251,11 +2251,17 @@ def _federation_request_file_host(
     recipients: list[str],
     room: Optional[str],
     *,
-    timeout: float = 15.0,
+    timeout: float | None = None,
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return {"ok": False, "error": "federation disabled"}
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("SSHCHAT_FILE_FED_PROXY_TIMEOUT", "30") or "30")
+        except ValueError:
+            timeout = 30.0
+        timeout = max(5.0, timeout)
     req_id = secrets.token_hex(8)
     event = threading.Event()
     with _file_host_waiters_lock:
@@ -2272,7 +2278,10 @@ def _federation_request_file_host(
         ):
             return {"ok": False, "error": f"无法联系文件代理节点 {host_node}"}
         if not event.wait(timeout):
-            return {"ok": False, "error": "等待文件代理节点超时"}
+            return {
+                "ok": False,
+                "error": f"等待文件代理节点超时（{timeout:.0f}s）",
+            }
         with _file_host_waiters_lock:
             payload = _file_host_waiters.get(req_id, {}).get("payload")
         if not isinstance(payload, dict):
@@ -3226,9 +3235,28 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
             and hub.enabled
             and file_http_server.needs_federation_file_proxy(file_http.get_base_url())
         ):
+            # Peer may have connected before fpub arrived (catalog-first push on
+            # older builds). Nudge a local re-advertise from us; peers push on
+            # link-up — if pubs are still empty, tell the user clearly.
+            if not hub.has_remote_file_public():
+                try:
+                    _federation_sync_file_public()
+                except Exception:
+                    pass
             proxy_peer = hub.pick_file_public_peer()
-            if proxy_peer is not None:
-                host_node, _peer_url = proxy_peer
+            if proxy_peer is None:
+                send_line(
+                    conn,
+                    "[*] 联邦中暂无已广告的 Cloudflare/公网文件节点；"
+                    "使用本机地址（对端可能打不开）。\n",
+                )
+            else:
+                host_node, peer_url = proxy_peer
+                send_line(
+                    conn,
+                    f"[*] 正在向联邦节点 {host_node} 申请公网通道"
+                    f"（{peer_url}）…\n",
+                )
                 hosted = _federation_request_file_host(
                     host_node, sender, recipients, room_name
                 )
@@ -3610,12 +3638,29 @@ def _fed_resolve_actor(room: str, game, player_node: str, name: str, sub: str):
         if conn is not None and sub != "join":
             _resume_same_account_seat_locked(room, game, conn, name)
         return conn
-    if sub == "join":
-        return FederatedSeat(player_node, name)
-    seat = _game_seat_conn_by_name(game, name)
-    if isinstance(seat, FederatedSeat) and seat.node_id == player_node:
-        return seat
+    # Remote player: always act as FederatedSeat for *this* peer node.
+    # Returning a stale DisconnectedSeat / old-node FederatedSeat / local socket
+    # skips resume and drops private replies (not a FederatedSeat → no gpriv).
+    seat = FederatedSeat(player_node, name)
+    _resume_same_account_seat_locked(room, game, seat, name)
     return seat
+
+
+def _fed_send_player_notice(
+    player_node: str, room: str, name: str, lines: list[str]
+) -> None:
+    """Best-effort private notice to a federation player (or local conn)."""
+    if not lines:
+        return
+    local = _local_node_id()
+    if player_node == local:
+        conn = _local_conn_for_name_in_room_locked(name, room)
+        if conn is not None:
+            send_game_private(conn, room, lines)
+        return
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.send_game_private_to(player_node, room, name, lines)
 
 
 def _finish_game_action(
@@ -3667,10 +3712,21 @@ def _fed_execute_game_cmd(
         with lock:
             game = room_games.get(room)
             if game is None:
+                _fed_send_player_notice(
+                    player_node,
+                    room,
+                    name,
+                    ["本房没有进行中的对局；用 /game new … 开局。"],
+                )
                 return
             actor = _fed_resolve_actor(room, game, player_node, name, sub)
             if isinstance(actor, FederatedSeat):
-                priv, bcast, _ = game.try_join(actor, name)
+                # Resume may have already seated this FederatedSeat (same nick).
+                if getattr(game, "is_seated", lambda _c: False)(actor):
+                    priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
+                    bcast = [f"{name} 从另一终端接管了本局操作。"]
+                else:
+                    priv, bcast, _ = game.try_join(actor, name)
             else:
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 if resumed:
@@ -3687,9 +3743,16 @@ def _fed_execute_game_cmd(
 
     if sub == "move":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩；可试 /game show。"],
+            )
             return
         try:
             with lock:
+                # Resolve already attempted resume; call again is cheap/no-op if seated.
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(actor, rest)
@@ -3700,6 +3763,12 @@ def _fed_execute_game_cmd(
                         ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"fed /game move failed: {e!r}")
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                [f"/game move 执行失败：{e}"],
+            )
             return
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
@@ -3708,6 +3777,12 @@ def _fed_execute_game_cmd(
 
     if sub == "resign":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩。"],
+            )
             return
         with lock:
             resumed = _resume_same_account_seat_locked(room, game, actor, name)

@@ -751,6 +751,10 @@ class FederationHub:
             return None
         return best[2], best[3]
 
+    def has_remote_file_public(self) -> bool:
+        """True if any peer has advertised a non-empty public file base URL."""
+        return self.pick_file_public_peer() is not None
+
     def request_file_host(
         self, host_node: str, req_id: str, payload: dict[str, Any]
     ) -> bool:
@@ -1075,8 +1079,11 @@ class FederationHub:
             line = f"presence\t{origin}\t{remote_blob}\n"
             self._remember_seen(line)
             link.send_line(line)
-        self._push_library_catalog(link)
+        # Advertise public file URLs before the (often multi-MB) library catalog.
+        # Otherwise /sendfile on a LAN-only peer waits for fpub that is stuck
+        # behind lcatalog on slow links (ZeroTier / iSH) and falls back to LAN.
         self._push_file_public(link)
+        self._push_library_catalog(link)
 
     def _push_presence_async(self, link: _PeerLink) -> None:
         """Push presence/catalog off the session read loop.
