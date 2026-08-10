@@ -209,6 +209,11 @@ def _polish_en_game_line(line: str) -> str:
     out = out.replace("含空 ", "territory ")
     out = out.replace("含贴目 ", "komi ")
     out = out.replace("，空 ", ", territory ")
+    out = out.replace("（行 列，1 起算，左上为 1,1）", "(row col, 1-based, top-left is 1,1)")
+    out = out.replace("坐标为 行 列，左上为 1,1。", "Coords are row col, top-left is 1,1.")
+    out = out.replace("（1～15，左上为 1,1）", "(1–15, top-left is 1,1)")
+    out = out.replace("<行> <列>", "<row> <col>")
+    out = out.replace("行 列", "row col")
     try:
         from ratings import localize_levels_in_text
 

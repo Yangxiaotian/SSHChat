@@ -81,6 +81,13 @@ class I18nTests(unittest.TestCase):
             i18n.localize_game_line("待响应弃牌：m1 -> Alice", "en"),
             "Pending discard: m1 -> Alice",
         )
+        self.assertEqual(
+            i18n.localize_game_line(
+                "  上一步：(8, 6)  （行 列，1 起算，左上为 1,1）",
+                "en",
+            ),
+            "  Last move: (8, 6)  (row col, 1-based, top-left is 1,1)",
+        )
 
     def test_env_default_override(self) -> None:
         old = os.environ.get("SSHCHAT_DEFAULT_LOCALE")
