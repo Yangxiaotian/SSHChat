@@ -278,8 +278,16 @@ apply_data_plane_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  if [[ -d "$PREFIX/locales" ]]; then
+    chown -R "$u:$g" "$PREFIX/locales"
+    chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -f "$PREFIX/user_locales.json" ]]; then
+    chown "$u:$g" "$PREFIX/user_locales.json"
+    chmod 660 "$PREFIX/user_locales.json"
+  fi
   chmod 700 "$PREFIX/server.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
     chown "$u:$g" "$PREFIX/game_ratings.json"
@@ -393,9 +401,17 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  if [[ -d "$PREFIX/locales" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/locales"
+    chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -f "$PREFIX/user_locales.json" ]]; then
+    chown "$ROOT_OWN" "$PREFIX/user_locales.json"
+    chmod 660 "$PREFIX/user_locales.json"
+  fi
   chown "$ROOT_OWN" "$PREFIX/federation-bridge.sh"
   chmod 755 "$PREFIX/federation-bridge.sh"
   if [[ -f "$PREFIX/game_ratings.json" ]]; then
@@ -783,13 +799,17 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$SCRIPT_DIR/file_sharing.py" "$SCRIPT_DIR/file_http_server.py" "$PREFIX/"
+cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$SCRIPT_DIR/file_sharing.py" "$SCRIPT_DIR/file_http_server.py" "$SCRIPT_DIR/i18n.py" "$SCRIPT_DIR/locale_store.py" "$PREFIX/"
+rm -rf "$PREFIX/locales"
+cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
 cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/admin-remove-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PREFIX" -maxdepth 2 -name '*.pyc' -delete 2>/dev/null || true
+find "$PREFIX/locales" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find "$PREFIX/locales" -name '*.pyc' -delete 2>/dev/null || true
 
 REUSE_VENV=0
 if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
