@@ -380,6 +380,7 @@ PATTERNS_ZH_TO_EN: list[tuple[str, str]] = [
     ('^轮到 红方 (?P<name>.+) 走子$', 'Red {name} to move'),
     ('^轮到 黑方 (?P<name>.+) 落子$', 'Black {name} to move'),
     ('^轮到 白方 (?P<name>.+) 落子$', 'White {name} to move'),
+    ('^轮到 黑方 (?P<name>.+)（第 (?P<n>\\d+) 手）(?P<suffix>.*)$', 'Black {name} to move (move {n}){suffix}'),
     ('^轮到 白方 (?P<name>.+)（第 1 手）$', 'White {name} to move (move 1)'),
     ('^轮到 白方 (?P<name>.+)（第 (?P<n>\\d+) 手）(?P<suffix>.*)$', 'White {name} to move (move {n}){suffix}'),
     ('^轮到 红 (?P<name>.+) 行棋$', 'Red {name} to move'),
@@ -534,19 +535,25 @@ PATTERNS_ZH_TO_EN: list[tuple[str, str]] = [
     ('^红方（先手）：(?P<red>.+)    黑方：(?P<black>.+)$', 'Red (first): {red}    Black: {black}'),
     ('^红方（先手）：(?P<name>.+)$', 'Red (first): {name}'),
     ('^黑方（先手）：(?P<name>.+)$', 'Black (first): {name}'),
+    # Score / capture lines before generic "Black: {name}" seat labels.
+    ('^黑方：(?P<bs>[0-9.]+)（含空 (?P<bt>\\d+)）  白方：(?P<ws>[0-9.]+)（含贴目 (?P<komi>[0-9.]+)，空 (?P<wt>\\d+)）$',
+     'Black: {bs} (territory {bt})  White: {ws} (komi {komi}, territory {wt})'),
+    ('^贴目：白 (?P<komi>[0-9.]+)；提子：黑 (?P<b>\\d+)，白 (?P<w>\\d+)$',
+     'Komi: White {komi}; captures: Black {b}, White {w}'),
     ('^白方：(?P<name>.+)$', 'White: {name}'),
     ('^黑方：(?P<name>.+)$', 'Black: {name}'),
-    ('^白方：(?P<name>.+)$', 'White: {name}'),
     ('^房主：(?P<name>.+)$', 'Host: {name}'),
     ('^（第 (?P<n>\\d+) 手）(?P<suffix>.*)$', '(move {n}){suffix}'),
     ('^等级=(?P<level>.+) 战绩=(?P<w>\\d+)/(?P<l>\\d+)/(?P<d>\\d+)$', 'level={level} W/L/D={w}/{l}/{d}'),
     ('^#(?P<seat>\\d+) (?P<name>.+): 积分=(?P<rating>\\d+)$', '#{seat} {name}: rating={rating}'),
     ('^#(?P<i>\\d+) (?P<n>.+)：积分=(?P<stack>\\d+) (?P<rest>.*)$', '#{i} {n}: chips={stack} {rest}'),
-    ('^贴目：白 (?P<komi>[0-9.]+)；提子：黑 (?P<b>\\d+)，白 (?P<w>\\d+)$', 'Komi: White {komi}; captures: Black {b}, White {w}'),
-    ('^黑方：(?P<bs>[0-9.]+)（含空 (?P<bt>\\d+)）  白方：(?P<ws>[0-9.]+)（含贴目 (?P<komi>[0-9.]+)，空 (?P<wt>\\d+)）$', 'Black: {bs} (territory {bt})  White: {ws} (komi {komi}, territory {wt})'),
     ('^没有可移动到 \\((?P<r>\\d+),(?P<c>\\d+)\\) 的(?P<kind>.+)。$', 'No {kind} can move to ({r},{c}).'),
+    ('^请等待 (?P<name>.+) 选择吃哪一行$', 'Wait for {name} to choose which row to take'),
+    ('^请等待 (?P<name>.+)$', 'Please wait for {name}'),
+    ('^待响应弃牌：(?P<tile>.+)$', 'Pending discard response: {tile}'),
+    ('^当前为响应弃牌阶段，请等待他人或过牌。$', 'Discard-response phase; wait for others or pass.'),
+    ('^最近弃牌：(?P<tile>.+)$', 'Last discard: {tile}'),
 ]
-
 
 def _localize_sample(line: str) -> str:
     """Minimal localize helper for ``__main__`` smoke checks."""

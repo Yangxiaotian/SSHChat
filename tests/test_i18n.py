@@ -61,6 +61,27 @@ class I18nTests(unittest.TestCase):
             "  White: bob",
         )
 
+    def test_other_games_common_labels(self) -> None:
+        self.assertEqual(
+            i18n.localize_game_line("轮到 黑方 Bob（第 12 手）", "en"),
+            "Black Bob to move (move 12)",
+        )
+        self.assertEqual(
+            i18n.localize_game_line(
+                "黑方：64.5（含空 58）  白方：71（含贴目 6.5，空 64）",
+                "en",
+            ),
+            "Black: 64.5 (territory 58)  White: 71 (komi 6.5, territory 64)",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("请等待 Bob", "en"),
+            "Please wait for Bob",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("待响应弃牌：m1 -> Alice", "en"),
+            "Pending discard: m1 -> Alice",
+        )
+
     def test_env_default_override(self) -> None:
         old = os.environ.get("SSHCHAT_DEFAULT_LOCALE")
         try:

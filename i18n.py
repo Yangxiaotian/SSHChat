@@ -201,7 +201,14 @@ def _polish_en_game_line(line: str) -> str:
     out = re.sub(r"(^|\s)白方（先手）：", r"\1White (first): ", out)
     out = re.sub(r"轮到 白方 ", "White ", out)
     out = re.sub(r"轮到 黑方 ", "Black ", out)
+    out = re.sub(r"轮到 红方 ", "Red ", out)
     out = re.sub(r" 落子$", " to move", out)
+    out = re.sub(r" 走子$", " to move", out)
+    out = re.sub(r"（第 (\d+) 手）", r"(move \1)", out)
+    out = re.sub(r"（将军）", " (check)", out)
+    out = out.replace("含空 ", "territory ")
+    out = out.replace("含贴目 ", "komi ")
+    out = out.replace("，空 ", ", territory ")
     try:
         from ratings import localize_levels_in_text
 
