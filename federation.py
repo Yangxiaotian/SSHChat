@@ -1078,6 +1078,30 @@ class FederationHub:
         self._push_library_catalog(link)
         self._push_file_public(link)
 
+    def _push_presence_async(self, link: _PeerLink) -> None:
+        """Push presence/catalog off the session read loop.
+
+        Both sides send large lcatalog frames right after handshake. Doing that
+        synchronously before reading deadlocks TCP windows on slow links
+        (e.g. ZeroTier to iSH): each side blocks in sendall while the peer is
+        also stuck sending. Announce the peer first, then push in a thread so
+        the session loop can drain inbound data.
+        """
+
+        def _run() -> None:
+            try:
+                self._push_presence(link)
+            except Exception as e:
+                print(
+                    f"federation: async presence push to {link.node_id} failed: {e!r}"
+                )
+
+        threading.Thread(
+            target=_run,
+            name=f"fed-push-{link.node_id}",
+            daemon=True,
+        ).start()
+
     def _push_file_public(self, link: _PeerLink) -> None:
         """Advertise local + known remote public file base URLs to a new peer."""
         local_url = ""
@@ -1923,10 +1947,11 @@ class FederationHub:
                 link = _PeerLink(self, peer_node, _send)
                 is_new = self._register_peer(peer_node, link)
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
-                self._push_presence(link)
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
                 if is_new:
                     self._notify_peer_up(peer_node)
+                # Async: avoid mutual sendall deadlock with large catalogs.
+                self._push_presence_async(link)
 
             assert link is not None and peer_node is not None
             while not self._stop.is_set():
@@ -2158,10 +2183,11 @@ class FederationHub:
                             conn.settimeout(None)
                         except (OSError, AttributeError):
                             pass
-                self._push_presence(link)
                 print(f"federation: outbound connected to {peer_node}")
                 if is_new:
                     self._notify_peer_up(peer_node)
+                # Async: keep reading while we push (avoids ZT/iSH TCP deadlock).
+                self._push_presence_async(link)
                 continue
             if link is not None:
                 link.handle_line(line)
