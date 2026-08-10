@@ -136,7 +136,8 @@ ssh -p 22 用户名@10.147.17.226
 - iSH 上默认 **无** Cloudflare；文件页用局域网 HTTP。  
 - `SSHCHAT_FILE_PUBLIC_HOST` 一般为 `--client-ssh-host`（手机 IP）。  
 - 接收方需能访问该 IP 的 `8443`（或你改过的 `--file-port`）。  
-- 仅同一 Wi‑Fi / VPN / Tailscale 等可达网络内使用较稳妥。
+- 仅同一 Wi‑Fi / VPN / Tailscale 等可达网络内使用较稳妥。  
+- **联邦公网代理：** 若本机已与一台开了 Cloudflare 的联邦节点连通，`/sendfile` 会优先把上传/下载网址托管到该节点的 `*.trycloudflare.com`，手机浏览器可从外网打开；失败时仍回退局域网地址。
 
 ---
 
