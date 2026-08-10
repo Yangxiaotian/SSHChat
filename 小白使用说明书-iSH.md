@@ -1,5 +1,7 @@
 # SSHChat 手机使用说明书（iSH）
 
+English version: [docs/en/ish-beginner.md](docs/en/ish-beginner.md)
+
 给完全没用过终端的人用。密钥已经配好，你只要按下面做就能进聊天室。
 
 ---

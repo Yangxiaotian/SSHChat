@@ -181,9 +181,11 @@ export default function App() {
       if (nextStatus === 'connected') {
         useChatStore.getState().setShowLogin(false);
         useChatStore.getState().setError(null);
-        const { messages, activeRoom } = useChatStore.getState();
+        const { messages, activeRoom, locale } = useChatStore.getState();
         useChatStore.getState().rebuildLibraryView(messages.get(activeRoom) || []);
         window.api.requestUsers();
+        // Keep TCP chat language in sync with the GUI locale preference.
+        void window.api.sendMessage(`/lang ${locale}`);
       } else if (nextStatus === 'disconnected') {
         useChatStore.getState().setShowLogin(true);
         useChatStore.getState().resetLibraryView();
