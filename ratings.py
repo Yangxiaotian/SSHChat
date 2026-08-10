@@ -52,7 +52,60 @@ _LEVEL_LABEL_EN: dict[str, str] = {
     "8级": "8 kyu",
     "10级": "10 kyu",
     "12级": "12 kyu",
-    "练气初期": "Qi refining (early)",
+    "道祖": "Dao Ancestor",
+    "大罗大圆满": "Daluo (Peak)",
+    "大罗后期": "Daluo (Late)",
+    "大罗中期": "Daluo (Mid)",
+    "大罗初期": "Daluo (Early)",
+    "太乙大圆满": "Taiyi (Peak)",
+    "太乙后期": "Taiyi (Late)",
+    "太乙中期": "Taiyi (Mid)",
+    "太乙初期": "Taiyi (Early)",
+    "金仙大圆满": "Golden Immortal (Peak)",
+    "金仙后期": "Golden Immortal (Late)",
+    "金仙中期": "Golden Immortal (Mid)",
+    "金仙初期": "Golden Immortal (Early)",
+    "真仙大圆满": "True Immortal (Peak)",
+    "真仙后期": "True Immortal (Late)",
+    "真仙中期": "True Immortal (Mid)",
+    "真仙初期": "True Immortal (Early)",
+    "渡劫大圆满": "Tribulation (Peak)",
+    "渡劫后期": "Tribulation (Late)",
+    "渡劫中期": "Tribulation (Mid)",
+    "渡劫初期": "Tribulation (Early)",
+    "大乘大圆满": "Mahayana (Peak)",
+    "大乘后期": "Mahayana (Late)",
+    "大乘中期": "Mahayana (Mid)",
+    "大乘初期": "Mahayana (Early)",
+    "合体大圆满": "Body Integration (Peak)",
+    "合体后期": "Body Integration (Late)",
+    "合体中期": "Body Integration (Mid)",
+    "合体初期": "Body Integration (Early)",
+    "炼虚大圆满": "Void Refining (Peak)",
+    "炼虚后期": "Void Refining (Late)",
+    "炼虚中期": "Void Refining (Mid)",
+    "炼虚初期": "Void Refining (Early)",
+    "化神大圆满": "Spirit Transformation (Peak)",
+    "化神后期": "Spirit Transformation (Late)",
+    "化神中期": "Spirit Transformation (Mid)",
+    "化神初期": "Spirit Transformation (Early)",
+    "元婴大圆满": "Nascent Soul (Peak)",
+    "元婴后期": "Nascent Soul (Late)",
+    "元婴中期": "Nascent Soul (Mid)",
+    "元婴初期": "Nascent Soul (Early)",
+    "结丹大圆满": "Core Formation (Peak)",
+    "结丹后期": "Core Formation (Late)",
+    "结丹中期": "Core Formation (Mid)",
+    "结丹初期": "Core Formation (Early)",
+    "筑基大圆满": "Foundation (Peak)",
+    "筑基后期": "Foundation (Late)",
+    "筑基中期": "Foundation (Mid)",
+    "筑基初期": "Foundation (Early)",
+    "炼气大圆满": "Qi Refining (Peak)",
+    "炼气后期": "Qi Refining (Late)",
+    "炼气中期": "Qi Refining (Mid)",
+    "炼气初期": "Qi Refining (Early)",
+    "练气初期": "Qi Refining (Early)",
 }
 
 
@@ -61,6 +114,17 @@ def localize_level(level: str, locale: str = "en") -> str:
     if (locale or "en").lower().startswith("zh"):
         return level
     return _LEVEL_LABEL_EN.get(level, level)
+
+
+def localize_levels_in_text(text: str, locale: str = "en") -> str:
+    """Replace known Chinese level tokens inside a longer English/mixed line."""
+    if (locale or "en").lower().startswith("zh") or not text:
+        return text
+    # Longer names first so 大罗大圆满 wins over 大罗.
+    for zh, en in sorted(_LEVEL_LABEL_EN.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if zh in text:
+            text = text.replace(zh, en)
+    return text
 
 
 def _dan_level(rating: int) -> str:
@@ -181,7 +245,7 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "k_factor": _fide_k,
     },
     "gomoku": {
-        "scheme": "Elo",
+        "scheme": "Cultivation Elo",
         "initial": 1200,
         "floor": 1000,
         "level_of": _gomoku_cultivation_level,
