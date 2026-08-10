@@ -37,6 +37,30 @@ class I18nTests(unittest.TestCase):
             "不是你的回合。",
         )
 
+    def test_gomoku_rating_and_white_labels(self) -> None:
+        self.assertEqual(
+            i18n.localize_game_line(
+                "#1 alice: 积分=1200 等级=炼气初期 战绩=1/2/0",
+                "en",
+            ),
+            "#1 alice: rating=1200 level=Qi Refining (Early) W/L/D=1/2/0",
+        )
+        self.assertEqual(
+            i18n.localize_game_line(
+                "gomoku 对局（playing）  黑：alice   白：bob",
+                "en",
+            ),
+            "gomoku (playing)  Black: alice   White: bob",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("轮到 白方 bob 落子", "en"),
+            "White bob to move",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("  白方：bob", "en"),
+            "  White: bob",
+        )
+
     def test_env_default_override(self) -> None:
         old = os.environ.get("SSHCHAT_DEFAULT_LOCALE")
         try:
