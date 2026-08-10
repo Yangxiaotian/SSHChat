@@ -205,6 +205,16 @@ else
   fi
 fi
 
+# Alpine adduser -D leaves shadow '!' (locked); OpenSSH then rejects publickey too.
+# '*' disables password login but allows pubkey. Also fix pre-existing locked users.
+if ! is_darwin && [[ -f /etc/shadow ]] && grep -q "^${USER_NAME}:!" /etc/shadow; then
+  if echo "${USER_NAME}:*" | chpasswd -e 2>/dev/null; then
+    echo "info: unlocked $USER_NAME for pubkey auth (shadow '!' -> '*')"
+  else
+    echo "warning: could not unlock $USER_NAME in /etc/shadow; pubkey login may fail" >&2
+  fi
+fi
+
 if ! is_darwin; then
   ensure_client_group
   if ! id -nG "$USER_NAME" | grep -qw "$SSHCHAT_CLIENT_GROUP"; then
