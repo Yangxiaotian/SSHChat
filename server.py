@@ -94,6 +94,9 @@ library_reading: dict[object, dict[str, object]] = {}
 # req_id -> {"event": Event, "payload": dict|None, "error": str}
 _library_page_waiters: dict[str, dict[str, object]] = {}
 _library_page_waiters_lock = threading.Lock()
+# req_id -> {"event": Event, "payload": dict|None} for federation file-host proxy
+_file_host_waiters: dict[str, dict[str, object]] = {}
+_file_host_waiters_lock = threading.Lock()
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
 # per-book load locks so concurrent federated page requests share one parse
@@ -2007,6 +2010,138 @@ def _fed_on_library_page_request(
         print(f"federation: reply_library_page failed: {e!r}")
 
 
+def _fed_local_file_public() -> str:
+    """Public file base URL advertised to federation peers (empty if LAN-only)."""
+    if file_http is None:
+        return ""
+    try:
+        base = file_http.get_base_url()
+    except Exception:
+        return ""
+    if not file_http_server.is_externally_reachable_url(base):
+        return ""
+    return base.rstrip("/")
+
+
+def _fed_on_file_host_request(
+    requester: str, req_id: str, payload: dict
+) -> None:
+    """Peer asked us to host a /sendfile session on our public Cloudflare URL."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
+    try:
+        if file_http is None:
+            reply["error"] = "file transfer disabled on host"
+        elif not file_http_server.is_externally_reachable_url(file_http.get_base_url()):
+            reply["error"] = "host has no public file URL"
+        else:
+            sender = str(payload.get("sender") or "").strip()
+            recipients = payload.get("recipients") or []
+            if not isinstance(recipients, list):
+                recipients = []
+            recipients = [str(r).strip() for r in recipients if str(r).strip()]
+            room = payload.get("room")
+            room_name = str(room).strip() if room else None
+            if not sender or not recipients:
+                reply["error"] = "invalid sender/recipients"
+            else:
+                store = file_sharing.file_transfer_store
+                transfer = store.create_upload_session(
+                    sender=sender,
+                    recipients=recipients,
+                    room=room_name,
+                )
+                base_url = file_http.get_base_url().rstrip("/")
+                reply = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "host_node": hub.node_id,
+                    "base_url": base_url,
+                    "transfer_id": transfer.transfer_id,
+                    "upload_token": transfer.upload_token,
+                    "upload_key": transfer.upload_key,
+                    "upload_url": f"{base_url}/upload/{transfer.upload_token}",
+                    "download_tokens": dict(transfer.download_tokens),
+                    "download_keys": dict(transfer.download_keys),
+                    "room": room_name,
+                    "sender": sender,
+                    "recipients": recipients,
+                }
+                print(
+                    f"[FileTransfer] Hosted federated upload for {requester}: "
+                    f"sender={sender} recipients={len(recipients)} via {base_url}"
+                )
+    except Exception as e:
+        print(f"[FileTransfer] federated host error: {e!r}")
+        traceback.print_exc()
+        reply = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_file_host(requester, req_id, reply)
+    except Exception as e:
+        print(f"federation: reply_file_host failed: {e!r}")
+
+
+def _fed_on_file_host_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _file_host_waiters_lock:
+        waiter = _file_host_waiters.get(req_id)
+        if waiter is None:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _federation_request_file_host(
+    host_node: str,
+    sender: str,
+    recipients: list[str],
+    room: Optional[str],
+    *,
+    timeout: float = 15.0,
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _file_host_waiters_lock:
+        _file_host_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_file_host(
+            host_node,
+            req_id,
+            {
+                "sender": sender,
+                "recipients": recipients,
+                "room": room,
+            },
+        ):
+            return {"ok": False, "error": f"无法联系文件代理节点 {host_node}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待文件代理节点超时"}
+        with _file_host_waiters_lock:
+            payload = _file_host_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _file_host_waiters_lock:
+            _file_host_waiters.pop(req_id, None)
+
+
+def _federation_sync_file_public() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.sync_file_public(_fed_local_file_public())
+    except Exception as e:
+        print(f"federation: file public sync failed: {e!r}")
+
+
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
     with _library_page_waiters_lock:
         waiter = _library_page_waiters.get(req_id)
@@ -2022,6 +2157,19 @@ def _fail_library_page_waiters(error: str) -> None:
     """Unblock pending remote /library opens when a peer link drops."""
     with _library_page_waiters_lock:
         waiters = list(_library_page_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_file_host_waiters(error: str) -> None:
+    """Unblock pending federated /sendfile host requests when a peer drops."""
+    with _file_host_waiters_lock:
+        waiters = list(_file_host_waiters.values())
     for waiter in waiters:
         if waiter.get("payload") is not None:
             continue
@@ -2889,22 +3037,102 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         else:
             # Offline locally or only present on a peer — open a session either way.
             recipients = [target]
-    # Create transfer session
+    # Create transfer session (prefer a Cloudflare-capable federation peer when
+    # this node only has a LAN / non-public file URL — e.g. iSH --no-cloudflare).
     try:
+        hub = federation.get_hub()
+        used_proxy = False
+        if (
+            hub is not None
+            and hub.enabled
+            and file_http_server.needs_federation_file_proxy(file_http.get_base_url())
+        ):
+            proxy_peer = hub.pick_file_public_peer()
+            if proxy_peer is not None:
+                host_node, _peer_url = proxy_peer
+                hosted = _federation_request_file_host(
+                    host_node, sender, recipients, room_name
+                )
+                if hosted.get("ok"):
+                    upload_url = str(hosted.get("upload_url") or "").strip()
+                    upload_key = str(hosted.get("upload_key") or "").strip()
+                    if upload_url and upload_key:
+                        used_proxy = True
+                        if extra_args:
+                            send_line(
+                                conn,
+                                "[*] 提示: 现在不用再写文件名，直接 /sendfile 即可。\n",
+                            )
+                        send_line(conn, "[*] ========== 文件上传信息 ==========\n")
+                        if is_room:
+                            send_line(
+                                conn,
+                                f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n",
+                            )
+                        else:
+                            send_line(
+                                conn, f"[*] 接收者: {', '.join(recipients)}\n"
+                            )
+                        send_line(
+                            conn,
+                            f"[*] 经联邦节点 {host_node} 的公网通道"
+                            f"（本机无 Cloudflare）\n",
+                        )
+                        send_line(conn, "[*]\n")
+                        send_line(conn, "[*] 上传网址:\n")
+                        send_line(conn, f"[*] {upload_url}\n")
+                        send_line(conn, "[*]\n")
+                        send_line(conn, f"[*] 上传密钥: {upload_key}\n")
+                        send_line(conn, "[*]\n")
+                        send_line(conn, "[*] 说明:\n")
+                        send_line(
+                            conn, "[*] 1. 打开上传网址，在页面里输入上面的密钥\n"
+                        )
+                        send_line(
+                            conn,
+                            "[*] 2. 选择要发的文件并上传，文件名以所选文件为准\n",
+                        )
+                        send_line(
+                            conn, "[*] 3. 上传成功即完成，此网址随后作废\n"
+                        )
+                        send_line(
+                            conn,
+                            "[*] 4. 接收者将收到各自的下载网址和密钥，"
+                            "各自只能下载一次\n",
+                        )
+                        send_line(
+                            conn, "[*] =====================================\n"
+                        )
+                    else:
+                        send_line(
+                            conn,
+                            "[*] 联邦公网文件代理返回无效；改用本机地址。\n",
+                        )
+                else:
+                    err = hosted.get("error") or "unknown"
+                    send_line(
+                        conn,
+                        f"[*] 联邦公网文件代理（{host_node}）失败：{err}；"
+                        f"改用本机地址。\n",
+                    )
+
+        if used_proxy:
+            return
+
         store = file_sharing.file_transfer_store
         transfer = store.create_upload_session(
             sender=sender,
             recipients=recipients,
             room=room_name
         )
-        
+
         # Send upload URL and key to sender
         base_url = file_http.get_base_url()
         upload_url = f"{base_url}/upload/{transfer.upload_token}"
-        
+
         if extra_args:
             send_line(conn, "[*] 提示: 现在不用再写文件名，直接 /sendfile 即可。\n")
-        
+
         send_line(conn, "[*] ========== 文件上传信息 ==========\n")
         if is_room:
             send_line(conn, f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n")
@@ -2922,7 +3150,7 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         send_line(conn, "[*] 3. 上传成功即完成，此网址随后作废\n")
         send_line(conn, "[*] 4. 接收者将收到各自的下载网址和密钥，各自只能下载一次\n")
         send_line(conn, "[*] =====================================\n")
-        
+
     except Exception as e:
         print(f"[FileTransfer] Error creating transfer: {e}")
         traceback.print_exc()
@@ -3422,6 +3650,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_sync_library_catalog()
             except Exception as e:
                 print(f"federation: peer-up library catalog sync error: {e!r}")
+            try:
+                _federation_sync_file_public()
+            except Exception as e:
+                print(f"federation: peer-up file public sync error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -3430,6 +3662,7 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
         else:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
         _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
+        _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
     else:
         return
     broadcast_local_notice(text)
@@ -3564,6 +3797,9 @@ def _ensure_federation_hub() -> None:
         _fed_on_library_page_result,
         _fed_local_library_bookmarks_snapshot,
         _fed_on_library_bookmarks,
+        _fed_on_file_host_request,
+        _fed_on_file_host_result,
+        _fed_local_file_public,
     )
     _fed_hub.start()
     _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
@@ -4631,6 +4867,7 @@ def run_server() -> int:
             file_http = file_http_server.create_file_server()
             file_http.start()
             print(f"[FileTransfer] HTTP server started at {file_http.get_base_url()}")
+            _federation_sync_file_public()
             
             # Start cleanup task for expired transfers
             def _cleanup_task():

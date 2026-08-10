@@ -750,6 +750,13 @@ class FederationServerIntegrationTests(unittest.TestCase):
         federation._hub = None
         server._fed_hub = None
 
+    def _free_port(self) -> int:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
     def test_broadcast_forwards_to_hub(self) -> None:
         sent: list[tuple[str, bytes]] = []
 
@@ -773,6 +780,12 @@ class FederationServerIntegrationTests(unittest.TestCase):
 
             def sync_game(self, room, authority, pickle_b64, conflict_token=""):
                 pushed.append((room, authority))
+
+            def sync_library_catalog(self, books=None):
+                return None
+
+            def sync_file_public(self, base_url=None):
+                return None
 
         class FakeGame:
             state = "playing"
@@ -1473,6 +1486,184 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(events, [("up", "node-b", "node-a")])
         self.assertTrue(first._closed)
         self.assertIs(hub._peers["node-b"], second)
+
+    def test_pick_newest_file_public_peer(self) -> None:
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub._routes["node-b"] = "node-b"
+        hub._routes["node-c"] = "node-c"
+        hub._peers["node-b"] = object()  # type: ignore[assignment]
+        hub._remote_file_pubs["node-b"] = {
+            "base_url": "https://old.trycloudflare.com",
+            "seen_at": 100.0,
+        }
+        hub._remote_file_pubs["node-c"] = {
+            "base_url": "https://new.trycloudflare.com",
+            "seen_at": 200.0,
+        }
+        picked = hub.pick_file_public_peer()
+        self.assertEqual(picked, ("node-c", "https://new.trycloudflare.com"))
+
+    def test_file_host_rpc_roundtrip(self) -> None:
+        chat_a = self._free_port()
+        chat_b = self._free_port()
+        fed_a = self._free_port()
+        fed_b = self._free_port()
+
+        with tempfile.TemporaryDirectory() as td:
+            peers_a = Path(td) / "peers_a.json"
+            peers_b = Path(td) / "peers_b.json"
+            peers_a.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_b,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peers_b.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-a",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_a,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            hosted: dict = {}
+            result: dict = {}
+            done = threading.Event()
+
+            def on_host_req(requester, req_id, payload):
+                hosted["requester"] = requester
+                hosted["payload"] = payload
+                hub_b.reply_file_host(
+                    requester,
+                    req_id,
+                    {
+                        "ok": True,
+                        "upload_url": "https://cf.trycloudflare.com/upload/tok",
+                        "upload_key": "ABC123",
+                        "host_node": "node-b",
+                    },
+                )
+
+            def on_host_result(origin, req_id, payload):
+                result["origin"] = origin
+                result["payload"] = payload
+                done.set()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-a",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_a),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_a),
+                },
+                clear=False,
+            ):
+                hub_a = federation.FederationHub(
+                    chat_a,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_result=on_host_result,
+                    get_local_file_public=lambda: "",
+                )
+                hub_a.enabled = True
+                hub_a.start()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-b",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_b),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_b),
+                },
+                clear=False,
+            ):
+                hub_b = federation.FederationHub(
+                    chat_b,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_request=on_host_req,
+                    get_local_file_public=lambda: "https://cf.trycloudflare.com",
+                )
+                hub_b.enabled = True
+                hub_b.start()
+
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if hub_a.peer_count and hub_b.peer_count:
+                        break
+                    time.sleep(0.05)
+                self.assertGreater(hub_a.peer_count, 0)
+                # B announces public URL; A should learn it.
+                hub_b.sync_file_public()
+                deadline = time.time() + 3
+                while time.time() < deadline and "node-b" not in hub_a._remote_file_pubs:
+                    time.sleep(0.05)
+                self.assertIn("node-b", hub_a._remote_file_pubs)
+                picked = hub_a.pick_file_public_peer()
+                self.assertIsNotNone(picked)
+                assert picked is not None
+                self.assertEqual(picked[0], "node-b")
+                self.assertTrue(
+                    hub_a.request_file_host(
+                        "node-b",
+                        "req1",
+                        {"sender": "alice", "recipients": ["bob"], "room": None},
+                    )
+                )
+                self.assertTrue(done.wait(5))
+                self.assertEqual(hosted.get("requester"), "node-a")
+                self.assertEqual(result.get("origin"), "node-b")
+                self.assertTrue((result.get("payload") or {}).get("ok"))
+            finally:
+                hub_a.stop()
+                hub_b.stop()
+
+
+class FilePublicReachabilityTests(unittest.TestCase):
+    def test_trycloudflare_and_private(self) -> None:
+        import file_http_server as fhs
+
+        self.assertTrue(fhs.is_externally_reachable_host("abc.trycloudflare.com"))
+        self.assertTrue(
+            fhs.is_externally_reachable_url("https://abc.trycloudflare.com")
+        )
+        self.assertFalse(fhs.is_externally_reachable_host("10.147.17.226"))
+        self.assertFalse(fhs.is_externally_reachable_host("127.0.0.1"))
+        self.assertFalse(fhs.is_externally_reachable_host("localhost"))
+        self.assertTrue(fhs.needs_federation_file_proxy("http://10.0.0.5:8443"))
+        with mock.patch.dict(os.environ, {"SSHCHAT_FILE_USE_FED_PROXY": "0"}):
+            self.assertFalse(
+                fhs.needs_federation_file_proxy("http://10.0.0.5:8443")
+            )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ single-use, so capturing one off the wire does not allow a replay.
 import os
 import cgi
 import html
+import ipaddress
 import json
 import ssl
 import subprocess
@@ -82,6 +83,66 @@ def _detect_lan_ip() -> str:
     except Exception:
         pass
     return "127.0.0.1"
+
+
+def is_externally_reachable_host(host: str) -> bool:
+    """True when *host* is likely reachable from the public Internet.
+
+    Used to decide whether this node can offer Cloudflare/public file URLs to
+    federation peers that only have LAN/self-signed endpoints (e.g. iSH).
+    """
+    host = (host or "").strip().lower().rstrip(".")
+    if not host or host in {"localhost", "0.0.0.0", "::", "*"}:
+        return False
+    # Strip brackets from IPv6 literals.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    force = os.environ.get("SSHCHAT_FILE_PUBLIC_EXTERNAL", "").strip().lower()
+    if force in ("1", "true", "yes"):
+        return True
+    if force in ("0", "false", "no"):
+        return False
+    if host.endswith(".trycloudflare.com"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    except ValueError:
+        # Hostname: require a dotted name (skip bare machine hostnames).
+        return "." in host and not host.endswith(".local")
+
+
+def is_externally_reachable_url(base_url: str) -> bool:
+    """True when a file base URL looks publicly reachable."""
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip()
+    return is_externally_reachable_host(host)
+
+
+def needs_federation_file_proxy(base_url: Optional[str] = None) -> bool:
+    """Whether /sendfile should host the transfer on a Cloudflare-capable peer.
+
+    Auto when local file URL is not public; override with SSHCHAT_FILE_USE_FED_PROXY.
+    """
+    force = os.environ.get("SSHCHAT_FILE_USE_FED_PROXY", "").strip().lower()
+    if force in ("0", "false", "no"):
+        return False
+    if force in ("1", "true", "yes"):
+        return True
+    return not is_externally_reachable_url(base_url or "")
 
 
 def content_disposition(filename: str, inline: bool) -> str:
