@@ -146,18 +146,69 @@ def localize_game_line(line: str, locale: Optional[Locale] = None) -> str:
     if loc != "en" or not line:
         return line
     if line in _GAME_EXACT:
-        return _GAME_EXACT[line]
-    for pat, repl in _GAME_PATTERNS:
-        m = pat.match(line)
-        if m:
+        return _polish_en_game_line(_GAME_EXACT[line])
+
+    stripped = line.lstrip(" ")
+    indent = line[: len(line) - len(stripped)]
+    candidates = (line, stripped) if stripped != line else (line,)
+
+    for candidate in candidates:
+        if candidate in _GAME_EXACT:
+            return indent + _polish_en_game_line(_GAME_EXACT[candidate])
+        for pat, repl in _GAME_PATTERNS:
+            m = pat.match(candidate)
+            if not m:
+                continue
             try:
-                return m.expand(repl) if "\\" in repl else repl.format(**m.groupdict())
+                out = m.expand(repl) if "\\" in repl else repl.format(**m.groupdict())
             except (KeyError, ValueError, IndexError, re.error):
                 try:
-                    return repl.format(**m.groupdict())
+                    out = repl.format(**m.groupdict())
                 except Exception:
-                    return line
-    return line
+                    continue
+            if candidate is stripped and indent:
+                out = indent + out
+            return _polish_en_game_line(out)
+
+    return _polish_en_game_line(line)
+
+
+def _polish_en_game_line(line: str) -> str:
+    """Fix leftover Chinese labels / level names after pattern translation."""
+    if not line:
+        return line
+    replacements = (
+        ("积分=", "rating="),
+        ("等级=", "level="),
+        ("战绩=", "W/L/D="),
+        ("局数=", "games="),
+        ("体系=", "scheme="),
+        ("白：", "White: "),
+        ("黑：", "Black: "),
+        ("红：", "Red: "),
+        ("空席", "empty"),
+        ("(空席, 可 /game join)", "(empty, /game join)"),
+        ("（空席, 可 /game join）", "(empty, /game join)"),
+    )
+    out = line
+    for zh, en in replacements:
+        if zh in out:
+            out = out.replace(zh, en)
+    # Seat lines like "  白方：name" that missed a pattern.
+    out = re.sub(r"(^|\s)白方：", r"\1White: ", out)
+    out = re.sub(r"(^|\s)黑方：", r"\1Black: ", out)
+    out = re.sub(r"(^|\s)黑方（先手）：", r"\1Black (first): ", out)
+    out = re.sub(r"(^|\s)白方（先手）：", r"\1White (first): ", out)
+    out = re.sub(r"轮到 白方 ", "White ", out)
+    out = re.sub(r"轮到 黑方 ", "Black ", out)
+    out = re.sub(r" 落子$", " to move", out)
+    try:
+        from ratings import localize_levels_in_text
+
+        out = localize_levels_in_text(out, "en")
+    except Exception:
+        pass
+    return out
 
 
 def localize_game_lines(lines: list[str], locale: Optional[Locale] = None) -> list[str]:
