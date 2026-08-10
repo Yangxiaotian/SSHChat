@@ -10646,6 +10646,8 @@ def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
 
 
 HELP_LINES = (
+    # Canonical Chinese copy kept for imports/tests; runtime /game help uses
+    # i18n.game_help_lines(locale) from locales/{en,zh}.py.
     "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
     "（chess: 白；gomoku/go/xiangqi/doushou: 黑/黑/红/红先手；sanguo: 房主）。",

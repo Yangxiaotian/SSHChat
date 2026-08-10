@@ -19,6 +19,7 @@ const COMMAND_KEYS = [
   { name: '/news', key: 'input.commands.news' },
   { name: '/library', key: 'input.commands.library' },
   { name: '/lib', key: 'input.commands.library' },
+  { name: '/lang', key: 'input.commands.lang' },
   { name: '/dict', key: 'input.commands.dict' },
   { name: '/announce', key: 'input.commands.announce' },
 ] as const;

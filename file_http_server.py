@@ -25,7 +25,7 @@ import mimetypes
 import socket
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qs
 from pathlib import Path
 from typing import Optional
 import file_sharing
@@ -152,14 +152,222 @@ def content_disposition(filename: str, inline: bool) -> str:
     return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
-def generate_upload_page(token: str, error: str = "") -> str:
+def _normalize_lang(value: str) -> str:
+    """Map a lang tag to our supported locale codes (`en` / `zh`)."""
+    v = (value or "").strip().lower().replace("_", "-")
+    if v.startswith("zh"):
+        return "zh"
+    if v.startswith("en"):
+        return "en"
+    return ""
+
+
+def _page_locale(handler_or_query=None) -> str:
+    """Resolve page language from `?lang=en|zh`; default `en`.
+
+    Accepts a RequestHandler (reads ``path`` query), a query string, a path
+    with query, or ``None``. Query param wins; otherwise English.
+    """
+    query = ""
+    if handler_or_query is None:
+        return "en"
+    if isinstance(handler_or_query, str):
+        raw = handler_or_query.strip()
+        if "?" in raw:
+            query = urlparse(raw if raw.startswith("/") or "://" in raw else f"x://x/{raw}").query
+        elif raw.startswith("/") or "://" in raw:
+            query = urlparse(raw).query
+        else:
+            query = raw  # bare "lang=zh"
+    else:
+        try:
+            query = urlparse(getattr(handler_or_query, "path", "") or "").query
+        except Exception:
+            query = ""
+    langs = parse_qs(query).get("lang") or []
+    if langs:
+        normalized = _normalize_lang(langs[0])
+        if normalized:
+            return normalized
+    return "en"
+
+
+def _html_lang_attr(lang: str) -> str:
+    return "zh-CN" if lang == "zh" else "en"
+
+
+UPLOAD_TEXTS = {
+    "en": {
+        "title": "File Upload - SSHChat",
+        "heading": "🔒 Secure File Upload",
+        "subtitle": "This link is finished once the upload succeeds",
+        "info_title": "Instructions:",
+        "info_1": "Enter the 6-character upload key sent separately in chat",
+        "info_2": "Choose the file to upload (the filename comes from your selection)",
+        "info_3": "Click upload; the recipient will get a download link",
+        "key_label": "Upload key *",
+        "key_placeholder": "Enter 6-character key",
+        "file_label": "Choose file *",
+        "submit": "📤 Upload",
+        "uploading": "Uploading...",
+        "alert_key": "Please enter the 6-character key",
+        "alert_file": "Please choose a file",
+        "success_progress": "✅ Upload successful!",
+        "success_alert_prefix": "Upload successful!\n\nFilename: ",
+        "success_alert_suffix": "\n\nThe recipient has the download link — nothing else to do.",
+        "fail_default": "Upload failed",
+        "retry": "📤 Retry upload",
+    },
+    "zh": {
+        "title": "文件上传 - SSHChat",
+        "heading": "🔒 安全文件上传",
+        "subtitle": "上传成功后此链接即完成使命",
+        "info_title": "使用说明：",
+        "info_1": "输入聊天窗里单独发给你的6位上传密钥",
+        "info_2": "选择要上传的文件（文件名以你选的文件为准）",
+        "info_3": "点击上传按钮，接收者会收到下载链接",
+        "key_label": "上传密钥 *",
+        "key_placeholder": "输入6位密钥",
+        "file_label": "选择文件 *",
+        "submit": "📤 开始上传",
+        "uploading": "上传中...",
+        "alert_key": "请输入6位密钥",
+        "alert_file": "请选择文件",
+        "success_progress": "✅ 上传成功！",
+        "success_alert_prefix": "上传成功！\n\n文件名：",
+        "success_alert_suffix": "\n\n接收者已收到下载链接，无需再做别的操作。",
+        "fail_default": "上传失败",
+        "retry": "📤 重新上传",
+    },
+}
+
+DOWNLOAD_TEXTS = {
+    "en": {
+        "title_prefix": "File Download - ",
+        "heading": "📥 Secure File Download",
+        "subtitle": "Private download link — key required",
+        "filename": "📄 Filename:",
+        "filesize": "📦 File size:",
+        "filetype": "🔖 File type:",
+        "preview_label": "👁️ In-browser preview:",
+        "preview_yes": "✅ Supported",
+        "preview_no": "❌ Not supported",
+        "info_title": "Instructions:",
+        "info_1": "Enter the 6-character download key sent separately in chat",
+        "info_preview_rest": (
+            "2. Preview and download each get their own one-time link<br>"
+            "3. Click download to save the file<br>"
+            "4. <strong>This page is void after download</strong> — confirm the save before leaving"
+        ),
+        "info_no_preview_rest": (
+            "2. Click download to save the file<br>"
+            "3. <strong>This page is void after download</strong> — confirm the save before leaving"
+        ),
+        "key_label": "Download key *",
+        "key_placeholder": "Enter 6-character key",
+        "submit_preview": "🔍 Verify & preview",
+        "submit_download": "📥 Verify & download",
+        "preview_title": "📋 File preview",
+        "download_btn": "💾 Download file",
+        "alert_key": "Please enter the 6-character key",
+        "verifying": "Verifying...",
+        "verify_fail": "Verification failed",
+        "retry": "🔁 Retry",
+        "verify_ok_body": "<p>Verified. Click the button below to save the file.</p>",
+        "verify_ok": "✅ Verified",
+        "loading": "Loading...",
+        "server_status": "Server returned ",
+        "preview_fail_body": "<p>Preview failed; you can still download.</p>",
+        "preview_fail": "⚠️ Preview failed",
+        "alert_enter_key": "Please enter the key first",
+        "download_started": "⬇️ Download started — this link is now void",
+    },
+    "zh": {
+        "title_prefix": "文件下载 - ",
+        "heading": "📥 安全文件下载",
+        "subtitle": "专属下载链接，需要密钥才能打开",
+        "filename": "📄 文件名：",
+        "filesize": "📦 文件大小：",
+        "filetype": "🔖 文件类型：",
+        "preview_label": "👁️ 在线预览：",
+        "preview_yes": "✅ 支持",
+        "preview_no": "❌ 不支持",
+        "info_title": "使用说明：",
+        "info_1": "输入聊天窗里单独发给你的6位下载密钥",
+        "info_preview_rest": (
+            "2. 预览和下载会各自生成一条一次性链接<br>"
+            "3. 点击下载按钮保存文件<br>"
+            "4. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开"
+        ),
+        "info_no_preview_rest": (
+            "2. 点击下载按钮保存文件<br>"
+            "3. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开"
+        ),
+        "key_label": "下载密钥 *",
+        "key_placeholder": "输入6位密钥",
+        "submit_preview": "🔍 验证并预览",
+        "submit_download": "📥 验证并下载",
+        "preview_title": "📋 文件预览",
+        "download_btn": "💾 下载文件",
+        "alert_key": "请输入6位密钥",
+        "verifying": "验证中...",
+        "verify_fail": "验证失败",
+        "retry": "🔁 重试",
+        "verify_ok_body": "<p>验证成功，点击下方按钮保存文件。</p>",
+        "verify_ok": "✅ 验证成功",
+        "loading": "加载中...",
+        "server_status": "服务器返回 ",
+        "preview_fail_body": "<p>预览失败，仍可直接下载。</p>",
+        "preview_fail": "⚠️ 预览失败",
+        "alert_enter_key": "请先输入密钥",
+        "download_started": "⬇️ 已开始下载，本链接已作废",
+    },
+}
+
+HTML_ERROR_TEXTS = {
+    "en": {
+        "title": "Error - SSHChat",
+        "heading": "Error {code}",
+    },
+    "zh": {
+        "title": "错误 - SSHChat",
+        "heading": "错误 {code}",
+    },
+}
+
+PAGE_ERROR_MSGS = {
+    "en": {
+        "upload_invalid": "Upload link is invalid",
+        "upload_used": "This upload link was already used. Ask the sender to run /sendfile again",
+        "upload_expired": "Upload link has expired",
+        "download_invalid": "Download link is invalid",
+        "download_waiting": "The sender has not uploaded the file yet. Try again later",
+        "download_expired": "Download link has expired",
+        "download_used": "This download link was already used. Contact the sender for a new one",
+    },
+    "zh": {
+        "upload_invalid": "上传链接无效",
+        "upload_used": "该上传链接已使用过，请让发送方重新执行 /sendfile",
+        "upload_expired": "上传链接已过期",
+        "download_invalid": "下载链接无效",
+        "download_waiting": "发送方还没有上传文件，请稍后再试",
+        "download_expired": "下载链接已过期",
+        "download_used": "该下载链接已使用过，如需重发请联系发送方",
+    },
+}
+
+
+def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
     """Generate HTML upload page."""
+    lang = "zh" if _normalize_lang(lang) == "zh" else "en"
+    S = UPLOAD_TEXTS[lang]
+    html_lang = _html_lang_attr(lang)
     return f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{html_lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件上传 - SSHChat</title>
+    <title>{S['title']}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -298,42 +506,42 @@ def generate_upload_page(token: str, error: str = "") -> str:
 </head>
 <body>
     <div class="container">
-        <h1>🔒 安全文件上传</h1>
-        <p class="subtitle">上传成功后此链接即完成使命</p>
+        <h1>{S['heading']}</h1>
+        <p class="subtitle">{S['subtitle']}</p>
         
         {"<div class='error'>" + html.escape(error) + "</div>" if error else ""}
         
         <div class="info">
-            ℹ️ <strong>使用说明：</strong><br>
-            1. 输入聊天窗里单独发给你的6位上传密钥<br>
-            2. 选择要上传的文件（文件名以你选的文件为准）<br>
-            3. 点击上传按钮，接收者会收到下载链接
+            ℹ️ <strong>{S['info_title']}</strong><br>
+            1. {S['info_1']}<br>
+            2. {S['info_2']}<br>
+            3. {S['info_3']}
         </div>
         
         <form id="uploadForm" method="POST" enctype="multipart/form-data">
             <div class="form-group">
-                <label for="key">上传密钥 *</label>
+                <label for="key">{S['key_label']}</label>
                 <input type="text" id="key" name="key" required 
-                       placeholder="输入6位密钥" 
+                       placeholder="{S['key_placeholder']}" 
                        maxlength="6" 
                        pattern="[A-Z0-9]{{6}}"
                        autocomplete="off">
             </div>
             
             <div class="form-group">
-                <label for="file">选择文件 *</label>
+                <label for="file">{S['file_label']}</label>
                 <input type="file" id="file" name="file" required>
                 <div id="selectedFile" class="selected-file" style="display:none;"></div>
             </div>
             
-            <button type="submit" id="uploadBtn">📤 开始上传</button>
+            <button type="submit" id="uploadBtn">{S['submit']}</button>
         </form>
         
         <div class="progress" id="progress">
             <div class="progress-bar">
                 <div class="progress-fill" id="progressFill"></div>
             </div>
-            <div class="progress-text" id="progressText">上传中...</div>
+            <div class="progress-text" id="progressText">{S['uploading']}</div>
         </div>
     </div>
     
@@ -347,6 +555,17 @@ def generate_upload_page(token: str, error: str = "") -> str:
         const progressFill = document.getElementById('progressFill');
         const progressText = document.getElementById('progressText');
         const uploadUrl = '/upload/{token}';
+        const i18n = {{
+            alertKey: {json.dumps(S['alert_key'])},
+            alertFile: {json.dumps(S['alert_file'])},
+            uploading: {json.dumps(S['uploading'])},
+            successProgress: {json.dumps(S['success_progress'])},
+            successAlertPrefix: {json.dumps(S['success_alert_prefix'])},
+            successAlertSuffix: {json.dumps(S['success_alert_suffix'])},
+            failDefault: {json.dumps(S['fail_default'])},
+            retry: {json.dumps(S['retry'])},
+            submit: {json.dumps(S['submit'])},
+        }};
         
         // Auto uppercase key input
         keyInput.addEventListener('input', function(e) {{
@@ -370,18 +589,18 @@ def generate_upload_page(token: str, error: str = "") -> str:
             const file = fileInput.files[0];
             
             if (!key || key.length !== 6) {{
-                alert('请输入6位密钥');
+                alert(i18n.alertKey);
                 return;
             }}
             
             if (!file) {{
-                alert('请选择文件');
+                alert(i18n.alertFile);
                 return;
             }}
             
             // Disable form
             uploadBtn.disabled = true;
-            uploadBtn.textContent = '上传中...';
+            uploadBtn.textContent = i18n.uploading;
             progress.style.display = 'block';
             
             const formData = new FormData();
@@ -400,21 +619,21 @@ def generate_upload_page(token: str, error: str = "") -> str:
                 
                 if (response.ok) {{
                     progressFill.style.width = '100%';
-                    progressText.textContent = '✅ 上传成功！';
+                    progressText.textContent = i18n.successProgress;
                     progressText.style.color = '#4caf50';
                     
                     setTimeout(() => {{
                         const name = result.filename || file.name;
-                        alert('上传成功！\\n\\n文件名：' + name + '\\n\\n接收者已收到下载链接，无需再做别的操作。');
+                        alert(i18n.successAlertPrefix + name + i18n.successAlertSuffix);
                     }}, 800);
                 }} else {{
-                    throw new Error(result.error || '上传失败');
+                    throw new Error(result.error || i18n.failDefault);
                 }}
             }} catch (error) {{
                 progressText.textContent = '❌ ' + error.message;
                 progressText.style.color = '#f44336';
                 uploadBtn.disabled = false;
-                uploadBtn.textContent = '📤 重新上传';
+                uploadBtn.textContent = i18n.retry;
             }}
         }});
     </script>
@@ -433,6 +652,7 @@ DOWNLOAD_PAGE_SCRIPT = r"""
         const mimeType = __MIME_TYPE__;
         const filename = __FILENAME__;
         const ticketEndpoint = __TICKET_ENDPOINT__;
+        const i18n = __I18N__;
         let downloadUrl = '';
 
         keyInput.addEventListener('input', function () {
@@ -444,12 +664,12 @@ DOWNLOAD_PAGE_SCRIPT = r"""
 
             const key = keyInput.value.trim();
             if (!key || key.length !== 6) {
-                alert('请输入6位密钥');
+                alert(i18n.alertKey);
                 return;
             }
 
             submitBtn.disabled = true;
-            submitBtn.textContent = '验证中...';
+            submitBtn.textContent = i18n.verifying;
 
             let tickets;
             try {
@@ -462,13 +682,13 @@ DOWNLOAD_PAGE_SCRIPT = r"""
                 });
                 const result = await response.json().catch(() => ({}));
                 if (!response.ok) {
-                    throw new Error(result.error || '验证失败');
+                    throw new Error(result.error || i18n.verifyFail);
                 }
                 tickets = result;
             } catch (error) {
                 alert(error.message);
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🔁 重试';
+                submitBtn.textContent = i18n.retry;
                 return;
             }
 
@@ -479,20 +699,20 @@ DOWNLOAD_PAGE_SCRIPT = r"""
                 await loadPreview(tickets.preview);
             } else {
                 previewContainer.classList.add('show');
-                previewContent.innerHTML = '<p>验证成功，点击下方按钮保存文件。</p>';
-                submitBtn.textContent = '✅ 验证成功';
+                previewContent.innerHTML = i18n.verifyOkBody;
+                submitBtn.textContent = i18n.verifyOk;
             }
         });
 
         async function loadPreview(previewUrl) {
-            submitBtn.textContent = '加载中...';
+            submitBtn.textContent = i18n.loading;
             try {
                 // Fetched once through a single-use ticket, then rendered from
                 // an in-page blob so media never re-requests the server.
                 const response = await fetch(previewUrl);
                 if (!response.ok) {
                     const reason = await response.json().catch(() => ({}));
-                    throw new Error(reason.error || ('服务器返回 ' + response.status));
+                    throw new Error(reason.error || (i18n.serverStatus + response.status));
                 }
                 const blob = await response.blob();
 
@@ -525,46 +745,65 @@ DOWNLOAD_PAGE_SCRIPT = r"""
                 }
 
                 previewContainer.classList.add('show');
-                submitBtn.textContent = '✅ 验证成功';
+                submitBtn.textContent = i18n.verifyOk;
             } catch (error) {
                 previewContainer.classList.add('show');
-                previewContent.innerHTML = '<p>预览失败，仍可直接下载。</p>';
-                submitBtn.textContent = '⚠️ 预览失败';
+                previewContent.innerHTML = i18n.previewFailBody;
+                submitBtn.textContent = i18n.previewFail;
             }
         }
 
         function downloadFile() {
             if (!downloadUrl) {
-                alert('请先输入密钥');
+                alert(i18n.alertEnterKey);
                 return;
             }
             window.location.href = downloadUrl;
             downloadUrl = '';
             downloadBtn.disabled = true;
-            downloadBtn.textContent = '⬇️ 已开始下载，本链接已作废';
+            downloadBtn.textContent = i18n.downloadStarted;
         }
 """
 
 
-def generate_download_page(token: str, filename: str, file_size: int, mime_type: str) -> str:
+def generate_download_page(token: str, filename: str, file_size: int, mime_type: str,
+                           lang: str = "en") -> str:
     """Generate HTML download page with preview support."""
+    lang = "zh" if _normalize_lang(lang) == "zh" else "en"
+    S = DOWNLOAD_TEXTS[lang]
+    html_lang = _html_lang_attr(lang)
     can_preview = is_previewable(mime_type) and file_size <= MAX_PREVIEW_SIZE
     size_mb = file_size / 1024 / 1024
     safe_filename = html.escape(filename)
+    i18n = {
+        "alertKey": S["alert_key"],
+        "verifying": S["verifying"],
+        "verifyFail": S["verify_fail"],
+        "retry": S["retry"],
+        "verifyOkBody": S["verify_ok_body"],
+        "verifyOk": S["verify_ok"],
+        "loading": S["loading"],
+        "serverStatus": S["server_status"],
+        "previewFailBody": S["preview_fail_body"],
+        "previewFail": S["preview_fail"],
+        "alertEnterKey": S["alert_enter_key"],
+        "downloadStarted": S["download_started"],
+    }
     download_script = (
         DOWNLOAD_PAGE_SCRIPT
         .replace("__CAN_PREVIEW__", "true" if can_preview else "false")
         .replace("__MIME_TYPE__", json.dumps(mime_type))
         .replace("__FILENAME__", json.dumps(filename))
         .replace("__TICKET_ENDPOINT__", json.dumps(f"/download/{token}/ticket"))
+        .replace("__I18N__", json.dumps(i18n, ensure_ascii=False))
     )
     
     return f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{html_lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件下载 - {safe_filename}</title>
+    <title>{S['title_prefix']}{safe_filename}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -739,56 +978,56 @@ def generate_download_page(token: str, filename: str, file_size: int, mime_type:
 <body>
     <div class="container">
         <div class="header">
-            <h1>📥 安全文件下载</h1>
-            <p class="subtitle">专属下载链接，需要密钥才能打开</p>
+            <h1>{S['heading']}</h1>
+            <p class="subtitle">{S['subtitle']}</p>
         </div>
         
         <div class="content">
             <div class="file-info">
                 <div class="file-info-row">
-                    <span class="file-info-label">📄 文件名：</span>
+                    <span class="file-info-label">{S['filename']}</span>
                     <span class="file-info-value">{safe_filename}</span>
                 </div>
                 <div class="file-info-row">
-                    <span class="file-info-label">📦 文件大小：</span>
+                    <span class="file-info-label">{S['filesize']}</span>
                     <span class="file-info-value">{size_mb:.2f} MB</span>
                 </div>
                 <div class="file-info-row">
-                    <span class="file-info-label">🔖 文件类型：</span>
+                    <span class="file-info-label">{S['filetype']}</span>
                     <span class="file-info-value">{mime_type}</span>
                 </div>
                 <div class="file-info-row">
-                    <span class="file-info-label">👁️ 在线预览：</span>
-                    <span class="file-info-value">{'✅ 支持' if can_preview else '❌ 不支持'}</span>
+                    <span class="file-info-label">{S['preview_label']}</span>
+                    <span class="file-info-value">{S['preview_yes'] if can_preview else S['preview_no']}</span>
                 </div>
             </div>
             
             <div class="info">
-                ℹ️ <strong>使用说明：</strong><br>
-                1. 输入聊天窗里单独发给你的6位下载密钥<br>
-                {'2. 预览和下载会各自生成一条一次性链接<br>3. 点击下载按钮保存文件<br>4. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开' if can_preview else '2. 点击下载按钮保存文件<br>3. <strong>下载完成后本页面即作废</strong>，请确认保存成功再离开'}
+                ℹ️ <strong>{S['info_title']}</strong><br>
+                1. {S['info_1']}<br>
+                {S['info_preview_rest'] if can_preview else S['info_no_preview_rest']}
             </div>
             
             <form id="downloadForm">
                 <div class="form-group">
-                    <label for="key">下载密钥 *</label>
+                    <label for="key">{S['key_label']}</label>
                     <input type="text" id="key" name="key" required 
-                           placeholder="输入6位密钥" 
+                           placeholder="{S['key_placeholder']}" 
                            maxlength="6" 
                            pattern="[A-Z0-9]{{6}}"
                            autocomplete="off">
                 </div>
                 
                 <button type="submit" id="submitBtn">
-                    {'🔍 验证并预览' if can_preview else '📥 验证并下载'}
+                    {S['submit_preview'] if can_preview else S['submit_download']}
                 </button>
             </form>
             
             <div class="preview-container" id="previewContainer">
-                <div class="preview-title">📋 文件预览</div>
+                <div class="preview-title">{S['preview_title']}</div>
                 <div class="preview-content" id="previewContent"></div>
                 <button class="download-button" id="downloadBtn" onclick="downloadFile()">
-                    💾 下载文件
+                    {S['download_btn']}
                 </button>
             </div>
         </div>
@@ -844,14 +1083,17 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         self._drain_request_body()
         self._send_error_json(code, message)
     
-    def _send_html_error(self, code: int, message: str):
+    def _send_html_error(self, code: int, message: str, lang: str = "en"):
         """Send HTML error page."""
+        lang = "zh" if _normalize_lang(lang) == "zh" else "en"
+        S = HTML_ERROR_TEXTS[lang]
+        html_lang = _html_lang_attr(lang)
         page = f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{html_lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>错误 - SSHChat</title>
+    <title>{S['title']}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -889,7 +1131,7 @@ class FileTransferHandler(BaseHTTPRequestHandler):
 <body>
     <div class="container">
         <h1>❌</h1>
-        <h2>错误 {code}</h2>
+        <h2>{S['heading'].format(code=code)}</h2>
         <p>{html.escape(message)}</p>
     </div>
 </body>
@@ -1085,6 +1327,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
         store = file_sharing.file_transfer_store
+        lang = _page_locale(self)
+        errs = PAGE_ERROR_MSGS[lang]
         
         if len(path_parts) < 2:
             self._send_error_json(404, "网址无效")
@@ -1100,18 +1344,18 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             transfer = store.get_transfer_by_token(token)
             
             if not transfer or transfer.upload_token != token:
-                self._send_html_error(404, "上传链接无效")
+                self._send_html_error(404, errs["upload_invalid"], lang=lang)
                 return
             
             if transfer.upload_used:
-                self._send_html_error(403, "该上传链接已使用过，请让发送方重新执行 /sendfile")
+                self._send_html_error(403, errs["upload_used"], lang=lang)
                 return
             
             if time.time() > transfer.upload_expires:
-                self._send_html_error(403, "上传链接已过期")
+                self._send_html_error(403, errs["upload_expired"], lang=lang)
                 return
             
-            self._send_html_page(generate_upload_page(token))
+            self._send_html_page(generate_upload_page(token, lang=lang))
             return
         
         if path_parts[0] == 'download' and len(path_parts) == 2:
@@ -1119,25 +1363,25 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             transfer = store.get_transfer_by_token(token)
             
             if not transfer or token not in transfer.download_tokens.values():
-                self._send_html_error(404, "下载链接无效")
+                self._send_html_error(404, errs["download_invalid"], lang=lang)
                 return
             
             if not transfer.upload_used:
-                self._send_html_error(403, "发送方还没有上传文件，请稍后再试")
+                self._send_html_error(403, errs["download_waiting"], lang=lang)
                 return
             
             if time.time() > transfer.download_expires:
-                self._send_html_error(403, "下载链接已过期")
+                self._send_html_error(403, errs["download_expired"], lang=lang)
                 return
             
             if (file_sharing.ONE_TIME_DOWNLOAD
                     and transfer.download_used.get(token, False)):
-                self._send_html_error(403, "该下载链接已使用过，如需重发请联系发送方")
+                self._send_html_error(403, errs["download_used"], lang=lang)
                 return
             
             mime_type = get_mime_type(transfer.filename)
             self._send_html_page(generate_download_page(
-                token, transfer.filename, transfer.file_size, mime_type))
+                token, transfer.filename, transfer.file_size, mime_type, lang=lang))
             return
         
         self._send_error_json(404, "网址无效")

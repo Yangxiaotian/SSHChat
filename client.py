@@ -39,7 +39,8 @@ _SYSTEM_SENDERS = frozenset(("+", "!", "*"))
 _STOP = threading.Event()
 _DISCONNECTED = threading.Event()
 _DISPLAY_TIMES: deque[datetime] = deque(maxlen=2048)
-_DND_TURN_HINT = "轮到你操作"
+_DND_TURN_HINT = "Your turn to move"
+_DND_TURN_HINT_ZH = "轮到你操作"
 _DND_LOCK = threading.Lock()
 _DND_HINT_LOCK = threading.Lock()
 _DND_LAST_HINT_AT = 0.0
@@ -125,6 +126,8 @@ _DND_SUBCOMMANDS = {
 
 _TOP_COMMANDS = (
     "/help",
+    "/lang",
+    "/language",
     "/names",
     "/users",
     "/rooms",
@@ -147,6 +150,15 @@ _TOP_COMMANDS = (
     "/dnd",
 )
 
+_LANG_SUBCOMMANDS = {
+    "en": None,
+    "zh": None,
+    "english": None,
+    "chinese": None,
+    "中文": None,
+    "英文": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -154,6 +166,8 @@ _SUBCOMMANDS_BY_CMD = {
     "/lib": sorted(_LIBRARY_SUBCOMMANDS),
     "/dict": sorted(_DICT_SUBCOMMANDS),
     "/dnd": sorted(_DND_SUBCOMMANDS),
+    "/lang": sorted(_LANG_SUBCOMMANDS),
+    "/language": sorted(_LANG_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -277,11 +291,11 @@ def _is_reading_content_line(payload: str) -> bool:
         return True
     if re.match(r"^\d+\.\s+\[", t):
         return True
-    if t.startswith("《") or "【图书馆】" in t or t.startswith("[图书馆]"):
+    if t.startswith("《") or "【图书馆】" in t or t.startswith("[图书馆]") or "[Library]" in t:
         return True
     if t.startswith("Usage:") or t.startswith("用法：") or t.startswith("用法:"):
         return True
-    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib"):
+    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib") or t.startswith("/lang"):
         return True
     return False
 
@@ -308,8 +322,11 @@ def _is_game_flood_line(payload: str) -> bool:
         "可直接加入",
         "同一房间同一时刻仅允许一场进行中的对局",
         "可玩游戏",
+        "Playable games",
         "你的手牌",
+        "Your hand",
         "公共牌",
+        "community cards",
         "贴目",
         "提子",
         "停一手",
@@ -319,12 +336,15 @@ def _is_game_flood_line(payload: str) -> bool:
         "落子：",
         "走子：",
         "轮到：",
+        "Turn:",
+        "to move",
         "轮到 黑",
         "轮到 白",
         "轮到 红",
         "轮到 黑方",
         "轮到 白方",
         "轮到 红方",
+        "Not your turn",
         "gomoku",
         "围棋",
         "chess",
@@ -353,6 +373,8 @@ def _is_game_flood_line(payload: str) -> bool:
         "等宽字体",
         "被将军",
         "将军）",
+        "rating=",
+        "Leaderboard",
     )
     return any(k.lower() in t for k in keywords)
 
@@ -365,6 +387,8 @@ def _is_game_context_line(payload: str) -> bool:
     if not t:
         return False
     if "积分体系" in t or "积分=" in t or "等级=" in t or "战绩=" in t:
+        return True
+    if "rating=" in t.lower() or "level=" in t.lower() or "W/L/D=" in t:
         return True
     if re.search(r"对局[（(]", t) or "对局状态" in t:
         return True
@@ -421,6 +445,16 @@ def _parse_turn_name(payload: str) -> str:
         m = re.match(r"^轮到\s+(?:黑|白|红)(?:方)?\s+(\S+)", trimmed)
         if m:
             return re.split(r"[（(]", m.group(1))[0].strip()
+        m = re.match(
+            r"^(?:Black|White|Red)(?:\s+to\s+move)?[:：]\s*(\S+)",
+            trimmed,
+            re.I,
+        )
+        if m:
+            return re.split(r"[（(]", m.group(1))[0].strip()
+        m = re.match(r"^Turn:\s*(\S+)", trimmed, re.I)
+        if m:
+            return re.split(r"[（(]", m.group(1))[0].strip()
     return ""
 
 
@@ -432,7 +466,10 @@ def _is_my_turn_line(payload: str, my_name: str) -> bool:
         return True
     trimmed = payload.strip()
     m = re.match(r"^轮到[：:]\s*(.+)$", trimmed)
-    return bool(m and m.group(1).strip() == my_name)
+    if m and m.group(1).strip() == my_name:
+        return True
+    m = re.match(r"^Turn[:：]\s*(.+)$", trimmed, re.I)
+    return bool(m and m.group(1).strip().split()[0] == my_name)
 
 
 def _is_game_error_line(payload: str) -> bool:
@@ -442,14 +479,21 @@ def _is_game_error_line(payload: str) -> bool:
         return False
     markers = (
         "不是你的回合",
+        "Not your turn",
         "无法",
+        "cannot",
         "用法：",
         "用法:",
+        "Usage:",
         "错误",
+        "error",
         "非法",
         "无效",
+        "invalid",
         "失败",
+        "failed",
         "未知",
+        "unknown",
         "未进行",
         "未开始",
     )
@@ -520,14 +564,14 @@ def _dnd_print_game_session_ack(cmd: str) -> None:
     parts = lower.split(None, 2)
     action = parts[1] if len(parts) >= 2 else ""
     hints = {
-        "join": "加入对局请求已发送（勿扰模式隐藏棋盘；结果见下方提示）",
-        "new": "开局请求已发送（勿扰模式隐藏棋盘；结果见下方提示）",
-        "end": "结束对局请求已发送",
-        "resign": "认输请求已发送",
-        "abort": "中止对局请求已发送",
-        "undo": "悔棋请求已发送",
+        "join": "Join request sent (DND hides the board; see tips below)",
+        "new": "New-game request sent (DND hides the board; see tips below)",
+        "end": "End-game request sent",
+        "resign": "Resign request sent",
+        "abort": "Abort request sent",
+        "undo": "Undo request sent",
     }
-    hint = hints.get(action, "游戏命令已发送")
+    hint = hints.get(action, "Game command sent")
     print(f"[*] {hint}\n", end="", flush=True)
 
 
@@ -565,7 +609,7 @@ def _is_dnd_game_action_command(cmd: str) -> bool:
 
 
 def _dnd_print_game_action_ack() -> None:
-    print("[*] 走子已提交（勿扰模式隐藏局面更新）\n", end="", flush=True)
+    print("[*] Move submitted (DND hides board updates)\n", end="", flush=True)
 
 
 def _dnd_system_action(payload: str, my_name: str) -> str | None:
@@ -630,20 +674,20 @@ def _try_handle_local_command(msg: str) -> bool:
     stripped = msg.strip()
     lower = stripped.lower()
     if lower == "/dnd":
-        state = "开启" if _dnd_enabled() else "关闭"
-        print(f"[*] 勿扰模式：{state}（/dnd on | /dnd off）")
+        state = "on" if _dnd_enabled() else "off"
+        print(f"[*] Do-not-disturb: {state} (/dnd on | /dnd off)")
         return True
     if lower == "/dnd on":
         already = _dnd_enabled()
         _set_dnd(True)
         if already:
-            print("[*] 勿扰模式本就开启；已恢复过滤游戏广播")
+            print("[*] DND already on; game broadcast filtering restored")
         else:
-            print("[*] 勿扰模式已开启：游戏广播不再刷屏，轮到你时仅提示一行")
+            print("[*] DND on: game broadcasts suppressed; one-line hint on your turn")
         return True
     if lower == "/dnd off":
         _set_dnd(False)
-        print("[*] 勿扰模式已关闭")
+        print("[*] DND off")
         return True
     if lower in ("/clear", "/cls"):
         _terminal_hard_clear()
@@ -1051,8 +1095,8 @@ def main():
         "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /game  /news  /news fetch <类> <号>  /dict  /library (/lib)  "
-        "/dnd on|off  /clear  /help"
+        "/announce  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")
     print(
@@ -1064,7 +1108,10 @@ def main():
         f"(SSHCHAT_ALERT_SOUND={_ALERT_SOUND}): auto | canberra | paplay | aplay | none"
     )
     if _dnd_enabled():
-        print("[*] 勿扰模式已开启（/dnd off 关闭；仅 /game show 等查看命令会临时显示完整局面）")
+        print(
+            "[*] DND is on (/dnd off to disable; only /game show and similar "
+            "read commands temporarily show the full board)"
+        )
 
     threading.Thread(target=recv_msg, args=(s, name), daemon=True).start()
 

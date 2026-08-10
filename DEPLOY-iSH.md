@@ -1,5 +1,7 @@
 # 在 iSH 上部署 SSHChat 服务器
 
+English version: [docs/en/deploy-ish.md](docs/en/deploy-ish.md)
+
 把 iPhone / iPad 上的 **iSH**（Alpine Linux 用户态）当作聊天服务器主机。  
 手机端**只当 SSH 客户端**连别的服务器时，请看 `小白使用说明书-iSH.md`，不必看本文。
 
