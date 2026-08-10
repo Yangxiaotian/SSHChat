@@ -32,6 +32,12 @@ KEY_PUB="$FED_DIR/id_ed25519.pub"
 
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
 
+# Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
+primary_group_of() {
+  local user_name=$1
+  id -gn "$user_name" 2>/dev/null || printf '%s' "$user_name"
+}
+
 usage() {
   cat >&2 <<EOF
 Usage: sudo $0 <peer_node_id> <peer_host> <pubkey-or-file>
@@ -101,15 +107,16 @@ if ! is_darwin; then
       echo "info: federation SSH home -> $FED_HOME (was $cur_home)"
     fi
   fi
+  FED_GROUP=$(primary_group_of "$FED_USER")
   mkdir -p "$FED_HOME"
-  chown "$FED_USER:$FED_USER" "$FED_HOME"
+  chown "$FED_USER:$FED_GROUP" "$FED_HOME"
   chmod 755 "$FED_HOME"
-  install -d -m 700 -o "$FED_USER" -g "$FED_USER" "$FED_HOME/.ssh"
+  install -d -m 700 -o "$FED_USER" -g "$FED_GROUP" "$FED_HOME/.ssh"
   AUTH_DIR=$(getent passwd "$FED_USER" | cut -d: -f6)
   AUTH_DIR=${AUTH_DIR:-$FED_HOME}
   AUTH_KEYS="$AUTH_DIR/.ssh/authorized_keys"
   mkdir -p "$(dirname "$AUTH_KEYS")"
-  chown "$FED_USER:$FED_USER" "$(dirname "$AUTH_KEYS")"
+  chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")"
   chmod 700 "$(dirname "$AUTH_KEYS")"
 else
   AUTH_KEYS="$FED_DIR/authorized_keys_inbound"
@@ -135,7 +142,7 @@ if [[ -f "$AUTH_KEYS" ]] && grep -qF "$KEY_BLOB" "$AUTH_KEYS" 2>/dev/null; then
     mv "$TMP" "$AUTH_KEYS"
     chmod 600 "$AUTH_KEYS"
     if ! is_darwin; then
-      chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
+      chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
     fi
     echo "info: updated peer inbound key options in $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
   fi
@@ -143,7 +150,7 @@ else
   echo "$FINAL_LINE" >>"$AUTH_KEYS"
   chmod 600 "$AUTH_KEYS"
   if ! is_darwin; then
-    chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
+    chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
   fi
   echo "info: added peer inbound key to $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
 fi
@@ -194,12 +201,13 @@ if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
   SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
 fi
 SVC_USER=${SVC_USER:-sshchat}
+SVC_GROUP=$(primary_group_of "$SVC_USER")
 if id "$SVC_USER" &>/dev/null; then
-  chown "$SVC_USER:$SVC_USER" "$PEERS_JSON" 2>/dev/null || true
-  chown "$SVC_USER:$SVC_USER" "$FED_DIR" 2>/dev/null || true
+  chown "$SVC_USER:$SVC_GROUP" "$PEERS_JSON" 2>/dev/null || true
+  chown "$SVC_USER:$SVC_GROUP" "$FED_DIR" 2>/dev/null || true
   chmod 750 "$FED_DIR" 2>/dev/null || true
   if [[ -f "$KEY_PRIV" ]]; then
-    chown "$SVC_USER:$SVC_USER" "$KEY_PRIV" "$KEY_PUB" 2>/dev/null || true
+    chown "$SVC_USER:$SVC_GROUP" "$KEY_PRIV" "$KEY_PUB" 2>/dev/null || true
     chmod 600 "$KEY_PRIV" 2>/dev/null || true
     chmod 644 "$KEY_PUB" 2>/dev/null || true
   fi
@@ -211,12 +219,12 @@ if ! is_darwin && id "$FED_USER" &>/dev/null; then
     usermod -aG "$CLIENT_GROUP_NAME" "$FED_USER" 2>/dev/null || true
   fi
   if [[ -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
-    chown "$FED_USER:$FED_USER" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
+    chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
     chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
     chmod 600 "$AUTH_KEYS" 2>/dev/null || true
   fi
   # Keep sshd-compliant home ownership.
-  chown "$FED_USER:$FED_USER" "$FED_HOME" 2>/dev/null || true
+  chown "$FED_USER:$FED_GROUP" "$FED_HOME" 2>/dev/null || true
   chmod 755 "$FED_HOME" 2>/dev/null || true
 fi
 # Bridge is forced-command for inbound peers.
