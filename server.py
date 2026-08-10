@@ -306,15 +306,65 @@ def send_game_private(conn, room: str, lines) -> None:
     send_line(conn, _format_game_lines(room, out).decode("utf-8"))
 
 
-def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
+# [#room] [*] <body> — game system lines from broadcast_game / send_game_private
+_GAME_BROADCAST_LINE_RE = re.compile(
+    r"^\[#([a-zA-Z0-9_-]{1,32})\] \[\*\] (.*)$"
+)
+
+
+def _parse_game_broadcast_msg(msg: bytes) -> Optional[tuple[str, list[str]]]:
+    """If msg is only [#room] [*] lines for one room, return (room, bodies)."""
+    try:
+        text = msg.decode("utf-8")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    if not lines:
+        return None
+    room: Optional[str] = None
+    bodies: list[str] = []
+    for ln in lines:
+        m = _GAME_BROADCAST_LINE_RE.match(ln)
+        if not m:
+            return None
+        r, body = m.group(1), m.group(2)
+        if room is None:
+            room = r
+        elif r != room:
+            return None
+        bodies.append(body)
+    if room is None:
+        return None
+    return room, bodies
+
+
+def _deliver_game_lines_localized(room: str, lines: list[str]) -> None:
+    """Send game lines to each local client in that client's UI locale."""
     if not lines:
         return
-    if _should_skip_game_localize(room):
-        out = list(lines)
-    else:
-        loc = locale or i18n.default_locale()
-        out = i18n.localize_game_lines(list(lines), loc)
-    broadcast_room(room, _format_game_lines(room, out))
+    skip = _should_skip_game_localize(room)
+    with lock:
+        targets = [c for c in list(rooms.get(room, ())) if c in clients]
+    for conn in targets:
+        out = list(lines) if skip else i18n.localize_game_lines(list(lines), conn_locale(conn))
+        send_line(conn, _format_game_lines(room, out).decode("utf-8"))
+
+
+def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
+    """Broadcast game system text, localized per recipient (not one room language).
+
+    ``locale`` is kept for call-site compatibility but ignored: each connection
+    uses ``conn_locale(conn)``. Federation forwards the source (usually Chinese)
+    lines so peer nodes can localize for their own clients.
+    """
+    if not lines:
+        return
+    _ = locale  # retained for API compatibility; delivery is always per-conn
+    raw = list(lines)
+    _deliver_game_lines_localized(room, raw)
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.broadcast_room(room, _format_game_lines(room, raw))
 
 
 def _viewer_name_for_conn(conn) -> str | None:
@@ -3586,14 +3636,7 @@ def _finish_game_action(
         for peer_conn, extra in drain():
             _route_game_private(room, peer_conn, extra)
     if bcast:
-        actor_loc = i18n.default_locale()
-        if actor_conn in clients:
-            actor_loc = conn_locale(actor_conn)
-        else:
-            nick = getattr(actor_conn, "nickname", None) or getattr(actor_conn, "name", None)
-            if nick:
-                actor_loc = nick_locale(str(nick))
-        broadcast_game(room, bcast, locale=actor_loc)
+        broadcast_game(room, bcast)
     if send_boards and (ended or getattr(game, "send_view_on_move", True)):
         send_oriented_boards(room, game)
     send_sanguo_hand_views(room, game)
@@ -3747,6 +3790,13 @@ def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
     # duplicates from older peers that still federated those via msg.
     if _is_presence_chat_notice(msg):
         return
+    parsed = _parse_game_broadcast_msg(msg)
+    if parsed is not None:
+        parsed_room, bodies = parsed
+        deliver_room = room or parsed_room
+        if not _should_skip_game_localize(deliver_room):
+            _deliver_game_lines_localized(deliver_room, bodies)
+            return
     broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
 
 
