@@ -137,6 +137,7 @@ Environment=SSHCHAT_ENV_FILE=$ENV_FILE
 Environment=SSHCHAT_FILE_LOCAL_URL=$LOCAL_URL
 Environment=SSHCHAT_PREFIX=$PREFIX
 Environment=SSHCHAT_FILE_HTTP_PORT=$FILE_HTTP_PORT
+Environment=SSHCHAT_CLOUDFLARED_PROTOCOL=http2
 KillMode=control-group
 TimeoutStopSec=20
 
@@ -168,6 +169,8 @@ install_macos_daemon() {
     <string>$PREFIX</string>
     <key>SSHCHAT_FILE_HTTP_PORT</key>
     <string>$FILE_HTTP_PORT</string>
+    <key>SSHCHAT_CLOUDFLARED_PROTOCOL</key>
+    <string>http2</string>
     <key>PATH</key>
     <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
