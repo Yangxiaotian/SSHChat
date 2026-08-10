@@ -171,7 +171,54 @@ apk add py3-lxml
 
 并用仓库自带的 `deploy.sh`（会 `--system-site-packages` + ebooklib `--no-deps`）。
 
-### 5. 手机休眠后服务停了
+### 5. 卡在 `fetch http://apk.ish.app/.../APKINDEX.tar.gz`
+
+这是 iSH 自带源 `apk.ish.app` 常见故障（源站慢/不可达），与 SSHChat 无关。`deploy.sh` 在已装好 `py3-lxml`/`pip` 时会跳过 `apk add`。
+
+**立刻处理：**
+
+1. `Ctrl+C` 中断当前 `deploy.sh`  
+2. 若以前装过依赖，直接再跑（新脚本会跳过 apk）：
+
+```bash
+./deploy.sh --keep-env
+```
+
+3. 若缺包，先换可用 Alpine 源再装（App Store 版建议留在 **v3.14**，勿盲目升到过新版本以免 Bad system call）：
+
+```bash
+# 备份
+cp /etc/apk/repositories /etc/apk/repositories.bak
+
+# 方案 A：仍用同版本，换官方 CDN（常比 apk.ish.app 通）
+printf '%s\n' \
+  'https://dl-cdn.alpinelinux.org/alpine/v3.14/main' \
+  'https://dl-cdn.alpinelinux.org/alpine/v3.14/community' \
+  >/etc/apk/repositories
+
+apk update
+apk add py3-lxml py3-pip
+```
+
+若官方 CDN 也慢，可试国内镜像（版本仍用 v3.14）：
+
+```bash
+printf '%s\n' \
+  'https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.14/main' \
+  'https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.14/community' \
+  >/etc/apk/repositories
+apk update && apk add py3-lxml py3-pip
+```
+
+说明：只要目录 `/ish` 还在，iSH 重启后可能改回 `apk.ish.app`。需要长期固定源时可按 [iSH wiki](https://github.com/ish-app/ish/wiki/Using-Alpine-Linux-repositories) 处理 `/ish`（有风险，先备份）。
+
+装好后再：
+
+```bash
+./deploy.sh --keep-env
+```
+
+### 6. 手机休眠后服务停了
 
 iSH 在后台可能被系统挂起。保持 iSH 前台、接电，或按需重开 App 后再 `rc-service sshchat start`。这是 iOS 限制，不是 SSHChat 独有。
 

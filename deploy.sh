@@ -690,9 +690,24 @@ if is_ish && [[ "${SSHCHAT_NO_ISH_ADAPT:-}" != "1" ]]; then
     PIP_CMD_RETRIES=5
   fi
   # Soft deps from Alpine apk so venv can use --system-site-packages (avoids compiling lxml).
+  # apk.ish.app often hangs on APKINDEX fetch; skip when packages are already present.
   if command -v apk &>/dev/null; then
-    echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
-    apk add --no-cache py3-lxml py3-pip 2>/dev/null || apk add py3-lxml py3-pip || true
+    need_apk=0
+    python3 -c "import lxml" 2>/dev/null || need_apk=1
+    command -v pip3 &>/dev/null || command -v pip &>/dev/null || need_apk=1
+    if [[ "$need_apk" -eq 0 ]]; then
+      echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
+    else
+      echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+      echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
+      if command -v timeout &>/dev/null; then
+        timeout 90 apk add --no-cache py3-lxml py3-pip 2>/dev/null \
+          || timeout 90 apk add py3-lxml py3-pip 2>/dev/null \
+          || echo "warning: iSH: apk add timed out or failed; install py3-lxml py3-pip manually then re-run" >&2
+      else
+        apk add --no-cache py3-lxml py3-pip 2>/dev/null || apk add py3-lxml py3-pip || true
+      fi
+    fi
   fi
 fi
 
