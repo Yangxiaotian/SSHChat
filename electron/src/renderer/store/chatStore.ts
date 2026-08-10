@@ -330,11 +330,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setLocale: (locale) => {
     persistLocale(locale);
     set({ locale });
+    void window.api?.sendMessage?.(`/lang ${locale}`);
   },
   toggleLocale: () =>
     set((state) => {
       const next: Locale = state.locale === 'zh' ? 'en' : 'zh';
       persistLocale(next);
+      void window.api?.sendMessage?.(`/lang ${next}`);
       return { locale: next };
     }),
   setPrivacyMode: (value) => set({ privacyMode: value }),

@@ -33,6 +33,36 @@ def _chess_level(rating: int) -> str:
     return "Beginner"
 
 
+_LEVEL_LABEL_EN: dict[str, str] = {
+    "GM线": "GM",
+    "IM线": "IM",
+    "FM线": "FM",
+    "CM线": "CM",
+    "业余7段": "Amateur 7 dan",
+    "业余6段": "Amateur 6 dan",
+    "业余5段": "Amateur 5 dan",
+    "业余4段": "Amateur 4 dan",
+    "业余3段": "Amateur 3 dan",
+    "业余2段": "Amateur 2 dan",
+    "业余1段": "Amateur 1 dan",
+    "1级": "1 kyu",
+    "2级": "2 kyu",
+    "4级": "4 kyu",
+    "6级": "6 kyu",
+    "8级": "8 kyu",
+    "10级": "10 kyu",
+    "12级": "12 kyu",
+    "练气初期": "Qi refining (early)",
+}
+
+
+def localize_level(level: str, locale: str = "en") -> str:
+    """Translate stored level labels for English UI; Chinese kept as-is."""
+    if (locale or "en").lower().startswith("zh"):
+        return level
+    return _LEVEL_LABEL_EN.get(level, level)
+
+
 def _dan_level(rating: int) -> str:
     if rating >= 2400:
         return "业余7段"

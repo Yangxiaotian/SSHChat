@@ -1,5 +1,7 @@
 # 文件收发功能使用指南
 
+English version: [docs/en/file-sharing.md](docs/en/file-sharing.md)
+
 ## 用户首次登录看到的信息
 
 当用户通过 SSH 连接到服务器后，会看到：

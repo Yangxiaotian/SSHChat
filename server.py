@@ -26,11 +26,13 @@ from typing import Optional
 import dict_lookup
 import federation
 import games
+import i18n
 import library
 import file_sharing
 import file_http_server
+from locale_store import LocaleStore
 from offline_messages import OfflineMessageStore
-from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
+from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game, localize_level
 from session_store import DisconnectedSeat, FederatedSeat, GameSessionStore
 
 DEFAULT_ROOM = "default"
@@ -65,10 +67,18 @@ def _offline_messages_path() -> str:
     return os.path.join(os.path.dirname(__file__), "offline_messages.json")
 
 
+def _locale_store_path() -> str:
+    raw = os.environ.get("SSHCHAT_LOCALE_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "user_locales.json")
+
+
 rating_store = GameRatingStore(_rating_store_path())
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
 offline_messages = OfflineMessageStore(_offline_messages_path())
+locale_store = LocaleStore(_locale_store_path())
 file_http = None  # HTTP server for file transfers, initialized in main()
 
 # conn -> {"name", "rooms", "current_room"}
@@ -204,46 +214,7 @@ article_fetch_cache: dict[str, tuple[float, str]] = {}
 article_fetch_lock = threading.Lock()
 _ARTICLE_CACHE_MAX = 200
 
-HELP_LINES = (
-    "[*] ---------- SSHChat 命令说明 ----------\n",
-    "[*] 普通文字（不以 / 开头）发到「当前活跃房间」，房内在线用户都会收到。\n",
-    "[*]\n",
-    "[*] /join <房间>     加入房间并立刻切到该房；若已在房内则只切换当前房。\n",
-    "[*]              房间名：1～32 字符，仅字母、数字、下划线、连字符。\n",
-    "[*] /switch <房间>  只在已加入的房间之间切换；未加入会提示先用 /join。\n",
-    "[*] /part <房间>    退出某房间；至少保留一间，不能退出最后一个。\n",
-    "[*] /rooms         列出你已加入的房间；前面带 * 的是当前活跃房间。\n",
-    "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
-    "[*]\n",
-    "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
-    "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
-    "[*]              昵称大小写不敏感；同昵称多人在线会全部收到；发件人会收到汇总提示。\n",
-    "[*] /leave [昵称]     查看你发出、对方尚未阅读的留言/文件（按昵称分组编号）。\n",
-    "[*] /leave <昵称> <编号>  撤回发给该昵称的第 N 条未读留言或离线文件（别名：/留言、/unmsg）。\n",
-    "[*]\n",
-    "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
-    "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
-    "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
-    "[*]\n",
-    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
-    "[*]              详细用法用 /game help 查看。\n",
-    "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
-    "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
-    "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
-    "[*] /library       列出图书馆书目（epub / txt / md / pdf；每人自带书签，翻页自动保存）。\n",
-    "[*] /lib             /library 的简写。\n",
-    "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
-    "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
-    "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
-    "[*]\n",
-    "[*] /sendfile      发送文件到当前房间，你将收到上传网址，密钥另行单独给出。\n",
-    "[*] /sendfile <昵称>    发送文件给指定用户（对方离线则留言，上线后收到；可用 /leave 查看或撤回）。\n",
-    "[*] /sendfile #<房间>   发送文件到指定房间，成员各自收到不同的下载网址+密钥。\n",
-    "[*]              文件名以你实际上传的文件为准，不必在指令里写。\n",
-    "[*]              密钥不在网址里，打开网页后另行输入；支持图片、视频、PDF等在线预览。\n",
-    "[*]              上传和下载都只能用一次，用过即作废，链接被别人截获也没用。\n",
-    "[*] /help          显示本说明。\n",
-)
+# /help text lives in locales/{en,zh}.py (i18n.help_lines).
 
 
 def _parse_handshake_line(raw: str) -> str:
@@ -252,6 +223,40 @@ def _parse_handshake_line(raw: str) -> str:
     if not line:
         return "Unknown"
     return line.split("\t", 1)[0].strip() or "Unknown"
+
+
+def conn_locale(conn) -> str:
+    info = clients.get(conn)
+    if info:
+        loc = info.get("locale")
+        if loc:
+            return i18n.normalize_locale(str(loc))
+        name = (info.get("name") or "").strip()
+        if name:
+            return locale_store.get(name)
+    return i18n.default_locale()
+
+
+def nick_locale(nickname: str) -> str:
+    return locale_store.get(nickname)
+
+
+def _ts(conn, key: str, **kwargs) -> str:
+    return i18n.t(f"server.{key}", conn_locale(conn), **kwargs)
+
+
+def set_conn_locale(conn, locale: str) -> str:
+    loc = i18n.normalize_locale(locale)
+    with lock:
+        info = clients.get(conn)
+        if info:
+            info["locale"] = loc
+            name = (info.get("name") or "").strip()
+        else:
+            name = ""
+    if name:
+        locale_store.set(name, loc)
+    return loc
 
 
 def normalize_room(name: str) -> Optional[str]:
@@ -278,7 +283,7 @@ def send_room_announcement_preview(conn, room: str) -> None:
         text = (room_announcements.get(room) or "").strip()
     if not text:
         return
-    send_line(conn, f"[#{room}] [*] 公告：{text}\n")
+    send_line(conn, _ts(conn, "announce_preview", room=room, text=text))
 
 
 def _format_game_lines(room: str, lines) -> bytes:
@@ -286,16 +291,30 @@ def _format_game_lines(room: str, lines) -> bytes:
     return "".join(f"[#{room}] [*] {ln}\n" for ln in lines).encode("utf-8")
 
 
+def _should_skip_game_localize(room: str) -> bool:
+    game = room_games.get(room)
+    return getattr(game, "name", "") == "sanguo"
+
+
 def send_game_private(conn, room: str, lines) -> None:
     if not lines:
         return
-    send_line(conn, _format_game_lines(room, lines).decode("utf-8"))
+    if _should_skip_game_localize(room):
+        out = list(lines)
+    else:
+        out = i18n.localize_game_lines(list(lines), conn_locale(conn))
+    send_line(conn, _format_game_lines(room, out).decode("utf-8"))
 
 
-def broadcast_game(room: str, lines) -> None:
+def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
     if not lines:
         return
-    broadcast_room(room, _format_game_lines(room, lines))
+    if _should_skip_game_localize(room):
+        out = list(lines)
+    else:
+        loc = locale or i18n.default_locale()
+        out = i18n.localize_game_lines(list(lines), loc)
+    broadcast_room(room, _format_game_lines(room, out))
 
 
 def _viewer_name_for_conn(conn) -> str | None:
@@ -346,32 +365,83 @@ def send_sanguo_hand_views(room: str, game) -> None:
         send_game_private(conn, room, lines)
 
 
-def _rating_profile_line(game_name: str, profile: dict[str, object], rank: int | None = None) -> str:
+def _rating_profile_line(
+    game_name: str,
+    profile: dict[str, object],
+    rank: int | None = None,
+    *,
+    locale: str | None = None,
+) -> str:
     prefix = f"#{rank} " if rank is not None else ""
-    return (
-        f"{prefix}{profile['name']}: 积分={profile['rating']} 等级={profile['level']} "
-        f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
-        f"局数={profile['games']}"
+    loc = locale or i18n.default_locale()
+    level = localize_level(str(profile["level"]), loc)
+    return i18n.tr(
+        en=(
+            f"{prefix}{profile['name']}: rating={profile['rating']} "
+            f"level={level} "
+            f"W/L/D={profile['wins']}/{profile['losses']}/{profile['draws']} "
+            f"games={profile['games']}"
+        ),
+        zh=(
+            f"{prefix}{profile['name']}: 积分={profile['rating']} 等级={profile['level']} "
+            f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+            f"局数={profile['games']}"
+        ),
+        locale=loc,
     )
 
 
-def _rating_summary_lines(target_name: str, game_name: Optional[str] = None) -> list[str]:
+def _rating_summary_lines(
+    target_name: str,
+    game_name: Optional[str] = None,
+    *,
+    locale: str | None = None,
+) -> list[str]:
+    loc = locale or i18n.default_locale()
     if game_name:
         profile = rating_store.profile(game_name, target_name)
-        lines = [f"{game_name} 积分（{profile['scheme']}）"]
-        lines.append(_rating_profile_line(game_name, profile))
+        lines = [
+            i18n.tr(
+                en=f"{game_name} rating ({profile['scheme']})",
+                zh=f"{game_name} 积分（{profile['scheme']}）",
+                locale=loc,
+            )
+        ]
+        lines.append(_rating_profile_line(game_name, profile, locale=loc))
         top = rating_store.top(game_name, limit=5)
         if top:
-            lines.append("榜单 Top 5：")
-            lines.extend(_rating_profile_line(game_name, item, idx) for idx, item in enumerate(top, start=1))
+            lines.append(
+                i18n.tr(en="Leaderboard Top 5:", zh="榜单 Top 5：", locale=loc)
+            )
+            lines.extend(
+                _rating_profile_line(game_name, item, idx, locale=loc)
+                for idx, item in enumerate(top, start=1)
+            )
         return lines
-    lines = [f"{target_name} 的棋类积分总览（跨房间共享）"]
+    lines = [
+        i18n.tr(
+            en=f"{target_name} board-game ratings overview (shared across rooms)",
+            zh=f"{target_name} 的棋类积分总览（跨房间共享）",
+            locale=loc,
+        )
+    ]
     for rated_game in sorted(GAME_CONFIGS):
         profile = rating_store.profile(rated_game, target_name)
+        level = localize_level(str(profile["level"]), loc)
         lines.append(
-            f"{rated_game}: 积分={profile['rating']} 等级={profile['level']} "
-            f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
-            f"局数={profile['games']} 体系={profile['scheme']}"
+            i18n.tr(
+                en=(
+                    f"{rated_game}: rating={profile['rating']} level={level} "
+                    f"W/L/D={profile['wins']}/{profile['losses']}/{profile['draws']} "
+                    f"games={profile['games']} scheme={profile['scheme']}"
+                ),
+                zh=(
+                    f"{rated_game}: 积分={profile['rating']} 等级={profile['level']} "
+                    f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+                    f"局数={profile['games']} 体系={profile['scheme']}"
+                ),
+                locale=loc,
+            )
         )
     return lines
 
@@ -1007,18 +1077,21 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
     if not pending:
         return 0
     n = len(pending)
-    send_line(conn, f"[*] 你有 {n} 条留言（离线期间收到，按时间顺序）：\n")
+    send_line(conn, _ts(conn, "offline_header", n=n))
     for item in pending:
         when = _format_offline_ts(item.get("ts", 0))
         sender = item.get("from") or "?"
         if (item.get("kind") or "pm") == "file":
             notice = _file_ready_message_from_leave(item)
             if notice:
-                send_line(conn, f"[*] （离线文件 {when}，来自 {sender}）\n")
+                send_line(conn, _ts(conn, "offline_file_meta", when=when, sender=sender))
                 send_line(conn, notice)
             else:
-                text = item.get("text") or "[文件]"
-                send_line(conn, f"[PM from {sender}] (离线文件 {when}) {text}\n")
+                text = item.get("text") or i18n.tr(en="[file]", zh="[文件]", locale=conn_locale(conn))
+                send_line(
+                    conn,
+                    _ts(conn, "offline_file_pm", sender=sender, when=when, text=text),
+                )
             meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
             tid = str(meta.get("transfer_id") or "").strip()
             if tid:
@@ -1029,7 +1102,7 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
                       f"(from={sender}, to={recipient_name})")
             continue
         text = item.get("text") or ""
-        send_line(conn, f"[PM from {sender}] (留言 {when}) {text}\n")
+        send_line(conn, _ts(conn, "offline_pm", sender=sender, when=when, text=text))
         lid = str(item.get("id") or "").strip()
         if lid:
             _federation_clear_offline_pm(recipient_name, lid)
@@ -1042,37 +1115,62 @@ def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> No
         if recipient:
             send_line(
                 conn,
-                f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言或文件。\n",
+                i18n.tr(
+                    en=(
+                        f"[*] No unread leave-messages or files awaiting {recipient!r}.\n"
+                    ),
+                    zh=(
+                        f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言或文件。\n"
+                    ),
+                    locale=conn_locale(conn),
+                ),
             )
         else:
-            send_line(conn, "[*] 你目前没有对方尚未阅读的留言或文件。\n")
+            send_line(conn, _ts(conn, "leave_none"))
         return
     if recipient:
         send_line(
             conn,
-            f"[*] 发给 {recipient!r}、对方尚未阅读的留言/文件（共 {len(items)} 条）：\n",
+            i18n.tr(
+                en=(
+                    f"[*] Unread leave-messages/files to {recipient!r} "
+                    f"({len(items)} total):\n"
+                ),
+                zh=(
+                    f"[*] 发给 {recipient!r}、对方尚未阅读的留言/文件"
+                    f"（共 {len(items)} 条）：\n"
+                ),
+                locale=conn_locale(conn),
+            ),
         )
         for item in items:
             when = _format_offline_ts(item.get("ts", 0))
             send_line(
                 conn,
-                f"[*]   {item['index']}. ({when}) {item['text']}\n",
+                _ts(conn, "leave_item", index=item["index"], when=when, text=item["text"]),
             )
-        send_line(conn, f"[*] 撤回：/leave {recipient} <编号>\n")
+        send_line(conn, _ts(conn, "leave_recall_hint", recipient=recipient))
         return
-    send_line(conn, f"[*] 你发出的未读留言/文件（共 {len(items)} 条）：\n")
+    send_line(conn, _ts(conn, "leave_list_header", n=len(items)))
     current_to = None
     for item in items:
         to_name = item.get("to") or "?"
         if to_name != current_to:
             current_to = to_name
-            send_line(conn, f"[*] → {to_name}:\n")
+            send_line(conn, _ts(conn, "leave_group", name=to_name))
         when = _format_offline_ts(item.get("ts", 0))
         send_line(
             conn,
-            f"[*]   {item['index']}. ({when}) {item['text']}\n",
+            _ts(conn, "leave_item", index=item["index"], when=when, text=item["text"]),
         )
-    send_line(conn, "[*] 撤回：/leave <昵称> <编号>\n")
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Recall: /leave <nick> <n>\n",
+            zh="[*] 撤回：/leave <昵称> <编号>\n",
+            locale=conn_locale(conn),
+        ),
+    )
 
 
 def handle_leave_command(conn, name: str, parts: list[str]) -> None:
@@ -1087,10 +1185,7 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
         return
     if args[0].lower() in ("recall", "unmsg", "撤回", "撤销"):
         if len(args) < 3:
-            send_line(
-                conn,
-                "[*] Usage: /leave <nick> <n>  |  /leave recall <nick> <n>\n",
-            )
+            send_line(conn, _ts(conn, "leave_usage"))
             return
         target = args[1].strip()
         num_raw = args[2].strip()
@@ -1101,23 +1196,18 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
         _send_leave_list(conn, name, args[0].strip())
         return
     else:
-        send_line(
-            conn,
-            "[*] Usage: /leave [nick]  |  /leave <nick> <n>\n"
-            "[*] （列出或撤回你发出、对方尚未阅读的留言或离线文件）\n",
-        )
+        send_line(conn, _ts(conn, "leave_usage"))
         return
     try:
         index = int(num_raw)
     except ValueError:
-        send_line(conn, "[*] 编号须为正整数。\n")
+        send_line(conn, _ts(conn, "leave_bad_index"))
         return
     removed = offline_messages.recall(name, target, index)
     if removed is None:
         send_line(
             conn,
-            f"[*] 撤回失败：没有发给 {target!r} 的第 {index} 条未读留言/文件"
-            f"（可用 /leave {target} 查看）。\n",
+            _ts(conn, "leave_recall_fail", recipient=target, index=index),
         )
         return
     _revoke_recalled_file(removed, target)
@@ -1125,11 +1215,22 @@ def handle_leave_command(conn, name: str, parts: list[str]) -> None:
     if lid and (removed.get("kind") or "pm") != "file":
         _federation_clear_offline_pm(target, lid)
     when = _format_offline_ts(removed.get("ts", 0))
-    label = "文件" if (removed.get("kind") or "pm") == "file" else "留言"
+    kind = i18n.tr(
+        en="file" if (removed.get("kind") or "pm") == "file" else "leave-message",
+        zh="文件" if (removed.get("kind") or "pm") == "file" else "留言",
+        locale=conn_locale(conn),
+    )
     send_line(
         conn,
-        f"[*] 已撤回发给 {target!r} 的第 {index} 条{label}"
-        f"（{when}）：{removed.get('text')}\n",
+        _ts(
+            conn,
+            "leave_recalled",
+            kind=kind,
+            index=index,
+            recipient=target,
+            when=when,
+            text=removed.get("text"),
+        ),
     )
 
 
@@ -2434,23 +2535,51 @@ def _handle_library(conn, payload: str) -> None:
     head = parts[0].lower()
 
     if head in {"help", "?", "帮助"}:
-        send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library | /lib                 联邦并集书目（含书签进度）\n")
-        send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
-        send_line(
-            conn,
-            "[*]   /library open <序号|文件名[@节点]>  打开（有书签则从书签继续）\n",
-        )
-        send_line(conn, "[*]   /library show | 显示               显示当前页内容\n")
-        send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
-        send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
-        send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
-        send_line(conn, "[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n")
-        send_line(conn, "[*]   /library bookmarks | 书签           列出书签（进度以图书所在节点为准）\n")
-        send_line(conn, "[*]   /library reset <序号|文件名[@节点]> 清除某本书的书签\n")
-        send_line(conn, "[*]   /library info | 状态               当前阅读进度信息\n")
-        send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
-        send_line(conn, f"[*] 本机目录：{lib_dir}（对端图书按页拉取，不复制整本）\n")
+        loc = conn_locale(conn)
+        for line in (
+            i18n.tr(en="[*] /library usage:\n", zh="[*] /library 用法：\n", locale=loc),
+            i18n.tr(
+                en="[*]   /library | /lib                 Federated catalog (with bookmark progress)\n",
+                zh="[*]   /library | /lib                 联邦并集书目（含书签进度）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library find <keyword>           Find by title (when no book is open)\n",
+                zh="[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library open <index|file[@node]>  Open (resume from bookmark if any)\n",
+                zh="[*]   /library open <序号|文件名[@节点]>  打开（有书签则从书签继续）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library show                     Show current page\n",
+                zh="[*]   /library show | 显示               显示当前页内容\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library next | prev | page <n>   Turn pages (auto-save bookmark)\n",
+                zh="[*]   /library next|prev|page <页码>     翻页（自动存书签）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library search <keyword>         Search inside a local book; use find for remote\n",
+                zh="[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library bookmarks | reset | info | close\n",
+                zh="[*]   /library bookmarks | reset | info | close（书签/清除/状态/关闭）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en=f"[*] Local directory: {lib_dir} (remote books stream page-by-page)\n",
+                zh=f"[*] 本机目录：{lib_dir}（对端图书按页拉取，不复制整本）\n",
+                locale=loc,
+            ),
+        ):
+            send_line(conn, line)
         return
 
     if head in {"bookmarks", "bookmark", "书签"}:
@@ -3457,7 +3586,14 @@ def _finish_game_action(
         for peer_conn, extra in drain():
             _route_game_private(room, peer_conn, extra)
     if bcast:
-        broadcast_game(room, bcast)
+        actor_loc = i18n.default_locale()
+        if actor_conn in clients:
+            actor_loc = conn_locale(actor_conn)
+        else:
+            nick = getattr(actor_conn, "nickname", None) or getattr(actor_conn, "name", None)
+            if nick:
+                actor_loc = nick_locale(str(nick))
+        broadcast_game(room, bcast, locale=actor_loc)
     if send_boards and (ended or getattr(game, "send_view_on_move", True)):
         send_oriented_boards(room, game)
     send_sanguo_hand_views(room, game)
@@ -4221,8 +4357,30 @@ def handle_command(conn, payload: str) -> None:
         return
 
     if cmd == "/help":
-        for hline in HELP_LINES:
+        for hline in i18n.help_lines(conn_locale(conn)):
             send_line(conn, hline)
+        return
+
+    if cmd in ("/lang", "/language", "/locale"):
+        rest = payload.split(None, 1)
+        if len(rest) < 2 or not rest[1].strip():
+            send_line(conn, _ts(conn, "lang_current", lang=conn_locale(conn)))
+            send_line(conn, _ts(conn, "lang_usage"))
+            return
+        arg = rest[1].strip().split()[0]
+        if arg.lower() not in (
+            "en",
+            "zh",
+            "cn",
+            "english",
+            "chinese",
+            "中文",
+            "英文",
+        ):
+            send_line(conn, _ts(conn, "lang_usage"))
+            return
+        loc = set_conn_locale(conn, arg)
+        send_line(conn, _ts(conn, "lang_set", lang=loc))
         return
 
     if cmd == "/announce":
@@ -4243,36 +4401,36 @@ def handle_command(conn, payload: str) -> None:
             with lock:
                 cur = (room_announcements.get(room) or "").strip()
             if cur:
-                send_line(conn, f"[*] #{room} 当前公告：{cur}\n")
+                send_line(conn, _ts(conn, "announce_current", room=room, text=cur))
             else:
-                send_line(conn, f"[*] #{room} 暂无公告。\n")
+                send_line(conn, _ts(conn, "announce_none", room=room))
             return
         if not is_owner:
-            send_line(conn, "[*] 只有房主可以修改公告（查看无需权限）。\n")
+            send_line(conn, _ts(conn, "announce_owner_only"))
             return
         if tail.lower() == "clear":
             with lock:
                 room_announcements.pop(room, None)
             broadcast_room(
                 room,
-                f"[#{room}] [*] 公告已清除。\n".encode("utf-8"),
+                _ts(conn, "announce_cleared_bcast", room=room).encode("utf-8"),
             )
-            send_line(conn, f"[*] 已清除 #{room} 的公告。\n")
+            send_line(conn, _ts(conn, "announce_cleared", room=room))
             return
         one_line = " ".join(tail.split())
         if len(one_line) > MAX_ANNOUNCE_LEN:
             send_line(
                 conn,
-                f"[*] 公告过长（最多 {MAX_ANNOUNCE_LEN} 字符）。\n",
+                _ts(conn, "announce_too_long", max_len=MAX_ANNOUNCE_LEN),
             )
             return
         with lock:
             room_announcements[room] = one_line
         broadcast_room(
             room,
-            f"[#{room}] [*] 公告：{one_line}\n".encode("utf-8"),
+            _ts(conn, "announce_set_bcast", room=room, text=one_line).encode("utf-8"),
         )
-        send_line(conn, f"[*] 已更新 #{room} 的公告。\n")
+        send_line(conn, _ts(conn, "announce_updated", room=room))
         return
 
     if cmd == "/game":
@@ -4281,7 +4439,7 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/game error: room={current_room} user={name} payload={payload!r} err={e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] /game 命令执行失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "game_cmd_fail"))
         return
 
     if cmd == "/news":
@@ -4290,7 +4448,7 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/news error: {e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] 新闻命令处理失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "news_cmd_fail"))
         return
 
     if cmd in {"/library", "/lib"}:
@@ -4299,7 +4457,7 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/library error: {e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] 图书馆命令处理失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "library_cmd_fail"))
         return
 
     if cmd == "/dict":
@@ -4317,14 +4475,18 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     """All /game subcommands. Mutates room_games under the global lock."""
     raw = payload[len("/game") :].strip()
     if not raw or raw.lower() == "help":
-        send_line(conn, "[*] /game 用法：\n")
-        for ln in games.HELP_LINES:
+        send_line(conn, _ts(conn, "game_usage_header"))
+        for ln in i18n.game_help_lines(conn_locale(conn)):
             send_line(conn, ln + "\n")
         with lock:
             enabled = _enabled_games_for_room_locked(room)
         send_line(
             conn,
-            "[*] 本房可玩：" + ", ".join(games.list_game_names(enabled)) + "\n",
+            _ts(
+                conn,
+                "game_room_playable",
+                games=", ".join(games.list_game_names(enabled)),
+            ),
         )
         return
 
@@ -4337,7 +4499,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         auth = room_game_authority.get(room, "")
         if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
             return
-        send_line(conn, "[*] 无法连接对局所在节点，请稍后重试。\n")
+        send_line(conn, _ts(conn, "game_forward_fail"))
         return
 
     if sub == "list":
@@ -4345,12 +4507,9 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             enabled = _enabled_games_for_room_locked(room)
             names = games.list_game_names(enabled)
         if names:
-            line = "[*] 可玩游戏：" + ", ".join(names)
-            line += "（xiangqi 别名 cchess；sanguo 别名 sgs/三国杀）\n"
+            line = _ts(conn, "game_list_line", games=", ".join(names))
         else:
-            line = (
-                "[*] 本房暂无已上线游戏；房主可用 /game on <名称> 上线。\n"
-            )
+            line = _ts(conn, "game_list_empty")
         send_line(conn, line)
         return
 
@@ -4371,9 +4530,13 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     if is_rated_game(maybe_game):
                         game_name = maybe_game
         if game_name is not None and not is_rated_game(game_name):
-            send_line(conn, f"[*] {game_name} 当前没有持久化棋类积分。\n")
+            send_line(conn, _ts(conn, "rating_no_persist", game=game_name))
             return
-        send_game_private(conn, room, _rating_summary_lines(target_name, game_name))
+        send_game_private(
+            conn,
+            room,
+            _rating_summary_lines(target_name, game_name, locale=conn_locale(conn)),
+        )
         return
 
     if sub in ("on", "off", "上线", "下线"):
@@ -4765,6 +4928,7 @@ def handle_client(conn, addr) -> None:
                 "name": name,
                 "rooms": set(inherited_rooms),
                 "current_room": active_room,
+                "locale": locale_store.get(name),
             }
             for room in inherited_rooms:
                 was_empty = len(rooms[room]) == 0
@@ -4779,7 +4943,9 @@ def handle_client(conn, addr) -> None:
             if active_game is not None and getattr(active_game, "state", "ended") != "ended":
                 active_game_lines = _game_show_for_conn(active_game, conn)
                 if active_room in resumed_game_rooms:
-                    active_game_lines = ["已自动续玩接管旧终端席位。"] + active_game_lines
+                    active_game_lines = [
+                        _ts(conn, "game_resume_takeover")
+                    ] + active_game_lines
             room_labels = [
                 f"*#{r}" if r == active_room else f"#{r}"
                 for r in sorted(inherited_rooms)
@@ -4796,20 +4962,20 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /leave /part /announce /game /news /dict /clear /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /leave /part /announce /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
             send_line(
                 conn,
-                f"[*] 联邦网络已连接 {hub.peer_count} 个节点（同名用户/房间跨服合并）。\n",
+                _ts(conn, "fed_connected", n=hub.peer_count),
             )
         if same_name_peers:
-            send_line(conn, "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n")
+            send_line(conn, _ts(conn, "multi_terminal"))
         elif restored_from_session:
-            send_line(conn, "[*] 已恢复上次客户端会话，回到原房间；如有未结束对局可继续操作。\n")
+            send_line(conn, _ts(conn, "session_restored"))
         if resumed_game_rooms:
-            send_line(conn, "[*] 已接管旧连接保留的游戏席位。\n")
+            send_line(conn, _ts(conn, "game_seat_resumed"))
         # Deliver leave-messages only on the first local session for this nick,
         # so multi-device reconnect does not drain the mailbox twice.
         if not same_name_peers:

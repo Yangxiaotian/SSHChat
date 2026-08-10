@@ -75,6 +75,7 @@ export const zhMessages = {
       game: '游戏命令',
       news: '查看新闻',
       library: '浏览图书馆',
+      lang: '切换界面语言（en/zh）',
       dict: '词典查询（en/cn/hh）',
       announce: '房间公告',
     },

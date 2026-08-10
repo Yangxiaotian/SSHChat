@@ -77,6 +77,7 @@ export const enMessages: MessageTree = {
       game: 'Game commands',
       news: 'Show news',
       library: 'Browse library books',
+      lang: 'Switch UI language (en/zh)',
       dict: 'Dictionary lookup (en/cn/hh)',
       announce: 'Room announcement',
     },

@@ -47,13 +47,22 @@ for mime_type, expected in preview_tests:
 # Test 3: HTML page generation
 print("\n3. Testing HTML page generation...")
 
-# Test upload page
+# Test upload page (default English)
 upload_html = file_http_server.generate_upload_page("test_token_123")
 assert len(upload_html) > 1000, "Upload page too short"
-assert "文件上传" in upload_html, "Missing upload title"
-assert "上传密钥" in upload_html, "Missing key input"
+assert '<html lang="en">' in upload_html, "Default lang should be en"
+assert "File Upload" in upload_html, "Missing upload title"
+assert "Upload key" in upload_html, "Missing key input"
+assert 'id="uploadForm"' in upload_html, "Missing upload form"
 assert "test_token_123" in upload_html or "?key=" in upload_html, "Token not in URL"
 print("   ✓ Upload page generated (", len(upload_html), "chars)")
+
+# Chinese locale
+upload_zh = file_http_server.generate_upload_page("test_token_123", lang="zh")
+assert '<html lang="zh-CN">' in upload_zh, "zh lang attr missing"
+assert "文件上传" in upload_zh, "Missing Chinese upload title"
+assert "上传密钥" in upload_zh, "Missing Chinese key label"
+print("   ✓ Upload page (zh) generated")
 
 # Test upload page with error
 upload_error_html = file_http_server.generate_upload_page("test_token", "Invalid key")
@@ -68,12 +77,12 @@ download_html_img = file_http_server.generate_download_page(
     "image/jpeg"
 )
 assert len(download_html_img) > 1000, "Download page too short"
-assert "文件下载" in download_html_img, "Missing download title"
+assert "File Download" in download_html_img, "Missing download title"
 assert "photo.jpg" in download_html_img, "Missing filename"
 assert "2.00 MB" in download_html_img, "Missing file size"
 assert "image/jpeg" in download_html_img, "Missing MIME type"
-assert "✅ 支持" in download_html_img, "Should show preview supported"
-assert "预览" in download_html_img, "Missing preview keyword"
+assert "✅ Supported" in download_html_img, "Should show preview supported"
+assert "preview" in download_html_img.lower(), "Missing preview keyword"
 print("   ✓ Download page (image) generated (", len(download_html_img), "chars)")
 
 # Test download page - binary file (not previewable)
@@ -85,16 +94,23 @@ download_html_bin = file_http_server.generate_download_page(
 )
 assert "archive.zip" in download_html_bin, "Missing filename"
 assert "50.00 MB" in download_html_bin, "Missing file size"
-assert "❌ 不支持" in download_html_bin, "Should show preview not supported"
-assert "验证并下载" in download_html_bin, "Should show download button"
+assert "❌ Not supported" in download_html_bin, "Should show preview not supported"
+assert "Verify & download" in download_html_bin, "Should show download button"
 print("   ✓ Download page (binary) generated (", len(download_html_bin), "chars)")
+
+# Locale helper
+assert file_http_server._page_locale("lang=zh") == "zh"
+assert file_http_server._page_locale("/upload/abc?lang=zh") == "zh"
+assert file_http_server._page_locale("/upload/abc") == "en"
+assert file_http_server._page_locale(None) == "en"
+print("   ✓ _page_locale helper")
 
 # Test 4: Check HTML elements
 print("\n4. Testing HTML elements...")
 
 elements_to_check = [
     ("<!DOCTYPE html>", upload_html),
-    ("<html lang=\"zh-CN\">", upload_html),
+    ("<html lang=\"en\">", upload_html),
     ("<meta charset=\"UTF-8\">", upload_html),
     ("<form", upload_html),
     ("input type=\"text\"", upload_html),

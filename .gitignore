@@ -20,3 +20,9 @@ electron/**/user-data/
 
 # Local game engines are not committed.
 electron/engines/
+
+# Runtime user preference / session data (local)
+user_locales.json
+game_sessions.json
+offline_messages.json
+game_ratings.json
