@@ -3842,21 +3842,75 @@ def _fed_execute_game_cmd(
         _persist_after_game_change()
 
 
+def _game_has_only_local_seats_locked(game, local_node: str) -> bool:
+    """True when every seated role is local (socket / disconnect / local FederatedSeat)."""
+    has_seat = False
+    for conn, _name in _iter_game_conn_seats(game):
+        has_seat = True
+        if isinstance(conn, FederatedSeat) and conn.node_id != local_node:
+            return False
+    return has_seat
+
+
+def _reclaim_game_authority_for_local_seats(room: str) -> bool:
+    """Take authority when a remote claim remains but all seats are on this node.
+
+    Common after gsync: both players reconnect to the same SSHChat host while
+    ``room_game_authority`` still points at a peer. Forwarding ``/game move`` then
+    black-holes when the federation link is flaky. Returns True when authority is
+    local afterwards (including already-local / empty-then-claimed).
+    """
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    push = False
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return (not auth) or auth == local
+        if not auth or auth == local:
+            if not auth:
+                room_game_authority[room] = local
+                if not (room_game_tokens.get(room) or "").strip():
+                    room_game_tokens[room] = secrets.token_hex(16)
+            return True
+        if not _game_has_only_local_seats_locked(game, local):
+            return False
+        room_game_authority[room] = local
+        room_game_tokens[room] = secrets.token_hex(16)
+        push = True
+    if push:
+        print(
+            f"federation: reclaimed game authority for #{room} "
+            f"(all seats local on {local})"
+        )
+        try:
+            _federation_sync_game(room)
+        except Exception as e:
+            print(f"federation: reclaim sync failed room={room!r}: {e!r}")
+    return True
+
+
 def _should_forward_game(room: str, sub: str) -> bool:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return False
-    auth = room_game_authority.get(room)
-    if not auth:
-        return False
-    return auth != hub.node_id and sub in (
+    if sub not in (
         "join",
         "move",
         "resign",
         "undo",
         "abort",
         "end",
-    )
+    ):
+        return False
+    auth = (room_game_authority.get(room) or "").strip()
+    if not auth or auth == hub.node_id:
+        return False
+    # Stale remote authority with only local players → play here, don't black-hole.
+    if _reclaim_game_authority_for_local_seats(room):
+        return False
+    return True
 
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
@@ -4624,8 +4678,12 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         auth = room_game_authority.get(room, "")
         if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
             return
-        send_line(conn, _ts(conn, "game_forward_fail"))
-        return
+        # Peer unreachable: if seats are all local, reclaim and handle here.
+        if _reclaim_game_authority_for_local_seats(room):
+            pass
+        else:
+            send_line(conn, _ts(conn, "game_forward_fail"))
+            return
 
     if sub == "list":
         with lock:
