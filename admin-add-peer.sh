@@ -22,8 +22,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${SSHCHAT_PREFIX:-$SCRIPT_DIR}
 FED_USER=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
 FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
-PEER_SSH_PORT=${SSHCHAT_PEER_SSH_PORT:-22}
-PEER_MODE=${SSHCHAT_PEER_MODE:-ssh}
 FED_DIR="$PREFIX/federation"
 PEERS_JSON="$FED_DIR/peers.json"
 BRIDGE="$PREFIX/federation-bridge.sh"
@@ -75,6 +73,9 @@ if [[ -f "$PREFIX/sshchat.env" ]]; then
   # shellcheck disable=SC1091
   . "$PREFIX/sshchat.env"
 fi
+# Re-resolve after sourcing sshchat.env so SSHCHAT_PEER_* there take effect.
+PEER_SSH_PORT=${SSHCHAT_PEER_SSH_PORT:-22}
+PEER_MODE=${SSHCHAT_PEER_MODE:-ssh}
 CHAT_PORT=${SSHCHAT_PORT:-12345}
 PEER_FED_PORT=${SSHCHAT_PEER_FED_PORT:-$((CHAT_PORT + 1))}
 
