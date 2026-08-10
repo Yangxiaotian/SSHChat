@@ -262,20 +262,44 @@ ensure_client_group() {
 }
 
 apply_data_plane_permissions() {
-  # Chat login users only need chat.sh, client.py, sshchat.env, venv/. Admins keep
-  # server.* and admin-add-user.sh private to root / service user.
+  # Chat login users only need chat.sh, client.py, sshchat_client_util.py,
+  # sshchat.env, venv/. Admins keep server.* and admin-add-user.sh private.
   local u="$RUN_USER"
   local g
   g=$(primary_group_of "$u")
+  # iSH ignores supplementary-group bits for many paths; world r/X on the
+  # client entrypoints is required so ForcedCommand chat.sh can run.
+  local ish_client_world=0
+  if is_ish; then
+    ish_client_world=1
+    echo "info: iSH: relaxing client entrypoint modes (o+rX); group bits alone are unreliable" >&2
+  fi
+
   chown "$u:$CLIENT_GROUP" "$PREFIX"
-  chmod 750 "$PREFIX"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod 755 "$PREFIX"
+  else
+    chmod 750 "$PREFIX"
+  fi
 
   chown "$u:$CLIENT_GROUP" "$PREFIX/chat.sh" "$PREFIX/client.py"
-  chmod 750 "$PREFIX/chat.sh"
-  chmod 640 "$PREFIX/client.py"
+  [[ -f "$PREFIX/sshchat_client_util.py" ]] && chown "$u:$CLIENT_GROUP" "$PREFIX/sshchat_client_util.py"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod 755 "$PREFIX/chat.sh"
+    chmod 644 "$PREFIX/client.py"
+    [[ -f "$PREFIX/sshchat_client_util.py" ]] && chmod 644 "$PREFIX/sshchat_client_util.py"
+  else
+    chmod 750 "$PREFIX/chat.sh"
+    chmod 640 "$PREFIX/client.py"
+    [[ -f "$PREFIX/sshchat_client_util.py" ]] && chmod 640 "$PREFIX/sshchat_client_util.py"
+  fi
   if [[ -f "$PREFIX/sshchat.env" ]]; then
     chown "$u:$CLIENT_GROUP" "$PREFIX/sshchat.env"
-    chmod 640 "$PREFIX/sshchat.env"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      chmod 644 "$PREFIX/sshchat.env"
+    else
+      chmod 640 "$PREFIX/sshchat.env"
+    fi
   fi
 
   chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
@@ -305,12 +329,20 @@ apply_data_plane_permissions() {
   chmod 755 "$PREFIX/federation-bridge.sh"
 
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
-  chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/venv"
+  else
+    chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  fi
 
   # Library directory: readable by client group so users can browse books
   if [[ -d "$PREFIX/library" ]]; then
     chown "$u:$CLIENT_GROUP" "$PREFIX/library"
-    chmod 750 "$PREFIX/library"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      chmod 755 "$PREFIX/library"
+    else
+      chmod 750 "$PREFIX/library"
+    fi
   fi
 
   if [[ -d /var/lib/sshchat/files ]]; then
@@ -1184,7 +1216,11 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
     # Re-apply env ownership if the tunnel helper rewrote sshchat.env as root
     if [[ "$CREATE_RUN_USER" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
       chown "$RUN_USER:$CLIENT_GROUP" "$PREFIX/sshchat.env"
-      chmod 640 "$PREFIX/sshchat.env"
+      if is_ish; then
+        chmod 644 "$PREFIX/sshchat.env"
+      else
+        chmod 640 "$PREFIX/sshchat.env"
+      fi
     elif is_darwin && [[ -f "$PREFIX/sshchat.env" ]]; then
       chown "root:$CLIENT_GROUP" "$PREFIX/sshchat.env" 2>/dev/null || true
       chmod 640 "$PREFIX/sshchat.env"

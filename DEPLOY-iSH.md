@@ -218,7 +218,26 @@ apk update && apk add py3-lxml py3-pip
 ./deploy.sh --keep-env
 ```
 
-### 6. 手机休眠后服务停了
+### 6. 部署后 `chat.sh: Permission denied` / 公钥能登但进不了聊天
+
+iSH 对**附加组**权限经常不生效：即使用户已在 `sshchat-clients`，`750`/`640` 仍会拒绝。
+
+当前 `deploy.sh` 在 iSH 上会自动把客户端入口改为：
+
+- `/opt/sshchat`、`chat.sh`、`venv`：`o+rX`（如 `755`）
+- `client.py` / `sshchat_client_util.py` / `sshchat.env`：`644`
+
+若你跑的是旧脚本，可临时手动修：
+
+```bash
+chmod 755 /opt/sshchat /opt/sshchat/chat.sh
+chmod 644 /opt/sshchat/client.py /opt/sshchat/sshchat_client_util.py /opt/sshchat/sshchat.env
+chmod -R a+rX /opt/sshchat/venv
+```
+
+服务端文件（`server.py` 等）保持 `600` 即可。
+
+### 7. 手机休眠后服务停了
 
 iSH 在后台可能被系统挂起。保持 iSH 前台、接电，或按需重开 App 后再 `rc-service sshchat start`。这是 iOS 限制，不是 SSHChat 独有。
 
