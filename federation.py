@@ -136,6 +136,13 @@ class FederationHub:
         on_library_bookmarks: Optional[
             Callable[[str, str, dict[str, Any]], None]
         ] = None,
+        on_file_host_request: Optional[
+            Callable[[str, str, dict[str, Any]], None]
+        ] = None,
+        on_file_host_result: Optional[
+            Callable[[str, str, dict[str, Any]], None]
+        ] = None,
+        get_local_file_public: Optional[Callable[[], str]] = None,
     ) -> None:
         self.node_id = _node_id()
         self.chat_port = chat_port
@@ -171,6 +178,12 @@ class FederationHub:
         self.on_library_bookmarks = on_library_bookmarks
         # nick, book_name — clear bookmark on this (owner) node
         self.on_library_bookmark_clear: Optional[Callable[[str, str], None]] = None
+        # host_node (self), req_id, payload — create upload session for a peer
+        self.on_file_host_request = on_file_host_request
+        # from_peer, req_id, payload — reply to our fhost_req
+        self.on_file_host_result = on_file_host_result
+        # () -> public file base URL (empty if not externally reachable)
+        self.get_local_file_public = get_local_file_public
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -187,6 +200,8 @@ class FederationHub:
         self._room_remotes: dict[str, set[tuple[str, str]]] = defaultdict(set)
         # node_id -> list of book metadata dicts
         self._remote_catalogs: dict[str, list[dict[str, Any]]] = {}
+        # node_id -> {"base_url": str, "seen_at": float} for public file endpoints
+        self._remote_file_pubs: dict[str, dict[str, Any]] = {}
         self._seen_lock = threading.Lock()
         self._seen_keys: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -448,6 +463,7 @@ class FederationHub:
             return
         self._routes.pop(origin, None)
         self._remote_catalogs.pop(origin, None)
+        self._remote_file_pubs.pop(origin, None)
         to_remove = [k for k in self._remote_users if k[0] == origin]
         for k in to_remove:
             user = self._remote_users.pop(k, None)
@@ -686,6 +702,90 @@ class FederationHub:
         line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{nonce}\n"
         self._remember_seen(line)
         self._fanout(line)
+
+    def sync_file_public(self, base_url: Optional[str] = None) -> None:
+        """Fan-out this node's public file base URL (Cloudflare / domain).
+
+        Peers without a public endpoint use the most recently advertised URL to
+        host /sendfile sessions (file bytes stay on the Cloudflare node).
+        """
+        if not self.enabled or not self._peers:
+            return
+        if base_url is None:
+            if self.get_local_file_public is None:
+                return
+            try:
+                base_url = str(self.get_local_file_public() or "").strip()
+            except Exception as e:
+                print(f"federation: get_local_file_public error: {e!r}")
+                return
+        url = str(base_url or "").strip() or "-"
+        line = f"fpub\t{self.node_id}\t{url}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def pick_file_public_peer(self) -> Optional[tuple[str, str]]:
+        """Return (node_id, base_url) for the newest advertised public file host.
+
+        Prefers a direct neighbor when timestamps tie; skips self.
+        """
+        best: Optional[tuple[float, int, str, str]] = None
+        # rank: (seen_at, direct_neighbor_boost, node_id, url)
+        for node_id, info in list(self._remote_file_pubs.items()):
+            if node_id == self.node_id:
+                continue
+            if node_id not in self._routes and node_id not in self._peers:
+                continue
+            url = str((info or {}).get("base_url") or "").strip()
+            if not url or url == "-":
+                continue
+            try:
+                seen_at = float((info or {}).get("seen_at") or 0.0)
+            except (TypeError, ValueError):
+                seen_at = 0.0
+            direct = 1 if node_id in self._peers else 0
+            cand = (seen_at, direct, node_id, url)
+            if best is None or cand[:2] > best[:2]:
+                best = cand
+        if best is None:
+            return None
+        return best[2], best[3]
+
+    def request_file_host(
+        self, host_node: str, req_id: str, payload: dict[str, Any]
+    ) -> bool:
+        """Ask host_node to create a /sendfile upload session on its public URL."""
+        if not self.enabled:
+            return False
+        host_node = str(host_node or "").strip()
+        req_id = str(req_id or "").strip()
+        if not host_node or not req_id or not isinstance(payload, dict):
+            return False
+        try:
+            blob = base64.b64encode(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return False
+        line = f"fhost_req\t{self.node_id}\t{host_node}\t{req_id}\t{blob}\n"
+        self._remember_seen(line)
+        return self._send_toward(host_node, line)
+
+    def reply_file_host(
+        self, requester_node: str, req_id: str, payload: dict[str, Any]
+    ) -> bool:
+        if not self.enabled:
+            return False
+        requester_node = str(requester_node or "").strip()
+        req_id = str(req_id or "").strip()
+        if not requester_node or not req_id or not isinstance(payload, dict):
+            return False
+        blob = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"fhost_ok\t{self.node_id}\t{requester_node}\t{req_id}\t{blob}\n"
+        self._remember_seen(line)
+        return self._send_toward(requester_node, line)
 
     def request_library_page(
         self,
@@ -936,6 +1036,7 @@ class FederationHub:
                 self._routes.pop(dest, None)
         for origin in lost:
             self._remote_catalogs.pop(origin, None)
+            self._remote_file_pubs.pop(origin, None)
             to_remove = [k for k in self._remote_users if k[0] == origin]
             for k in to_remove:
                 user = self._remote_users.pop(k, None)
@@ -975,6 +1076,27 @@ class FederationHub:
             self._remember_seen(line)
             link.send_line(line)
         self._push_library_catalog(link)
+        self._push_file_public(link)
+
+    def _push_file_public(self, link: _PeerLink) -> None:
+        """Advertise local + known remote public file base URLs to a new peer."""
+        local_url = ""
+        if self.get_local_file_public is not None:
+            try:
+                local_url = str(self.get_local_file_public() or "").strip()
+            except Exception as e:
+                print(f"federation: get_local_file_public error: {e!r}")
+                local_url = ""
+        local_line = f"fpub\t{self.node_id}\t{local_url or '-'}\t{time.time_ns()}\n"
+        self._remember_seen(local_line)
+        link.send_line(local_line)
+        for origin, info in list(self._remote_file_pubs.items()):
+            if origin == link.node_id:
+                continue
+            url = str((info or {}).get("base_url") or "").strip() or "-"
+            line = f"fpub\t{origin}\t{url}\t{time.time_ns()}\n"
+            self._remember_seen(line)
+            link.send_line(line)
 
     def _push_library_catalog(self, link: _PeerLink) -> None:
         """Send local + known remote library catalogs to a newly connected peer."""
@@ -1263,6 +1385,114 @@ class FederationHub:
                         self.on_library_page_result(origin, req_id, payload)
                     except Exception as e:
                         print(f"federation: on_library_page_result error: {e!r}")
+            else:
+                self._learn_route(requester, peer_node)
+                self._send_toward(requester, line + "\n", exclude_node=peer_node)
+            return
+        if kind == "fpub":
+            # fpub\torigin\tbase_url\tnonce
+            if self._remember_seen(line):
+                return
+            fpub_parts = line.split("\t", 3)
+            if len(fpub_parts) < 3:
+                return
+            origin = fpub_parts[1]
+            base_url = fpub_parts[2].strip()
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            self._remote_file_pub_set(origin, base_url)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "fhost_req":
+            # fhost_req\torigin\thost\treq_id\tblob
+            req_parts = line.split("\t", 4)
+            if len(req_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, host, req_id, b64 = (
+                req_parts[1],
+                req_parts[2],
+                req_parts[3],
+                req_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if host == self.node_id:
+                try:
+                    payload = json.loads(
+                        base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                    )
+                except Exception:
+                    return
+                if not isinstance(payload, dict):
+                    return
+                cb = self.on_file_host_request
+                if cb is None:
+                    self.reply_file_host(
+                        origin,
+                        req_id,
+                        {"ok": False, "error": "file host proxy unsupported"},
+                    )
+                    return
+
+                def _run_file_host(
+                    _cb=cb, _origin=origin, _req=req_id, _payload=payload
+                ) -> None:
+                    try:
+                        _cb(_origin, _req, _payload)
+                    except Exception as e:
+                        print(
+                            f"federation: on_file_host_request "
+                            f"error ({_req}): {e!r}"
+                        )
+                        try:
+                            self.reply_file_host(
+                                _origin,
+                                _req,
+                                {"ok": False, "error": str(e)},
+                            )
+                        except Exception:
+                            pass
+
+                threading.Thread(
+                    target=_run_file_host,
+                    name=f"fed-fhost-{req_id[:8]}",
+                    daemon=True,
+                ).start()
+            else:
+                self._learn_route(host, peer_node)
+                self._send_toward(host, line + "\n", exclude_node=peer_node)
+            return
+        if kind == "fhost_ok":
+            ok_parts = line.split("\t", 4)
+            if len(ok_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, requester, req_id, b64 = (
+                ok_parts[1],
+                ok_parts[2],
+                ok_parts[3],
+                ok_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if requester == self.node_id:
+                try:
+                    payload = json.loads(
+                        base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                    )
+                except Exception:
+                    return
+                if isinstance(payload, dict) and self.on_file_host_result is not None:
+                    try:
+                        self.on_file_host_result(origin, req_id, payload)
+                    except Exception as e:
+                        print(f"federation: on_file_host_result error: {e!r}")
             else:
                 self._learn_route(requester, peer_node)
                 self._send_toward(requester, line + "\n", exclude_node=peer_node)
@@ -1594,6 +1824,19 @@ class FederationHub:
             f"federation: presence from {node_id}: "
             f"{len(users)} user(s) → tracking {sum(1 for k in self._remote_users if k[0] == node_id)}"
         )
+
+    def _remote_file_pub_set(self, node_id: str, base_url: str) -> None:
+        if node_id == self.node_id:
+            return
+        url = str(base_url or "").strip()
+        if not url or url == "-":
+            self._remote_file_pubs.pop(node_id, None)
+            return
+        self._remote_file_pubs[node_id] = {
+            "base_url": url.rstrip("/"),
+            "seen_at": time.time(),
+        }
+        print(f"federation: file public from {node_id}: {url}")
 
     def _remote_library_bulk(self, node_id: str, b64: str) -> None:
         if node_id == self.node_id:
@@ -1980,6 +2223,13 @@ def init_hub(
     on_library_bookmarks: Optional[
         Callable[[str, str, dict[str, Any]], None]
     ] = None,
+    on_file_host_request: Optional[
+        Callable[[str, str, dict[str, Any]], None]
+    ] = None,
+    on_file_host_result: Optional[
+        Callable[[str, str, dict[str, Any]], None]
+    ] = None,
+    get_local_file_public: Optional[Callable[[], str]] = None,
 ) -> FederationHub:
     global _hub
     _hub = FederationHub(
@@ -2001,5 +2251,8 @@ def init_hub(
         on_library_page_result,
         get_local_library_bookmarks,
         on_library_bookmarks,
+        on_file_host_request,
+        on_file_host_result,
+        get_local_file_public,
     )
     return _hub
