@@ -2,12 +2,15 @@
 # Runtime helper for Cloudflare Quick Tunnel (installed to /usr/local/sbin by setup).
 # Environment overrides:
 #   SSHCHAT_ENV_FILE, SSHCHAT_FILE_LOCAL_URL, SSHCHAT_PREFIX, SSHCHAT_FILE_HTTP_PORT
+#   SSHCHAT_CLOUDFLARED_PROTOCOL  — quic|http2|auto (default: http2; better under Clash TUN)
 set -uo pipefail
 
 ENV_FILE="${SSHCHAT_ENV_FILE:-/opt/sshchat/sshchat.env}"
 PREFIX="${SSHCHAT_PREFIX:-/opt/sshchat}"
 FILE_HTTP_PORT="${SSHCHAT_FILE_HTTP_PORT:-8443}"
 LOCAL_URL="${SSHCHAT_FILE_LOCAL_URL:-http://127.0.0.1:${FILE_HTTP_PORT}}"
+# http2 uses TCP/443 and survives many TUN/UDP filters; override with quic if preferred.
+PROTOCOL="${SSHCHAT_CLOUDFLARED_PROTOCOL:-http2}"
 STATE_DIR=/var/lib/sshchat/cloudflared
 STORAGE_DIR=/var/lib/sshchat/files
 
@@ -26,7 +29,20 @@ restart_sshchat() {
     sleep 1
   fi
   if [[ -x "$PREFIX/server.sh" ]]; then
-    nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 &
+    # macOS LaunchDaemon has no TTY; nohup often fails. Prefer launchctl submit.
+    if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+      launchctl remove com.sshchat.server 2>/dev/null || true
+      if launchctl submit -l com.sshchat.server -o "$PREFIX/server.log" -e "$PREFIX/server.log" -- "$PREFIX/server.sh"; then
+        return 0
+      fi
+      echo "[sshchat-cloudflared] WARN: launchctl submit failed, trying nohup" >&2
+    fi
+    /usr/bin/nohup "$PREFIX/server.sh" >>"$PREFIX/server.log" 2>&1 </dev/null &
+    disown 2>/dev/null || true
+    sleep 1
+    if ! pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+      echo "[sshchat-cloudflared] WARN: failed to restart $PREFIX/server.sh" >&2
+    fi
   fi
 }
 
@@ -86,14 +102,20 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 
-echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL"
+echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL)"
 rm -f "$URL_FILE"
 
 run_tunnel() {
+  local -a args=(tunnel --no-autoupdate --url "$LOCAL_URL")
+  case "$PROTOCOL" in
+    ""|auto) ;;
+    quic|http2|http2_quic|quic_http2) args+=(--protocol "$PROTOCOL") ;;
+    *) echo "[sshchat-cloudflared] unknown protocol '$PROTOCOL', using cloudflared default" ;;
+  esac
   if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL cloudflared tunnel --no-autoupdate --url "$LOCAL_URL"
+    stdbuf -oL -eL cloudflared "${args[@]}"
   else
-    cloudflared tunnel --no-autoupdate --url "$LOCAL_URL"
+    cloudflared "${args[@]}"
   fi
 }
 
