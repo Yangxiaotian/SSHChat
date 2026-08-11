@@ -3539,15 +3539,18 @@ def _federation_push_game_snapshot(room: str) -> None:
 
 
 def _federation_push_all_game_snapshots() -> None:
-    """After a peer connects, push every active local game replica/authority state."""
+    """After a peer connects, push every active game this node is authority for."""
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return
+    local = hub.node_id
     with lock:
         rooms = [
             room
             for room, game in room_games.items()
-            if game is not None and getattr(game, "state", "ended") != "ended"
+            if game is not None
+            and getattr(game, "state", "ended") != "ended"
+            and (room_game_authority.get(room) or local) == local
         ]
     for room in rooms:
         try:
@@ -3557,13 +3560,22 @@ def _federation_push_all_game_snapshots() -> None:
 
 
 def _fed_on_game_request(_from_peer: str, room: str) -> None:
-    """Peer is missing this room's game; re-push our snapshot if we have one."""
+    """Peer is missing this room's game; only the authority may re-push.
+
+    Replicas answering greq with a stale board can regress peers that already
+    received a newer authority snapshot.
+    """
     room = (room or "").strip()
     if not room:
         return
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
     with lock:
         game = room_games.get(room)
         if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        auth = (room_game_authority.get(room) or "").strip()
+        if auth and auth != local:
             return
     _federation_push_game_snapshot(room)
 
@@ -3590,6 +3602,55 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
         time.sleep(0.05)
     return False
 
+
+def _federation_wait_game_progress(
+    room: str, min_progress: int, timeout: float = 1.5
+) -> bool:
+    """Poll until local replica progress reaches min_progress (no greq)."""
+    deadline = time.time() + max(0.2, float(timeout))
+    target = int(min_progress)
+    while time.time() < deadline:
+        with lock:
+            if _game_progress_score(room_games.get(room)) >= target:
+                return True
+        time.sleep(0.05)
+    with lock:
+        return _game_progress_score(room_games.get(room)) >= target
+
+
+def _federation_refresh_replica_and_wait(
+    room: str,
+    *,
+    min_progress: int | None = None,
+    timeout: float = 2.0,
+) -> bool:
+    """Ask authority for a fresh gsync and wait until local progress catches up.
+
+    Used before /game show on a non-authority node so a delayed/lost gsync after a
+    forwarded move does not leave /game show on the previous ply.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    local = hub.node_id
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if auth and auth == local:
+            return True
+        before = _game_progress_score(game)
+    try:
+        hub.request_game(room)
+    except Exception as e:
+        print(f"federation: refresh greq failed for room {room!r}: {e!r}")
+        return False
+    if min_progress is None:
+        # Prefer a strictly newer board when one is available; otherwise time out
+        # and show whatever we already have.
+        target = before + 1
+    else:
+        target = max(before + 1, int(min_progress))
+    return _federation_wait_game_progress(room, target, timeout=timeout)
 
 def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
@@ -3673,14 +3734,17 @@ def _fed_on_game_sync(
             and getattr(local_game, "state", "ended") != "ended"
         )
         remote_active = getattr(game, "state", "ended") != "ended"
+        local_prog = _game_progress_score(local_game) if local_active else -1
+        remote_prog = _game_progress_score(game) if remote_active else -1
+        # Never let a stale replica / catch-up push rewind the board.
+        if local_active and remote_active and remote_prog < local_prog:
+            return
         if (
             local_active
             and remote_active
             and local_auth
             and local_auth != authority
         ):
-            local_prog = _game_progress_score(local_game)
-            remote_prog = _game_progress_score(game)
             if remote_prog > local_prog:
                 # Peer resumed/moved further — never keep a staler local board.
                 winner_auth = authority
@@ -4816,7 +4880,16 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if _should_forward_game(room, sub):
         hub = federation.get_hub()
         auth = room_game_authority.get(room, "")
+        with lock:
+            progress_before = _game_progress_score(room_games.get(room))
         if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
+            # Authority applies then gsyncs; wait so replica board catches up.
+            if sub == "move":
+                _federation_wait_game_progress(
+                    room, progress_before + 1, timeout=1.5
+                )
+            else:
+                _federation_refresh_replica_and_wait(room, timeout=1.5)
             return
         # Peer unreachable: if seats are all local, reclaim and handle here.
         if _reclaim_game_authority_for_local_seats(room):
@@ -5015,10 +5088,21 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
+            auth = (room_game_authority.get(room) or "").strip()
+        hub = federation.get_hub()
         if game is None:
             _federation_request_game_and_wait(room)
-            with lock:
-                game = room_games.get(room)
+        elif (
+            hub is not None
+            and hub.enabled
+            and auth
+            and auth != hub.node_id
+        ):
+            # Replica: pull authority board before showing (may be one ply behind
+            # if a prior gsync was delayed/lost after a forwarded move).
+            _federation_refresh_replica_and_wait(room, timeout=1.8)
+        with lock:
+            game = room_games.get(room)
         with lock:
             if game is None:
                 lines = ["本房没有进行中的对局。"]

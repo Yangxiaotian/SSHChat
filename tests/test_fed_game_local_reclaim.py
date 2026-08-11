@@ -148,6 +148,69 @@ class FedGameSyncProgressTests(unittest.TestCase):
         self.assertIs(server.room_games["lobby"], remote)
         self.assertEqual(server.room_game_authority["lobby"], "node-b")
 
+    def test_gsync_ignores_stale_lower_progress(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2)]
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-b"
+
+        local = LocalGame()
+        server.room_games["lobby"] = local
+        server.room_game_authority["lobby"] = "node-a"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=RemoteGame()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        server._fed_on_game_sync(
+                            "node-a",
+                            "lobby",
+                            "node-a",
+                            "ZmFrZQ==",
+                            "tok",
+                        )
+        self.assertIs(server.room_games["lobby"], local)
+
+    def test_replica_ignores_greq(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-b"
+
+        server.room_games["lobby"] = LocalGame()
+        server.room_game_authority["lobby"] = "node-a"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_federation_push_game_snapshot") as push:
+                server._fed_on_game_request("node-c", "lobby")
+                push.assert_not_called()
+
+    def test_authority_answers_greq(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+
+        server.room_games["lobby"] = LocalGame()
+        server.room_game_authority["lobby"] = "node-a"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_federation_push_game_snapshot") as push:
+                server._fed_on_game_request("node-b", "lobby")
+                push.assert_called_once_with("lobby")
+
 
 if __name__ == "__main__":
     unittest.main()
