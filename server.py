@@ -75,6 +75,32 @@ def _locale_store_path() -> str:
 
 
 rating_store = GameRatingStore(_rating_store_path())
+
+
+def _federation_sync_ratings(rows: list[dict]) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or not rows:
+        return
+    try:
+        hub.sync_ratings(rows)
+    except Exception as e:
+        print(f"federation: sync_ratings failed: {e!r}")
+
+
+def _on_local_rating_change(game: str, changed: list[tuple[str, dict]]) -> None:
+    """Push host-settled rating rows so federated same-nick views match."""
+    rows: list[dict] = []
+    for user, entry in changed:
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        row["game"] = game
+        row["user"] = str(entry.get("display_name") or user)
+        rows.append(row)
+    _federation_sync_ratings(rows)
+
+
+rating_store.on_change = _on_local_rating_change
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
 offline_messages = OfflineMessageStore(_offline_messages_path())
@@ -4158,6 +4184,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_push_all_offline_leaves()
             except Exception as e:
                 print(f"federation: peer-up offline leave sync error: {e!r}")
+            try:
+                _federation_sync_ratings(rating_store.export_entries())
+            except Exception as e:
+                print(f"federation: peer-up ratings sync error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -4289,6 +4319,24 @@ def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
     offline_messages.remove_by_id(to_name, leave_id)
 
 
+def _fed_on_ratings(origin: str, rows: list) -> None:
+    """Merge peer rating ledger; newer host settlements win for same nick."""
+    if not isinstance(rows, list):
+        return
+    applied = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        game = str(row.get("game") or "").strip()
+        user = str(row.get("user") or row.get("display_name") or "").strip()
+        if not game or not user or not is_rated_game(game):
+            continue
+        if rating_store.apply_remote_entry(game, user, row, source_node=origin):
+            applied += 1
+    if applied:
+        print(f"federation: applied {applied} rating row(s) from {origin}")
+
+
 def _ensure_federation_hub() -> None:
     global _fed_hub, _library_watch_thread
     if _fed_hub is not None:
@@ -4321,6 +4369,8 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
     _fed_hub.on_offline_pm = _fed_on_offline_pm
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
+    _fed_hub.on_ratings = _fed_on_ratings
+    _fed_hub.get_local_ratings = rating_store.export_entries
     _federation_sync_library_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
@@ -4329,6 +4379,10 @@ def _ensure_federation_hub() -> None:
         _federation_push_all_offline_leaves()
     except Exception as e:
         print(f"federation: initial offline leave sync error: {e!r}")
+    try:
+        _federation_sync_ratings(rating_store.export_entries())
+    except Exception as e:
+        print(f"federation: initial ratings sync error: {e!r}")
     
     # Start library directory watch thread
     if _library_watch_thread is None:

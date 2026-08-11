@@ -163,6 +163,10 @@ class FederationHub:
         self.on_offline_pm: Optional[Callable[[str, str, str, str], None]] = None
         # to_nick, leave_id
         self.on_offline_pm_clear: Optional[Callable[[str, str], None]] = None
+        # origin_node, rows: list[{game, user, ...entry}]
+        self.on_ratings: Optional[Callable[[str, list], None]] = None
+        # () -> list of rating row dicts for catch-up
+        self.get_local_ratings: Optional[Callable[[], list]] = None
         # event in {"up","down"}, peer_node, reporter_node
         self.on_peer_event = on_peer_event
         # peer_node, room — ask holders to re-push gsync for that room
@@ -646,6 +650,27 @@ class FederationHub:
             return False
         nonce = str(time.time_ns())
         line = f"pleave_clear\t{self.node_id}\t{to_nick}\t{leave_id}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
+
+    def sync_ratings(self, rows: list[dict[str, Any]]) -> bool:
+        """Fan-out rating rows so same-nick peers share the game-host ledger."""
+        if not self.enabled or not self._peers:
+            return False
+        if not isinstance(rows, list) or not rows:
+            return False
+        clean: list[dict[str, Any]] = [r for r in rows if isinstance(r, dict)]
+        if not clean:
+            return False
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return False
+        nonce = str(time.time_ns())
+        line = f"rrating\t{self.node_id}\t{blob}\t{nonce}\n"
         self._remember_seen(line)
         self._fanout(line)
         return True
@@ -1163,7 +1188,8 @@ class FederationHub:
             line = f"lcatalog\t{origin}\t{remote_blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
-        self._push_library_bookmarks(link)
+            self._push_library_bookmarks(link)
+            self._push_ratings(link)
 
     def _push_library_bookmarks(self, link: _PeerLink) -> None:
         """Send local users' bookmarks (and known remote copies) to a new peer."""
@@ -1189,6 +1215,30 @@ class FederationHub:
             line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
+
+    def _push_ratings(self, link: _PeerLink) -> None:
+        """Send local rating ledger so same-nick peers match the host node."""
+        rows: list[dict[str, Any]] = []
+        if self.get_local_ratings is not None:
+            try:
+                rows = self.get_local_ratings() or []
+            except Exception as e:
+                print(f"federation: get_local_ratings error: {e!r}")
+                rows = []
+        if not isinstance(rows, list) or not rows:
+            return
+        clean = [r for r in rows if isinstance(r, dict)]
+        if not clean:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"rrating\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        link.send_line(line)
 
     def _forward_unicast_for_nick(
         self,
@@ -1668,6 +1718,26 @@ class FederationHub:
                     self.on_offline_pm_clear(to_name, leave_id)
                 except Exception as e:
                     print(f"federation: on_offline_pm_clear error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "rrating" and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
+            origin, b64 = parts[1], parts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                rows = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(rows, list) and self.on_ratings is not None:
+                try:
+                    self.on_ratings(origin, rows)
+                except Exception as e:
+                    print(f"federation: on_ratings error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
