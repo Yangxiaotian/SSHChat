@@ -1131,6 +1131,9 @@ def _federation_push_all_offline_leaves() -> None:
     if hub is None or not hub.enabled:
         return
     try:
+        removed = offline_messages.compact_duplicates()
+        if removed:
+            print(f"federation: compacted {removed} duplicate offline leave(s)")
         pending = offline_messages.snapshot_pending()
     except Exception as e:
         print(f"federation: snapshot offline leaves failed: {e!r}")
@@ -1172,6 +1175,10 @@ def _federation_push_all_offline_leaves() -> None:
                 print(f"federation: catch-up fleave failed: {e!r}")
             continue
         leave_id = str(item.get("id") or "").strip()
+        # Never re-seed without a stable id — empty ids mint a new one per hop
+        # and explode into duplicate /leave rows across federation reconnects.
+        if not leave_id:
+            continue
         try:
             if hub.broadcast_offline_pm(
                 to_name,
@@ -1228,6 +1235,10 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
 
 
 def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> None:
+    try:
+        offline_messages.compact_duplicates()
+    except Exception as e:
+        print(f"offline leave compact failed: {e!r}")
     items = offline_messages.list_sent_unread(sender_name, recipient)
     if not items:
         if recipient:

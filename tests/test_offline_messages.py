@@ -363,6 +363,31 @@ class OfflineLeaveFederationCatchUpTests(unittest.TestCase):
         self.assertEqual(pending[0]["ts"], 555.0)
         self.assertEqual(pending[0]["id"], "id-9")
 
+    def test_content_dedupe_and_compact(self) -> None:
+        server.offline_messages.leave("bob", "alice", "same", leave_id="id-a", ts=1.0)
+        # Simulate a federated re-seed that minted a different id for the same body.
+        server.offline_messages.leave("bob", "alice", "same", leave_id="id-b", ts=2.0)
+        self.assertEqual(server.offline_messages.count("bob"), 1)
+        # Inject a raw duplicate bypassing leave() to exercise compact().
+        with server.offline_messages._lock:
+            server.offline_messages._ensure_loaded_locked()
+            box = server.offline_messages._cache["mailboxes"]["bob"]
+            box.append(
+                {
+                    "id": "id-c",
+                    "from": "alice",
+                    "to_display": "bob",
+                    "text": "same",
+                    "ts": 3.0,
+                    "kind": "pm",
+                }
+            )
+            server.offline_messages._save_locked()
+        self.assertEqual(server.offline_messages.count("bob"), 2)
+        removed = server.offline_messages.compact_duplicates()
+        self.assertGreaterEqual(removed, 1)
+        self.assertEqual(server.offline_messages.count("bob"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

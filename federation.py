@@ -616,8 +616,9 @@ class FederationHub:
         to_nick = str(to_nick or "").strip()
         from_name = str(from_name or "").strip() or "?"
         text = str(text or "")
-        leave_id = str(leave_id or "").strip() or "-"
-        if not to_nick or not text.strip():
+        leave_id = str(leave_id or "").strip()
+        # Require a stable id so catch-up re-seeds stay idempotent.
+        if not to_nick or not text.strip() or not leave_id or leave_id == "-":
             return False
         payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
         nonce = str(time.time_ns())
