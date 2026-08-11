@@ -119,11 +119,13 @@ class OfflineMessageStore:
         kind: str = "pm",
         meta: dict[str, Any] | None = None,
         leave_id: str | None = None,
+        ts: float | None = None,
     ) -> dict[str, Any] | None:
         """Enqueue a leave-message. Returns the stored entry, or None if invalid.
 
         kind=\"file\" stores an offline file notice (see meta for transfer details).
         File summaries are not truncated by max_text_len so listing stays readable.
+        ``ts`` preserves the origin timestamp when federation re-seeds a leave.
         """
         key = _normalize_user(recipient)
         sender_name = (sender or "").strip() or "?"
@@ -134,12 +136,16 @@ class OfflineMessageStore:
         if msg_kind != "file" and len(body) > self.max_text_len:
             body = body[: self.max_text_len]
         lid = str(leave_id or "").strip() or secrets.token_hex(8)
+        try:
+            entry_ts = float(ts) if ts is not None else time.time()
+        except (TypeError, ValueError):
+            entry_ts = time.time()
         entry: dict[str, Any] = {
             "id": lid,
             "from": sender_name,
             "to_display": (recipient or "").strip() or key,
             "text": body,
-            "ts": time.time(),
+            "ts": entry_ts,
             "kind": msg_kind,
         }
         if isinstance(meta, dict) and meta:
@@ -178,6 +184,40 @@ class OfflineMessageStore:
             mailboxes[key] = box
             self._save_locked()
             return dict(entry)
+
+    def snapshot_pending(self) -> list[dict[str, Any]]:
+        """Copy every pending leave for federation catch-up (idempotent re-seed)."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            out: list[dict[str, Any]] = []
+            mailboxes = self._cache["mailboxes"]
+            for to_key in sorted(k for k in mailboxes if isinstance(k, str)):
+                box = mailboxes.get(to_key)
+                if not isinstance(box, list):
+                    continue
+                for item in box:
+                    parsed = self._parse_entry(item)
+                    if parsed is None:
+                        continue
+                    display_to = to_key
+                    if isinstance(item, dict):
+                        raw_to = str(item.get("to_display") or "").strip()
+                        if raw_to:
+                            display_to = raw_to
+                    row = {
+                        "to": display_to,
+                        "from": parsed["from"],
+                        "text": parsed["text"],
+                        "ts": parsed["ts"],
+                        "kind": parsed.get("kind") or "pm",
+                    }
+                    if parsed.get("id"):
+                        row["id"] = parsed["id"]
+                    if "meta" in parsed:
+                        row["meta"] = parsed["meta"]
+                    out.append(row)
+            return out
 
     def remove_file_by_transfer(
         self, recipient: str, transfer_id: str

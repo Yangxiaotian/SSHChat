@@ -308,5 +308,61 @@ class OfflineMessageServerTests(unittest.TestCase):
             server.file_http = prev_http
 
 
+class OfflineLeaveFederationCatchUpTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fd, self.path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.path)
+        self.prev = server.offline_messages
+        server.offline_messages = OfflineMessageStore(self.path)
+
+    def tearDown(self) -> None:
+        server.offline_messages = self.prev
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_snapshot_and_preserve_ts(self) -> None:
+        stored = server.offline_messages.leave(
+            "bob", "alice", "hi", leave_id="abc123", ts=12345.0
+        )
+        self.assertEqual(stored["ts"], 12345.0)
+        snap = server.offline_messages.snapshot_pending()
+        self.assertEqual(len(snap), 1)
+        self.assertEqual(snap[0]["id"], "abc123")
+        self.assertEqual(snap[0]["ts"], 12345.0)
+
+    def test_peer_catchup_reseeds_pending_pm(self) -> None:
+        server.offline_messages.leave(
+            "bob", "alice", "catch me", leave_id="leave-1", ts=99.0
+        )
+        sent: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+
+            def broadcast_offline_pm(self, to, frm, text, *, leave_id="", ts=None):
+                sent.append((to, frm, text, leave_id, ts))
+                return True
+
+            def broadcast_file_leave(self, *a, **k):
+                return False
+
+        with patch.object(server.federation, "get_hub", return_value=FakeHub()):
+            server._federation_push_all_offline_leaves()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "bob")
+        self.assertEqual(sent[0][2], "catch me")
+        self.assertEqual(sent[0][3], "leave-1")
+        self.assertEqual(sent[0][4], 99.0)
+
+    def test_fed_on_offline_pm_keeps_origin_ts(self) -> None:
+        server._fed_on_offline_pm("carol", "dave", "yo", "id-9", 555.0)
+        items = server.offline_messages.list_sent_unread("dave", "carol")
+        self.assertEqual(len(items), 1)
+        pending = server.offline_messages.snapshot_pending()
+        self.assertEqual(pending[0]["ts"], 555.0)
+        self.assertEqual(pending[0]["id"], "id-9")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ from unittest import mock
 import federation
 import server
 from games import GomokuGame
-from session_store import FederatedSeat
+from session_store import DisconnectedSeat, FederatedSeat
 
 
 class DummyConn:
@@ -76,6 +76,77 @@ class FedGameLocalReclaimTests(unittest.TestCase):
         ):
             self.assertTrue(server._should_forward_game(room, "move"))
             self.assertEqual(server.room_game_authority[room], "iPhone")
+
+    def test_still_forwards_when_opponent_only_disconnected(self) -> None:
+        """Resume-only node must not reclaim while the other seat is offline here."""
+        room = "default"
+        host = DummyConn()
+        guest = DummyConn()
+        game = GomokuGame(host, "alice")
+        game.try_join(guest, "bob")
+        server._replace_conn_refs(game, guest, DisconnectedSeat("bob"))
+        server.room_games[room] = game
+        server.room_game_authority[room] = "Mathematics.local"
+        server.clients[host] = {"name": "alice", "rooms": {room}, "current_room": room}
+        server.rooms[room] = {host}
+
+        hub = mock.Mock()
+        hub.enabled = True
+        hub.node_id = "iPhone"
+        hub.forward_game_cmd = mock.Mock(return_value=True)
+
+        with mock.patch.object(server, "_local_node_id", return_value="iPhone"), mock.patch.object(
+            federation, "get_hub", return_value=hub
+        ):
+            self.assertTrue(server._should_forward_game(room, "move"))
+            self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+
+
+class FedGameSyncProgressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server.clients.clear()
+        server.rooms.clear()
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        federation._hub = None
+
+    def test_gsync_prefers_remote_with_more_progress(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1)]
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+
+        remote = RemoteGame()
+        server.room_games["lobby"] = LocalGame()
+        server.room_game_authority["lobby"] = "node-a"
+        server.room_game_tokens["lobby"] = "zzzz"  # would win token conflict
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(server, "broadcast_room") as br:
+                            with mock.patch.object(server, "send_oriented_boards"):
+                                with mock.patch.object(server, "send_sanguo_hand_views"):
+                                    server._fed_on_game_sync(
+                                        "node-b",
+                                        "lobby",
+                                        "node-b",
+                                        "ZmFrZQ==",
+                                        "aaaa",
+                                    )
+                                    br.assert_not_called()
+        self.assertIs(server.room_games["lobby"], remote)
+        self.assertEqual(server.room_game_authority["lobby"], "node-b")
 
 
 if __name__ == "__main__":

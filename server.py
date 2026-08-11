@@ -1121,6 +1121,74 @@ def _federation_seed_file_leave(
         print(f"federation: broadcast_file_leave failed: {e!r}")
 
 
+def _federation_push_all_offline_leaves() -> None:
+    """Re-seed every pending leave so a newly linked peer shares the mailbox.
+
+    Same-nick users logging into either node (and /leave on either node) need the
+    full unread set, including leaves created while the peer was offline.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        pending = offline_messages.snapshot_pending()
+    except Exception as e:
+        print(f"federation: snapshot offline leaves failed: {e!r}")
+        return
+    pushed_pm = 0
+    pushed_file = 0
+    for item in pending:
+        to_name = str(item.get("to") or "").strip()
+        from_name = str(item.get("from") or "").strip() or "?"
+        text = str(item.get("text") or "")
+        if not to_name or not text:
+            continue
+        kind = str(item.get("kind") or "pm")
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if kind == "file":
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            download_url = str(meta.get("download_url") or "").strip()
+            download_key = str(meta.get("download_key") or "").strip()
+            if not tid or not download_url or not download_key:
+                continue
+            notice = {
+                "filename": str(meta.get("filename") or "").strip() or "file",
+                "file_size": meta.get("file_size") or 0,
+                "download_url": download_url,
+                "download_key": download_key,
+                "download_token": str(meta.get("download_token") or "").strip(),
+                "room": meta.get("room"),
+                "transfer_id": tid,
+                "leave_ts": ts,
+            }
+            try:
+                if hub.broadcast_file_leave(to_name, from_name, notice):
+                    pushed_file += 1
+            except Exception as e:
+                print(f"federation: catch-up fleave failed: {e!r}")
+            continue
+        leave_id = str(item.get("id") or "").strip()
+        try:
+            if hub.broadcast_offline_pm(
+                to_name,
+                from_name,
+                text,
+                leave_id=leave_id,
+                ts=ts or None,
+            ):
+                pushed_pm += 1
+        except Exception as e:
+            print(f"federation: catch-up pleave failed: {e!r}")
+    if pushed_pm or pushed_file:
+        print(
+            f"federation: catch-up offline leaves "
+            f"pm={pushed_pm} file={pushed_file}"
+        )
+
 def deliver_offline_messages(conn, recipient_name: str) -> int:
     """Flush stored leave-messages to this connection. Returns how many were sent."""
     pending = offline_messages.take_all(recipient_name)
@@ -1306,6 +1374,7 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
                     sender_name,
                     text,
                     leave_id=str(stored.get("id") or ""),
+                    ts=float(stored.get("ts") or 0) or None,
                 )
             except Exception as e:
                 print(f"federation: broadcast_offline_pm failed: {e!r}")
@@ -3119,13 +3188,14 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
             "download_url": download_url,
             "room": transfer.room,
         }
-        offline_messages.leave(
+        stored = offline_messages.leave(
             recipient,
             transfer.sender,
             summary,
             kind="file",
             meta=meta,
         )
+        leave_ts = float((stored or {}).get("ts") or time.time())
         _federation_seed_file_leave(
             recipient,
             transfer.sender,
@@ -3137,6 +3207,7 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 "download_token": token,
                 "room": transfer.room,
                 "transfer_id": transfer.transfer_id,
+                "leave_ts": leave_ts,
             },
         )
 
@@ -3536,6 +3607,27 @@ def _game_conflict_winner(
     return b_auth, b_tok
 
 
+def _game_progress_score(game) -> int:
+    """Best-effort ply/move count so newer replicas win dual-authority races."""
+    if game is None:
+        return 0
+    hist = getattr(game, "_history", None)
+    if isinstance(hist, list):
+        return len(hist)
+    ply = getattr(game, "_xq_ply_log", None)
+    if isinstance(ply, list):
+        return len(ply)
+    board = getattr(game, "board", None)
+    if board is not None:
+        stack = getattr(board, "move_stack", None)
+        if stack is not None:
+            try:
+                return len(stack)
+            except Exception:
+                pass
+    return 0
+
+
 def _fed_on_game_sync(
     _from_peer: str,
     room: str,
@@ -3576,17 +3668,26 @@ def _fed_on_game_sync(
             and local_auth
             and local_auth != authority
         ):
-            win_auth, win_tok = _game_conflict_winner(
-                local_auth, local_token, authority, conflict_token
-            )
-            winner_auth = win_auth
-            if win_auth == local_auth:
-                # Keep local; ask peers to take ours.
-                room_game_tokens[room] = win_tok or local_token
+            local_prog = _game_progress_score(local_game)
+            remote_prog = _game_progress_score(game)
+            if remote_prog > local_prog:
+                # Peer resumed/moved further — never keep a staler local board.
+                winner_auth = authority
+            elif local_prog > remote_prog:
+                room_game_tokens[room] = local_token
                 keep_local = True
             else:
-                lost_local = True
-                loser_auth = local_auth
+                win_auth, win_tok = _game_conflict_winner(
+                    local_auth, local_token, authority, conflict_token
+                )
+                winner_auth = win_auth
+                if win_auth == local_auth:
+                    # Keep local; ask peers to take ours.
+                    room_game_tokens[room] = win_tok or local_token
+                    keep_local = True
+                else:
+                    lost_local = True
+                    loser_auth = local_auth
 
         if not keep_local:
             _remap_local_game_seats_locked(room, game)
@@ -3842,18 +3943,27 @@ def _fed_execute_game_cmd(
         _persist_after_game_change()
 
 
-def _game_has_only_local_seats_locked(game, local_node: str) -> bool:
-    """True when every seated role is local (socket / disconnect / local FederatedSeat)."""
+def _game_all_seat_nicks_present_locally_locked(
+    room: str, game, local_node: str
+) -> bool:
+    """True only when every seat owner is currently online in this room.
+
+    DisconnectedSeat / missing opponents must NOT look "local-only", or a peer
+    that only has the resuming player will wrongly reclaim authority and push a
+    divergent board back to the real host.
+    """
     has_seat = False
-    for conn, _name in _iter_game_conn_seats(game):
+    for conn, name in _iter_game_conn_seats(game):
         has_seat = True
         if isinstance(conn, FederatedSeat) and conn.node_id != local_node:
+            return False
+        if _local_conn_for_name_in_room_locked(name, room) is None:
             return False
     return has_seat
 
 
 def _reclaim_game_authority_for_local_seats(room: str) -> bool:
-    """Take authority when a remote claim remains but all seats are on this node.
+    """Take authority when a remote claim remains but every seat nick is here.
 
     Common after gsync: both players reconnect to the same SSHChat host while
     ``room_game_authority`` still points at a peer. Forwarding ``/game move`` then
@@ -3874,7 +3984,7 @@ def _reclaim_game_authority_for_local_seats(room: str) -> bool:
                 if not (room_game_tokens.get(room) or "").strip():
                     room_game_tokens[room] = secrets.token_hex(16)
             return True
-        if not _game_has_only_local_seats_locked(game, local):
+        if not _game_all_seat_nicks_present_locally_locked(room, game, local):
             return False
         room_game_authority[room] = local
         room_game_tokens[room] = secrets.token_hex(16)
@@ -3882,7 +3992,7 @@ def _reclaim_game_authority_for_local_seats(room: str) -> bool:
     if push:
         print(
             f"federation: reclaimed game authority for #{room} "
-            f"(all seats local on {local})"
+            f"(all seat nicks local on {local})"
         )
         try:
             _federation_sync_game(room)
@@ -3969,6 +4079,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_sync_file_public()
             except Exception as e:
                 print(f"federation: peer-up file public sync error: {e!r}")
+            try:
+                _federation_push_all_offline_leaves()
+            except Exception as e:
+                print(f"federation: peer-up offline leave sync error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -4042,6 +4156,10 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
 
     # Recipient is offline on this node — store absolute origin URL for later login.
     summary = _format_file_leave_summary(filename, file_size)
+    try:
+        leave_ts = float(notice.get("leave_ts") or 0) or None
+    except (TypeError, ValueError):
+        leave_ts = None
     offline_messages.leave(
         to_name,
         from_name,
@@ -4057,6 +4175,7 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
             "room": room_name,
             "federated": True,
         },
+        ts=leave_ts,
     )
 
 
@@ -4071,7 +4190,7 @@ def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
 
 
 def _fed_on_offline_pm(
-    to_name: str, from_name: str, text: str, leave_id: str = ""
+    to_name: str, from_name: str, text: str, leave_id: str = "", leave_ts: float = 0.0
 ) -> None:
     """Seed or deliver an offline text leave that originated on another node."""
     targets = find_clients_by_nickname(to_name, local_only=True)
@@ -4082,7 +4201,13 @@ def _fed_on_offline_pm(
             offline_messages.remove_by_id(to_name, leave_id)
             _federation_clear_offline_pm(to_name, leave_id)
         return
-    offline_messages.leave(to_name, from_name, text, leave_id=leave_id or None)
+    try:
+        ts = float(leave_ts) if leave_ts else None
+    except (TypeError, ValueError):
+        ts = None
+    offline_messages.leave(
+        to_name, from_name, text, leave_id=leave_id or None, ts=ts
+    )
 
 
 def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
@@ -4125,6 +4250,10 @@ def _ensure_federation_hub() -> None:
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    try:
+        _federation_push_all_offline_leaves()
+    except Exception as e:
+        print(f"federation: initial offline leave sync error: {e!r}")
     
     # Start library directory watch thread
     if _library_watch_thread is None:

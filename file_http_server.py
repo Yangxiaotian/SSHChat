@@ -203,11 +203,14 @@ UPLOAD_TEXTS = {
         "subtitle": "This link is finished once the upload succeeds",
         "info_title": "Instructions:",
         "info_1": "Enter the 6-character upload key sent separately in chat",
-        "info_2": "Choose the file to upload (the filename comes from your selection)",
+        "info_2": "Choose a file, or paste (Ctrl/Cmd+V) an image/file from the clipboard",
         "info_3": "Click upload; the recipient will get a download link",
         "key_label": "Upload key *",
         "key_placeholder": "Enter 6-character key",
-        "file_label": "Choose file *",
+        "file_label": "Choose file * (or paste from clipboard)",
+        "paste_hint": "Tip: you can paste a screenshot or file here with Ctrl/Cmd+V",
+        "paste_ok": "Pasted from clipboard:",
+        "paste_none": "Clipboard has no file/image to paste",
         "submit": "📤 Upload",
         "uploading": "Uploading...",
         "alert_key": "Please enter the 6-character key",
@@ -224,11 +227,14 @@ UPLOAD_TEXTS = {
         "subtitle": "上传成功后此链接即完成使命",
         "info_title": "使用说明：",
         "info_1": "输入聊天窗里单独发给你的6位上传密钥",
-        "info_2": "选择要上传的文件（文件名以你选的文件为准）",
+        "info_2": "选择文件，或从剪贴板粘贴（Ctrl/Cmd+V）图片/文件",
         "info_3": "点击上传按钮，接收者会收到下载链接",
         "key_label": "上传密钥 *",
         "key_placeholder": "输入6位密钥",
-        "file_label": "选择文件 *",
+        "file_label": "选择文件 *（也可粘贴剪贴板）",
+        "paste_hint": "提示：可在本页 Ctrl/Cmd+V 粘贴截图或文件",
+        "paste_ok": "已从剪贴板粘贴：",
+        "paste_none": "剪贴板里没有可粘贴的文件/图片",
         "submit": "📤 开始上传",
         "uploading": "上传中...",
         "alert_key": "请输入6位密钥",
@@ -532,6 +538,7 @@ def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
                 <label for="file">{S['file_label']}</label>
                 <input type="file" id="file" name="file" required>
                 <div id="selectedFile" class="selected-file" style="display:none;"></div>
+                <div class="selected-file" style="margin-top:8px;background:#eef2ff;color:#4338ca;">{S['paste_hint']}</div>
             </div>
             
             <button type="submit" id="uploadBtn">{S['submit']}</button>
@@ -565,8 +572,44 @@ def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
             failDefault: {json.dumps(S['fail_default'])},
             retry: {json.dumps(S['retry'])},
             submit: {json.dumps(S['submit'])},
+            pasteOk: {json.dumps(S['paste_ok'])},
+            pasteNone: {json.dumps(S['paste_none'])},
         }};
         
+        function showSelectedFile(file, fromPaste) {{
+            if (!file) {{
+                selectedFile.style.display = 'none';
+                return;
+            }}
+            const size = (file.size / 1024 / 1024).toFixed(2);
+            const prefix = fromPaste ? (i18n.pasteOk + ' ') : '📄 ';
+            selectedFile.textContent = `${{prefix}}${{file.name}} (${{size}} MB)`;
+            selectedFile.style.display = 'block';
+        }}
+
+        function assignFileToInput(file, fromPaste) {{
+            if (!file) return false;
+            try {{
+                const dt = new DataTransfer();
+                let named = file;
+                if (!file.name || file.name === 'image.png' || file.name === 'image.jpg') {{
+                    const ext = (file.type && file.type.split('/')[1]) || 'png';
+                    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    named = new File([file], `clipboard-${{stamp}}.${{ext}}`, {{
+                        type: file.type || 'application/octet-stream',
+                        lastModified: Date.now(),
+                    }});
+                }}
+                dt.items.add(named);
+                fileInput.files = dt.files;
+                showSelectedFile(named, fromPaste);
+                return true;
+            }} catch (err) {{
+                console.warn('assign file failed', err);
+                return false;
+            }}
+        }}
+
         // Auto uppercase key input
         keyInput.addEventListener('input', function(e) {{
             this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -575,13 +618,33 @@ def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
         // Show selected file
         fileInput.addEventListener('change', function(e) {{
             if (this.files.length > 0) {{
-                const file = this.files[0];
-                const size = (file.size / 1024 / 1024).toFixed(2);
-                selectedFile.textContent = `📄 ${{file.name}} (${{size}} MB)`;
-                selectedFile.style.display = 'block';
+                showSelectedFile(this.files[0], false);
             }}
         }});
-        
+
+        // Clipboard paste (screenshots / copied files) onto the upload page
+        document.addEventListener('paste', function(e) {{
+            const cd = e.clipboardData;
+            if (!cd) return;
+            let file = null;
+            if (cd.files && cd.files.length) {{
+                file = cd.files[0];
+            }} else if (cd.items) {{
+                for (const item of cd.items) {{
+                    if (item.kind === 'file') {{
+                        file = item.getAsFile();
+                        if (file) break;
+                    }}
+                }}
+            }}
+            if (!file) {{
+                return;
+            }}
+            e.preventDefault();
+            if (!assignFileToInput(file, true)) {{
+                alert(i18n.pasteNone);
+            }}
+        }});        
         form.addEventListener('submit', async function(e) {{
             e.preventDefault();
             

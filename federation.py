@@ -608,6 +608,7 @@ class FederationHub:
         text: str,
         *,
         leave_id: str = "",
+        ts: float | None = None,
     ) -> bool:
         """Fan-out an offline text leave so login on any peer can deliver it."""
         if not self.enabled or not self._peers:
@@ -620,9 +621,15 @@ class FederationHub:
             return False
         payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
         nonce = str(time.time_ns())
+        ts_s = ""
+        if ts is not None:
+            try:
+                ts_s = str(float(ts))
+            except (TypeError, ValueError):
+                ts_s = ""
         line = (
             f"pleave\t{self.node_id}\t{to_nick}\t{from_name}\t"
-            f"{payload}\t{leave_id}\t{nonce}\n"
+            f"{payload}\t{leave_id}\t{nonce}\t{ts_s}\n"
         )
         self._remember_seen(line)
         self._fanout(line)
@@ -1623,6 +1630,12 @@ class FederationHub:
             leave_id = parts[5].strip() if len(parts) >= 6 else ""
             if leave_id in {"", "-"}:
                 leave_id = ""
+            leave_ts = 0.0
+            if len(parts) >= 8 and str(parts[7] or "").strip():
+                try:
+                    leave_ts = float(parts[7])
+                except (TypeError, ValueError):
+                    leave_ts = 0.0
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -1632,7 +1645,12 @@ class FederationHub:
                 return
             if self.on_offline_pm is not None:
                 try:
-                    self.on_offline_pm(to_name, from_name, text, leave_id)
+                    self.on_offline_pm(to_name, from_name, text, leave_id, leave_ts)
+                except TypeError:
+                    try:
+                        self.on_offline_pm(to_name, from_name, text, leave_id)
+                    except Exception as e:
+                        print(f"federation: on_offline_pm error: {e!r}")
                 except Exception as e:
                     print(f"federation: on_offline_pm error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
