@@ -181,6 +181,27 @@ class ServerRestartResumeTests(unittest.TestCase):
             payload = server._build_session_payload_locked()
         self.assertEqual(payload["room_games"], {})
 
+    def test_game_authority_survives_restart(self) -> None:
+        room = "default"
+        black = DummyConn()
+        game = GomokuGame(black, "zouyu")
+        server.room_games[room] = game
+        server.room_game_authority[room] = "Mathematics.local"
+        server.room_game_tokens[room] = "tok-abc"
+
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        server.session_store.save(payload)
+
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server._load_persisted_sessions()
+
+        self.assertIn(room, server.room_games)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+        self.assertEqual(server.room_game_tokens[room], "tok-abc")
+
 
 if __name__ == "__main__":
     unittest.main()

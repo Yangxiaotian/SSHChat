@@ -137,14 +137,17 @@ class FedGameSyncProgressTests(unittest.TestCase):
                         with mock.patch.object(server, "broadcast_room") as br:
                             with mock.patch.object(server, "send_oriented_boards"):
                                 with mock.patch.object(server, "send_sanguo_hand_views"):
-                                    server._fed_on_game_sync(
-                                        "node-b",
-                                        "lobby",
-                                        "node-b",
-                                        "ZmFrZQ==",
-                                        "aaaa",
-                                    )
-                                    br.assert_not_called()
+                                    with mock.patch.object(
+                                        server, "_persist_after_game_change"
+                                    ):
+                                        server._fed_on_game_sync(
+                                            "node-b",
+                                            "lobby",
+                                            "node-b",
+                                            "ZmFrZQ==",
+                                            "aaaa",
+                                        )
+                                        br.assert_not_called()
         self.assertIs(server.room_games["lobby"], remote)
         self.assertEqual(server.room_game_authority["lobby"], "node-b")
 
@@ -210,6 +213,50 @@ class FedGameSyncProgressTests(unittest.TestCase):
             with mock.patch.object(server, "_federation_push_game_snapshot") as push:
                 server._fed_on_game_request("node-b", "lobby")
                 push.assert_called_once_with("lobby")
+
+    def test_empty_auth_does_not_answer_greq(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-b"
+
+        server.room_games["lobby"] = LocalGame()
+        # Missing authority after old session restore must not claim hostship.
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_federation_push_game_snapshot") as push:
+                server._fed_on_game_request("node-a", "lobby")
+                push.assert_not_called()
+
+    def test_gsync_persists_immediately(self) -> None:
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-b"
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=RemoteGame()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(server, "send_oriented_boards"):
+                            with mock.patch.object(server, "send_sanguo_hand_views"):
+                                with mock.patch.object(
+                                    server, "_persist_after_game_change"
+                                ) as persist:
+                                    server._fed_on_game_sync(
+                                        "node-a",
+                                        "lobby",
+                                        "node-a",
+                                        "ZmFrZQ==",
+                                        "tok",
+                                    )
+                                    persist.assert_called_once()
 
 
 if __name__ == "__main__":

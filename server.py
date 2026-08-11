@@ -882,6 +882,16 @@ def _build_session_payload_locked() -> dict[str, object]:
             for room, enabled in room_enabled_games.items()
         },
         "room_announcements": dict(room_announcements),
+        "room_game_authority": {
+            room: auth
+            for room, auth in room_game_authority.items()
+            if isinstance(room, str) and isinstance(auth, str) and auth.strip()
+        },
+        "room_game_tokens": {
+            room: tok
+            for room, tok in room_game_tokens.items()
+            if isinstance(room, str) and isinstance(tok, str) and tok.strip()
+        },
     }
 
 
@@ -930,6 +940,26 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
         for room, text in announcements.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_announcements[room] = text
+    authority = payload.get("room_game_authority")
+    if isinstance(authority, dict):
+        for room, auth in authority.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(auth, str)
+                and auth.strip()
+            ):
+                room_game_authority[room] = auth.strip()
+    tokens = payload.get("room_game_tokens")
+    if isinstance(tokens, dict):
+        for room, tok in tokens.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(tok, str)
+                and tok.strip()
+            ):
+                room_game_tokens[room] = tok.strip()
 
 
 def _mark_sessions_dirty() -> None:
@@ -3576,13 +3606,70 @@ def _federation_push_all_game_snapshots() -> None:
             for room, game in room_games.items()
             if game is not None
             and getattr(game, "state", "ended") != "ended"
-            and (room_game_authority.get(room) or local) == local
+            # Strict: empty authority after restart must NOT claim host and push
+            # a possibly stale replica that races the real host.
+            and (room_game_authority.get(room) or "").strip() == local
         ]
     for room in rooms:
         try:
             _federation_push_game_snapshot(room)
         except Exception as e:
             print(f"federation: catch-up gsync failed for room {room!r}: {e!r}")
+
+
+def _federation_reconcile_restored_games() -> None:
+    """After restart, pull newer boards for games whose authority is unknown/remote.
+
+    Session restore used to omit authority, so both nodes treated empty auth as
+    local and kept a one-ply-stale replica forever.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            room
+            for room, game in list(room_games.items())
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        ]
+    for room in rooms:
+        with lock:
+            auth = (room_game_authority.get(room) or "").strip()
+            before = _game_progress_score(room_games.get(room))
+        if auth == local:
+            try:
+                _federation_push_game_snapshot(room)
+            except Exception as e:
+                print(f"federation: reconcile push failed room={room!r}: {e!r}")
+            continue
+        # Unknown or remote authority: ask peers and keep the newer board.
+        try:
+            hub.request_game(room)
+        except Exception as e:
+            print(f"federation: reconcile greq failed room={room!r}: {e!r}")
+            continue
+        _federation_wait_game_progress(room, before + 1, timeout=2.0)
+        with lock:
+            after = _game_progress_score(room_games.get(room))
+            auth_now = (room_game_authority.get(room) or "").strip()
+        if after > before:
+            print(
+                f"federation: reconciled #{room} progress {before}->{after} "
+                f"auth={auth_now or '?'}"
+            )
+        elif not auth_now:
+            # No peer answered with a newer board — claim local hostship so
+            # subsequent moves/syncs have a deterministic authority.
+            with lock:
+                if room in room_games and not (room_game_authority.get(room) or "").strip():
+                    room_game_authority[room] = local
+                    if not (room_game_tokens.get(room) or "").strip():
+                        room_game_tokens[room] = secrets.token_hex(16)
+            try:
+                _federation_push_game_snapshot(room)
+            except Exception as e:
+                print(f"federation: reconcile claim push failed room={room!r}: {e!r}")
 
 
 def _fed_on_game_request(_from_peer: str, room: str) -> None:
@@ -3600,8 +3687,10 @@ def _fed_on_game_request(_from_peer: str, room: str) -> None:
         game = room_games.get(room)
         if game is None or getattr(game, "state", "ended") == "ended":
             return
+        # Empty auth after restart must not answer — a stale replica would claim
+        # hostship via push_game_snapshot's `auth or node_id` fallback.
         auth = (room_game_authority.get(room) or "").strip()
-        if auth and auth != local:
+        if auth != local:
             return
     _federation_push_game_snapshot(room)
 
@@ -3803,7 +3892,9 @@ def _fed_on_game_sync(
             print(f"federation: re-push after winning conflict: {e!r}")
         return
 
-    _mark_sessions_dirty()
+    # Immediate persist: debounce alone left replicas one ply behind after restart
+    # when the host had already flushed the newer move.
+    _persist_after_game_change()
     if lost_local:
         notice = (
             f"[*] 联邦对局冲突：#{room} 同时存在多局，已随机保留节点 "
@@ -3824,7 +3915,7 @@ def _fed_on_game_end(room: str, authority: str) -> None:
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
         room_game_tokens.pop(room, None)
-    _mark_sessions_dirty()
+    _persist_after_game_change()
 
 
 def _fed_on_game_priv(room: str, to_name: str, lines: list[str]) -> None:
@@ -4173,6 +4264,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             except Exception as e:
                 print(f"federation: peer-up game catch-up error: {e!r}")
             try:
+                _federation_reconcile_restored_games()
+            except Exception as e:
+                print(f"federation: peer-up game reconcile error: {e!r}")
+            try:
                 _federation_sync_library_catalog()
             except Exception as e:
                 print(f"federation: peer-up library catalog sync error: {e!r}")
@@ -4383,7 +4478,12 @@ def _ensure_federation_hub() -> None:
         _federation_sync_ratings(rating_store.export_entries())
     except Exception as e:
         print(f"federation: initial ratings sync error: {e!r}")
-    
+    try:
+        # Peers may already be up; otherwise peer-up handler reconciles again.
+        _federation_reconcile_restored_games()
+    except Exception as e:
+        print(f"federation: initial game reconcile error: {e!r}")
+
     # Start library directory watch thread
     if _library_watch_thread is None:
         _library_watch_stop.clear()
@@ -5149,12 +5249,10 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         elif (
             hub is not None
             and hub.enabled
-            and auth
-            and auth != hub.node_id
+            and (not auth or auth != hub.node_id)
         ):
-            # Replica: pull authority board before showing (may be one ply behind
-            # if a prior gsync was delayed/lost after a forwarded move).
-            _federation_refresh_replica_and_wait(room, timeout=1.8)
+            # Replica or unknown authority after restart: pull before showing.
+            _federation_refresh_replica_and_wait(room, timeout=2.0)
         with lock:
             game = room_games.get(room)
         with lock:
