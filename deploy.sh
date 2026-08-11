@@ -61,6 +61,84 @@ is_ish() {
   [[ -d /ish ]] || grep -q 'apk\.ish\.app' /etc/apk/repositories 2>/dev/null
 }
 
+# Alpine series for mirrors (e.g. v3.14). App Store iSH is usually 3.14; do not jump major.
+ish_alpine_series() {
+  local s ver
+  s=$(grep -oE 'v[0-9]+\.[0-9]+' /etc/apk/repositories 2>/dev/null | head -1 || true)
+  if [[ -n "$s" ]]; then
+    printf '%s\n' "$s"
+    return
+  fi
+  if [[ -f /etc/os-release ]]; then
+    ver=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    if [[ "$ver" =~ ^([0-9]+\.[0-9]+) ]]; then
+      printf 'v%s\n' "${BASH_REMATCH[1]}"
+      return
+    fi
+  fi
+  printf 'v3.14\n'
+}
+
+ish_apk_add_timed() {
+  # Prefer short timeout so apk.ish.app hangs do not block deploy for ages.
+  if command -v timeout &>/dev/null; then
+    timeout 90 apk add --no-cache "$@" || timeout 90 apk add "$@"
+  else
+    apk add --no-cache "$@" || apk add "$@"
+  fi
+}
+
+# Fresh iSH needs apk py3-lxml (venv --system-site-packages). apk.ish.app often
+# fails; switch to Alpine CDN / tuna and retry before aborting.
+ish_ensure_py_apk_deps() {
+  if ! command -v apk &>/dev/null; then
+    return 0
+  fi
+  if python3 -c "import lxml" 2>/dev/null \
+    && { command -v pip3 &>/dev/null || command -v pip &>/dev/null; }; then
+    echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
+    return 0
+  fi
+
+  echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+  echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
+  if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+    && python3 -c "import lxml" 2>/dev/null; then
+    return 0
+  fi
+
+  local series mirror
+  series=$(ish_alpine_series)
+  echo "warning: iSH: apk add failed (often apk.ish.app); trying Alpine mirrors for $series" >&2
+  if [[ -f /etc/apk/repositories && ! -f /etc/apk/repositories.sshchat.bak ]]; then
+    cp /etc/apk/repositories /etc/apk/repositories.sshchat.bak || true
+  fi
+  for mirror in \
+    https://dl-cdn.alpinelinux.org \
+    https://mirrors.tuna.tsinghua.edu.cn; do
+    echo "info: iSH: apk repositories -> $mirror/alpine/$series/{main,community}" >&2
+    printf '%s\n' \
+      "$mirror/alpine/$series/main" \
+      "$mirror/alpine/$series/community" \
+      >/etc/apk/repositories
+    if command -v timeout &>/dev/null; then
+      timeout 120 apk update 2>/dev/null || continue
+    else
+      apk update 2>/dev/null || continue
+    fi
+    if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+      && python3 -c "import lxml" 2>/dev/null; then
+      echo "info: iSH: installed py3-lxml via $mirror" >&2
+      return 0
+    fi
+  done
+
+  echo "error: iSH: py3-lxml still missing after apk mirror retries" >&2
+  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add py3-lxml py3-pip" >&2
+  echo "error: re-run ./deploy.sh --keep-env (do not continue without lxml — ebooklib needs it)" >&2
+  exit 1
+}
+
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
 primary_group_of() {
   local user_name=$1
@@ -722,25 +800,8 @@ if is_ish && [[ "${SSHCHAT_NO_ISH_ADAPT:-}" != "1" ]]; then
     PIP_CMD_RETRIES=5
   fi
   # Soft deps from Alpine apk so venv can use --system-site-packages (avoids compiling lxml).
-  # apk.ish.app often hangs on APKINDEX fetch; skip when packages are already present.
-  if command -v apk &>/dev/null; then
-    need_apk=0
-    python3 -c "import lxml" 2>/dev/null || need_apk=1
-    command -v pip3 &>/dev/null || command -v pip &>/dev/null || need_apk=1
-    if [[ "$need_apk" -eq 0 ]]; then
-      echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
-    else
-      echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
-      echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
-      if command -v timeout &>/dev/null; then
-        timeout 90 apk add --no-cache py3-lxml py3-pip 2>/dev/null \
-          || timeout 90 apk add py3-lxml py3-pip 2>/dev/null \
-          || echo "warning: iSH: apk add timed out or failed; install py3-lxml py3-pip manually then re-run" >&2
-      else
-        apk add --no-cache py3-lxml py3-pip 2>/dev/null || apk add py3-lxml py3-pip || true
-      fi
-    fi
-  fi
+  # apk.ish.app often hangs; ish_ensure_py_apk_deps retries CDN/tuna then hard-fails.
+  ish_ensure_py_apk_deps
 fi
 
 if [[ "$FILE_TRANSFER_ENABLED" -eq 0 ]]; then
@@ -915,6 +976,10 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
       'ebooklib>=0.18'
     if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
       echo "error: iSH venv missing required modules after install" >&2
+      if ! "$PREFIX/venv/bin/python" -c "import lxml" 2>/dev/null; then
+        echo "error: lxml missing — install system package then re-run: apk add py3-lxml" >&2
+        echo "error: (venv uses --system-site-packages; see DEPLOY-iSH.md if apk.ish.app hangs)" >&2
+      fi
       "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
       exit 1
     fi

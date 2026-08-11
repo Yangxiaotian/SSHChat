@@ -66,6 +66,7 @@ git checkout -B develop github/develop             # 或 master / 指定 tag
 - 关闭 Cloudflare Quick Tunnel  
 - 使用 `requirements-server-ish.txt`（无 pymupdf）  
 - 默认清华 PyPI 镜像、跳过 pip 自升级  
+- 用 apk 装 `py3-lxml`（venv `--system-site-packages`）；`apk.ish.app` 失败时自动改官方 CDN / 清华镜像并重试，仍失败则**立刻退出**（避免空跑 pip）  
 - 安装 / 启动 OpenRC 单元 `/etc/init.d/sshchat`  
 - 服务用户一般为 `sshchat`（Alpine 上主组常为 `nogroup`，脚本已按主组 chown）
 
@@ -173,18 +174,18 @@ apk add py3-lxml
 
 ### 5. 卡在 `fetch http://apk.ish.app/.../APKINDEX.tar.gz`
 
-这是 iSH 自带源 `apk.ish.app` 常见故障（源站慢/不可达），与 SSHChat 无关。`deploy.sh` 在已装好 `py3-lxml`/`pip` 时会跳过 `apk add`。
+这是 iSH 自带源 `apk.ish.app` 常见故障（源站慢/不可达），与 SSHChat 无关。新版 `deploy.sh` 会：已装好 `py3-lxml`/`pip` 时跳过 `apk add`；失败时自动改写 `/etc/apk/repositories`（备份为 `repositories.sshchat.bak`）并试官方 CDN / 清华镜像。若自动换源仍失败，再手工处理：
 
 **立刻处理：**
 
-1. `Ctrl+C` 中断当前 `deploy.sh`  
-2. 若以前装过依赖，直接再跑（新脚本会跳过 apk）：
+1. `Ctrl+C` 中断当前 `deploy.sh`（若卡在旧版脚本里）  
+2. 若以前装过依赖，直接再跑（会跳过 apk）：
 
 ```bash
 ./deploy.sh --keep-env
 ```
 
-3. 若缺包，先换可用 Alpine 源再装（App Store 版建议留在 **v3.14**，勿盲目升到过新版本以免 Bad system call）：
+3. 若缺包且自动换源未成功，先换可用 Alpine 源再装（App Store 版建议留在 **v3.14**，勿盲目升到过新版本以免 Bad system call）：
 
 ```bash
 # 备份
