@@ -1740,11 +1740,24 @@ class FederationHub:
                     print(f"federation: on_ratings error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
-        if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
+        if kind == "gsync" and self.on_game_sync:
+            # Must not use the early split(..., 4): nonce/token would stick to b64
+            # and base64.b64decode raises Incorrect padding (replicas never apply).
+            # gsync\torigin\troom\tauthority\tb64[\tnonce[\ttoken]]
+            gsync_parts = line.split("\t", 6)
+            if len(gsync_parts) < 5:
+                return
             if self._remember_seen(line):
                 return
-            origin, room, authority, b64 = parts[1], parts[2], parts[3], parts[4]
-            conflict_token = parts[6] if len(parts) >= 7 else authority
+            origin, room, authority, b64 = (
+                gsync_parts[1],
+                gsync_parts[2],
+                gsync_parts[3],
+                gsync_parts[4],
+            )
+            conflict_token = (
+                gsync_parts[6] if len(gsync_parts) >= 7 else authority
+            )
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)

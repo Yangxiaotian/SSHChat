@@ -797,7 +797,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
             with mock.patch.object(server, "_pickle_game_for_storage", return_value=b"x"):
                 with mock.patch.object(server, "broadcast_local_notice"):
                     server._fed_on_peer_event("up", "node-b", "node-a")
-        self.assertEqual(pushed, [("lobby", "node-a")])
+        # peer-up catch-up push + reconcile re-push for local-authority rooms
+        self.assertEqual(pushed, [("lobby", "node-a"), ("lobby", "node-a")])
 
     def test_game_request_pushes_snapshot(self) -> None:
         pushed: list[str] = []
@@ -849,6 +850,45 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(parts[4], "YmFzZTY0")
         self.assertGreaterEqual(len(parts), 7)
         self.assertEqual(parts[6], "deadbeef")
+
+    def test_gsync_parse_strips_nonce_from_b64(self) -> None:
+        """Regression: split(..., 4) used to append nonce/token onto pickle b64."""
+        got: list[tuple[str, str, str, str, str]] = []
+
+        class FakeLink:
+            node_id = "node-b"
+
+            def send_line(self, line: str) -> None:
+                return None
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub._peers["node-b"] = FakeLink()
+        hub.on_game_sync = lambda peer, room, auth, b64, tok: got.append(
+            (peer, room, auth, b64, tok)
+        )
+        line = (
+            "gsync\tnode-b\tlobby\tnode-b\tYmFzZTY0\t"
+            "1234567890123456789\tdeadbeef"
+        )
+        hub._on_peer_line("node-b", line)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][1], "lobby")
+        self.assertEqual(got[0][2], "node-b")
+        self.assertEqual(got[0][3], "YmFzZTY0")
+        self.assertEqual(got[0][4], "deadbeef")
+        # Must be valid standalone base64 (no trailing nonce).
+        import base64
+
+        self.assertEqual(base64.b64decode(got[0][3].encode("ascii")), b"base64")
 
     def test_greq_invokes_handler_and_fanout(self) -> None:
         got: list[tuple[str, str]] = []
