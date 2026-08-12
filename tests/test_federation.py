@@ -36,6 +36,7 @@ class FederationProtocolTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_games_parked.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
         federation._hub = None
@@ -747,6 +748,7 @@ class FederationServerIntegrationTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_games_parked.clear()
         federation._hub = None
         server._fed_hub = None
 
@@ -943,9 +945,11 @@ class FederationServerIntegrationTests(unittest.TestCase):
             node_id = "node-a"
 
         remote = RemoteGame()
-        server.room_games["lobby"] = LocalGame()
+        local = LocalGame()
+        server.room_games["lobby"] = local
         server.room_game_authority["lobby"] = "node-a"
         server.room_game_tokens["lobby"] = "aaaa"  # loses to bbbb
+        server.room_games_parked.clear()
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=remote):
                 with mock.patch.object(server, "_rebind_game_services"):
@@ -966,8 +970,10 @@ class FederationServerIntegrationTests(unittest.TestCase):
                                     )
         self.assertIs(server.room_games["lobby"], remote)
         self.assertEqual(server.room_game_authority["lobby"], "node-b")
+        self.assertIs(server.room_games_parked["lobby"], local)
         self.assertEqual(len(notices), 1)
         self.assertIn("联邦对局冲突".encode("utf-8"), notices[0])
+        self.assertIn("已暂存".encode("utf-8"), notices[0])
         self.assertIn(b"node-b", notices[0])
         self.assertIn(b"node-a", notices[0])
 

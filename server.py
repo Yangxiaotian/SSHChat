@@ -117,6 +117,8 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# room -> parked (inactive) game kept across federation merge/partition
+room_games_parked: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
@@ -861,6 +863,12 @@ def _build_session_payload_locked() -> dict[str, object]:
             continue
         raw = _pickle_game_for_storage(game)
         games_blob[room] = base64.b64encode(raw).decode("ascii")
+    parked_blob: dict[str, str] = {}
+    for room, game in room_games_parked.items():
+        if game is None or getattr(game, "state", "ended") == "ended":
+            continue
+        raw = _pickle_game_for_storage(game)
+        parked_blob[room] = base64.b64encode(raw).decode("ascii")
     sessions: dict[str, dict[str, object]] = {}
     for key, sess in disconnected_sessions.items():
         rooms_set = sess.get("rooms") or set()
@@ -876,6 +884,7 @@ def _build_session_payload_locked() -> dict[str, object]:
         }
     return {
         "room_games": games_blob,
+        "room_games_parked": parked_blob,
         "disconnected_sessions": sessions,
         "room_enabled_games": {
             room: sorted(enabled)
@@ -908,6 +917,18 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 continue
             _rebind_game_services(game)
             room_games[room] = game
+    parked_blob = payload.get("room_games_parked")
+    if isinstance(parked_blob, dict):
+        for room, encoded in parked_blob.items():
+            if not isinstance(room, str) or not isinstance(encoded, str):
+                continue
+            try:
+                game = pickle.loads(base64.b64decode(encoded))
+            except Exception as e:
+                print(f"skip restoring parked room {room!r} game: {e!r}")
+                continue
+            _rebind_game_services(game)
+            room_games_parked[room] = game
     sessions = payload.get("disconnected_sessions")
     if isinstance(sessions, dict):
         for key, sess in sessions.items():
@@ -3815,6 +3836,78 @@ def _game_progress_score(game) -> int:
     return 0
 
 
+def _park_room_game_locked(room: str, game) -> None:
+    """Stash a displaced game so a later partition can restore it."""
+    if game is None or getattr(game, "state", "ended") == "ended":
+        return
+    room_games_parked[room] = game
+
+
+def _game_authority_reachable(auth: str) -> bool:
+    auth = (auth or "").strip()
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    if not auth or auth == local:
+        return True
+    if hub is None or not hub.enabled:
+        return False
+    return hub._link_toward(auth) is not None
+
+
+def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
+    """When a game host is unreachable: restore parked fork, or park & free room."""
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    restored: list[tuple[str, object]] = []
+    freed: list[str] = []
+    with lock:
+        rooms = set(room_games) | set(room_games_parked)
+        for room in list(rooms):
+            auth = (room_game_authority.get(room) or "").strip()
+            game = room_games.get(room)
+            active = game is not None and getattr(game, "state", "ended") != "ended"
+            if not active or not auth or auth == local:
+                continue
+            if _game_authority_reachable(auth):
+                continue
+            parked = room_games_parked.get(room)
+            parked_ok = (
+                parked is not None and getattr(parked, "state", "ended") != "ended"
+            )
+            if parked_ok:
+                room_games_parked.pop(room, None)
+                _remap_local_game_seats_locked(room, parked)
+                _rebind_game_services(parked)
+                room_games[room] = parked
+                room_game_authority[room] = local
+                room_game_tokens[room] = secrets.token_hex(16)
+                restored.append((room, parked))
+            else:
+                _park_room_game_locked(room, game)
+                room_games.pop(room, None)
+                room_game_authority.pop(room, None)
+                room_game_tokens.pop(room, None)
+                freed.append(room)
+
+    for room, game in restored:
+        notice = (
+            f"[*] 联邦断开：#{room} 权威节点不可达，已恢复本节点暂存对局"
+            f"（{getattr(game, 'name', '?')}）。请用 /game show 查看。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+        if getattr(game, "state", "ended") != "ended":
+            send_oriented_boards(room, game)
+            send_sanguo_hand_views(room, game)
+    for room in freed:
+        notice = (
+            f"[*] 联邦断开：#{room} 对局权威节点不可达，对局已暂存；"
+            f"本房可重新 /game new。联线后若冲突将随机保留一局并暂存另一局。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+    if restored or freed:
+        _persist_after_game_change()
+
+
 def _fed_on_game_sync(
     _from_peer: str,
     room: str,
@@ -3880,6 +3973,14 @@ def _fed_on_game_sync(
                     loser_auth = local_auth
 
         if not keep_local:
+            if (
+                local_active
+                and local_auth
+                and local_auth != authority
+            ):
+                _park_room_game_locked(room, local_game)
+                lost_local = True
+                loser_auth = loser_auth or local_auth
             _remap_local_game_seats_locked(room, game)
             room_games[room] = game
             room_game_authority[room] = authority
@@ -3897,9 +3998,9 @@ def _fed_on_game_sync(
     _persist_after_game_change()
     if lost_local:
         notice = (
-            f"[*] 联邦对局冲突：#{room} 同时存在多局，已随机保留节点 "
-            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已作废。"
-            f"请用 /game show 查看当前局面。\n"
+            f"[*] 联邦对局冲突：#{room} 同时存在多局，已保留节点 "
+            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已暂存。"
+            f"联邦断开后可恢复暂存局；请用 /game show 查看当前局面。\n"
         )
         broadcast_room(room, notice.encode("utf-8"))
     if getattr(game, "state", "ended") != "ended":
@@ -4292,6 +4393,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
         _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
         _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
+        try:
+            _fed_handle_unreachable_game_authority(peer_node)
+        except Exception as e:
+            print(f"federation: peer-down game park/restore error: {e!r}")
     else:
         return
     broadcast_local_notice(text)

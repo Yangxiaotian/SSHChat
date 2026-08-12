@@ -27,6 +27,7 @@ class FedGameLocalReclaimTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_games_parked.clear()
         federation._hub = None
         server._fed_hub = None
 
@@ -109,6 +110,7 @@ class FedGameSyncProgressTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_games_parked.clear()
         federation._hub = None
 
     def test_gsync_prefers_remote_with_more_progress(self) -> None:
@@ -127,14 +129,20 @@ class FedGameSyncProgressTests(unittest.TestCase):
             node_id = "node-a"
 
         remote = RemoteGame()
-        server.room_games["lobby"] = LocalGame()
+        local = LocalGame()
+        server.room_games["lobby"] = local
         server.room_game_authority["lobby"] = "node-a"
         server.room_game_tokens["lobby"] = "zzzz"  # would win token conflict
+        notices: list[bytes] = []
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=remote):
                 with mock.patch.object(server, "_rebind_game_services"):
                     with mock.patch.object(server, "_remap_local_game_seats_locked"):
-                        with mock.patch.object(server, "broadcast_room") as br:
+                        with mock.patch.object(
+                            server,
+                            "broadcast_room",
+                            side_effect=lambda r, m, **k: notices.append(m),
+                        ):
                             with mock.patch.object(server, "send_oriented_boards"):
                                 with mock.patch.object(server, "send_sanguo_hand_views"):
                                     with mock.patch.object(
@@ -147,9 +155,11 @@ class FedGameSyncProgressTests(unittest.TestCase):
                                             "ZmFrZQ==",
                                             "aaaa",
                                         )
-                                        br.assert_not_called()
         self.assertIs(server.room_games["lobby"], remote)
         self.assertEqual(server.room_game_authority["lobby"], "node-b")
+        self.assertIs(server.room_games_parked["lobby"], local)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("已暂存".encode("utf-8"), notices[0])
 
     def test_gsync_ignores_stale_lower_progress(self) -> None:
         class LocalGame:
@@ -257,6 +267,89 @@ class FedGameSyncProgressTests(unittest.TestCase):
                                         "tok",
                                     )
                                     persist.assert_called_once()
+
+
+class FedGameParkRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server.clients.clear()
+        server.rooms.clear()
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server.room_games_parked.clear()
+        federation._hub = None
+
+    def test_unreachable_authority_parks_and_frees_room(self) -> None:
+        class ActiveGame:
+            name = "chess"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+
+            def _link_toward(self, dest):
+                return None
+
+        game = ActiveGame()
+        server.room_games["lobby"] = game
+        server.room_game_authority["lobby"] = "node-b"
+        notices: list[bytes] = []
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(
+                server,
+                "broadcast_room",
+                side_effect=lambda r, m, **k: notices.append(m),
+            ):
+                with mock.patch.object(server, "_persist_after_game_change"):
+                    server._fed_handle_unreachable_game_authority("node-b")
+        self.assertNotIn("lobby", server.room_games)
+        self.assertIs(server.room_games_parked["lobby"], game)
+        self.assertEqual(len(notices), 1)
+        self.assertIn(b"/game new", notices[0])
+
+    def test_unreachable_restores_parked_over_remote_active(self) -> None:
+        class RemoteActive:
+            name = "gomoku"
+            state = "playing"
+
+        class ParkedLocal:
+            name = "chess"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+
+            def _link_toward(self, dest):
+                return None
+
+        parked = ParkedLocal()
+        server.room_games["lobby"] = RemoteActive()
+        server.room_game_authority["lobby"] = "node-b"
+        server.room_games_parked["lobby"] = parked
+        notices: list[bytes] = []
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(
+                        server,
+                        "broadcast_room",
+                        side_effect=lambda r, m, **k: notices.append(m),
+                    ):
+                        with mock.patch.object(server, "send_oriented_boards"):
+                            with mock.patch.object(server, "send_sanguo_hand_views"):
+                                with mock.patch.object(
+                                    server, "_persist_after_game_change"
+                                ):
+                                    server._fed_handle_unreachable_game_authority(
+                                        "node-b"
+                                    )
+        self.assertIs(server.room_games["lobby"], parked)
+        self.assertNotIn("lobby", server.room_games_parked)
+        self.assertEqual(server.room_game_authority["lobby"], "node-a")
+        self.assertEqual(len(notices), 1)
+        self.assertIn("已恢复".encode("utf-8"), notices[0])
 
 
 if __name__ == "__main__":
