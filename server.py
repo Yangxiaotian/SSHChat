@@ -3643,9 +3643,15 @@ def _federation_reconcile_restored_games() -> None:
 
     Session restore used to omit authority, so both nodes treated empty auth as
     local and kept a one-ply-stale replica forever.
+
+    Also parks (or restores a parked fork) when the authority peer is already
+    gone — peer-down alone is not enough after a restart while partitioned.
     """
     hub = federation.get_hub()
-    if hub is None or not hub.enabled or hub.peer_count < 1:
+    if hub is None or not hub.enabled:
+        return
+    if hub.peer_count < 1:
+        _fed_handle_unreachable_game_authority()
         return
     local = hub.node_id
     with lock:
@@ -3691,6 +3697,8 @@ def _federation_reconcile_restored_games() -> None:
                 _federation_push_game_snapshot(room)
             except Exception as e:
                 print(f"federation: reconcile claim push failed room={room!r}: {e!r}")
+    # greq may have timed out while the real host is still partitioned away.
+    _fed_handle_unreachable_game_authority()
 
 
 def _fed_on_game_request(_from_peer: str, room: str) -> None:

@@ -351,6 +351,31 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn("已恢复".encode("utf-8"), notices[0])
 
+    def test_reconcile_with_no_peers_parks_remote_auth(self) -> None:
+        """Restart while partitioned must free the room without waiting for peer-down."""
+
+        class ActiveGame:
+            name = "chess"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 0
+
+            def _link_toward(self, dest):
+                return None
+
+        game = ActiveGame()
+        server.room_games["lobby"] = game
+        server.room_game_authority["lobby"] = "node-b"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "broadcast_room"):
+                with mock.patch.object(server, "_persist_after_game_change"):
+                    server._federation_reconcile_restored_games()
+        self.assertNotIn("lobby", server.room_games)
+        self.assertIs(server.room_games_parked["lobby"], game)
+
 
 if __name__ == "__main__":
     unittest.main()
