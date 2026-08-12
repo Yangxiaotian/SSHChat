@@ -130,6 +130,18 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         last = (9, 4)  # (10, 5)
         self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
 
+    def test_jump_to_five_gap_not_counted_as_four(self) -> None:
+        """Inner gap-fill X . X X X → five is not a 四 on that axis."""
+        line = "X.XXX...."
+        self.assertTrue(_gomoku_axis_has_four(line))  # extend at 5 → XXXX
+        # isolated vertical — only one axis, not 四四
+        g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
+        for r in (6, 8, 9):
+            g[r][4] = 1
+        last = (10, 4)
+        g[last[0]][last[1]] = 1
+        self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
+
     def test_user_position_5_11_not_forbidden(self) -> None:
         """Regression: (5,11) is only one rush-four; split diagonal must not count."""
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
