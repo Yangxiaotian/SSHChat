@@ -4,7 +4,8 @@ import json
 import os
 import tempfile
 import threading
-from typing import Any, Callable
+import time
+from typing import Any, Callable, Optional
 
 
 def _normalize_user(name: str) -> str:
@@ -291,6 +292,10 @@ class GameRatingStore:
         self.path = path
         self._lock = threading.RLock()
         self._cache: dict[str, Any] | None = None
+        # Optional hook: after local record_result, for federation fan-out.
+        self.on_change: Optional[
+            Callable[[str, list[tuple[str, dict[str, Any]]]], None]
+        ] = None
 
     def _empty_data(self) -> dict[str, Any]:
         return {
@@ -402,6 +407,7 @@ class GameRatingStore:
                 "losses": 0,
                 "draws": 0,
                 "games": 0,
+                "updated_at": 0.0,
             }
             entries[key] = entry
         else:
@@ -417,6 +423,7 @@ class GameRatingStore:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if game not in GAME_CONFIGS:
             raise KeyError(game)
+        changed: list[tuple[str, dict[str, Any]]] = []
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
@@ -453,12 +460,105 @@ class GameRatingStore:
             else:
                 entry_a["losses"] = int(entry_a.get("losses", 0)) + 1
                 entry_b["wins"] = int(entry_b.get("wins", 0)) + 1
+            now = time.time()
+            entry_a["updated_at"] = now
+            entry_b["updated_at"] = now
             self._save_locked()
             after_a = self._profile_from_entry(game, player_a, entry_a)
             after_b = self._profile_from_entry(game, player_b, entry_b)
+            changed = [
+                (player_a, dict(entry_a)),
+                (player_b, dict(entry_b)),
+            ]
+        hook = self.on_change
+        if hook is not None:
+            try:
+                hook(game, changed)
+            except Exception:
+                pass
         return (after_a | {"delta": after_a["rating"] - before_a["rating"]}), (
             after_b | {"delta": after_b["rating"] - before_b["rating"]}
         )
+
+    @staticmethod
+    def _entry_rank(entry: dict[str, Any]) -> tuple[float, int, int]:
+        """Higher wins when merging federated copies of the same nick."""
+        try:
+            updated = float(entry.get("updated_at") or 0.0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        try:
+            games = int(entry.get("games") or 0)
+        except (TypeError, ValueError):
+            games = 0
+        try:
+            rating = int(entry.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        return (updated, games, rating)
+
+    def apply_remote_entry(
+        self,
+        game: str,
+        user: str,
+        entry: dict[str, Any],
+        *,
+        source_node: str = "",
+    ) -> bool:
+        """Install a peer rating row when it is at least as fresh as ours.
+
+        Settlement only runs on the game-host (authority) node; peers receive that
+        node's rows so same-nick ``/game rating`` matches the host.
+        """
+        if game not in GAME_CONFIGS or not isinstance(entry, dict):
+            return False
+        key = _normalize_user(user)
+        if not key:
+            return False
+        incoming = {
+            "display_name": str(entry.get("display_name") or user).strip() or user,
+            "rating": int(entry.get("rating") or GAME_CONFIGS[game]["initial"]),
+            "wins": int(entry.get("wins") or 0),
+            "losses": int(entry.get("losses") or 0),
+            "draws": int(entry.get("draws") or 0),
+            "games": int(entry.get("games") or 0),
+            "updated_at": float(entry.get("updated_at") or 0.0),
+        }
+        if source_node:
+            incoming["source_node"] = str(source_node).strip()
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            current = self._cache["games"][game].get(key)
+            if isinstance(current, dict) and self._entry_rank(current) > self._entry_rank(
+                incoming
+            ):
+                return False
+            self._cache["games"][game][key] = incoming
+            self._save_locked()
+            return True
+
+    def export_entries(self) -> list[dict[str, Any]]:
+        """All non-empty rating rows for federation catch-up."""
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            for game, users in self._cache["games"].items():
+                if not isinstance(users, dict):
+                    continue
+                for key, entry in users.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if int(entry.get("games") or 0) <= 0 and float(
+                        entry.get("updated_at") or 0
+                    ) <= 0:
+                        continue
+                    row = dict(entry)
+                    row["game"] = game
+                    row["user"] = str(entry.get("display_name") or key)
+                    out.append(row)
+        return out
 
     def top(self, game: str, limit: int = 10) -> list[dict[str, Any]]:
         if game not in GAME_CONFIGS:

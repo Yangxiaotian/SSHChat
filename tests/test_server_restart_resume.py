@@ -22,6 +22,7 @@ class ServerRestartResumeTests(unittest.TestCase):
         server.room_owners.clear()
         server.room_announcements.clear()
         server.room_games.clear()
+        server.room_games_parked.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -180,6 +181,43 @@ class ServerRestartResumeTests(unittest.TestCase):
         with server.lock:
             payload = server._build_session_payload_locked()
         self.assertEqual(payload["room_games"], {})
+
+    def test_game_authority_survives_restart(self) -> None:
+        room = "default"
+        black = DummyConn()
+        game = GomokuGame(black, "zouyu")
+        server.room_games[room] = game
+        server.room_game_authority[room] = "Mathematics.local"
+        server.room_game_tokens[room] = "tok-abc"
+
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        server.session_store.save(payload)
+
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server._load_persisted_sessions()
+
+        self.assertIn(room, server.room_games)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+        self.assertEqual(server.room_game_tokens[room], "tok-abc")
+
+    def test_parked_game_survives_restart(self) -> None:
+        room = "default"
+        host = DummyConn()
+        game = GomokuGame(host, "parked-player")
+        server.room_games_parked[room] = game
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertIn(room, payload["room_games_parked"])
+        server.session_store.save(payload)
+
+        server.room_games_parked.clear()
+        server._load_persisted_sessions()
+        self.assertIn(room, server.room_games_parked)
+        self.assertEqual(server.room_games_parked[room].name, "gomoku")
+        self.assertEqual(server.room_games_parked[room].state, "waiting")
 
 
 if __name__ == "__main__":

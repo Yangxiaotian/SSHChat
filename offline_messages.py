@@ -110,6 +110,18 @@ class OfflineMessageStore:
             out["meta"] = dict(meta)
         return out
 
+    @staticmethod
+    def _content_dedupe_key(entry: dict[str, Any]) -> tuple[str, str, str, str]:
+        """Identity for federated re-seeds that may arrive with different leave ids."""
+        kind = str(entry.get("kind") or "pm").strip() or "pm"
+        sender = _normalize_user(str(entry.get("from") or ""))
+        text = str(entry.get("text") or "").strip()
+        tid = ""
+        if kind == "file":
+            meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+        return (kind, sender, text, tid)
+
     def leave(
         self,
         recipient: str,
@@ -119,11 +131,13 @@ class OfflineMessageStore:
         kind: str = "pm",
         meta: dict[str, Any] | None = None,
         leave_id: str | None = None,
+        ts: float | None = None,
     ) -> dict[str, Any] | None:
         """Enqueue a leave-message. Returns the stored entry, or None if invalid.
 
         kind=\"file\" stores an offline file notice (see meta for transfer details).
         File summaries are not truncated by max_text_len so listing stays readable.
+        ``ts`` preserves the origin timestamp when federation re-seeds a leave.
         """
         key = _normalize_user(recipient)
         sender_name = (sender or "").strip() or "?"
@@ -134,16 +148,21 @@ class OfflineMessageStore:
         if msg_kind != "file" and len(body) > self.max_text_len:
             body = body[: self.max_text_len]
         lid = str(leave_id or "").strip() or secrets.token_hex(8)
+        try:
+            entry_ts = float(ts) if ts is not None else time.time()
+        except (TypeError, ValueError):
+            entry_ts = time.time()
         entry: dict[str, Any] = {
             "id": lid,
             "from": sender_name,
             "to_display": (recipient or "").strip() or key,
             "text": body,
-            "ts": time.time(),
+            "ts": entry_ts,
             "kind": msg_kind,
         }
         if isinstance(meta, dict) and meta:
             entry["meta"] = dict(meta)
+        content_key = self._content_dedupe_key(entry)
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
@@ -166,11 +185,17 @@ class OfflineMessageStore:
                             and str(em.get("transfer_id") or "").strip() == tid
                         ):
                             return dict(existing)
-            # Text/file leaves with the same federated id are idempotent.
             for existing in box:
                 if not isinstance(existing, dict):
                     continue
+                # Same federated id → idempotent.
                 if str(existing.get("id") or "").strip() == lid:
+                    return dict(existing)
+                # Catch-up / dual-node seeds often mint different ids for one leave.
+                parsed = self._parse_entry(existing)
+                if parsed is None:
+                    continue
+                if self._content_dedupe_key(parsed) == content_key:
                     return dict(existing)
             box.append(entry)
             if len(box) > self.max_per_user:
@@ -178,6 +203,94 @@ class OfflineMessageStore:
             mailboxes[key] = box
             self._save_locked()
             return dict(entry)
+
+    def compact_duplicates(self) -> int:
+        """Drop duplicate pending leaves (by id and by content). Returns removed count."""
+        removed = 0
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            mailboxes = self._cache["mailboxes"]
+            dirty = False
+            for to_key, box in list(mailboxes.items()):
+                if not isinstance(box, list) or not box:
+                    continue
+                seen_ids: set[str] = set()
+                seen_content: set[tuple[str, str, str, str]] = set()
+                kept: list[Any] = []
+                for item in box:
+                    parsed = self._parse_entry(item)
+                    if parsed is None:
+                        removed += 1
+                        dirty = True
+                        continue
+                    if not isinstance(item, dict):
+                        item = dict(parsed)
+                        dirty = True
+                    lid = str(item.get("id") or parsed.get("id") or "").strip()
+                    if not lid:
+                        lid = secrets.token_hex(8)
+                        item = dict(item)
+                        item["id"] = lid
+                        dirty = True
+                    elif "id" not in item:
+                        item = dict(item)
+                        item["id"] = lid
+                        dirty = True
+                    content_key = self._content_dedupe_key(parsed)
+                    if lid in seen_ids or content_key in seen_content:
+                        removed += 1
+                        dirty = True
+                        continue
+                    seen_ids.add(lid)
+                    seen_content.add(content_key)
+                    kept.append(item)
+                if kept:
+                    mailboxes[to_key] = kept
+                else:
+                    mailboxes.pop(to_key, None)
+                    dirty = True
+            if dirty:
+                self._save_locked()
+        return removed
+
+    def snapshot_pending(self) -> list[dict[str, Any]]:
+        """Copy every pending leave for federation catch-up (idempotent re-seed)."""
+        self.compact_duplicates()
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            out: list[dict[str, Any]] = []
+            mailboxes = self._cache["mailboxes"]
+            for to_key in sorted(k for k in mailboxes if isinstance(k, str)):
+                box = mailboxes.get(to_key)
+                if not isinstance(box, list):
+                    continue
+                for item in box:
+                    parsed = self._parse_entry(item)
+                    if parsed is None:
+                        continue
+                    display_to = to_key
+                    if isinstance(item, dict):
+                        raw_to = str(item.get("to_display") or "").strip()
+                        if raw_to:
+                            display_to = raw_to
+                    row = {
+                        "to": display_to,
+                        "from": parsed["from"],
+                        "text": parsed["text"],
+                        "ts": parsed["ts"],
+                        "kind": parsed.get("kind") or "pm",
+                    }
+                    lid = str(parsed.get("id") or "").strip()
+                    if not lid and isinstance(item, dict):
+                        lid = str(item.get("id") or "").strip()
+                    if lid:
+                        row["id"] = lid
+                    if "meta" in parsed:
+                        row["meta"] = parsed["meta"]
+                    out.append(row)
+            return out
 
     def remove_file_by_transfer(
         self, recipient: str, transfer_id: str

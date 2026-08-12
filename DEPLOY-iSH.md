@@ -66,6 +66,7 @@ git checkout -B develop github/develop             # 或 master / 指定 tag
 - 关闭 Cloudflare Quick Tunnel  
 - 使用 `requirements-server-ish.txt`（无 pymupdf）  
 - 默认清华 PyPI 镜像、跳过 pip 自升级  
+- 用 apk 装 `py3-lxml`（venv `--system-site-packages`）；`apk.ish.app` 失败时自动改官方 CDN / 清华镜像并重试，仍失败则**立刻退出**（避免空跑 pip）  
 - 安装 / 启动 OpenRC 单元 `/etc/init.d/sshchat`  
 - 服务用户一般为 `sshchat`（Alpine 上主组常为 `nogroup`，脚本已按主组 chown）
 
@@ -171,7 +172,73 @@ apk add py3-lxml
 
 并用仓库自带的 `deploy.sh`（会 `--system-site-packages` + ebooklib `--no-deps`）。
 
-### 5. 手机休眠后服务停了
+### 5. 卡在 `fetch http://apk.ish.app/.../APKINDEX.tar.gz`
+
+这是 iSH 自带源 `apk.ish.app` 常见故障（源站慢/不可达），与 SSHChat 无关。新版 `deploy.sh` 会：已装好 `py3-lxml`/`pip` 时跳过 `apk add`；失败时自动改写 `/etc/apk/repositories`（备份为 `repositories.sshchat.bak`）并试官方 CDN / 清华镜像。若自动换源仍失败，再手工处理：
+
+**立刻处理：**
+
+1. `Ctrl+C` 中断当前 `deploy.sh`（若卡在旧版脚本里）  
+2. 若以前装过依赖，直接再跑（会跳过 apk）：
+
+```bash
+./deploy.sh --keep-env
+```
+
+3. 若缺包且自动换源未成功，先换可用 Alpine 源再装（App Store 版建议留在 **v3.14**，勿盲目升到过新版本以免 Bad system call）：
+
+```bash
+# 备份
+cp /etc/apk/repositories /etc/apk/repositories.bak
+
+# 方案 A：仍用同版本，换官方 CDN（常比 apk.ish.app 通）
+printf '%s\n' \
+  'https://dl-cdn.alpinelinux.org/alpine/v3.14/main' \
+  'https://dl-cdn.alpinelinux.org/alpine/v3.14/community' \
+  >/etc/apk/repositories
+
+apk update
+apk add py3-lxml py3-pip
+```
+
+若官方 CDN 也慢，可试国内镜像（版本仍用 v3.14）：
+
+```bash
+printf '%s\n' \
+  'https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.14/main' \
+  'https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.14/community' \
+  >/etc/apk/repositories
+apk update && apk add py3-lxml py3-pip
+```
+
+说明：只要目录 `/ish` 还在，iSH 重启后可能改回 `apk.ish.app`。需要长期固定源时可按 [iSH wiki](https://github.com/ish-app/ish/wiki/Using-Alpine-Linux-repositories) 处理 `/ish`（有风险，先备份）。
+
+装好后再：
+
+```bash
+./deploy.sh --keep-env
+```
+
+### 6. 部署后 `chat.sh: Permission denied` / 公钥能登但进不了聊天
+
+iSH 对**附加组**权限经常不生效：即使用户已在 `sshchat-clients`，`750`/`640` 仍会拒绝。
+
+当前 `deploy.sh` 在 iSH 上会自动把客户端入口改为：
+
+- `/opt/sshchat`、`chat.sh`、`venv`：`o+rX`（如 `755`）
+- `client.py` / `sshchat_client_util.py` / `sshchat.env`：`644`
+
+若你跑的是旧脚本，可临时手动修：
+
+```bash
+chmod 755 /opt/sshchat /opt/sshchat/chat.sh
+chmod 644 /opt/sshchat/client.py /opt/sshchat/sshchat_client_util.py /opt/sshchat/sshchat.env
+chmod -R a+rX /opt/sshchat/venv
+```
+
+服务端文件（`server.py` 等）保持 `600` 即可。
+
+### 7. 手机休眠后服务停了
 
 iSH 在后台可能被系统挂起。保持 iSH 前台、接电，或按需重开 App 后再 `rc-service sshchat start`。这是 iOS 限制，不是 SSHChat 独有。
 
