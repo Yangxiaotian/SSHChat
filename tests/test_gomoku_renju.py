@@ -142,6 +142,48 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         g[last[0]][last[1]] = 1
         self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
 
+    def test_zouyu_yxt_board_11_5_not_double_four(self) -> None:
+        """Regression: live #default board; old logic false 四四 on diagonal XXX.X."""
+        g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
+        rows = [
+            "...............",
+            "..#...........",
+            "....#..o......",
+            ".#..oo#o......",
+            "..o#o##.......",
+            ".#ooo#ooo#....",
+            ".o##o#.o#o....",
+            "...o#oo##.....",
+            "..o.###..o....",
+            ".#............",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+            "...............",
+        ]
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    g[r][c] = 1
+                elif ch == "o":
+                    g[r][c] = 2
+        g[6][9] = 2  # white last (7, 10)
+        last = (10, 4)  # black tries (11, 5)
+        self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
+        self.assertFalse(_gomoku_axis_has_four("XXX.X...."))
+
+        c1, c2 = object(), object()
+        game = GomokuGame(c1, "zouyu")
+        game.try_join(c2, "yxt")
+        game.grid = [row[:] for row in g]
+        game.state = "playing"
+        game._turn = 1
+        game._last = (6, 9)
+        priv, _, _ = game.try_move(c1, "11 5")
+        self.assertFalse(any("禁手" in line for line in priv))
+        self.assertEqual(game.grid[last[0]][last[1]], 1)
+
     def test_user_position_5_11_not_forbidden(self) -> None:
         """Regression: (5,11) is only one rush-four; split diagonal must not count."""
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
