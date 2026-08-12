@@ -163,6 +163,10 @@ class FederationHub:
         self.on_offline_pm: Optional[Callable[[str, str, str, str], None]] = None
         # to_nick, leave_id
         self.on_offline_pm_clear: Optional[Callable[[str, str], None]] = None
+        # origin_node, rows: list[{game, user, ...entry}]
+        self.on_ratings: Optional[Callable[[str, list], None]] = None
+        # () -> list of rating row dicts for catch-up
+        self.get_local_ratings: Optional[Callable[[], list]] = None
         # event in {"up","down"}, peer_node, reporter_node
         self.on_peer_event = on_peer_event
         # peer_node, room — ask holders to re-push gsync for that room
@@ -608,6 +612,7 @@ class FederationHub:
         text: str,
         *,
         leave_id: str = "",
+        ts: float | None = None,
     ) -> bool:
         """Fan-out an offline text leave so login on any peer can deliver it."""
         if not self.enabled or not self._peers:
@@ -615,14 +620,21 @@ class FederationHub:
         to_nick = str(to_nick or "").strip()
         from_name = str(from_name or "").strip() or "?"
         text = str(text or "")
-        leave_id = str(leave_id or "").strip() or "-"
-        if not to_nick or not text.strip():
+        leave_id = str(leave_id or "").strip()
+        # Require a stable id so catch-up re-seeds stay idempotent.
+        if not to_nick or not text.strip() or not leave_id or leave_id == "-":
             return False
         payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
         nonce = str(time.time_ns())
+        ts_s = ""
+        if ts is not None:
+            try:
+                ts_s = str(float(ts))
+            except (TypeError, ValueError):
+                ts_s = ""
         line = (
             f"pleave\t{self.node_id}\t{to_nick}\t{from_name}\t"
-            f"{payload}\t{leave_id}\t{nonce}\n"
+            f"{payload}\t{leave_id}\t{nonce}\t{ts_s}\n"
         )
         self._remember_seen(line)
         self._fanout(line)
@@ -638,6 +650,27 @@ class FederationHub:
             return False
         nonce = str(time.time_ns())
         line = f"pleave_clear\t{self.node_id}\t{to_nick}\t{leave_id}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+        return True
+
+    def sync_ratings(self, rows: list[dict[str, Any]]) -> bool:
+        """Fan-out rating rows so same-nick peers share the game-host ledger."""
+        if not self.enabled or not self._peers:
+            return False
+        if not isinstance(rows, list) or not rows:
+            return False
+        clean: list[dict[str, Any]] = [r for r in rows if isinstance(r, dict)]
+        if not clean:
+            return False
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return False
+        nonce = str(time.time_ns())
+        line = f"rrating\t{self.node_id}\t{blob}\t{nonce}\n"
         self._remember_seen(line)
         self._fanout(line)
         return True
@@ -750,6 +783,10 @@ class FederationHub:
         if best is None:
             return None
         return best[2], best[3]
+
+    def has_remote_file_public(self) -> bool:
+        """True if any peer has advertised a non-empty public file base URL."""
+        return self.pick_file_public_peer() is not None
 
     def request_file_host(
         self, host_node: str, req_id: str, payload: dict[str, Any]
@@ -1075,8 +1112,35 @@ class FederationHub:
             line = f"presence\t{origin}\t{remote_blob}\n"
             self._remember_seen(line)
             link.send_line(line)
-        self._push_library_catalog(link)
+        # Advertise public file URLs before the (often multi-MB) library catalog.
+        # Otherwise /sendfile on a LAN-only peer waits for fpub that is stuck
+        # behind lcatalog on slow links (ZeroTier / iSH) and falls back to LAN.
         self._push_file_public(link)
+        self._push_library_catalog(link)
+
+    def _push_presence_async(self, link: _PeerLink) -> None:
+        """Push presence/catalog off the session read loop.
+
+        Both sides send large lcatalog frames right after handshake. Doing that
+        synchronously before reading deadlocks TCP windows on slow links
+        (e.g. ZeroTier to iSH): each side blocks in sendall while the peer is
+        also stuck sending. Announce the peer first, then push in a thread so
+        the session loop can drain inbound data.
+        """
+
+        def _run() -> None:
+            try:
+                self._push_presence(link)
+            except Exception as e:
+                print(
+                    f"federation: async presence push to {link.node_id} failed: {e!r}"
+                )
+
+        threading.Thread(
+            target=_run,
+            name=f"fed-push-{link.node_id}",
+            daemon=True,
+        ).start()
 
     def _push_file_public(self, link: _PeerLink) -> None:
         """Advertise local + known remote public file base URLs to a new peer."""
@@ -1124,7 +1188,8 @@ class FederationHub:
             line = f"lcatalog\t{origin}\t{remote_blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
-        self._push_library_bookmarks(link)
+            self._push_library_bookmarks(link)
+            self._push_ratings(link)
 
     def _push_library_bookmarks(self, link: _PeerLink) -> None:
         """Send local users' bookmarks (and known remote copies) to a new peer."""
@@ -1150,6 +1215,30 @@ class FederationHub:
             line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
+
+    def _push_ratings(self, link: _PeerLink) -> None:
+        """Send local rating ledger so same-nick peers match the host node."""
+        rows: list[dict[str, Any]] = []
+        if self.get_local_ratings is not None:
+            try:
+                rows = self.get_local_ratings() or []
+            except Exception as e:
+                print(f"federation: get_local_ratings error: {e!r}")
+                rows = []
+        if not isinstance(rows, list) or not rows:
+            return
+        clean = [r for r in rows if isinstance(r, dict)]
+        if not clean:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"rrating\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        link.send_line(line)
 
     def _forward_unicast_for_nick(
         self,
@@ -1592,6 +1681,12 @@ class FederationHub:
             leave_id = parts[5].strip() if len(parts) >= 6 else ""
             if leave_id in {"", "-"}:
                 leave_id = ""
+            leave_ts = 0.0
+            if len(parts) >= 8 and str(parts[7] or "").strip():
+                try:
+                    leave_ts = float(parts[7])
+                except (TypeError, ValueError):
+                    leave_ts = 0.0
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -1601,7 +1696,12 @@ class FederationHub:
                 return
             if self.on_offline_pm is not None:
                 try:
-                    self.on_offline_pm(to_name, from_name, text, leave_id)
+                    self.on_offline_pm(to_name, from_name, text, leave_id, leave_ts)
+                except TypeError:
+                    try:
+                        self.on_offline_pm(to_name, from_name, text, leave_id)
+                    except Exception as e:
+                        print(f"federation: on_offline_pm error: {e!r}")
                 except Exception as e:
                     print(f"federation: on_offline_pm error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
@@ -1620,11 +1720,44 @@ class FederationHub:
                     print(f"federation: on_offline_pm_clear error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
-        if kind == "gsync" and len(parts) >= 5 and self.on_game_sync:
+        if kind == "rrating" and len(parts) >= 3:
             if self._remember_seen(line):
                 return
-            origin, room, authority, b64 = parts[1], parts[2], parts[3], parts[4]
-            conflict_token = parts[6] if len(parts) >= 7 else authority
+            origin, b64 = parts[1], parts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                rows = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(rows, list) and self.on_ratings is not None:
+                try:
+                    self.on_ratings(origin, rows)
+                except Exception as e:
+                    print(f"federation: on_ratings error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "gsync" and self.on_game_sync:
+            # Must not use the early split(..., 4): nonce/token would stick to b64
+            # and base64.b64decode raises Incorrect padding (replicas never apply).
+            # gsync\torigin\troom\tauthority\tb64[\tnonce[\ttoken]]
+            gsync_parts = line.split("\t", 6)
+            if len(gsync_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, room, authority, b64 = (
+                gsync_parts[1],
+                gsync_parts[2],
+                gsync_parts[3],
+                gsync_parts[4],
+            )
+            conflict_token = (
+                gsync_parts[6] if len(gsync_parts) >= 7 else authority
+            )
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -1923,10 +2056,11 @@ class FederationHub:
                 link = _PeerLink(self, peer_node, _send)
                 is_new = self._register_peer(peer_node, link)
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
-                self._push_presence(link)
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
                 if is_new:
                     self._notify_peer_up(peer_node)
+                # Async: avoid mutual sendall deadlock with large catalogs.
+                self._push_presence_async(link)
 
             assert link is not None and peer_node is not None
             while not self._stop.is_set():
@@ -2158,10 +2292,11 @@ class FederationHub:
                             conn.settimeout(None)
                         except (OSError, AttributeError):
                             pass
-                self._push_presence(link)
                 print(f"federation: outbound connected to {peer_node}")
                 if is_new:
                     self._notify_peer_up(peer_node)
+                # Async: keep reading while we push (avoids ZT/iSH TCP deadlock).
+                self._push_presence_async(link)
                 continue
             if link is not None:
                 link.handle_line(line)

@@ -75,6 +75,32 @@ def _locale_store_path() -> str:
 
 
 rating_store = GameRatingStore(_rating_store_path())
+
+
+def _federation_sync_ratings(rows: list[dict]) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or not rows:
+        return
+    try:
+        hub.sync_ratings(rows)
+    except Exception as e:
+        print(f"federation: sync_ratings failed: {e!r}")
+
+
+def _on_local_rating_change(game: str, changed: list[tuple[str, dict]]) -> None:
+    """Push host-settled rating rows so federated same-nick views match."""
+    rows: list[dict] = []
+    for user, entry in changed:
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        row["game"] = game
+        row["user"] = str(entry.get("display_name") or user)
+        rows.append(row)
+    _federation_sync_ratings(rows)
+
+
+rating_store.on_change = _on_local_rating_change
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
 offline_messages = OfflineMessageStore(_offline_messages_path())
@@ -91,6 +117,8 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# room -> parked (inactive) game kept across federation merge/partition
+room_games_parked: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
@@ -306,15 +334,65 @@ def send_game_private(conn, room: str, lines) -> None:
     send_line(conn, _format_game_lines(room, out).decode("utf-8"))
 
 
-def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
+# [#room] [*] <body> — game system lines from broadcast_game / send_game_private
+_GAME_BROADCAST_LINE_RE = re.compile(
+    r"^\[#([a-zA-Z0-9_-]{1,32})\] \[\*\] (.*)$"
+)
+
+
+def _parse_game_broadcast_msg(msg: bytes) -> Optional[tuple[str, list[str]]]:
+    """If msg is only [#room] [*] lines for one room, return (room, bodies)."""
+    try:
+        text = msg.decode("utf-8")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    if not lines:
+        return None
+    room: Optional[str] = None
+    bodies: list[str] = []
+    for ln in lines:
+        m = _GAME_BROADCAST_LINE_RE.match(ln)
+        if not m:
+            return None
+        r, body = m.group(1), m.group(2)
+        if room is None:
+            room = r
+        elif r != room:
+            return None
+        bodies.append(body)
+    if room is None:
+        return None
+    return room, bodies
+
+
+def _deliver_game_lines_localized(room: str, lines: list[str]) -> None:
+    """Send game lines to each local client in that client's UI locale."""
     if not lines:
         return
-    if _should_skip_game_localize(room):
-        out = list(lines)
-    else:
-        loc = locale or i18n.default_locale()
-        out = i18n.localize_game_lines(list(lines), loc)
-    broadcast_room(room, _format_game_lines(room, out))
+    skip = _should_skip_game_localize(room)
+    with lock:
+        targets = [c for c in list(rooms.get(room, ())) if c in clients]
+    for conn in targets:
+        out = list(lines) if skip else i18n.localize_game_lines(list(lines), conn_locale(conn))
+        send_line(conn, _format_game_lines(room, out).decode("utf-8"))
+
+
+def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
+    """Broadcast game system text, localized per recipient (not one room language).
+
+    ``locale`` is kept for call-site compatibility but ignored: each connection
+    uses ``conn_locale(conn)``. Federation forwards the source (usually Chinese)
+    lines so peer nodes can localize for their own clients.
+    """
+    if not lines:
+        return
+    _ = locale  # retained for API compatibility; delivery is always per-conn
+    raw = list(lines)
+    _deliver_game_lines_localized(room, raw)
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.broadcast_room(room, _format_game_lines(room, raw))
 
 
 def _viewer_name_for_conn(conn) -> str | None:
@@ -785,6 +863,12 @@ def _build_session_payload_locked() -> dict[str, object]:
             continue
         raw = _pickle_game_for_storage(game)
         games_blob[room] = base64.b64encode(raw).decode("ascii")
+    parked_blob: dict[str, str] = {}
+    for room, game in room_games_parked.items():
+        if game is None or getattr(game, "state", "ended") == "ended":
+            continue
+        raw = _pickle_game_for_storage(game)
+        parked_blob[room] = base64.b64encode(raw).decode("ascii")
     sessions: dict[str, dict[str, object]] = {}
     for key, sess in disconnected_sessions.items():
         rooms_set = sess.get("rooms") or set()
@@ -800,12 +884,23 @@ def _build_session_payload_locked() -> dict[str, object]:
         }
     return {
         "room_games": games_blob,
+        "room_games_parked": parked_blob,
         "disconnected_sessions": sessions,
         "room_enabled_games": {
             room: sorted(enabled)
             for room, enabled in room_enabled_games.items()
         },
         "room_announcements": dict(room_announcements),
+        "room_game_authority": {
+            room: auth
+            for room, auth in room_game_authority.items()
+            if isinstance(room, str) and isinstance(auth, str) and auth.strip()
+        },
+        "room_game_tokens": {
+            room: tok
+            for room, tok in room_game_tokens.items()
+            if isinstance(room, str) and isinstance(tok, str) and tok.strip()
+        },
     }
 
 
@@ -822,6 +917,18 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 continue
             _rebind_game_services(game)
             room_games[room] = game
+    parked_blob = payload.get("room_games_parked")
+    if isinstance(parked_blob, dict):
+        for room, encoded in parked_blob.items():
+            if not isinstance(room, str) or not isinstance(encoded, str):
+                continue
+            try:
+                game = pickle.loads(base64.b64decode(encoded))
+            except Exception as e:
+                print(f"skip restoring parked room {room!r} game: {e!r}")
+                continue
+            _rebind_game_services(game)
+            room_games_parked[room] = game
     sessions = payload.get("disconnected_sessions")
     if isinstance(sessions, dict):
         for key, sess in sessions.items():
@@ -854,6 +961,26 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
         for room, text in announcements.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_announcements[room] = text
+    authority = payload.get("room_game_authority")
+    if isinstance(authority, dict):
+        for room, auth in authority.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(auth, str)
+                and auth.strip()
+            ):
+                room_game_authority[room] = auth.strip()
+    tokens = payload.get("room_game_tokens")
+    if isinstance(tokens, dict):
+        for room, tok in tokens.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(tok, str)
+                and tok.strip()
+            ):
+                room_game_tokens[room] = tok.strip()
 
 
 def _mark_sessions_dirty() -> None:
@@ -1071,6 +1198,81 @@ def _federation_seed_file_leave(
         print(f"federation: broadcast_file_leave failed: {e!r}")
 
 
+def _federation_push_all_offline_leaves() -> None:
+    """Re-seed every pending leave so a newly linked peer shares the mailbox.
+
+    Same-nick users logging into either node (and /leave on either node) need the
+    full unread set, including leaves created while the peer was offline.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        removed = offline_messages.compact_duplicates()
+        if removed:
+            print(f"federation: compacted {removed} duplicate offline leave(s)")
+        pending = offline_messages.snapshot_pending()
+    except Exception as e:
+        print(f"federation: snapshot offline leaves failed: {e!r}")
+        return
+    pushed_pm = 0
+    pushed_file = 0
+    for item in pending:
+        to_name = str(item.get("to") or "").strip()
+        from_name = str(item.get("from") or "").strip() or "?"
+        text = str(item.get("text") or "")
+        if not to_name or not text:
+            continue
+        kind = str(item.get("kind") or "pm")
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if kind == "file":
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            download_url = str(meta.get("download_url") or "").strip()
+            download_key = str(meta.get("download_key") or "").strip()
+            if not tid or not download_url or not download_key:
+                continue
+            notice = {
+                "filename": str(meta.get("filename") or "").strip() or "file",
+                "file_size": meta.get("file_size") or 0,
+                "download_url": download_url,
+                "download_key": download_key,
+                "download_token": str(meta.get("download_token") or "").strip(),
+                "room": meta.get("room"),
+                "transfer_id": tid,
+                "leave_ts": ts,
+            }
+            try:
+                if hub.broadcast_file_leave(to_name, from_name, notice):
+                    pushed_file += 1
+            except Exception as e:
+                print(f"federation: catch-up fleave failed: {e!r}")
+            continue
+        leave_id = str(item.get("id") or "").strip()
+        # Never re-seed without a stable id — empty ids mint a new one per hop
+        # and explode into duplicate /leave rows across federation reconnects.
+        if not leave_id:
+            continue
+        try:
+            if hub.broadcast_offline_pm(
+                to_name,
+                from_name,
+                text,
+                leave_id=leave_id,
+                ts=ts or None,
+            ):
+                pushed_pm += 1
+        except Exception as e:
+            print(f"federation: catch-up pleave failed: {e!r}")
+    if pushed_pm or pushed_file:
+        print(
+            f"federation: catch-up offline leaves "
+            f"pm={pushed_pm} file={pushed_file}"
+        )
+
 def deliver_offline_messages(conn, recipient_name: str) -> int:
     """Flush stored leave-messages to this connection. Returns how many were sent."""
     pending = offline_messages.take_all(recipient_name)
@@ -1110,6 +1312,10 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
 
 
 def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> None:
+    try:
+        offline_messages.compact_duplicates()
+    except Exception as e:
+        print(f"offline leave compact failed: {e!r}")
     items = offline_messages.list_sent_unread(sender_name, recipient)
     if not items:
         if recipient:
@@ -1256,6 +1462,7 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
                     sender_name,
                     text,
                     leave_id=str(stored.get("id") or ""),
+                    ts=float(stored.get("ts") or 0) or None,
                 )
             except Exception as e:
                 print(f"federation: broadcast_offline_pm failed: {e!r}")
@@ -2201,11 +2408,17 @@ def _federation_request_file_host(
     recipients: list[str],
     room: Optional[str],
     *,
-    timeout: float = 15.0,
+    timeout: float | None = None,
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return {"ok": False, "error": "federation disabled"}
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("SSHCHAT_FILE_FED_PROXY_TIMEOUT", "30") or "30")
+        except ValueError:
+            timeout = 30.0
+        timeout = max(5.0, timeout)
     req_id = secrets.token_hex(8)
     event = threading.Event()
     with _file_host_waiters_lock:
@@ -2222,7 +2435,10 @@ def _federation_request_file_host(
         ):
             return {"ok": False, "error": f"无法联系文件代理节点 {host_node}"}
         if not event.wait(timeout):
-            return {"ok": False, "error": "等待文件代理节点超时"}
+            return {
+                "ok": False,
+                "error": f"等待文件代理节点超时（{timeout:.0f}s）",
+            }
         with _file_host_waiters_lock:
             payload = _file_host_waiters.get(req_id, {}).get("payload")
         if not isinstance(payload, dict):
@@ -3060,13 +3276,14 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
             "download_url": download_url,
             "room": transfer.room,
         }
-        offline_messages.leave(
+        stored = offline_messages.leave(
             recipient,
             transfer.sender,
             summary,
             kind="file",
             meta=meta,
         )
+        leave_ts = float((stored or {}).get("ts") or time.time())
         _federation_seed_file_leave(
             recipient,
             transfer.sender,
@@ -3078,6 +3295,7 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 "download_token": token,
                 "room": transfer.room,
                 "transfer_id": transfer.transfer_id,
+                "leave_ts": leave_ts,
             },
         )
 
@@ -3176,9 +3394,28 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
             and hub.enabled
             and file_http_server.needs_federation_file_proxy(file_http.get_base_url())
         ):
+            # Peer may have connected before fpub arrived (catalog-first push on
+            # older builds). Nudge a local re-advertise from us; peers push on
+            # link-up — if pubs are still empty, tell the user clearly.
+            if not hub.has_remote_file_public():
+                try:
+                    _federation_sync_file_public()
+                except Exception:
+                    pass
             proxy_peer = hub.pick_file_public_peer()
-            if proxy_peer is not None:
-                host_node, _peer_url = proxy_peer
+            if proxy_peer is None:
+                send_line(
+                    conn,
+                    "[*] 联邦中暂无已广告的 Cloudflare/公网文件节点；"
+                    "使用本机地址（对端可能打不开）。\n",
+                )
+            else:
+                host_node, peer_url = proxy_peer
+                send_line(
+                    conn,
+                    f"[*] 正在向联邦节点 {host_node} 申请公网通道"
+                    f"（{peer_url}）…\n",
+                )
                 hosted = _federation_request_file_host(
                     host_node, sender, recipients, room_name
                 )
@@ -3379,15 +3616,20 @@ def _federation_push_game_snapshot(room: str) -> None:
 
 
 def _federation_push_all_game_snapshots() -> None:
-    """After a peer connects, push every active local game replica/authority state."""
+    """After a peer connects, push every active game this node is authority for."""
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return
+    local = hub.node_id
     with lock:
         rooms = [
             room
             for room, game in room_games.items()
-            if game is not None and getattr(game, "state", "ended") != "ended"
+            if game is not None
+            and getattr(game, "state", "ended") != "ended"
+            # Strict: empty authority after restart must NOT claim host and push
+            # a possibly stale replica that races the real host.
+            and (room_game_authority.get(room) or "").strip() == local
         ]
     for room in rooms:
         try:
@@ -3396,14 +3638,88 @@ def _federation_push_all_game_snapshots() -> None:
             print(f"federation: catch-up gsync failed for room {room!r}: {e!r}")
 
 
+def _federation_reconcile_restored_games() -> None:
+    """After restart, pull newer boards for games whose authority is unknown/remote.
+
+    Session restore used to omit authority, so both nodes treated empty auth as
+    local and kept a one-ply-stale replica forever.
+
+    Also parks (or restores a parked fork) when the authority peer is already
+    gone — peer-down alone is not enough after a restart while partitioned.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if hub.peer_count < 1:
+        _fed_handle_unreachable_game_authority()
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            room
+            for room, game in list(room_games.items())
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        ]
+    for room in rooms:
+        with lock:
+            auth = (room_game_authority.get(room) or "").strip()
+            before = _game_progress_score(room_games.get(room))
+        if auth == local:
+            try:
+                _federation_push_game_snapshot(room)
+            except Exception as e:
+                print(f"federation: reconcile push failed room={room!r}: {e!r}")
+            continue
+        # Unknown or remote authority: ask peers and keep the newer board.
+        try:
+            hub.request_game(room)
+        except Exception as e:
+            print(f"federation: reconcile greq failed room={room!r}: {e!r}")
+            continue
+        _federation_wait_game_progress(room, before + 1, timeout=2.0)
+        with lock:
+            after = _game_progress_score(room_games.get(room))
+            auth_now = (room_game_authority.get(room) or "").strip()
+        if after > before:
+            print(
+                f"federation: reconciled #{room} progress {before}->{after} "
+                f"auth={auth_now or '?'}"
+            )
+        elif not auth_now:
+            # No peer answered with a newer board — claim local hostship so
+            # subsequent moves/syncs have a deterministic authority.
+            with lock:
+                if room in room_games and not (room_game_authority.get(room) or "").strip():
+                    room_game_authority[room] = local
+                    if not (room_game_tokens.get(room) or "").strip():
+                        room_game_tokens[room] = secrets.token_hex(16)
+            try:
+                _federation_push_game_snapshot(room)
+            except Exception as e:
+                print(f"federation: reconcile claim push failed room={room!r}: {e!r}")
+    # greq may have timed out while the real host is still partitioned away.
+    _fed_handle_unreachable_game_authority()
+
+
 def _fed_on_game_request(_from_peer: str, room: str) -> None:
-    """Peer is missing this room's game; re-push our snapshot if we have one."""
+    """Peer is missing this room's game; only the authority may re-push.
+
+    Replicas answering greq with a stale board can regress peers that already
+    received a newer authority snapshot.
+    """
     room = (room or "").strip()
     if not room:
         return
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
     with lock:
         game = room_games.get(room)
         if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        # Empty auth after restart must not answer — a stale replica would claim
+        # hostship via push_game_snapshot's `auth or node_id` fallback.
+        auth = (room_game_authority.get(room) or "").strip()
+        if auth != local:
             return
     _federation_push_game_snapshot(room)
 
@@ -3431,6 +3747,55 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
     return False
 
 
+def _federation_wait_game_progress(
+    room: str, min_progress: int, timeout: float = 1.5
+) -> bool:
+    """Poll until local replica progress reaches min_progress (no greq)."""
+    deadline = time.time() + max(0.2, float(timeout))
+    target = int(min_progress)
+    while time.time() < deadline:
+        with lock:
+            if _game_progress_score(room_games.get(room)) >= target:
+                return True
+        time.sleep(0.05)
+    with lock:
+        return _game_progress_score(room_games.get(room)) >= target
+
+
+def _federation_refresh_replica_and_wait(
+    room: str,
+    *,
+    min_progress: int | None = None,
+    timeout: float = 2.0,
+) -> bool:
+    """Ask authority for a fresh gsync and wait until local progress catches up.
+
+    Used before /game show on a non-authority node so a delayed/lost gsync after a
+    forwarded move does not leave /game show on the previous ply.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    local = hub.node_id
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if auth and auth == local:
+            return True
+        before = _game_progress_score(game)
+    try:
+        hub.request_game(room)
+    except Exception as e:
+        print(f"federation: refresh greq failed for room {room!r}: {e!r}")
+        return False
+    if min_progress is None:
+        # Prefer a strictly newer board when one is available; otherwise time out
+        # and show whatever we already have.
+        target = before + 1
+    else:
+        target = max(before + 1, int(min_progress))
+    return _federation_wait_game_progress(room, target, timeout=timeout)
+
 def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -3456,6 +3821,99 @@ def _game_conflict_winner(
     if a_auth >= b_auth:
         return a_auth, a_tok
     return b_auth, b_tok
+
+
+def _game_progress_score(game) -> int:
+    """Best-effort ply/move count so newer replicas win dual-authority races."""
+    if game is None:
+        return 0
+    hist = getattr(game, "_history", None)
+    if isinstance(hist, list):
+        return len(hist)
+    ply = getattr(game, "_xq_ply_log", None)
+    if isinstance(ply, list):
+        return len(ply)
+    board = getattr(game, "board", None)
+    if board is not None:
+        stack = getattr(board, "move_stack", None)
+        if stack is not None:
+            try:
+                return len(stack)
+            except Exception:
+                pass
+    return 0
+
+
+def _park_room_game_locked(room: str, game) -> None:
+    """Stash a displaced game so a later partition can restore it."""
+    if game is None or getattr(game, "state", "ended") == "ended":
+        return
+    room_games_parked[room] = game
+
+
+def _game_authority_reachable(auth: str) -> bool:
+    auth = (auth or "").strip()
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    if not auth or auth == local:
+        return True
+    if hub is None or not hub.enabled:
+        return False
+    return hub._link_toward(auth) is not None
+
+
+def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
+    """When a game host is unreachable: restore parked fork, or park & free room."""
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    restored: list[tuple[str, object]] = []
+    freed: list[str] = []
+    with lock:
+        rooms = set(room_games) | set(room_games_parked)
+        for room in list(rooms):
+            auth = (room_game_authority.get(room) or "").strip()
+            game = room_games.get(room)
+            active = game is not None and getattr(game, "state", "ended") != "ended"
+            if not active or not auth or auth == local:
+                continue
+            if _game_authority_reachable(auth):
+                continue
+            parked = room_games_parked.get(room)
+            parked_ok = (
+                parked is not None and getattr(parked, "state", "ended") != "ended"
+            )
+            if parked_ok:
+                room_games_parked.pop(room, None)
+                _remap_local_game_seats_locked(room, parked)
+                _rebind_game_services(parked)
+                room_games[room] = parked
+                room_game_authority[room] = local
+                room_game_tokens[room] = secrets.token_hex(16)
+                restored.append((room, parked))
+            else:
+                _park_room_game_locked(room, game)
+                room_games.pop(room, None)
+                room_game_authority.pop(room, None)
+                room_game_tokens.pop(room, None)
+                freed.append(room)
+
+    for room, game in restored:
+        notice = (
+            f"[*] 联邦断开：#{room} 权威节点不可达，已恢复本节点暂存对局"
+            f"（{getattr(game, 'name', '?')}）。请用 /game show 查看。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+        if getattr(game, "state", "ended") != "ended":
+            send_oriented_boards(room, game)
+            send_sanguo_hand_views(room, game)
+    for room in freed:
+        notice = (
+            f"[*] 联邦断开：#{room} 对局权威节点不可达，对局已暂存；"
+            f"本房可重新 /game new。联线后若冲突将随机保留一局并暂存另一局。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+    if restored or freed:
+        _persist_after_game_change()
 
 
 def _fed_on_game_sync(
@@ -3492,25 +3950,45 @@ def _fed_on_game_sync(
             and getattr(local_game, "state", "ended") != "ended"
         )
         remote_active = getattr(game, "state", "ended") != "ended"
+        local_prog = _game_progress_score(local_game) if local_active else -1
+        remote_prog = _game_progress_score(game) if remote_active else -1
+        # Never let a stale replica / catch-up push rewind the board.
+        if local_active and remote_active and remote_prog < local_prog:
+            return
         if (
             local_active
             and remote_active
             and local_auth
             and local_auth != authority
         ):
-            win_auth, win_tok = _game_conflict_winner(
-                local_auth, local_token, authority, conflict_token
-            )
-            winner_auth = win_auth
-            if win_auth == local_auth:
-                # Keep local; ask peers to take ours.
-                room_game_tokens[room] = win_tok or local_token
+            if remote_prog > local_prog:
+                # Peer resumed/moved further — never keep a staler local board.
+                winner_auth = authority
+            elif local_prog > remote_prog:
+                room_game_tokens[room] = local_token
                 keep_local = True
             else:
-                lost_local = True
-                loser_auth = local_auth
+                win_auth, win_tok = _game_conflict_winner(
+                    local_auth, local_token, authority, conflict_token
+                )
+                winner_auth = win_auth
+                if win_auth == local_auth:
+                    # Keep local; ask peers to take ours.
+                    room_game_tokens[room] = win_tok or local_token
+                    keep_local = True
+                else:
+                    lost_local = True
+                    loser_auth = local_auth
 
         if not keep_local:
+            if (
+                local_active
+                and local_auth
+                and local_auth != authority
+            ):
+                _park_room_game_locked(room, local_game)
+                lost_local = True
+                loser_auth = loser_auth or local_auth
             _remap_local_game_seats_locked(room, game)
             room_games[room] = game
             room_game_authority[room] = authority
@@ -3523,12 +4001,14 @@ def _fed_on_game_sync(
             print(f"federation: re-push after winning conflict: {e!r}")
         return
 
-    _mark_sessions_dirty()
+    # Immediate persist: debounce alone left replicas one ply behind after restart
+    # when the host had already flushed the newer move.
+    _persist_after_game_change()
     if lost_local:
         notice = (
-            f"[*] 联邦对局冲突：#{room} 同时存在多局，已随机保留节点 "
-            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已作废。"
-            f"请用 /game show 查看当前局面。\n"
+            f"[*] 联邦对局冲突：#{room} 同时存在多局，已保留节点 "
+            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已暂存。"
+            f"联邦断开后可恢复暂存局；请用 /game show 查看当前局面。\n"
         )
         broadcast_room(room, notice.encode("utf-8"))
     if getattr(game, "state", "ended") != "ended":
@@ -3544,7 +4024,7 @@ def _fed_on_game_end(room: str, authority: str) -> None:
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
         room_game_tokens.pop(room, None)
-    _mark_sessions_dirty()
+    _persist_after_game_change()
 
 
 def _fed_on_game_priv(room: str, to_name: str, lines: list[str]) -> None:
@@ -3560,12 +4040,29 @@ def _fed_resolve_actor(room: str, game, player_node: str, name: str, sub: str):
         if conn is not None and sub != "join":
             _resume_same_account_seat_locked(room, game, conn, name)
         return conn
-    if sub == "join":
-        return FederatedSeat(player_node, name)
-    seat = _game_seat_conn_by_name(game, name)
-    if isinstance(seat, FederatedSeat) and seat.node_id == player_node:
-        return seat
+    # Remote player: always act as FederatedSeat for *this* peer node.
+    # Returning a stale DisconnectedSeat / old-node FederatedSeat / local socket
+    # skips resume and drops private replies (not a FederatedSeat → no gpriv).
+    seat = FederatedSeat(player_node, name)
+    _resume_same_account_seat_locked(room, game, seat, name)
     return seat
+
+
+def _fed_send_player_notice(
+    player_node: str, room: str, name: str, lines: list[str]
+) -> None:
+    """Best-effort private notice to a federation player (or local conn)."""
+    if not lines:
+        return
+    local = _local_node_id()
+    if player_node == local:
+        conn = _local_conn_for_name_in_room_locked(name, room)
+        if conn is not None:
+            send_game_private(conn, room, lines)
+        return
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.send_game_private_to(player_node, room, name, lines)
 
 
 def _finish_game_action(
@@ -3586,14 +4083,7 @@ def _finish_game_action(
         for peer_conn, extra in drain():
             _route_game_private(room, peer_conn, extra)
     if bcast:
-        actor_loc = i18n.default_locale()
-        if actor_conn in clients:
-            actor_loc = conn_locale(actor_conn)
-        else:
-            nick = getattr(actor_conn, "nickname", None) or getattr(actor_conn, "name", None)
-            if nick:
-                actor_loc = nick_locale(str(nick))
-        broadcast_game(room, bcast, locale=actor_loc)
+        broadcast_game(room, bcast)
     if send_boards and (ended or getattr(game, "send_view_on_move", True)):
         send_oriented_boards(room, game)
     send_sanguo_hand_views(room, game)
@@ -3624,10 +4114,21 @@ def _fed_execute_game_cmd(
         with lock:
             game = room_games.get(room)
             if game is None:
+                _fed_send_player_notice(
+                    player_node,
+                    room,
+                    name,
+                    ["本房没有进行中的对局；用 /game new … 开局。"],
+                )
                 return
             actor = _fed_resolve_actor(room, game, player_node, name, sub)
             if isinstance(actor, FederatedSeat):
-                priv, bcast, _ = game.try_join(actor, name)
+                # Resume may have already seated this FederatedSeat (same nick).
+                if getattr(game, "is_seated", lambda _c: False)(actor):
+                    priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
+                    bcast = [f"{name} 从另一终端接管了本局操作。"]
+                else:
+                    priv, bcast, _ = game.try_join(actor, name)
             else:
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 if resumed:
@@ -3644,9 +4145,16 @@ def _fed_execute_game_cmd(
 
     if sub == "move":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩；可试 /game show。"],
+            )
             return
         try:
             with lock:
+                # Resolve already attempted resume; call again is cheap/no-op if seated.
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(actor, rest)
@@ -3657,6 +4165,12 @@ def _fed_execute_game_cmd(
                         ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"fed /game move failed: {e!r}")
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                [f"/game move 执行失败：{e}"],
+            )
             return
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
@@ -3665,6 +4179,12 @@ def _fed_execute_game_cmd(
 
     if sub == "resign":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩。"],
+            )
             return
         with lock:
             resumed = _resume_same_account_seat_locked(room, game, actor, name)
@@ -3724,21 +4244,84 @@ def _fed_execute_game_cmd(
         _persist_after_game_change()
 
 
+def _game_all_seat_nicks_present_locally_locked(
+    room: str, game, local_node: str
+) -> bool:
+    """True only when every seat owner is currently online in this room.
+
+    DisconnectedSeat / missing opponents must NOT look "local-only", or a peer
+    that only has the resuming player will wrongly reclaim authority and push a
+    divergent board back to the real host.
+    """
+    has_seat = False
+    for conn, name in _iter_game_conn_seats(game):
+        has_seat = True
+        if isinstance(conn, FederatedSeat) and conn.node_id != local_node:
+            return False
+        if _local_conn_for_name_in_room_locked(name, room) is None:
+            return False
+    return has_seat
+
+
+def _reclaim_game_authority_for_local_seats(room: str) -> bool:
+    """Take authority when a remote claim remains but every seat nick is here.
+
+    Common after gsync: both players reconnect to the same SSHChat host while
+    ``room_game_authority`` still points at a peer. Forwarding ``/game move`` then
+    black-holes when the federation link is flaky. Returns True when authority is
+    local afterwards (including already-local / empty-then-claimed).
+    """
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    push = False
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return (not auth) or auth == local
+        if not auth or auth == local:
+            if not auth:
+                room_game_authority[room] = local
+                if not (room_game_tokens.get(room) or "").strip():
+                    room_game_tokens[room] = secrets.token_hex(16)
+            return True
+        if not _game_all_seat_nicks_present_locally_locked(room, game, local):
+            return False
+        room_game_authority[room] = local
+        room_game_tokens[room] = secrets.token_hex(16)
+        push = True
+    if push:
+        print(
+            f"federation: reclaimed game authority for #{room} "
+            f"(all seat nicks local on {local})"
+        )
+        try:
+            _federation_sync_game(room)
+        except Exception as e:
+            print(f"federation: reclaim sync failed room={room!r}: {e!r}")
+    return True
+
+
 def _should_forward_game(room: str, sub: str) -> bool:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return False
-    auth = room_game_authority.get(room)
-    if not auth:
-        return False
-    return auth != hub.node_id and sub in (
+    if sub not in (
         "join",
         "move",
         "resign",
         "undo",
         "abort",
         "end",
-    )
+    ):
+        return False
+    auth = (room_game_authority.get(room) or "").strip()
+    if not auth or auth == hub.node_id:
+        return False
+    # Stale remote authority with only local players → play here, don't black-hole.
+    if _reclaim_game_authority_for_local_seats(room):
+        return False
+    return True
 
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
@@ -3747,6 +4330,13 @@ def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
     # duplicates from older peers that still federated those via msg.
     if _is_presence_chat_notice(msg):
         return
+    parsed = _parse_game_broadcast_msg(msg)
+    if parsed is not None:
+        parsed_room, bodies = parsed
+        deliver_room = room or parsed_room
+        if not _should_skip_game_localize(deliver_room):
+            _deliver_game_lines_localized(deliver_room, bodies)
+            return
     broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
 
 
@@ -3783,6 +4373,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             except Exception as e:
                 print(f"federation: peer-up game catch-up error: {e!r}")
             try:
+                _federation_reconcile_restored_games()
+            except Exception as e:
+                print(f"federation: peer-up game reconcile error: {e!r}")
+            try:
                 _federation_sync_library_catalog()
             except Exception as e:
                 print(f"federation: peer-up library catalog sync error: {e!r}")
@@ -3790,6 +4384,14 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_sync_file_public()
             except Exception as e:
                 print(f"federation: peer-up file public sync error: {e!r}")
+            try:
+                _federation_push_all_offline_leaves()
+            except Exception as e:
+                print(f"federation: peer-up offline leave sync error: {e!r}")
+            try:
+                _federation_sync_ratings(rating_store.export_entries())
+            except Exception as e:
+                print(f"federation: peer-up ratings sync error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -3799,6 +4401,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
         _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
         _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
+        try:
+            _fed_handle_unreachable_game_authority(peer_node)
+        except Exception as e:
+            print(f"federation: peer-down game park/restore error: {e!r}")
     else:
         return
     broadcast_local_notice(text)
@@ -3863,6 +4469,10 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
 
     # Recipient is offline on this node — store absolute origin URL for later login.
     summary = _format_file_leave_summary(filename, file_size)
+    try:
+        leave_ts = float(notice.get("leave_ts") or 0) or None
+    except (TypeError, ValueError):
+        leave_ts = None
     offline_messages.leave(
         to_name,
         from_name,
@@ -3878,6 +4488,7 @@ def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
             "room": room_name,
             "federated": True,
         },
+        ts=leave_ts,
     )
 
 
@@ -3892,7 +4503,7 @@ def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
 
 
 def _fed_on_offline_pm(
-    to_name: str, from_name: str, text: str, leave_id: str = ""
+    to_name: str, from_name: str, text: str, leave_id: str = "", leave_ts: float = 0.0
 ) -> None:
     """Seed or deliver an offline text leave that originated on another node."""
     targets = find_clients_by_nickname(to_name, local_only=True)
@@ -3903,11 +4514,35 @@ def _fed_on_offline_pm(
             offline_messages.remove_by_id(to_name, leave_id)
             _federation_clear_offline_pm(to_name, leave_id)
         return
-    offline_messages.leave(to_name, from_name, text, leave_id=leave_id or None)
+    try:
+        ts = float(leave_ts) if leave_ts else None
+    except (TypeError, ValueError):
+        ts = None
+    offline_messages.leave(
+        to_name, from_name, text, leave_id=leave_id or None, ts=ts
+    )
 
 
 def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
     offline_messages.remove_by_id(to_name, leave_id)
+
+
+def _fed_on_ratings(origin: str, rows: list) -> None:
+    """Merge peer rating ledger; newer host settlements win for same nick."""
+    if not isinstance(rows, list):
+        return
+    applied = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        game = str(row.get("game") or "").strip()
+        user = str(row.get("user") or row.get("display_name") or "").strip()
+        if not game or not user or not is_rated_game(game):
+            continue
+        if rating_store.apply_remote_entry(game, user, row, source_node=origin):
+            applied += 1
+    if applied:
+        print(f"federation: applied {applied} rating row(s) from {origin}")
 
 
 def _ensure_federation_hub() -> None:
@@ -3942,11 +4577,26 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
     _fed_hub.on_offline_pm = _fed_on_offline_pm
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
+    _fed_hub.on_ratings = _fed_on_ratings
+    _fed_hub.get_local_ratings = rating_store.export_entries
     _federation_sync_library_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
-    
+    try:
+        _federation_push_all_offline_leaves()
+    except Exception as e:
+        print(f"federation: initial offline leave sync error: {e!r}")
+    try:
+        _federation_sync_ratings(rating_store.export_entries())
+    except Exception as e:
+        print(f"federation: initial ratings sync error: {e!r}")
+    try:
+        # Peers may already be up; otherwise peer-up handler reconciles again.
+        _federation_reconcile_restored_games()
+    except Exception as e:
+        print(f"federation: initial game reconcile error: {e!r}")
+
     # Start library directory watch thread
     if _library_watch_thread is None:
         _library_watch_stop.clear()
@@ -4497,10 +5147,23 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if _should_forward_game(room, sub):
         hub = federation.get_hub()
         auth = room_game_authority.get(room, "")
+        with lock:
+            progress_before = _game_progress_score(room_games.get(room))
         if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
+            # Authority applies then gsyncs; wait so replica board catches up.
+            if sub == "move":
+                _federation_wait_game_progress(
+                    room, progress_before + 1, timeout=1.5
+                )
+            else:
+                _federation_refresh_replica_and_wait(room, timeout=1.5)
             return
-        send_line(conn, _ts(conn, "game_forward_fail"))
-        return
+        # Peer unreachable: if seats are all local, reclaim and handle here.
+        if _reclaim_game_authority_for_local_seats(room):
+            pass
+        else:
+            send_line(conn, _ts(conn, "game_forward_fail"))
+            return
 
     if sub == "list":
         with lock:
@@ -4692,10 +5355,19 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
+            auth = (room_game_authority.get(room) or "").strip()
+        hub = federation.get_hub()
         if game is None:
             _federation_request_game_and_wait(room)
-            with lock:
-                game = room_games.get(room)
+        elif (
+            hub is not None
+            and hub.enabled
+            and (not auth or auth != hub.node_id)
+        ):
+            # Replica or unknown authority after restart: pull before showing.
+            _federation_refresh_replica_and_wait(room, timeout=2.0)
+        with lock:
+            game = room_games.get(room)
         with lock:
             if game is None:
                 lines = ["本房没有进行中的对局。"]

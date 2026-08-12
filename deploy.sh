@@ -61,6 +61,84 @@ is_ish() {
   [[ -d /ish ]] || grep -q 'apk\.ish\.app' /etc/apk/repositories 2>/dev/null
 }
 
+# Alpine series for mirrors (e.g. v3.14). App Store iSH is usually 3.14; do not jump major.
+ish_alpine_series() {
+  local s ver
+  s=$(grep -oE 'v[0-9]+\.[0-9]+' /etc/apk/repositories 2>/dev/null | head -1 || true)
+  if [[ -n "$s" ]]; then
+    printf '%s\n' "$s"
+    return
+  fi
+  if [[ -f /etc/os-release ]]; then
+    ver=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    if [[ "$ver" =~ ^([0-9]+\.[0-9]+) ]]; then
+      printf 'v%s\n' "${BASH_REMATCH[1]}"
+      return
+    fi
+  fi
+  printf 'v3.14\n'
+}
+
+ish_apk_add_timed() {
+  # Prefer short timeout so apk.ish.app hangs do not block deploy for ages.
+  if command -v timeout &>/dev/null; then
+    timeout 90 apk add --no-cache "$@" || timeout 90 apk add "$@"
+  else
+    apk add --no-cache "$@" || apk add "$@"
+  fi
+}
+
+# Fresh iSH needs apk py3-lxml (venv --system-site-packages). apk.ish.app often
+# fails; switch to Alpine CDN / tuna and retry before aborting.
+ish_ensure_py_apk_deps() {
+  if ! command -v apk &>/dev/null; then
+    return 0
+  fi
+  if python3 -c "import lxml" 2>/dev/null \
+    && { command -v pip3 &>/dev/null || command -v pip &>/dev/null; }; then
+    echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
+    return 0
+  fi
+
+  echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+  echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
+  if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+    && python3 -c "import lxml" 2>/dev/null; then
+    return 0
+  fi
+
+  local series mirror
+  series=$(ish_alpine_series)
+  echo "warning: iSH: apk add failed (often apk.ish.app); trying Alpine mirrors for $series" >&2
+  if [[ -f /etc/apk/repositories && ! -f /etc/apk/repositories.sshchat.bak ]]; then
+    cp /etc/apk/repositories /etc/apk/repositories.sshchat.bak || true
+  fi
+  for mirror in \
+    https://dl-cdn.alpinelinux.org \
+    https://mirrors.tuna.tsinghua.edu.cn; do
+    echo "info: iSH: apk repositories -> $mirror/alpine/$series/{main,community}" >&2
+    printf '%s\n' \
+      "$mirror/alpine/$series/main" \
+      "$mirror/alpine/$series/community" \
+      >/etc/apk/repositories
+    if command -v timeout &>/dev/null; then
+      timeout 120 apk update 2>/dev/null || continue
+    else
+      apk update 2>/dev/null || continue
+    fi
+    if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+      && python3 -c "import lxml" 2>/dev/null; then
+      echo "info: iSH: installed py3-lxml via $mirror" >&2
+      return 0
+    fi
+  done
+
+  echo "error: iSH: py3-lxml still missing after apk mirror retries" >&2
+  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add py3-lxml py3-pip" >&2
+  echo "error: re-run ./deploy.sh --keep-env (do not continue without lxml — ebooklib needs it)" >&2
+  exit 1
+}
+
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
 primary_group_of() {
   local user_name=$1
@@ -262,20 +340,44 @@ ensure_client_group() {
 }
 
 apply_data_plane_permissions() {
-  # Chat login users only need chat.sh, client.py, sshchat.env, venv/. Admins keep
-  # server.* and admin-add-user.sh private to root / service user.
+  # Chat login users only need chat.sh, client.py, sshchat_client_util.py,
+  # sshchat.env, venv/. Admins keep server.* and admin-add-user.sh private.
   local u="$RUN_USER"
   local g
   g=$(primary_group_of "$u")
+  # iSH ignores supplementary-group bits for many paths; world r/X on the
+  # client entrypoints is required so ForcedCommand chat.sh can run.
+  local ish_client_world=0
+  if is_ish; then
+    ish_client_world=1
+    echo "info: iSH: relaxing client entrypoint modes (o+rX); group bits alone are unreliable" >&2
+  fi
+
   chown "$u:$CLIENT_GROUP" "$PREFIX"
-  chmod 750 "$PREFIX"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod 755 "$PREFIX"
+  else
+    chmod 750 "$PREFIX"
+  fi
 
   chown "$u:$CLIENT_GROUP" "$PREFIX/chat.sh" "$PREFIX/client.py"
-  chmod 750 "$PREFIX/chat.sh"
-  chmod 640 "$PREFIX/client.py"
+  [[ -f "$PREFIX/sshchat_client_util.py" ]] && chown "$u:$CLIENT_GROUP" "$PREFIX/sshchat_client_util.py"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod 755 "$PREFIX/chat.sh"
+    chmod 644 "$PREFIX/client.py"
+    [[ -f "$PREFIX/sshchat_client_util.py" ]] && chmod 644 "$PREFIX/sshchat_client_util.py"
+  else
+    chmod 750 "$PREFIX/chat.sh"
+    chmod 640 "$PREFIX/client.py"
+    [[ -f "$PREFIX/sshchat_client_util.py" ]] && chmod 640 "$PREFIX/sshchat_client_util.py"
+  fi
   if [[ -f "$PREFIX/sshchat.env" ]]; then
     chown "$u:$CLIENT_GROUP" "$PREFIX/sshchat.env"
-    chmod 640 "$PREFIX/sshchat.env"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      chmod 644 "$PREFIX/sshchat.env"
+    else
+      chmod 640 "$PREFIX/sshchat.env"
+    fi
   fi
 
   chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
@@ -305,12 +407,20 @@ apply_data_plane_permissions() {
   chmod 755 "$PREFIX/federation-bridge.sh"
 
   chown -R "$u:$CLIENT_GROUP" "$PREFIX/venv"
-  chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  if [[ "$ish_client_world" -eq 1 ]]; then
+    chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/venv"
+  else
+    chmod -R 'u=rwX,g=rX,o=-' "$PREFIX/venv"
+  fi
 
   # Library directory: readable by client group so users can browse books
   if [[ -d "$PREFIX/library" ]]; then
     chown "$u:$CLIENT_GROUP" "$PREFIX/library"
-    chmod 750 "$PREFIX/library"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      chmod 755 "$PREFIX/library"
+    else
+      chmod 750 "$PREFIX/library"
+    fi
   fi
 
   if [[ -d /var/lib/sshchat/files ]]; then
@@ -690,10 +800,8 @@ if is_ish && [[ "${SSHCHAT_NO_ISH_ADAPT:-}" != "1" ]]; then
     PIP_CMD_RETRIES=5
   fi
   # Soft deps from Alpine apk so venv can use --system-site-packages (avoids compiling lxml).
-  if command -v apk &>/dev/null; then
-    echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
-    apk add --no-cache py3-lxml py3-pip 2>/dev/null || apk add py3-lxml py3-pip || true
-  fi
+  # apk.ish.app often hangs; ish_ensure_py_apk_deps retries CDN/tuna then hard-fails.
+  ish_ensure_py_apk_deps
 fi
 
 if [[ "$FILE_TRANSFER_ENABLED" -eq 0 ]]; then
@@ -868,6 +976,10 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
       'ebooklib>=0.18'
     if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
       echo "error: iSH venv missing required modules after install" >&2
+      if ! "$PREFIX/venv/bin/python" -c "import lxml" 2>/dev/null; then
+        echo "error: lxml missing — install system package then re-run: apk add py3-lxml" >&2
+        echo "error: (venv uses --system-site-packages; see DEPLOY-iSH.md if apk.ish.app hangs)" >&2
+      fi
       "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
       exit 1
     fi
@@ -1169,7 +1281,11 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
     # Re-apply env ownership if the tunnel helper rewrote sshchat.env as root
     if [[ "$CREATE_RUN_USER" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
       chown "$RUN_USER:$CLIENT_GROUP" "$PREFIX/sshchat.env"
-      chmod 640 "$PREFIX/sshchat.env"
+      if is_ish; then
+        chmod 644 "$PREFIX/sshchat.env"
+      else
+        chmod 640 "$PREFIX/sshchat.env"
+      fi
     elif is_darwin && [[ -f "$PREFIX/sshchat.env" ]]; then
       chown "root:$CLIENT_GROUP" "$PREFIX/sshchat.env" 2>/dev/null || true
       chmod 640 "$PREFIX/sshchat.env"

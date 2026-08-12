@@ -28,6 +28,12 @@ PEERS_JSON="$FED_DIR/peers.json"
 
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
 
+# Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
+primary_group_of() {
+  local user_name=$1
+  id -gn "$user_name" 2>/dev/null || printf '%s' "$user_name"
+}
+
 usage() {
   cat >&2 <<EOF
 Usage: sudo $0 <peer_node_id> [pubkey-or-file]
@@ -125,8 +131,9 @@ if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
   SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
 fi
 SVC_USER=${SVC_USER:-sshchat}
+SVC_GROUP=$(primary_group_of "$SVC_USER")
 if id "$SVC_USER" &>/dev/null; then
-  chown "$SVC_USER:$SVC_USER" "$PEERS_JSON" 2>/dev/null || true
+  chown "$SVC_USER:$SVC_GROUP" "$PEERS_JSON" 2>/dev/null || true
 fi
 
 if [[ -z "$PEER_PUBKEY" && -n "$STORED_PUBKEY" ]]; then
@@ -143,7 +150,8 @@ if [[ -n "$PEER_PUBKEY" && -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
     mv "$TMP" "$AUTH_KEYS"
     chmod 600 "$AUTH_KEYS"
     if ! is_darwin && id "$FED_USER" &>/dev/null; then
-      chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
+      FED_GROUP=$(primary_group_of "$FED_USER")
+      chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
     fi
     echo "info: removed peer inbound key from $AUTH_KEYS"
   else
