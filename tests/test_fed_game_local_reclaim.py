@@ -192,6 +192,78 @@ class FedGameSyncProgressTests(unittest.TestCase):
                         )
         self.assertIs(server.room_games["lobby"], local)
 
+    def test_gsync_authority_new_session_beats_stale_replica_fork(self) -> None:
+        """After /game new on the authority, a partitioned replica must not win by ply count."""
+
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(i, i % 15, i % 15) for i in range(19)]
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(i, i % 15, i % 15) for i in range(53)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "Mathematics.local"
+
+        server.room_games["default"] = LocalGame()
+        server.room_game_authority["default"] = "Mathematics.local"
+        server.room_game_tokens["default"] = "ffff" + "0" * 28
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=RemoteGame()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(
+                            server, "_federation_push_game_snapshot"
+                        ) as push:
+                            server._fed_on_game_sync(
+                                "iPhone",
+                                "default",
+                                "iPhone",
+                                "ZmFrZQ==",
+                                "aaaa" + "0" * 28,
+                            )
+                            push.assert_called_once()
+        self.assertIs(server.room_games["default"].__class__, LocalGame)
+
+    def test_gsync_replica_accepts_authority_new_session_with_fewer_plies(self) -> None:
+        """Replica must not ignore a newer authority snapshot just because local has more plies."""
+
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4)]
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "iPhone"
+
+        remote = RemoteGame()
+        server.room_games["default"] = LocalGame()
+        server.room_game_authority["default"] = "Mathematics.local"
+        server.room_game_tokens["default"] = "aaaa" + "0" * 28
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(server, "_persist_after_game_change"):
+                            server._fed_on_game_sync(
+                                "Mathematics.local",
+                                "default",
+                                "Mathematics.local",
+                                "ZmFrZQ==",
+                                "ffff" + "0" * 28,
+                            )
+        self.assertIs(server.room_games["default"], remote)
+
     def test_replica_ignores_greq(self) -> None:
         class LocalGame:
             name = "gomoku"

@@ -3952,9 +3952,16 @@ def _fed_on_game_sync(
         remote_active = getattr(game, "state", "ended") != "ended"
         local_prog = _game_progress_score(local_game) if local_active else -1
         remote_prog = _game_progress_score(game) if remote_active else -1
-        # Never let a stale replica / catch-up push rewind the board.
+        # Never let a stale replica / catch-up push rewind the board — unless
+        # the remote carries a newer session token (/game new after partition).
         if local_active and remote_active and remote_prog < local_prog:
-            return
+            newer_session = (
+                len(conflict_token) >= 16
+                and len(local_token) >= 16
+                and conflict_token > local_token
+            )
+            if not newer_session:
+                return
         if (
             local_active
             and remote_active
@@ -3962,8 +3969,20 @@ def _fed_on_game_sync(
             and local_auth != authority
         ):
             if remote_prog > local_prog:
-                # Peer resumed/moved further — never keep a staler local board.
-                winner_auth = authority
+                stale_fork = (
+                    local_auth == local_id
+                    and len(local_token) >= 16
+                    and len(conflict_token) >= 16
+                    and local_token > conflict_token
+                    and remote_prog - local_prog
+                    > max(10, local_prog)
+                )
+                if stale_fork:
+                    room_game_tokens[room] = local_token
+                    keep_local = True
+                else:
+                    # Peer resumed/moved further — never keep a staler local board.
+                    winner_auth = authority
             elif local_prog > remote_prog:
                 room_game_tokens[room] = local_token
                 keep_local = True

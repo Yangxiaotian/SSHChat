@@ -923,10 +923,26 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$SCRIPT_DIR/file_sharing.py" "$SCRIPT_DIR/file_http_server.py" "$SCRIPT_DIR/i18n.py" "$SCRIPT_DIR/locale_store.py" "$PREFIX/"
+# BusyBox cp/install on iSH (fake FS) do NOT truncate the destination when the
+# source is shorter — leftover bytes corrupt Python sources (SyntaxError).
+# Always replace by removing the target first on iSH.
+copy_app_file() {
+  local src=$1 dest=$2
+  if is_ish; then
+    rm -f "$dest"
+  fi
+  cp -f "$src" "$dest"
+}
+for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
+  library.py dict_lookup.py session_store.py federation.py offline_messages.py \
+  file_sharing.py file_http_server.py i18n.py locale_store.py; do
+  copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
+done
 rm -rf "$PREFIX/locales"
 cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
-cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/admin-remove-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
+for _f in chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
+  copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
+done
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
