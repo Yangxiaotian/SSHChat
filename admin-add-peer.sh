@@ -28,6 +28,9 @@ BRIDGE="$PREFIX/federation-bridge.sh"
 KEY_PRIV="$FED_DIR/id_ed25519"
 KEY_PUB="$FED_DIR/id_ed25519.pub"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/ensure-federation-user.sh"
+
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
 
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
@@ -89,41 +92,55 @@ if [[ ! -f "$KEY_PRIV" ]]; then
   echo "info: generated federation key $KEY_PUB"
 fi
 
-# Ensure federation user exists (Linux). Home is separate from FED_DIR so sshd
-# accepts ownership (service user owns FED_DIR for peers.json + private key).
-if ! is_darwin; then
-  if ! id "$FED_USER" &>/dev/null; then
-    mkdir -p "$FED_HOME"
-    useradd -r -s /usr/sbin/nologin -d "$FED_HOME" -c "SSHChat federation" "$FED_USER"
-    echo "info: created system user $FED_USER (home $FED_HOME)"
-  else
-    cur_home=$(getent passwd "$FED_USER" | cut -d: -f6)
-    if [[ -n "$cur_home" && "$cur_home" != "$FED_HOME" ]]; then
-      mkdir -p "$FED_HOME"
-      if [[ -f "$cur_home/.ssh/authorized_keys" && ! -f "$FED_HOME/.ssh/authorized_keys" ]]; then
-        mkdir -p "$FED_HOME/.ssh"
-        cp -a "$cur_home/.ssh/authorized_keys" "$FED_HOME/.ssh/authorized_keys"
-      fi
-      usermod -d "$FED_HOME" "$FED_USER" 2>/dev/null || true
-      echo "info: federation SSH home -> $FED_HOME (was $cur_home)"
+# Ensure federation user exists (Linux + macOS). Home is separate from FED_DIR
+# so sshd accepts ownership (service user owns FED_DIR for peers.json + private key).
+ensure_client_group() {
+  if is_darwin; then
+    if dscl . -read "/Groups/sshchat-clients" &>/dev/null; then
+      return 0
     fi
+    if command -v dseditgroup &>/dev/null; then
+      dseditgroup -o create sshchat-clients
+      echo "info: created macOS group sshchat-clients"
+    fi
+    return 0
   fi
-  FED_GROUP=$(primary_group_of "$FED_USER")
-  mkdir -p "$FED_HOME"
-  chown "$FED_USER:$FED_GROUP" "$FED_HOME"
-  chmod 755 "$FED_HOME"
-  install -d -m 700 -o "$FED_USER" -g "$FED_GROUP" "$FED_HOME/.ssh"
-  AUTH_DIR=$(getent passwd "$FED_USER" | cut -d: -f6)
-  AUTH_DIR=${AUTH_DIR:-$FED_HOME}
-  AUTH_KEYS="$AUTH_DIR/.ssh/authorized_keys"
-  mkdir -p "$(dirname "$AUTH_KEYS")"
-  chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")"
-  chmod 700 "$(dirname "$AUTH_KEYS")"
-else
-  AUTH_KEYS="$FED_DIR/authorized_keys_inbound"
+  local g=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
+  if getent group "$g" &>/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v groupadd &>/dev/null; then
+    groupadd -r "$g"
+    echo "info: created system group $g"
+  fi
+}
+
+add_fed_user_to_client_group() {
+  local g=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
+  id "$FED_USER" &>/dev/null || return 0
+  if is_darwin; then
+    if dscl . -read "/Groups/$g" &>/dev/null && ! id -Gn "$FED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+      dseditgroup -o edit -a "$FED_USER" -t user "$g" 2>/dev/null || true
+    fi
+  elif getent group "$g" >/dev/null 2>&1; then
+    usermod -aG "$g" "$FED_USER" 2>/dev/null || true
+  fi
+}
+
+ensure_federation_user "$FED_USER" "$FED_HOME" "$FED_DIR" || true
+ensure_client_group
+add_fed_user_to_client_group
+FED_GROUP=$(primary_group_of "$FED_USER" 2>/dev/null || printf '%s' "$FED_USER")
+AUTH_KEYS=$(federation_auth_keys_path "$FED_USER" "$FED_HOME" "$FED_DIR")
+mkdir -p "$(dirname "$AUTH_KEYS")"
+if [[ ! -f "$AUTH_KEYS" ]]; then
   touch "$AUTH_KEYS"
-  chmod 600 "$AUTH_KEYS"
 fi
+if id "$FED_USER" &>/dev/null; then
+  chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
+  chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
+fi
+chmod 600 "$AUTH_KEYS" 2>/dev/null || true
 
 # Local federation port the peer will ssh -W into (this machine).
 LOCAL_FED_PORT=${SSHCHAT_FEDERATION_PORT:-$((CHAT_PORT + 1))}
@@ -142,17 +159,19 @@ if [[ -f "$AUTH_KEYS" ]] && grep -qF "$KEY_BLOB" "$AUTH_KEYS" 2>/dev/null; then
     echo "$FINAL_LINE" >>"$TMP"
     mv "$TMP" "$AUTH_KEYS"
     chmod 600 "$AUTH_KEYS"
-    if ! is_darwin; then
-      chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
+    if id "$FED_USER" &>/dev/null; then
+      chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS" 2>/dev/null || true
     fi
+    sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
     echo "info: updated peer inbound key options in $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
   fi
 else
   echo "$FINAL_LINE" >>"$AUTH_KEYS"
   chmod 600 "$AUTH_KEYS"
-  if ! is_darwin; then
-    chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
+  if id "$FED_USER" &>/dev/null; then
+    chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS" 2>/dev/null || true
   fi
+  sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
   echo "info: added peer inbound key to $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
 fi
 
@@ -213,20 +232,16 @@ if id "$SVC_USER" &>/dev/null; then
     chmod 644 "$KEY_PUB" 2>/dev/null || true
   fi
 fi
-if ! is_darwin && id "$FED_USER" &>/dev/null; then
-  # Need group access to traverse /opt/sshchat (750) and read sshchat.env for bridge.
-  CLIENT_GROUP_NAME=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
-  if getent group "$CLIENT_GROUP_NAME" >/dev/null 2>&1; then
-    usermod -aG "$CLIENT_GROUP_NAME" "$FED_USER" 2>/dev/null || true
-  fi
+if id "$FED_USER" &>/dev/null; then
+  add_fed_user_to_client_group
   if [[ -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
     chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
     chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
     chmod 600 "$AUTH_KEYS" 2>/dev/null || true
   fi
-  # Keep sshd-compliant home ownership.
   chown "$FED_USER:$FED_GROUP" "$FED_HOME" 2>/dev/null || true
   chmod 755 "$FED_HOME" 2>/dev/null || true
+  sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
 fi
 # Bridge is forced-command for inbound peers.
 chmod 755 "$BRIDGE" 2>/dev/null || true
