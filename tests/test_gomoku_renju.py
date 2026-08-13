@@ -37,6 +37,15 @@ class TestGomokuRenjuAxisPatterns(unittest.TestCase):
     def test_dead_four_not_counted(self) -> None:
         self.assertFalse(_gomoku_axis_has_four("OXXXXO..."))
 
+    def test_jump_four_patterns(self) -> None:
+        self.assertTrue(_gomoku_axis_has_four("XX.XX...."))
+        self.assertTrue(_gomoku_axis_has_four("XXX.X...."))
+        self.assertTrue(_gomoku_axis_has_four("X.XXX...."))
+
+    def test_three_that_makes_rush_four_is_not_four(self) -> None:
+        """OXX.X fills to OXXXX (冲四), not five — not yet a 四."""
+        self.assertFalse(_gomoku_axis_has_four("OXX.X...."))
+
 
 class TestGomokuRenjuForbidden(unittest.TestCase):
     def _empty_grid(self) -> list[list[int]]:
@@ -102,7 +111,7 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
 
     def test_double_open_three_on_user_position(self) -> None:
-        """Regression: (10,5) is forbidden — two four-threats on vertical and diagonal."""
+        """Regression: (10,5) is forbidden — two open threes (not false 四四)."""
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
         rows = [
             "...............",
@@ -128,13 +137,11 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
                 elif ch == "o":
                     g[r][c] = 2
         last = (9, 4)  # (10, 5)
-        self.assertIn("四四", _gomoku_renju_forbidden(g, last[0], last[1]))
+        self.assertIn("三三", _gomoku_renju_forbidden(g, last[0], last[1]))
 
-    def test_jump_to_five_gap_not_counted_as_four(self) -> None:
-        """Inner gap-fill X . X X X → five is not a 四 on that axis."""
-        line = "X.XXX...."
-        self.assertTrue(_gomoku_axis_has_four(line))  # extend at 5 → XXXX
-        # isolated vertical — only one axis, not 四四
+    def test_jump_four_single_axis_not_double_four(self) -> None:
+        """Jump four on one axis only is legal (needs two axes for 四四)."""
+        self.assertTrue(_gomoku_axis_has_four("X.XXX...."))
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
         for r in (6, 8, 9):
             g[r][4] = 1
@@ -143,19 +150,19 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
         self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
 
     def test_zouyu_yxt_board_11_5_not_double_four(self) -> None:
-        """Regression: live #default board; old logic false 四四 on diagonal XXX.X."""
+        """Regression: live #default board; OXX.X on two axes is not 四四."""
         g = [[0] * GOMOKU_SIZE for _ in range(GOMOKU_SIZE)]
         rows = [
             "...............",
-            "..#...........",
-            "....#..o......",
-            ".#..oo#o......",
-            "..o#o##.......",
-            ".#ooo#ooo#....",
-            ".o##o#.o#o....",
-            "...o#oo##.....",
-            "..o.###..o....",
-            ".#............",
+            ".......#.......",
+            "....#..o.......",
+            ".#..oo#o.......",
+            "..o#o##........",
+            ".#ooo#ooo#.....",
+            ".o##o#.o#o.....",
+            "...o#oo##......",
+            "..o.###..o.....",
+            ".#.............",
             "...............",
             "...............",
             "...............",
@@ -168,15 +175,18 @@ class TestGomokuRenjuReportedPosition(unittest.TestCase):
                     g[r][c] = 1
                 elif ch == "o":
                     g[r][c] = 2
-        g[6][9] = 2  # white last (7, 10)
+        # Exact /game show: white last already at (7,10)
         last = (10, 4)  # black tries (11, 5)
+        g[last[0]][last[1]] = 1
         self.assertEqual(_gomoku_renju_forbidden(g, last[0], last[1]), [])
-        self.assertFalse(_gomoku_axis_has_four("XXX.X...."))
+        self.assertFalse(_gomoku_axis_has_four("OXX.X...."))
 
         c1, c2 = object(), object()
         game = GomokuGame(c1, "zouyu")
         game.try_join(c2, "yxt")
-        game.grid = [row[:] for row in g]
+        g2 = [row[:] for row in g]
+        g2[last[0]][last[1]] = 0
+        game.grid = g2
         game.state = "playing"
         game._turn = 1
         game._last = (6, 9)
