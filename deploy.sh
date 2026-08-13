@@ -441,6 +441,7 @@ apply_federation_permissions() {
   local fed_home=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
   local svc_user="$RUN_USER"
   local svc_group fed_group
+  local cur_home=""
   svc_group=$(primary_group_of "$svc_user")
   [[ -d "$fed_dir" ]] || mkdir -p "$fed_dir"
 
@@ -469,11 +470,14 @@ apply_federation_permissions() {
     chmod 640 "$fed_dir/peers.json"
   fi
 
-  if ! is_darwin && id "$fed_user" &>/dev/null; then
+  if id "$fed_user" &>/dev/null; then
     fed_group=$(primary_group_of "$fed_user")
     add_user_to_client_group "$fed_user" || true
-    local cur_home
-    cur_home=$(getent passwd "$fed_user" | cut -d: -f6)
+    if is_darwin; then
+      cur_home=$(dscl . -read "/Users/$fed_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)
+    else
+      cur_home=$(getent passwd "$fed_user" | cut -d: -f6)
+    fi
     mkdir -p "$fed_home"
     # sshd: home must be owned by the user (or root) and not group/other-writable.
     chown "$fed_user:$fed_group" "$fed_home"
@@ -484,7 +488,7 @@ apply_federation_permissions() {
         mkdir -p "$fed_home/.ssh"
         cp -a "$cur_home/.ssh/authorized_keys" "$fed_home/.ssh/authorized_keys"
       fi
-      if command -v usermod >/dev/null 2>&1; then
+      if ! is_darwin && command -v usermod >/dev/null 2>&1; then
         usermod -d "$fed_home" "$fed_user" 2>/dev/null || true
         echo "info: federation SSH home -> $fed_home (was $cur_home)"
       fi
@@ -495,6 +499,17 @@ apply_federation_permissions() {
     if [[ -f "$fed_home/.ssh/authorized_keys" ]]; then
       chown "$fed_user:$fed_group" "$fed_home/.ssh/authorized_keys"
       chmod 600 "$fed_home/.ssh/authorized_keys"
+    fi
+    if [[ -f "$fed_dir/authorized_keys_inbound" && -f "$fed_home/.ssh/authorized_keys" ]]; then
+      # shellcheck disable=SC1091
+      source "$SCRIPT_DIR/scripts/ensure-federation-user.sh"
+      sync_federation_staging_keys "$fed_home/.ssh/authorized_keys" "$fed_dir/authorized_keys_inbound"
+    elif [[ -f "$fed_dir/authorized_keys_inbound" && ! -f "$fed_home/.ssh/authorized_keys" ]]; then
+      mkdir -p "$fed_home/.ssh"
+      cp -a "$fed_dir/authorized_keys_inbound" "$fed_home/.ssh/authorized_keys"
+      chown "$fed_user:$fed_group" "$fed_home/.ssh/authorized_keys"
+      chmod 600 "$fed_home/.ssh/authorized_keys"
+      echo "info: migrated federation inbound keys -> $fed_home/.ssh/authorized_keys"
     fi
   fi
 }
@@ -767,6 +782,7 @@ fi
 if is_darwin && [[ "${SSHCHAT_NO_MAC_ADAPT:-}" != "1" ]]; then
   if [[ "$CREATE_RUN_USER" -eq 1 ]]; then
     echo "info: macOS: local-dev install (no Linux service user/systemd; uses group $CLIENT_GROUP for chat access)" >&2
+    echo "info: macOS: federation user ${SSHCHAT_FEDERATION_USER:-sshchat-federation} is still created for inbound SSH links" >&2
     echo "info: macOS: use $PREFIX/server.sh to run the server; set SSHCHAT_SERVER in $PREFIX/sshchat.env for LAN clients" >&2
     CREATE_RUN_USER=0
     INSTALL_SYSTEMD=0
@@ -1108,23 +1124,11 @@ if [[ ! -f "$FED_DIR/id_ed25519" ]]; then
   ssh-keygen -t ed25519 -f "$FED_DIR/id_ed25519" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)" >/dev/null
   echo "info: generated federation key $FED_DIR/id_ed25519.pub"
 fi
-if [[ "$CREATE_RUN_USER" -eq 1 ]] && ! is_darwin; then
-  if ! id "$FED_USER" &>/dev/null; then
-    mkdir -p "$FED_HOME"
-    # Prefer useradd (standard Linux), fall back to adduser (Alpine/BusyBox)
-    if command -v useradd &>/dev/null; then
-      useradd -r -s /usr/sbin/nologin -d "$FED_HOME" -c "SSHChat federation" "$FED_USER" 2>/dev/null || true
-    elif command -v adduser &>/dev/null; then
-      adduser -S -D -h "$FED_HOME" -s /sbin/nologin -g "SSHChat federation" "$FED_USER" 2>/dev/null || \
-        adduser -S -D -h "$FED_HOME" -s /bin/false "$FED_USER" 2>/dev/null || true
-    fi
-    if id "$FED_USER" &>/dev/null; then
-      echo "info: created federation user $FED_USER (home $FED_HOME)"
-    fi
-  fi
-  if id "$FED_USER" &>/dev/null; then
-    add_user_to_client_group "$FED_USER" || true
-  fi
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/ensure-federation-user.sh"
+ensure_federation_user "$FED_USER" "$FED_HOME" "$FED_DIR" || true
+if id "$FED_USER" &>/dev/null; then
+  add_user_to_client_group "$FED_USER" || true
 fi
 apply_federation_permissions
 

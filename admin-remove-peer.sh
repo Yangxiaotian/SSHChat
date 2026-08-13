@@ -26,6 +26,9 @@ FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
 FED_DIR="$PREFIX/federation"
 PEERS_JSON="$FED_DIR/peers.json"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/ensure-federation-user.sh"
+
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
 
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
@@ -63,16 +66,11 @@ if [[ ! -f "$PEERS_JSON" ]]; then
   exit 1
 fi
 
-# Resolve authorized_keys path.
-if ! is_darwin; then
-  if id "$FED_USER" &>/dev/null; then
-    AUTH_DIR=$(getent passwd "$FED_USER" | cut -d: -f6)
-    AUTH_KEYS="$AUTH_DIR/.ssh/authorized_keys"
-  else
-    AUTH_KEYS=""
-  fi
-else
-  AUTH_KEYS="$FED_DIR/authorized_keys_inbound"
+# Resolve authorized_keys path (live sshd file when federation user exists).
+ensure_federation_user "$FED_USER" "$FED_HOME" "$FED_DIR" || true
+AUTH_KEYS=$(federation_auth_keys_path "$FED_USER" "$FED_HOME" "$FED_DIR")
+if [[ -n "$AUTH_KEYS" && ! -f "$AUTH_KEYS" ]]; then
+  AUTH_KEYS=""
 fi
 
 PEER_PUBKEY=""
@@ -149,10 +147,11 @@ if [[ -n "$PEER_PUBKEY" && -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
     grep -vF "$KEY_BLOB" "$AUTH_KEYS" >"$TMP" || true
     mv "$TMP" "$AUTH_KEYS"
     chmod 600 "$AUTH_KEYS"
-    if ! is_darwin && id "$FED_USER" &>/dev/null; then
+    if id "$FED_USER" &>/dev/null; then
       FED_GROUP=$(primary_group_of "$FED_USER")
       chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS"
     fi
+    sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
     echo "info: removed peer inbound key from $AUTH_KEYS"
   else
     echo "info: peer pubkey not found in $AUTH_KEYS (already gone?)"
