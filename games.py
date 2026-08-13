@@ -1374,27 +1374,15 @@ def _gomoku_line_five_threat_count(line: str) -> int:
 def _gomoku_axis_has_four(line: str) -> bool:
     """One four-threat on an axis through center X (活四/冲四/跳四, not dead four).
 
-    Gap-fills that jump straight to five (e.g. X . X X X filled at the inner gap)
-    are win threats, not Renju 四; treating them as 四 caused false 四四.
+    Renju 四 = there is an empty cell where placing X makes five. Shapes that only
+    become a 冲四 after one more move (e.g. OXX.X → OXXXX) are 三-level, not 四;
+    counting those caused false 四四 (e.g. zouyu/yxt at 11,5).
     """
     if line[4] != "X":
         return False
-    if _gomoku_line_max_run(line) == 4:
-        return _gomoku_line_five_threat_count(line) >= 1
-    for pos in range(len(line)):
-        if line[pos] != ".":
-            continue
-        trial = list(line)
-        trial[pos] = "X"
-        filled = "".join(trial)
-        if _gomoku_line_max_run(filled) >= 5:
-            continue
-        if (
-            _gomoku_line_max_run(filled) == 4
-            and _gomoku_line_five_threat_count(filled) >= 1
-        ):
-            return True
-    return False
+    if _gomoku_line_max_run(line) >= 5:
+        return False
+    return _gomoku_line_five_threat_count(line) >= 1
 
 
 def _gomoku_axis_open_three(line: str) -> bool:
