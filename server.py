@@ -23,6 +23,7 @@ from html import unescape
 from pathlib import Path
 from typing import Optional
 
+import canvas_sharing
 import dict_lookup
 import federation
 import games
@@ -1111,7 +1112,9 @@ def _build_file_ready_message(
         "[*] 2. 图片、视频、PDF 等会直接预览，确认后再点按钮保存\n",
         "[*] 3. 文件只能下载一次，存好之前别关页面\n",
         "[*] 4. 每个接收者的网址和密钥都不同\n",
+        "[*] 5. 图形客户端会折叠成按钮，可一键打开\n",
         "[*] ================================\n",
+        f"[*] gui-open download {download_url} {key}\n",
     ])
     return "".join(message_lines)
 
@@ -3300,6 +3303,201 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
         )
 
 
+def _canvas_invite_message(
+    *,
+    creator: str,
+    url: str,
+    key: str,
+    room: Optional[str],
+    title: str = "",
+) -> str:
+    where = f"房间 #{room}" if room else "私密画布"
+    title_line = f"[*] 标题: {title}\n" if title else ""
+    return (
+        f"[*] ========== 共享画布 ==========\n"
+        f"[*] 发起人: {creator}\n"
+        f"[*] 范围: {where}\n"
+        f"{title_line}"
+        f"[*]\n"
+        f"[*] 画布网址:\n"
+        f"[*] {url}\n"
+        f"[*]\n"
+        f"[*] 访问密钥: {key}\n"
+        f"[*]\n"
+        f"[*] 说明:\n"
+        f"[*] 1. 打开网址，在页面里输入上面的密钥\n"
+        f"[*] 2. 密钥不在网址里；每人的网址和密钥都不同\n"
+        f"[*] 3. 解锁后可共同绘画，笔画会自动同步\n"
+        f"[*] 4. 图形客户端会折叠成按钮，可一键打开\n"
+        f"[*] =====================================\n"
+        f"[*] gui-open canvas {url} {key}\n"
+    )
+
+
+def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
+    """Privately deliver each participant their canvas URL + key."""
+    if file_http is None:
+        return
+    base_url = file_http.get_base_url()
+    for participant, token in session.tokens.items():
+        key = session.keys.get(participant) or ""
+        url = f"{base_url}/canvas/{token}"
+        message = _canvas_invite_message(
+            creator=session.creator,
+            url=url,
+            key=key,
+            room=session.room,
+            title=session.title,
+        )
+        recipient_lower = participant.lower()
+        with lock:
+            for c, info in clients.items():
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(c, message)
+                except Exception as e:
+                    print(f"[Canvas] Failed to notify {participant}: {e}")
+
+
+def _handle_canvas(conn, sender: str, payload: str) -> None:
+    """Handle /canvas — shared web drawing board (URL + separate key)."""
+    if file_http is None:
+        send_line(conn, "[*] 画布功能依赖文件网页服务，当前未启用。\n")
+        return
+
+    raw = payload[len("/canvas") :].strip()
+    if payload.lower().startswith("/board"):
+        raw = payload[len("/board") :].strip()
+
+    if raw.lower() in ("help", "?", "帮助"):
+        send_line(conn, "[*] 用法：\n")
+        send_line(conn, "[*]   /canvas            - 当前房间共享画布\n")
+        send_line(conn, "[*]   /canvas #<房间>    - 指定房间共享画布\n")
+        send_line(conn, "[*]   /canvas <昵称>     - 与某人私密画布\n")
+        send_line(conn, "[*]   /canvas close      - 发起人关闭当前房间画布\n")
+        send_line(conn, "[*]   /canvas new        - 强制新开一局（即使房间已有）\n")
+        send_line(
+            conn,
+            "[*] 每人收到独立网址和密钥（密钥不在网址里）；解锁后共同绘画。\n",
+        )
+        return
+
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    force_new = False
+    if target.lower() in ("new", "新建"):
+        force_new = True
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+    if target.lower() in ("close", "关闭", "end"):
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+        session = canvas_sharing.canvas_store.find_open_for_room(room_name)
+        if session is None:
+            send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的画布。\n")
+            return
+        ok, err = canvas_sharing.canvas_store.close_session(session.session_id, sender)
+        if not ok:
+            send_line(conn, f"[*] {err}\n")
+            return
+        send_line(conn, f"[*] 已关闭房间 #{room_name} 的共享画布。\n")
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 关闭了共享画布。\n".encode("utf-8"),
+        )
+        return
+
+    recipients: list[str] = []
+    room_name: Optional[str] = None
+
+    if not target:
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+
+    if room_name is not None:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            for c in rooms[room_name]:
+                if c in clients:
+                    recipients.append(clients[c]["name"])
+
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+
+        if len({n.lower() for n in recipients}) < 1:
+            send_line(conn, f"[*] 房间 #{room_name} 里没有人。\n")
+            return
+
+        if not force_new:
+            existing = canvas_sharing.canvas_store.find_open_for_room(room_name)
+            if existing is not None:
+                send_line(
+                    conn,
+                    f"[*] 房间 #{room_name} 已有共享画布；正在重新发送邀请。"
+                    f"（强制新开用 /canvas new）\n",
+                )
+                _deliver_canvas_invites(existing)
+                return
+    else:
+        target_lower = target.lower()
+        with lock:
+            online = [
+                info["name"]
+                for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        if not online:
+            send_line(conn, f"[*] 用户 {target} 不在线。\n")
+            return
+        if target_lower == sender.lower():
+            send_line(conn, "[*] 私密画布请指定另一位在线用户。\n")
+            return
+        recipients = [sender, online[0]]
+
+    try:
+        session = canvas_sharing.canvas_store.create_session(
+            creator=sender,
+            participants=recipients,
+            room=room_name,
+        )
+    except Exception as e:
+        print(f"[Canvas] create failed: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建画布失败，请稍后重试。\n")
+        return
+
+    if room_name:
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 开启了共享画布（请查看私信中的网址与密钥）。\n".encode(
+                "utf-8"
+            ),
+        )
+    else:
+        send_line(conn, f"[*] 已与 {recipients[-1]} 创建私密画布。\n")
+
+    _deliver_canvas_invites(session)
+
+
 def _handle_sendfile(conn, sender: str, payload: str) -> None:
     """Handle /sendfile command for secure file sharing."""
     global file_http
@@ -3467,7 +3665,14 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                             "各自只能下载一次\n",
                         )
                         send_line(
+                            conn, "[*] 5. 图形客户端会折叠成按钮，可一键打开\n"
+                        )
+                        send_line(
                             conn, "[*] =====================================\n"
+                        )
+                        send_line(
+                            conn,
+                            f"[*] gui-open upload {upload_url} {upload_key}\n",
                         )
                     else:
                         send_line(
@@ -3515,7 +3720,12 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
         send_line(conn, "[*] 2. 选择要发的文件并上传，文件名以所选文件为准\n")
         send_line(conn, "[*] 3. 上传成功即完成，此网址随后作废\n")
         send_line(conn, "[*] 4. 接收者将收到各自的下载网址和密钥，各自只能下载一次\n")
+        send_line(conn, "[*] 5. 图形客户端会折叠成按钮，可一键打开\n")
         send_line(conn, "[*] =====================================\n")
+        send_line(
+            conn,
+            f"[*] gui-open upload {upload_url} {transfer.upload_key}\n",
+        )
 
     except Exception as e:
         print(f"[FileTransfer] Error creating transfer: {e}")
@@ -5137,6 +5347,10 @@ def handle_command(conn, payload: str) -> None:
         _handle_sendfile(conn, name, payload)
         return
 
+    if cmd == "/canvas" or cmd == "/board":
+        _handle_canvas(conn, name, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
 
 
@@ -5653,7 +5867,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /leave /part /announce /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /leave /part /announce /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -5733,6 +5947,7 @@ def run_server() -> int:
                     if not _shutdown_requested:
                         try:
                             file_sharing.file_transfer_store.cleanup_expired()
+                            canvas_sharing.canvas_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

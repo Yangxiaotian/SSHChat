@@ -40,6 +40,8 @@ MESSAGES: dict = {
         "[*]              Filename is whatever you upload; you need not put it in the command.\n",
         "[*]              The key is not in the URL—enter it on the page; images, video, PDF can preview in-browser.\n",
         "[*]              Upload and download tokens are single-use; stolen links are useless after use.\n",
+        "[*] /canvas        Shared web canvas for the current room; each person gets a unique URL + key.\n",
+        "[*] /canvas <nick> / #<room> / close / new  Private board, room board, close, or force a new session.\n",
         "[*] /help          Show this help.\n",
     ],
     "game_help_lines": [

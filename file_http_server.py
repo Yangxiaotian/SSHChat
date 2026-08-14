@@ -7,6 +7,7 @@ Provides:
 - Download page:   GET  /download/<token>        - HTML page with key input and preview
 - Ticket exchange: POST /download/<token>/ticket - Key in body, returns two one-time links
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
+- Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
 - HTTPS support with auto-generated or provided certificates
 
 No key is ever carried in a URL, and every URL that serves file bytes is
@@ -28,6 +29,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, quote, parse_qs
 from pathlib import Path
 from typing import Optional
+import canvas_http
 import file_sharing
 
 
@@ -1221,6 +1223,9 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle key exchange and file upload."""
+        if canvas_http.handle_canvas_post(self):
+            return
+
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
         store = file_sharing.file_transfer_store
@@ -1387,6 +1392,9 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if canvas_http.handle_canvas_get(self):
+            return
+
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
         store = file_sharing.file_transfer_store

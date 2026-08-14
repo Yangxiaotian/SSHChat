@@ -66,6 +66,18 @@ declare global {
       analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest) => Promise<GoKataGoAnalyzeResponse>;
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
       analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
+      openSecureWebSession: (payload: {
+        kind: 'canvas' | 'upload' | 'download';
+        url: string;
+        key: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      uploadSecureFile: (payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      }) => Promise<{ ok: boolean; filename?: string; error?: string }>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;

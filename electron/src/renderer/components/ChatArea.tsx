@@ -3,7 +3,14 @@ import { useChatStore } from '../store/chatStore';
 import TabBar from './TabBar';
 import InputBar from './InputBar';
 import MessageBubble from './MessageBubble';
+import SecureLinkCard from './SecureLinkCard';
 import GameWorkbench from './GameWorkbench';
+import { groupSecureLinkMessages } from '../lib/secureLinks';
+import {
+  extractFileFromDataTransfer,
+  getPasteUploadState,
+  startPasteSendFile,
+} from '../lib/pasteUpload';
 
 const WORKBENCH_HEIGHT_KEY = 'sshchat:workbench-height:v1';
 const WORKBENCH_MIN_HEIGHT = 96;
@@ -111,6 +118,7 @@ export default function ChatArea() {
     }
   });
   const [isResizing, setIsResizing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
@@ -123,10 +131,15 @@ export default function ChatArea() {
     });
   }, [roomMessages]);
 
+  const timelineItems = useMemo(
+    () => groupSecureLinkMessages(visibleMessages),
+    [visibleMessages],
+  );
+
   useEffect(() => {
     if (!stickToBottom) return;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages, stickToBottom]);
+  }, [timelineItems, stickToBottom]);
 
   useEffect(() => {
     setStickToBottom(true);
@@ -235,8 +248,41 @@ export default function ChatArea() {
         )}
 
         <div className="chat-messages-surface">
-          <div ref={chatScrollRef} className="chat-messages" onScroll={onChatScroll}>
-            {visibleMessages.length === 0 ? (
+          <div
+            ref={chatScrollRef}
+            className={`chat-messages${dragOver ? ' drag-over' : ''}`}
+            onScroll={onChatScroll}
+            onDragEnter={(e) => {
+              if (status !== 'connected') return;
+              if (![...e.dataTransfer.types].includes('Files')) return;
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragOver={(e) => {
+              if (status !== 'connected') return;
+              if (![...e.dataTransfer.types].includes('Files')) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (status !== 'connected' || getPasteUploadState().busy) return;
+              const file = extractFileFromDataTransfer(e.dataTransfer);
+              if (!file) return;
+              void startPasteSendFile(file, activeRoom);
+            }}
+            onPaste={(e) => {
+              if (status !== 'connected' || getPasteUploadState().busy) return;
+              const file = extractFileFromDataTransfer(e.clipboardData);
+              if (!file) return;
+              e.preventDefault();
+              void startPasteSendFile(file, activeRoom);
+            }}
+          >
+            {timelineItems.length === 0 ? (
               <div className="chat-empty">
                 <div className="chat-empty-icon">{'</>'}</div>
                 <div className="chat-empty-text">
@@ -246,9 +292,18 @@ export default function ChatArea() {
                 </div>
               </div>
             ) : (
-              visibleMessages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} isMe={msg.sender === nickname} currentNickname={nickname} />
-              ))
+              timelineItems.map((item) =>
+                item.type === 'secure-link' ? (
+                  <SecureLinkCard key={item.id} payload={item.payload} />
+                ) : (
+                  <MessageBubble
+                    key={item.message.id}
+                    message={item.message}
+                    isMe={item.message.sender === nickname}
+                    currentNickname={nickname}
+                  />
+                ),
+              )
             )}
             <div ref={messagesEndRef} />
           </div>

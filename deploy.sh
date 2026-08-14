@@ -380,8 +380,8 @@ apply_data_plane_permissions() {
     fi
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$u:$g" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
@@ -526,8 +526,8 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/locales"
@@ -935,7 +935,7 @@ copy_app_file() {
 }
 for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
   library.py dict_lookup.py session_store.py federation.py offline_messages.py \
-  file_sharing.py file_http_server.py i18n.py locale_store.py; do
+  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py i18n.py locale_store.py; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
 rm -rf "$PREFIX/locales"

@@ -92,6 +92,22 @@ const api = {
   analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
     return ipcRenderer.invoke(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, payload);
   },
+  openSecureWebSession: (payload: {
+    kind: 'canvas' | 'upload' | 'download';
+    url: string;
+    key: string;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.OPEN_SECURE_WEB_SESSION, payload);
+  },
+  uploadSecureFile: (payload: {
+    url: string;
+    key: string;
+    filename: string;
+    mime: string;
+    data: ArrayBuffer;
+  }): Promise<{ ok: boolean; filename?: string; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.UPLOAD_SECURE_FILE, payload);
+  },
 
   // Event listeners
   onChatMessage: (callback: (message: ChatMessage) => void) => {

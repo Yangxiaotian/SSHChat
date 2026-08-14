@@ -23,6 +23,97 @@ import {
   ChatHistorySnapshot,
 } from '../shared/protocol';
 
+type SecureWebKind = 'canvas' | 'upload' | 'download';
+
+function buildSecureKeyAutofillScript(kind: SecureWebKind, key: string): string {
+  const safeKey = JSON.stringify(String(key || '').trim().toUpperCase());
+  const safeKind = JSON.stringify(kind);
+  // Fill the page key field. For canvas/download, also trigger unlock/verify.
+  // For upload, only fill the key so the user can still pick a file.
+  // Key never appears in the window URL.
+  return `(() => {
+    const key = ${safeKey};
+    const kind = ${safeKind};
+    const input = document.getElementById('key');
+    if (!input) return { ok: false, error: 'key input missing' };
+    input.focus();
+    input.value = key;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (kind === 'upload') return { ok: true, mode: 'upload-fill-only' };
+    const unlock = document.getElementById('unlockBtn');
+    if (unlock) { unlock.click(); return { ok: true, mode: 'canvas' }; }
+    const submit = document.getElementById('submitBtn');
+    if (submit) { submit.click(); return { ok: true, mode: 'download' }; }
+    const form = document.getElementById('downloadForm');
+    if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return { ok: true, mode: 'form' }; }
+    return { ok: false, error: 'submit control missing' };
+  })()`;
+}
+
+async function openSecureWebSession(payload: {
+  kind: SecureWebKind;
+  url: string;
+  key: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const url = String(payload?.url || '').trim();
+  const key = String(payload?.key || '').trim().toUpperCase();
+  const kind = payload?.kind;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return { ok: false, error: 'Invalid URL' };
+  }
+  if (!key || key.length !== 6) {
+    return { ok: false, error: 'Invalid key' };
+  }
+  if (kind !== 'canvas' && kind !== 'upload' && kind !== 'download') {
+    return { ok: false, error: 'Invalid kind' };
+  }
+
+  const win = new BrowserWindow({
+    width: kind === 'canvas' ? 1100 : 900,
+    height: kind === 'canvas' ? 820 : 720,
+    autoHideMenuBar: true,
+    title: kind === 'canvas' ? 'SSHChat Canvas' : kind === 'upload' ? 'SSHChat Upload' : 'SSHChat File',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  try {
+    await win.loadURL(url);
+  } catch (e) {
+    try {
+      win.close();
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: e instanceof Error ? e.message : 'Failed to open page' };
+  }
+
+  const tryFill = async () => {
+    try {
+      if (win.isDestroyed()) return;
+      await win.webContents.executeJavaScript(buildSecureKeyAutofillScript(kind, key), true);
+    } catch {
+      // Page may still be settling; a later did-finish-load/dom-ready retry helps.
+    }
+  };
+
+  win.webContents.once('dom-ready', () => {
+    void tryFill();
+  });
+  win.webContents.once('did-finish-load', () => {
+    void tryFill();
+  });
+  // One delayed retry for slow Cloudflare/tunnel pages.
+  setTimeout(() => {
+    void tryFill();
+  }, 800);
+
+  return { ok: true };
+}
+
 // ============================================================
 // VSCode Disguise: Process name, app name, user agent
 // ============================================================
@@ -2353,6 +2444,63 @@ function setupIPC(): void {
   ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, _payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
     return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.OPEN_SECURE_WEB_SESSION,
+    async (_event, payload: { kind: SecureWebKind; url: string; key: string }) => {
+      return openSecureWebSession(payload);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.UPLOAD_SECURE_FILE,
+    async (
+      _event,
+      payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      },
+    ): Promise<{ ok: boolean; filename?: string; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      const key = String(payload?.key || '').trim().toUpperCase();
+      const filename = String(payload?.filename || 'file').replace(/[\\/]/g, '_').slice(0, 200) || 'file';
+      const mime = String(payload?.mime || 'application/octet-stream');
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, error: 'Invalid upload URL' };
+      }
+      if (!key || key.length !== 6) {
+        return { ok: false, error: 'Invalid upload key' };
+      }
+      if (!payload?.data) {
+        return { ok: false, error: 'Empty file data' };
+      }
+
+      try {
+        const form = new FormData();
+        const bytes = Buffer.from(payload.data);
+        const blob = new Blob([bytes], { type: mime });
+        form.append('file', blob, filename);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'X-Upload-Key': key },
+          body: form,
+        });
+        const result = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          filename?: string;
+        };
+        if (!response.ok) {
+          return { ok: false, error: result.error || `HTTP ${response.status}` };
+        }
+        return { ok: true, filename: result.filename || filename };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
 }
 
 app.whenReady().then(() => {

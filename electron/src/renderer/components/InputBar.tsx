@@ -2,6 +2,14 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { SHAKE_TOKEN } from '../../shared/protocol';
 import { useTranslation } from '../i18n';
+import {
+  clearPasteUpload,
+  extractFileFromDataTransfer,
+  getPasteUploadState,
+  startPasteSendFile,
+  subscribePasteUpload,
+  type PasteUploadState,
+} from '../lib/pasteUpload';
 
 const COMMAND_KEYS = [
   { name: '/help', key: 'input.commands.help' },
@@ -13,6 +21,8 @@ const COMMAND_KEYS = [
   { name: '/msg', key: 'input.commands.msg' },
   { name: '/sendfile', key: 'input.commands.sendfile' },
   { name: '/file', key: 'input.commands.sendfile' },
+  { name: '/canvas', key: 'input.commands.canvas' },
+  { name: '/board', key: 'input.commands.canvas' },
   { name: '/leave', key: 'input.commands.leave' },
   { name: '/clear', key: 'input.commands.clear' },
   { name: '/game', key: 'input.commands.game' },
@@ -87,11 +97,32 @@ export default function InputBar() {
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [pasteState, setPasteState] = useState<PasteUploadState>(() => ({
+    status: { phase: 'idle' },
+    busy: false,
+  }));
   const inputRef = useRef<HTMLInputElement>(null);
   const sendingRef = useRef(false);
   const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
   const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
+
+  useEffect(() => subscribePasteUpload(setPasteState), []);
+
+  // Global paste: screenshot/file in clipboard → auto /sendfile + upload.
+  // Text-only pastes are left alone for the composer.
+  useEffect(() => {
+    const onWindowPaste = (e: ClipboardEvent) => {
+      if (status !== 'connected') return;
+      if (getPasteUploadState().busy) return;
+      const file = extractFileFromDataTransfer(e.clipboardData);
+      if (!file) return;
+      e.preventDefault();
+      void startPasteSendFile(file, useChatStore.getState().activeRoom);
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [status]);
 
   const commands = useMemo(
     () => COMMAND_KEYS.map((cmd) => ({ name: cmd.name, desc: t(cmd.key) })),
@@ -238,14 +269,73 @@ export default function InputBar() {
     await window.api.sendMessage(SHAKE_TOKEN);
   };
 
+  const sendQuickCommand = async (command: string) => {
+    if (!isConnected || sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    try {
+      await window.api.sendMessage(command);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
+  };
+
   const clearComposer = () => {
     setComposerText('');
     setShowSuggestions(false);
     inputRef.current?.focus();
   };
 
+  const pasteBannerText = (() => {
+    const s = pasteState.status;
+    if (s.phase === 'waiting') return t('pasteUpload.waiting', { name: s.filename });
+    if (s.phase === 'uploading') return t('pasteUpload.uploading', { name: s.filename });
+    if (s.phase === 'done') {
+      return t('pasteUpload.done', { name: s.remoteName || s.filename });
+    }
+    if (s.phase === 'error') {
+      if (s.error === 'busy') return t('pasteUpload.busy');
+      if (s.error === 'timeout') return t('pasteUpload.timeout');
+      if (s.error === 'send_failed') return t('pasteUpload.sendFailed');
+      return t('pasteUpload.error', { error: s.error });
+    }
+    return '';
+  })();
+
   return (
     <div className="input-bar">
+      {pasteBannerText ? (
+        <div className={`paste-upload-banner phase-${pasteState.status.phase}`}>
+          <span>{pasteBannerText}</span>
+          {(pasteState.status.phase === 'error' || pasteState.status.phase === 'done') && (
+            <button type="button" className="paste-upload-dismiss" onClick={() => clearPasteUpload()}>
+              {t('pasteUpload.dismiss')}
+            </button>
+          )}
+        </div>
+      ) : null}
+      <div className="input-quick-actions">
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending || pasteState.busy}
+          title={t('input.quick.fileTitle')}
+          onClick={() => void sendQuickCommand('/sendfile')}
+        >
+          {t('input.quick.file')}
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.canvasTitle')}
+          onClick={() => void sendQuickCommand('/canvas')}
+        >
+          {t('input.quick.canvas')}
+        </button>
+        <span className="quick-action-hint">{t('input.quick.pasteHint')}</span>
+      </div>
       <div className="input-wrapper" style={{ position: 'relative' }}>
         {showSuggestions && (
           <div className="command-suggestions">

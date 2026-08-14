@@ -14,6 +14,7 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import StatusBar from './components/StatusBar';
 import LoginDialog from './components/LoginDialog';
+import { tryHandleUploadInviteLine } from './lib/pasteUpload';
 
 let audioCtx: AudioContext | null = null;
 function playNotificationSound(): void {
@@ -144,6 +145,9 @@ export default function App() {
         return;
       }
       useChatStore.getState().addMessage(message);
+      if (message.type === 'system') {
+        tryHandleUploadInviteLine(message.content);
+      }
       const isPeerMessage = message.sender !== me && (message.type === 'chat' || message.type === 'pm' || message.type === 'game');
       const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());
       if (needAttention) {

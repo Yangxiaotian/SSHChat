@@ -61,6 +61,13 @@ export const zhMessages = {
     placeholder: '向 #{room} 发消息…',
     notConnected: '未连接',
     shakeTitle: '向当前房间所有客户端发送震屏',
+    quick: {
+      file: '发文件',
+      fileTitle: '向当前房间发送文件（一键 /sendfile）',
+      canvas: '画布',
+      canvasTitle: '开启当前房间共享画布（一键 /canvas）',
+      pasteHint: '也可直接粘贴/拖入图片或文件',
+    },
     commands: {
       help: '显示帮助',
       names: '列出当前房间用户',
@@ -70,6 +77,7 @@ export const zhMessages = {
       part: '退出房间',
       msg: '发送私聊',
       sendfile: '收发文件（当前房间 / 指定用户 / #房间）',
+      canvas: '共享画布（当前房间 / 指定用户 / #房间）',
       leave: '查看/撤回未读留言',
       clear: '清空本地视图（当前房间）',
       game: '游戏命令',
@@ -323,6 +331,23 @@ export const zhMessages = {
       eatRow: '吃第{row}行',
       botLevel: '机器人难度',
     },
+  },
+  secureLink: {
+    canvasHint: '密钥已自动处理，点按钮即可进入共享画布',
+    uploadHint: '密钥已自动处理，点按钮打开上传页并选择文件',
+    downloadHint: '密钥已自动处理，点按钮打开预览/下载页',
+    opening: '打开中…',
+    openFailed: '打开失败，请稍后重试',
+  },
+  pasteUpload: {
+    waiting: '正在准备发送 {name}…',
+    uploading: '正在上传 {name}…',
+    done: '已发送 {name}',
+    busy: '已有文件正在发送，请稍候',
+    timeout: '等待上传通道超时（房间可能没有其他在线用户）',
+    sendFailed: '无法发起文件发送',
+    error: '发送失败：{error}',
+    dismiss: '关闭',
   },
 } as const;
 
