@@ -3875,6 +3875,29 @@ def _federation_reconcile_restored_games() -> None:
             auth = (room_game_authority.get(room) or "").strip()
             before = _game_progress_score(room_games.get(room))
         if auth == local:
+            # Partitioned nodes often still believe they are authority with a stale
+            # board. Pull from peers before pushing, or we fan-out an old gsync on
+            # link-up and can overwrite the real host (e.g. WSL reconnect).
+            try:
+                hub.request_game(room)
+            except Exception as e:
+                print(f"federation: reconcile greq failed room={room!r}: {e!r}")
+            _federation_wait_game_progress(room, before + 1, timeout=2.0)
+            with lock:
+                auth_now = (room_game_authority.get(room) or "").strip()
+                after = _game_progress_score(room_games.get(room))
+            if auth_now != local:
+                if after > before:
+                    print(
+                        f"federation: reconciled #{room} progress {before}->{after} "
+                        f"auth={auth_now or '?'}"
+                    )
+                continue
+            if after > before:
+                print(
+                    f"federation: reconciled #{room} progress {before}->{after} "
+                    f"auth={local}"
+                )
             try:
                 _federation_push_game_snapshot(room)
             except Exception as e:
@@ -4595,16 +4618,16 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
     if event == "up":
         if reporter == local_id:
             text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
-            # Peer just linked: re-push active games so /game show works on the newcomer
-            # (and so multi-hop nodes that only see us get a fresh gsync).
-            try:
-                _federation_push_all_game_snapshots()
-            except Exception as e:
-                print(f"federation: peer-up game catch-up error: {e!r}")
+            # Pull before push on link-up so a partitioned replica (common on
+            # WSL) does not fan-out a stale board before seeing the real host.
             try:
                 _federation_reconcile_restored_games()
             except Exception as e:
                 print(f"federation: peer-up game reconcile error: {e!r}")
+            try:
+                _federation_push_all_game_snapshots()
+            except Exception as e:
+                print(f"federation: peer-up game catch-up error: {e!r}")
             try:
                 _federation_sync_library_catalog()
             except Exception as e:

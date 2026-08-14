@@ -423,6 +423,61 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn("已恢复".encode("utf-8"), notices[0])
 
+    def test_reconcile_local_auth_pulls_before_push(self) -> None:
+        """Stale local authority must greq on link-up, not immediately fan-out."""
+
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1)]
+
+        class RemoteGame:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2), (3, 3, 3)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+            peer_count = 1
+
+            def request_game(self, room: str) -> None:
+                server._fed_on_game_sync(
+                    "mac-node",
+                    room,
+                    "mac-node",
+                    "ZmFrZQ==",
+                    "bbbb" + "0" * 28,
+                )
+
+            def _link_toward(self, _dest):
+                return object()
+
+        remote = RemoteGame()
+        server.room_games["default"] = LocalGame()
+        server.room_game_authority["default"] = "wsl-node"
+        server.room_game_tokens["default"] = "aaaa" + "0" * 28
+        pushed: list[str] = []
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_remap_local_game_seats_locked"):
+                        with mock.patch.object(server, "broadcast_room"):
+                            with mock.patch.object(server, "send_oriented_boards"):
+                                with mock.patch.object(server, "send_sanguo_hand_views"):
+                                    with mock.patch.object(
+                                        server, "_persist_after_game_change"
+                                    ):
+                                        with mock.patch.object(
+                                            server,
+                                            "_federation_push_game_snapshot",
+                                            side_effect=lambda r: pushed.append(r),
+                                        ):
+                                            server._federation_reconcile_restored_games()
+        self.assertIs(server.room_games["default"], remote)
+        self.assertEqual(server.room_game_authority["default"], "mac-node")
+        self.assertEqual(pushed, [])
+
     def test_reconcile_with_no_peers_parks_remote_auth(self) -> None:
         """Restart while partitioned must free the room without waiting for peer-down."""
 
