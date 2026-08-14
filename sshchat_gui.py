@@ -7,20 +7,28 @@ SSHChat 图形客户端：通过 SSH（与命令行相同）进入服务端强�
 from __future__ import annotations
 
 import argparse
+import json
+import mimetypes
 import os
 import queue
 import re
 import shutil
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
 try:
@@ -55,8 +63,306 @@ _XQ_COLOR_SEG = re.compile(
 )
 _LEADING_GARBAGE_RE = re.compile(r"^[\s\uFFFD\u25A1\uFEFF\u00A0]+")
 _SPACE_RE = re.compile(r"\s+")
+_GUI_OPEN_UPLOAD_RE = re.compile(
+    r"^gui-open\s+upload\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
+_SENDFILE_FAIL_RE = re.compile(
+    r"没有其他用户|文件传输功能未启用|创建文件传输失败|"
+    r"File transfer is disabled|no other users",
+    re.I,
+)
 _MAX_ROOM_HISTORY = 4000
 _DRAIN_BATCH_ITEMS = 200
+_PASTE_UPLOAD_TIMEOUT_S = 45.0
+
+_TOP_COMMANDS = (
+    "/help",
+    "/lang",
+    "/language",
+    "/names",
+    "/users",
+    "/rooms",
+    "/join",
+    "/switch",
+    "/part",
+    "/msg",
+    "/sendfile",
+    "/file",
+    "/canvas",
+    "/board",
+    "/leave",
+    "/unmsg",
+    "/announce",
+    "/game",
+    "/news",
+    "/library",
+    "/lib",
+    "/dict",
+    "/clear",
+    "/cls",
+    "/dnd",
+)
+
+_SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
+    "/game": (
+        "help",
+        "list",
+        "new",
+        "join",
+        "show",
+        "move",
+        "resign",
+        "undo",
+        "abort",
+        "end",
+        "on",
+        "off",
+        "seats",
+        "rating",
+        "pgn",
+    ),
+    "/news": ("中文", "国际", "科技", "all", "detail", "详情", "fetch", "全文"),
+    "/library": (
+        "open",
+        "read",
+        "next",
+        "n",
+        "prev",
+        "p",
+        "page",
+        "find",
+        "search",
+        "bookmarks",
+        "bookmark",
+        "reset",
+        "close",
+        "info",
+        "show",
+        "help",
+    ),
+    "/lib": (
+        "open",
+        "read",
+        "next",
+        "n",
+        "prev",
+        "p",
+        "page",
+        "find",
+        "search",
+        "bookmarks",
+        "bookmark",
+        "reset",
+        "close",
+        "info",
+        "show",
+        "help",
+    ),
+    "/dict": ("en", "cn", "hh", "help", "英", "中", "汉"),
+    "/dnd": ("on", "off"),
+    "/lang": ("en", "zh", "english", "chinese", "中文", "英文"),
+    "/language": ("en", "zh", "english", "chinese", "中文", "英文"),
+}
+
+_NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("/game", "undo"): ("accept", "reject", "cancel"),
+}
+
+
+def _longest_common_prefix(values: list[str]) -> str:
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        while not value.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    return prefix
+
+
+def _command_completions(text: str) -> list[str]:
+    """Return full replacement strings for the current input prefix."""
+    if not text.startswith("/"):
+        return []
+    if " " not in text:
+        return [cmd for cmd in _TOP_COMMANDS if cmd.startswith(text)]
+
+    parts = text.split()
+    trailing_space = text.endswith(" ")
+    cmd = parts[0].lower()
+
+    if len(parts) == 1 and not trailing_space:
+        return [c for c in _TOP_COMMANDS if c.startswith(parts[0])]
+
+    if len(parts) >= 2:
+        sub = parts[1].lower()
+        nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
+        if nested:
+            if trailing_space and len(parts) == 2:
+                return [f"{parts[0]} {parts[1]} {item}" for item in nested]
+            if len(parts) >= 3 and not trailing_space:
+                prefix = parts[2]
+                return [
+                    f"{parts[0]} {parts[1]} {item}"
+                    for item in nested
+                    if item.startswith(prefix)
+                ]
+            if nested and len(parts) == 2 and not trailing_space:
+                # still typing subcommand name, fall through
+                pass
+            elif nested:
+                return []
+
+    subs = _SUBCOMMANDS_BY_CMD.get(cmd, ())
+    if not subs:
+        return []
+    if trailing_space and len(parts) == 1:
+        return [f"{parts[0]} {sub}" for sub in subs]
+    if len(parts) >= 2 and not trailing_space:
+        prefix = parts[1]
+        return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
+    return []
+
+
+def _is_ssl_verify_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLError):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, ssl.SSLError):
+        return True
+    msg = str(exc)
+    return "CERTIFICATE_VERIFY_FAILED" in msg or "SSL:" in msg
+
+
+def _urlopen_read(req: urllib.request.Request, timeout: float = 120) -> bytes:
+    """urlopen with default verify, then unverified fallback (frozen macOS CA gaps)."""
+    strategies: list[ssl.SSLContext | None] = [None]
+    if str(req.full_url).lower().startswith("https:"):
+        strategies.append(ssl._create_unverified_context())
+    last: BaseException | None = None
+    for ctx in strategies:
+        try:
+            if ctx is None:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.read()
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return resp.read()
+        except Exception as e:
+            last = e
+            if ctx is None and _is_ssl_verify_error(e):
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
+def _upload_secure_file(url: str, key: str, path: Path) -> str:
+    """POST multipart file with X-Upload-Key; return remote filename."""
+    filename = path.name.replace("\\", "_").replace("/", "_")[:200] or "file"
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    data = path.read_bytes()
+    boundary = f"----SSHChat{uuid.uuid4().hex}"
+    body = (
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n"
+        ).encode("utf-8")
+        + data
+        + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    )
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "X-Upload-Key": key.upper(),
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    raw = _urlopen_read(req).decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(str(payload["error"]))
+    if isinstance(payload, dict) and payload.get("filename"):
+        return str(payload["filename"])
+    return filename
+
+
+def _clipboard_existing_path(root: tk.Misc) -> Path | None:
+    try:
+        text = str(root.clipboard_get() or "").strip().strip('"')
+    except tk.TclError:
+        text = ""
+    if text:
+        if text.startswith("file:"):
+            parsed = urllib.parse.urlparse(text)
+            candidate = Path(urllib.parse.unquote(parsed.path))
+        else:
+            candidate = Path(text).expanduser()
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            pass
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["osascript", "-e", "POSIX path of (the clipboard as «class furl»)"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            ).strip()
+            candidate = Path(out)
+            if candidate.is_file():
+                return candidate.resolve()
+        except (subprocess.SubprocessError, OSError):
+            pass
+    return None
+
+
+def _mac_clipboard_image_file() -> Path | None:
+    """Write PNG from macOS clipboard to a temp file, if present."""
+    if sys.platform != "darwin":
+        return None
+    out = Path(tempfile.mkstemp(prefix="sshchat-clip-", suffix=".png")[1])
+    script = (
+        f'set outPath to "{out}"\n'
+        "try\n"
+        "  set pngData to the clipboard as «class PNGf»\n"
+        "  set f to open for access POSIX file outPath with write permission\n"
+        "  set eof f to 0\n"
+        "  write pngData to f\n"
+        "  close access f\n"
+        "  return outPath\n"
+        "on error\n"
+        "  try\n"
+        "    close access POSIX file outPath\n"
+        "  end try\n"
+        '  return ""\n'
+        "end try"
+    )
+    try:
+        got = subprocess.check_output(
+            ["osascript", "-e", script],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+        if got and Path(got).is_file() and Path(got).stat().st_size > 0:
+            return Path(got)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    try:
+        out.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
 
 
 def _clean_chunk(s: str) -> str:
@@ -139,11 +445,19 @@ class SSHChatGUI:
         self._active_room = "default"
         self._room_unread: dict[str, int] = {"default": 0}
         self._room_history: dict[str, list[tuple[str, str]]] = {"default": []}
+        self._paste_pending: dict[str, Any] | None = None
+        self._paste_timer: str | int | None = None
+        self._suggest_win: tk.Toplevel | None = None
+        self._suggest_list: tk.Listbox | None = None
+        self._suggest_items: list[str] = []
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
+        self.root.bind("<<Paste>>", self._on_paste_file, add="+")
+        self.root.bind("<Command-v>", self._on_paste_file, add="+")
+        self.root.bind("<Control-v>", self._on_paste_file, add="+")
         self._is_minimized = False
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -249,16 +563,39 @@ class SSHChatGUI:
         self.log.tag_configure("system", foreground="#8e24aa")
         self.log.tag_configure("xq_red", foreground="#c62828")
         self.log.tag_configure("xq_black", foreground="#263238")
+        self.log.bind("<<Paste>>", self._on_paste_file, add="+")
+        # Allow paste/drop focus even when text widget is disabled.
+        self.log.bind("<Button-1>", lambda e: self.log.focus_set(), add="+")
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
         self.var_input = tk.StringVar()
         self.entry = ttk.Entry(bot, textvariable=self.var_input)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.entry.bind("<Return>", lambda e: self._send_clicked())
+        self.entry.bind("<Return>", self._on_entry_return)
+        self.entry.bind("<Tab>", self._on_entry_tab)
+        self.entry.bind("<Down>", self._on_entry_down)
+        self.entry.bind("<Up>", self._on_entry_up)
+        self.entry.bind("<Escape>", self._on_entry_escape)
+        self.entry.bind("<KeyRelease>", self._on_entry_keyrelease, add="+")
+        self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
+        self.entry.bind("<Command-v>", self._on_paste_file, add="+")
+        self.entry.bind("<Control-v>", self._on_paste_file, add="+")
         ttk.Button(bot, text="发送", command=self._send_clicked).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        ttk.Button(bot, text="发文件", command=self._pick_and_send_file).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(bot, text="清屏", command=self._clear_active_room).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        hint = ttk.Label(
+            self.root,
+            text="提示: Tab 补全命令；/clear 清屏；可粘贴截图/文件路径，或点「发文件」",
+            foreground="#666",
+        )
+        hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
 
     def _on_window_mapped(self, _event=None) -> None:
@@ -450,8 +787,9 @@ class SSHChatGUI:
             and parsed[1] == "*"
             and parsed[2].strip() == "Screen cleared."
         ):
-            self._room_history[self._active_room] = []
-            self._render_active_room()
+            self._clear_active_room(announce=False)
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_upload_invite(parsed[2]):
             return
         ts = datetime.now()
         self._display_times.append(ts)
@@ -763,15 +1101,283 @@ class SSHChatGUI:
         self._disconnect(clear_log=False)
         self._set_status("已断开")
 
+    def _clear_active_room(self, announce: bool = True) -> None:
+        self._room_history[self._active_room] = []
+        self._render_active_room()
+        if announce:
+            self._append_room_entry(
+                self._active_room, "[*] Screen cleared.\n", "system"
+            )
+
+    def _cancel_paste_timer(self) -> None:
+        if self._paste_timer is not None:
+            try:
+                self.root.after_cancel(self._paste_timer)
+            except tk.TclError:
+                pass
+            self._paste_timer = None
+
+    def _paste_busy(self) -> bool:
+        return self._paste_pending is not None
+
+    def _fail_paste(self, message: str) -> None:
+        pending = self._paste_pending
+        self._cancel_paste_timer()
+        self._paste_pending = None
+        name = pending["name"] if pending else "file"
+        self._set_status(f"发文件失败: {message}")
+        self._append_chat_line(f"[*] 发文件失败（{name}）: {message}", local_sent=True)
+
+    def _start_paste_sendfile(self, path: Path) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        if self._paste_busy():
+            messagebox.showinfo("SSHChat", "已有文件正在上传，请稍候")
+            return
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError as e:
+            messagebox.showerror("SSHChat", f"无法读取文件: {e}")
+            return
+        if not resolved.is_file():
+            messagebox.showwarning("SSHChat", "不是有效文件")
+            return
+        self._cancel_paste_timer()
+        self._paste_pending = {
+            "path": resolved,
+            "name": resolved.name,
+            "consumed": False,
+            "started": time.time(),
+        }
+        self._set_status(f"等待上传通道: {resolved.name}")
+        self._append_chat_line(
+            f"[*] 正在发文件: {resolved.name}（/sendfile）", local_sent=True
+        )
+        self._paste_timer = self.root.after(
+            int(_PASTE_UPLOAD_TIMEOUT_S * 1000), self._on_paste_timeout
+        )
+        try:
+            self._chan_send_bytes(b"/sendfile\n")
+        except Exception as e:
+            self._fail_paste(str(e))
+
+    def _on_paste_timeout(self) -> None:
+        self._paste_timer = None
+        if self._paste_pending and not self._paste_pending.get("consumed"):
+            self._fail_paste("timeout")
+
+    def _try_handle_upload_invite(self, body: str) -> bool:
+        text = body.strip()
+        pending = self._paste_pending
+        if pending and not pending.get("consumed"):
+            if _SENDFILE_FAIL_RE.search(text):
+                self._fail_paste(text.replace("[*]", "").strip()[:120] or "send_failed")
+                return True
+        if not pending or pending.get("consumed"):
+            return False
+        m = _GUI_OPEN_UPLOAD_RE.match(text)
+        if not m:
+            return False
+        pending["consumed"] = True
+        self._cancel_paste_timer()
+        url, key = m.group(1), m.group(2).upper()
+        path: Path = pending["path"]
+        name = pending["name"]
+        self._set_status(f"上传中: {name}")
+
+        def worker() -> None:
+            err: str | None = None
+            remote = name
+            try:
+                remote = _upload_secure_file(url, key, path)
+            except Exception as e:
+                err = str(e)
+            self.root.after(
+                0, lambda: self._paste_upload_finished(name, remote, err)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _paste_upload_finished(
+        self, name: str, remote: str, err: str | None
+    ) -> None:
+        self._paste_pending = None
+        self._cancel_paste_timer()
+        if err:
+            self._set_status(f"发文件失败: {err}")
+            self._append_chat_line(
+                f"[*] 发文件失败（{name}）: {err}", local_sent=True
+            )
+            return
+        self._set_status(f"已上传: {remote}")
+        self._append_chat_line(f"[*] 已上传: {remote}", local_sent=True)
+
+    def _pick_and_send_file(self) -> None:
+        path = filedialog.askopenfilename(title="选择要发送的文件")
+        if path:
+            self._start_paste_sendfile(Path(path))
+
+    def _on_paste_file(self, event=None):
+        if not self._chan or self._chan.closed or self._paste_busy():
+            return None
+        path = _clipboard_existing_path(self.root)
+        if path is None:
+            path = _mac_clipboard_image_file()
+        if path is None:
+            return None
+        self._start_paste_sendfile(path)
+        return "break"
+
+    def _hide_suggestions(self) -> None:
+        if self._suggest_win is not None:
+            try:
+                self._suggest_win.destroy()
+            except tk.TclError:
+                pass
+        self._suggest_win = None
+        self._suggest_list = None
+        self._suggest_items = []
+
+    def _show_suggestions(self, items: list[str]) -> None:
+        self._hide_suggestions()
+        if not items:
+            return
+        self._suggest_items = items
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        lst = tk.Listbox(win, height=min(8, len(items)), exportselection=False)
+        lst.pack(fill=tk.BOTH, expand=True)
+        for item in items:
+            lst.insert(tk.END, item)
+        lst.selection_set(0)
+        lst.activate(0)
+        lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
+        self.entry.update_idletasks()
+        x = self.entry.winfo_rootx()
+        y = self.entry.winfo_rooty() - min(160, 20 * len(items) + 8)
+        if y < 0:
+            y = self.entry.winfo_rooty() + self.entry.winfo_height()
+        win.geometry(f"{max(self.entry.winfo_width(), 220)}x{min(160, 20 * len(items) + 4)}+{x}+{y}")
+        self._suggest_win = win
+        self._suggest_list = lst
+
+    def _apply_selected_suggestion(self) -> None:
+        if not self._suggest_list or not self._suggest_items:
+            return
+        sel = self._suggest_list.curselection()
+        idx = int(sel[0]) if sel else 0
+        if idx < 0 or idx >= len(self._suggest_items):
+            return
+        chosen = self._suggest_items[idx]
+        # Commands get a trailing space so the next arg is ready.
+        self.var_input.set(chosen if chosen.endswith(" ") else chosen + " ")
+        self.entry.icursor(tk.END)
+        self._hide_suggestions()
+        self.entry.focus_set()
+
+    def _refresh_command_suggestions(self) -> list[str]:
+        text = self.var_input.get()
+        items = _command_completions(text)[:12]
+        if text.startswith("/") and items:
+            self._show_suggestions(items)
+        else:
+            self._hide_suggestions()
+        return items
+
+    def _on_entry_keyrelease(self, event) -> None:
+        if event.keysym in (
+            "Tab",
+            "Return",
+            "Escape",
+            "Up",
+            "Down",
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+        ):
+            return
+        text = self.var_input.get()
+        if text.startswith("/"):
+            self._refresh_command_suggestions()
+        else:
+            self._hide_suggestions()
+
+    def _on_entry_tab(self, _event=None):
+        text = self.var_input.get()
+        if not text.startswith("/"):
+            return "break"
+        items = _command_completions(text)
+        if not items:
+            self._hide_suggestions()
+            return "break"
+        if len(items) == 1:
+            self.var_input.set(items[0] + " ")
+            self.entry.icursor(tk.END)
+            self._hide_suggestions()
+            return "break"
+        shared = _longest_common_prefix(items)
+        if len(shared) > len(text):
+            self.var_input.set(shared)
+            self.entry.icursor(tk.END)
+        self._show_suggestions(items[:12])
+        return "break"
+
+    def _on_entry_down(self, _event=None):
+        if not self._suggest_list:
+            return None
+        size = self._suggest_list.size()
+        if size <= 0:
+            return "break"
+        sel = self._suggest_list.curselection()
+        idx = (int(sel[0]) + 1) % size if sel else 0
+        self._suggest_list.selection_clear(0, tk.END)
+        self._suggest_list.selection_set(idx)
+        self._suggest_list.activate(idx)
+        self._suggest_list.see(idx)
+        return "break"
+
+    def _on_entry_up(self, _event=None):
+        if not self._suggest_list:
+            return None
+        size = self._suggest_list.size()
+        if size <= 0:
+            return "break"
+        sel = self._suggest_list.curselection()
+        idx = (int(sel[0]) - 1) % size if sel else size - 1
+        self._suggest_list.selection_clear(0, tk.END)
+        self._suggest_list.selection_set(idx)
+        self._suggest_list.activate(idx)
+        self._suggest_list.see(idx)
+        return "break"
+
+    def _on_entry_escape(self, _event=None):
+        if self._suggest_win is not None:
+            self._hide_suggestions()
+            return "break"
+        return None
+
+    def _on_entry_return(self, _event=None):
+        self._hide_suggestions()
+        self._send_clicked()
+        return "break"
+
     def _send_clicked(self) -> None:
         if not self._chan or self._chan.closed:
             return
         line = self.var_input.get()
         self.var_input.set("")
+        self._hide_suggestions()
         if not line.strip():
             return
+        low = line.strip()
+        if re.fullmatch(r"/(?:clear|cls)", low, flags=re.I):
+            self._clear_active_room()
+            return
         try:
-            low = line.strip()
             m_join = re.match(r"^/(?:join|switch)\s+([a-zA-Z0-9_-]{1,32})\s*$", low)
             if m_join:
                 self._switch_room_local(m_join.group(1), send_switch=False)
@@ -797,6 +1403,8 @@ class SSHChatGUI:
             self._disconnect()
 
     def _disconnect(self, clear_log: bool = True) -> None:
+        self._cancel_paste_timer()
+        self._paste_pending = None
         if self._drain_after_id is not None:
             try:
                 self.root.after_cancel(self._drain_after_id)

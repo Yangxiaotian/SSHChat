@@ -1,7 +1,10 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import * as os from 'os';
+import { URL } from 'url';
 import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
@@ -2478,29 +2481,96 @@ function setupIPC(): void {
         return { ok: false, error: 'Empty file data' };
       }
 
+      const bytes = Buffer.from(payload.data);
       try {
-        const form = new FormData();
-        const bytes = Buffer.from(payload.data);
-        const blob = new Blob([bytes], { type: mime });
-        form.append('file', blob, filename);
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'X-Upload-Key': key },
-          body: form,
-        });
-        const result = (await response.json().catch(() => ({}))) as {
-          error?: string;
-          filename?: string;
-        };
-        if (!response.ok) {
-          return { ok: false, error: result.error || `HTTP ${response.status}` };
-        }
-        return { ok: true, filename: result.filename || filename };
+        return await postSecureUpload(url, key, filename, mime, bytes, false);
       } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await postSecureUpload(url, key, filename, mime, bytes, true);
+          } catch (e2) {
+            return { ok: false, error: e2 instanceof Error ? e2.message : String(e2) };
+          }
+        }
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
   );
+}
+
+function isTlsCertError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string } | null;
+  const code = String(err?.code || '');
+  const msg = String(err?.message || e || '');
+  return (
+    code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+    code === 'CERT_HAS_EXPIRED' ||
+    code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+    code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' ||
+    /CERTIFICATE_VERIFY_FAILED|certificate|CERT_|SSL/i.test(msg)
+  );
+}
+
+function postSecureUpload(
+  urlStr: string,
+  key: string,
+  filename: string,
+  mime: string,
+  bytes: Buffer,
+  insecure: boolean,
+): Promise<{ ok: boolean; filename?: string; error?: string }> {
+  const u = new URL(urlStr);
+  const boundary = `----SSHChat${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+      `Content-Type: ${mime}\r\n\r\n`,
+    'utf8',
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const body = Buffer.concat([preamble, bytes, epilogue]);
+  const lib = u.protocol === 'https:' ? https : http;
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method: 'POST',
+    headers: {
+      'X-Upload-Key': key,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': body.length,
+    },
+    rejectUnauthorized: !insecure,
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let result: { error?: string; filename?: string } = {};
+        try {
+          result = raw.trim() ? (JSON.parse(raw) as typeof result) : {};
+        } catch {
+          result = {};
+        }
+        if ((res.statusCode || 500) >= 400) {
+          resolve({ ok: false, error: result.error || `HTTP ${res.statusCode}` });
+          return;
+        }
+        resolve({ ok: true, filename: result.filename || filename });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(120_000, () => {
+      req.destroy(new Error('upload timeout'));
+    });
+    req.write(body);
+    req.end();
+  });
 }
 
 app.whenReady().then(() => {
