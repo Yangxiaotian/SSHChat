@@ -3882,7 +3882,9 @@ def _federation_reconcile_restored_games() -> None:
                 hub.request_game(room)
             except Exception as e:
                 print(f"federation: reconcile greq failed room={room!r}: {e!r}")
-            _federation_wait_game_progress(room, before + 1, timeout=2.0)
+            _federation_wait_after_greq(
+                room, min_progress=before + 1, prior_auth=auth, timeout=2.0
+            )
             with lock:
                 auth_now = (room_game_authority.get(room) or "").strip()
                 after = _game_progress_score(room_games.get(room))
@@ -3898,10 +3900,17 @@ def _federation_reconcile_restored_games() -> None:
                     f"federation: reconciled #{room} progress {before}->{after} "
                     f"auth={local}"
                 )
-            try:
-                _federation_push_game_snapshot(room)
-            except Exception as e:
-                print(f"federation: reconcile push failed room={room!r}: {e!r}")
+            with lock:
+                game_now = room_games.get(room)
+                still_active = (
+                    game_now is not None
+                    and getattr(game_now, "state", "ended") != "ended"
+                )
+            if still_active:
+                try:
+                    _federation_push_game_snapshot(room)
+                except Exception as e:
+                    print(f"federation: reconcile push failed room={room!r}: {e!r}")
             continue
         # Unknown or remote authority: ask peers and keep the newer board.
         try:
@@ -3909,7 +3918,9 @@ def _federation_reconcile_restored_games() -> None:
         except Exception as e:
             print(f"federation: reconcile greq failed room={room!r}: {e!r}")
             continue
-        _federation_wait_game_progress(room, before + 1, timeout=2.0)
+        _federation_wait_after_greq(
+            room, min_progress=before + 1, prior_auth=auth, timeout=2.0
+        )
         with lock:
             after = _game_progress_score(room_games.get(room))
             auth_now = (room_game_authority.get(room) or "").strip()
@@ -3922,14 +3933,22 @@ def _federation_reconcile_restored_games() -> None:
             # No peer answered with a newer board — claim local hostship so
             # subsequent moves/syncs have a deterministic authority.
             with lock:
-                if room in room_games and not (room_game_authority.get(room) or "").strip():
+                game_now = room_games.get(room)
+                still_active = (
+                    game_now is not None
+                    and getattr(game_now, "state", "ended") != "ended"
+                )
+                if still_active and not (room_game_authority.get(room) or "").strip():
                     room_game_authority[room] = local
                     if not (room_game_tokens.get(room) or "").strip():
                         room_game_tokens[room] = secrets.token_hex(16)
-            try:
-                _federation_push_game_snapshot(room)
-            except Exception as e:
-                print(f"federation: reconcile claim push failed room={room!r}: {e!r}")
+            if still_active:
+                try:
+                    _federation_push_game_snapshot(room)
+                except Exception as e:
+                    print(
+                        f"federation: reconcile claim push failed room={room!r}: {e!r}"
+                    )
     # greq may have timed out while the real host is still partitioned away.
     _fed_handle_unreachable_game_authority()
 
@@ -3947,11 +3966,15 @@ def _fed_on_game_request(_from_peer: str, room: str) -> None:
     local = hub.node_id if hub is not None else _local_node_id()
     with lock:
         game = room_games.get(room)
+        auth = (room_game_authority.get(room) or "").strip()
         if game is None or getattr(game, "state", "ended") == "ended":
+            # Authority with no active game (ended while partitioned) must gend
+            # so stale replicas clear instead of fan-out after a silent greq.
+            if auth == local:
+                hub.end_game(room, local)
             return
         # Empty auth after restart must not answer — a stale replica would claim
         # hostship via push_game_snapshot's `auth or node_id` fallback.
-        auth = (room_game_authority.get(room) or "").strip()
         if auth != local:
             return
     _federation_push_game_snapshot(room)
@@ -3995,6 +4018,38 @@ def _federation_wait_game_progress(
         return _game_progress_score(room_games.get(room)) >= target
 
 
+def _federation_wait_after_greq(
+    room: str,
+    *,
+    min_progress: int,
+    prior_auth: str = "",
+    timeout: float = 2.0,
+) -> bool:
+    """Wait for a greq reply: newer ply, gend clear, or authority change."""
+    deadline = time.time() + max(0.2, float(timeout))
+    target = int(min_progress)
+    prior_auth = (prior_auth or "").strip()
+
+    def _settled() -> bool:
+        game = room_games.get(room)
+        auth = (room_game_authority.get(room) or "").strip()
+        if game is None:
+            return True
+        if getattr(game, "state", "ended") == "ended":
+            return True
+        if prior_auth and auth != prior_auth:
+            return True
+        return _game_progress_score(game) >= target
+
+    while time.time() < deadline:
+        with lock:
+            if _settled():
+                return True
+        time.sleep(0.05)
+    with lock:
+        return _settled()
+
+
 def _federation_refresh_replica_and_wait(
     room: str,
     *,
@@ -4033,8 +4088,10 @@ def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return
-    auth = room_game_authority.pop(room, None) or hub.node_id
+    auth = (room_game_authority.get(room) or "").strip() or hub.node_id
     room_game_tokens.pop(room, None)
+    # Keep authority so greq can answer gend after partition (WSL missed gend).
+    room_game_authority[room] = auth
     if auth == hub.node_id:
         hub.end_game(room, hub.node_id)
 
@@ -4185,6 +4242,9 @@ def _fed_on_game_sync(
         remote_active = getattr(game, "state", "ended") != "ended"
         local_prog = _game_progress_score(local_game) if local_active else -1
         remote_prog = _game_progress_score(game) if remote_active else -1
+        if not local_active and remote_active and local_auth == local_id:
+            # Game ended here as authority; ignore stale peer revival.
+            return
         # Never let a stale replica / catch-up push rewind the board — unless
         # the remote carries a newer session token (/game new after partition).
         if local_active and remote_active and remote_prog < local_prog:

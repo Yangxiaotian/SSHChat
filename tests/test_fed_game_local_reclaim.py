@@ -478,6 +478,82 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(server.room_game_authority["default"], "mac-node")
         self.assertEqual(pushed, [])
 
+    def test_greq_from_ended_authority_sends_gend(self) -> None:
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+            ended: list[tuple[str, str]] = []
+
+            def end_game(self, room: str, authority: str) -> None:
+                self.ended.append((room, authority))
+
+        hub = FakeHub()
+        server.room_game_authority["default"] = "mac-node"
+        with mock.patch.object(federation, "get_hub", return_value=hub):
+            with mock.patch.object(server, "_federation_push_game_snapshot") as push:
+                server._fed_on_game_request("wsl-node", "default")
+                push.assert_not_called()
+        self.assertEqual(hub.ended, [("default", "mac-node")])
+
+    def test_reconcile_clears_stale_game_when_peer_ended(self) -> None:
+        """WSL reconnect must drop a stale board when Mac already ended the game."""
+
+        class StaleGame:
+            name = "chess"
+            state = "playing"
+            _history = [(1, 1)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+            peer_count = 1
+
+            def request_game(self, room: str) -> None:
+                server._fed_on_game_end(room, "mac-node")
+
+            def _link_toward(self, _dest):
+                return object()
+
+        server.room_games["default"] = StaleGame()
+        server.room_game_authority["default"] = "wsl-node"
+        server.room_game_tokens["default"] = "aaaa" + "0" * 28
+        pushed: list[str] = []
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change"):
+                with mock.patch.object(
+                    server,
+                    "_federation_push_game_snapshot",
+                    side_effect=lambda r: pushed.append(r),
+                ):
+                    server._federation_reconcile_restored_games()
+        self.assertNotIn("default", server.room_games)
+        self.assertEqual(pushed, [])
+
+    def test_gsync_rejects_stale_revival_after_local_end(self) -> None:
+        class StaleRemote:
+            name = "chess"
+            state = "playing"
+            _history = [(1, 1), (2, 2)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+
+        server.room_game_authority["default"] = "mac-node"
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=StaleRemote()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_persist_after_game_change") as persist:
+                        server._fed_on_game_sync(
+                            "wsl-node",
+                            "default",
+                            "wsl-node",
+                            "ZmFrZQ==",
+                            "aaaa" + "0" * 28,
+                        )
+                        persist.assert_not_called()
+        self.assertNotIn("default", server.room_games)
+
     def test_reconcile_with_no_peers_parks_remote_auth(self) -> None:
         """Restart while partitioned must free the room without waiting for peer-down."""
 
