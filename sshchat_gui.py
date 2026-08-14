@@ -67,6 +67,12 @@ _GUI_OPEN_UPLOAD_RE = re.compile(
     r"^gui-open\s+upload\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
+_GUI_OPEN_CANVAS_RE = re.compile(
+    r"^gui-open\s+canvas\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
+_CANVAS_LOGICAL_W = 1200
+_CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
     r"没有其他用户|文件传输功能未启用|创建文件传输失败|"
     r"File transfer is disabled|no other users",
@@ -294,6 +300,332 @@ def _upload_secure_file(url: str, key: str, path: Path) -> str:
     return filename
 
 
+def _http_json(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method=method.upper(),
+        headers=headers or {},
+    )
+    try:
+        raw = _urlopen_read(req, timeout=60).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload["error"])) from e
+        raise RuntimeError(f"HTTP {e.code}") from e
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("error"):
+        raise RuntimeError(str(payload["error"]))
+    return payload
+
+
+def _canvas_token_from_url(url: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0] != "canvas":
+        raise ValueError("invalid canvas url")
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    return base, parts[1]
+
+
+class NativeCanvasWindow:
+    """Tk canvas client talking to the same /canvas HTTP API as the web page."""
+
+    def __init__(self, master: tk.Misc, url: str, key: str) -> None:
+        self.master = master
+        self.url = url
+        self.key = key.strip().upper()
+        self.base, self.token = _canvas_token_from_url(url)
+        self.ticket = ""
+        self.since = 0
+        self.color = "#222222"
+        self.width = 3.0
+        self._drawing = False
+        self._points: list[list[float]] = []
+        self._poll_id: str | int | None = None
+        self._closed = False
+
+        self.win = tk.Toplevel(master)
+        self.win.title("SSHChat 共享画布")
+        self.win.geometry("900x640")
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+        bar = ttk.Frame(self.win)
+        bar.pack(fill=tk.X, padx=8, pady=6)
+        self.var_status = tk.StringVar(value="正在进入画布…")
+        ttk.Label(bar, textvariable=self.var_status).pack(side=tk.LEFT)
+        ttk.Button(bar, text="清空", command=self._clear).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(bar, text="关闭", command=self.close).pack(side=tk.RIGHT)
+
+        tools = ttk.Frame(self.win)
+        tools.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Label(tools, text="颜色").pack(side=tk.LEFT)
+        self.var_color = tk.StringVar(value=self.color)
+        ttk.Entry(tools, textvariable=self.var_color, width=10).pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Label(tools, text="粗细").pack(side=tk.LEFT)
+        self.var_width = tk.StringVar(value="3")
+        ttk.Entry(tools, textvariable=self.var_width, width=4).pack(side=tk.LEFT, padx=(4, 0))
+
+        self.canvas = tk.Canvas(self.win, bg="#f7f3ea", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.canvas.bind("<ButtonPress-1>", self._on_down)
+        self.canvas.bind("<B1-Motion>", self._on_move)
+        self.canvas.bind("<ButtonRelease-1>", self._on_up)
+
+        threading.Thread(target=self._auth_worker, daemon=True).start()
+
+    def close(self) -> None:
+        self._closed = True
+        if self._poll_id is not None:
+            try:
+                self.win.after_cancel(self._poll_id)
+            except tk.TclError:
+                pass
+            self._poll_id = None
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+    def _view_size(self) -> tuple[float, float]:
+        w = max(1.0, float(self.canvas.winfo_width()))
+        h = max(1.0, float(self.canvas.winfo_height()))
+        return w, h
+
+    def _to_logical(self, x: float, y: float) -> list[float]:
+        vw, vh = self._view_size()
+        lx = max(0.0, min(float(_CANVAS_LOGICAL_W), x * _CANVAS_LOGICAL_W / vw))
+        ly = max(0.0, min(float(_CANVAS_LOGICAL_H), y * _CANVAS_LOGICAL_H / vh))
+        return [round(lx, 2), round(ly, 2)]
+
+    def _to_view(self, x: float, y: float) -> tuple[float, float]:
+        vw, vh = self._view_size()
+        return x * vw / _CANVAS_LOGICAL_W, y * vh / _CANVAS_LOGICAL_H
+
+    def _draw_stroke(self, points: list[list[float]], color: str, width: float) -> None:
+        if not points:
+            return
+        coords: list[float] = []
+        for pt in points:
+            vx, vy = self._to_view(float(pt[0]), float(pt[1]))
+            coords.extend((vx, vy))
+        if len(points) == 1:
+            vx, vy = self._to_view(float(points[0][0]), float(points[0][1]))
+            coords.extend((vx + 0.5, vy))
+        self.canvas.create_line(
+            *coords,
+            fill=color or "#222222",
+            width=max(1.0, float(width or 3)),
+            capstyle=tk.ROUND,
+            joinstyle=tk.ROUND,
+            smooth=True,
+        )
+
+    def _auth_worker(self) -> None:
+        err: str | None = None
+        ticket = ""
+        meta = ""
+        try:
+            data = _http_json(
+                f"{self.base}/canvas/{self.token}/auth",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"key": self.key}).encode("utf-8"),
+            )
+            ticket = str(data.get("ticket") or "")
+            bits = []
+            if data.get("participant"):
+                bits.append(f"你: {data['participant']}")
+            if data.get("room"):
+                bits.append(f"房间: #{data['room']}")
+            meta = " · ".join(bits)
+            if not ticket:
+                raise RuntimeError("auth failed")
+        except Exception as e:
+            err = str(e)
+        self.master.after(0, lambda: self._auth_done(ticket, meta, err))
+
+    def _auth_done(self, ticket: str, meta: str, err: str | None) -> None:
+        if self._closed:
+            return
+        if err or not ticket:
+            self.var_status.set(f"进入失败: {err or 'unknown'}")
+            return
+        self.ticket = ticket
+        self.var_status.set(meta or "已连接")
+        self._sync_once(initial=True)
+        self._schedule_poll()
+
+    def _schedule_poll(self) -> None:
+        if self._closed:
+            return
+        self._poll_id = self.win.after(900, self._poll_tick)
+
+    def _poll_tick(self) -> None:
+        self._poll_id = None
+        if self._closed:
+            return
+        threading.Thread(target=self._sync_worker, daemon=True).start()
+
+    def _sync_worker(self) -> None:
+        try:
+            data = _http_json(
+                f"{self.base}/canvas/{self.token}/sync?since={self.since}",
+                method="GET",
+                headers={"X-Canvas-Ticket": self.ticket},
+            )
+            self.master.after(0, lambda: self._apply_sync(data, None))
+        except Exception as e:
+            self.master.after(0, lambda: self._apply_sync(None, str(e)))
+
+    def _sync_once(self, *, initial: bool) -> None:
+        threading.Thread(target=self._sync_worker, daemon=True).start()
+
+    def _apply_sync(self, data: dict[str, Any] | None, err: str | None) -> None:
+        if self._closed:
+            return
+        if err or data is None:
+            self.var_status.set(f"同步出错: {err or 'unknown'}")
+            self._schedule_poll()
+            return
+        for ev in data.get("events") or []:
+            kind = str(ev.get("kind") or "")
+            seq = int(ev.get("seq") or 0)
+            self.since = max(self.since, seq)
+            if kind == "clear":
+                self.canvas.delete("all")
+            elif kind == "stroke":
+                pts = ev.get("points") or []
+                if isinstance(pts, list):
+                    self._draw_stroke(
+                        [[float(p[0]), float(p[1])] for p in pts if isinstance(p, (list, tuple)) and len(p) >= 2],
+                        str(ev.get("color") or "#222"),
+                        float(ev.get("width") or 3),
+                    )
+        bits = []
+        if data.get("participant"):
+            bits.append(f"你: {data['participant']}")
+        if data.get("room"):
+            bits.append(f"房间: #{data['room']}")
+        if bits:
+            self.var_status.set(" · ".join(bits))
+        self._schedule_poll()
+
+    def _read_tools(self) -> None:
+        color = self.var_color.get().strip() or "#222222"
+        if not color.startswith("#"):
+            color = "#222222"
+        self.color = color
+        try:
+            self.width = max(1.0, min(32.0, float(self.var_width.get().strip() or "3")))
+        except ValueError:
+            self.width = 3.0
+
+    def _on_down(self, event) -> None:
+        if not self.ticket:
+            return
+        self._read_tools()
+        self._drawing = True
+        self._points = [self._to_logical(event.x, event.y)]
+        self._draw_stroke(self._points, self.color, self.width)
+
+    def _on_move(self, event) -> None:
+        if not self._drawing:
+            return
+        pt = self._to_logical(event.x, event.y)
+        prev = self._points[-1]
+        self._points.append(pt)
+        self._draw_stroke([prev, pt], self.color, self.width)
+
+    def _on_up(self, _event=None) -> None:
+        if not self._drawing:
+            return
+        self._drawing = False
+        pts = list(self._points)
+        self._points = []
+        if not pts or not self.ticket:
+            return
+
+        def worker() -> None:
+            err: str | None = None
+            seq = 0
+            try:
+                data = _http_json(
+                    f"{self.base}/canvas/{self.token}/stroke",
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Canvas-Ticket": self.ticket,
+                    },
+                    body=json.dumps(
+                        {"color": self.color, "width": self.width, "points": pts}
+                    ).encode("utf-8"),
+                )
+                seq = int((data.get("event") or {}).get("seq") or 0)
+            except Exception as e:
+                err = str(e)
+            self.master.after(0, lambda: self._stroke_done(seq, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stroke_done(self, seq: int, err: str | None) -> None:
+        if self._closed:
+            return
+        if err:
+            self.var_status.set(f"笔画同步失败: {err}")
+            return
+        if seq:
+            self.since = max(self.since, seq)
+
+    def _clear(self) -> None:
+        if not self.ticket:
+            return
+        if not messagebox.askyesno("SSHChat", "确定清空共享画布？（所有人都会清空）"):
+            return
+
+        def worker() -> None:
+            err: str | None = None
+            seq = 0
+            try:
+                data = _http_json(
+                    f"{self.base}/canvas/{self.token}/clear",
+                    method="POST",
+                    headers={"X-Canvas-Ticket": self.ticket},
+                )
+                seq = int((data.get("event") or {}).get("seq") or 0)
+            except Exception as e:
+                err = str(e)
+            self.master.after(0, lambda: self._clear_done(seq, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _clear_done(self, seq: int, err: str | None) -> None:
+        if self._closed:
+            return
+        if err:
+            self.var_status.set(f"清空失败: {err}")
+            return
+        self.canvas.delete("all")
+        if seq:
+            self.since = max(self.since, seq)
+
+
 def _clipboard_existing_path(root: tk.Misc) -> Path | None:
     try:
         text = str(root.clipboard_get() or "").strip().strip('"')
@@ -450,6 +782,7 @@ class SSHChatGUI:
         self._suggest_win: tk.Toplevel | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
+        self._canvas_win: NativeCanvasWindow | None = None
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -790,6 +1123,8 @@ class SSHChatGUI:
             self._clear_active_room(announce=False)
             return
         if parsed and parsed[1] == "*" and self._try_handle_upload_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_canvas_invite(parsed[2]):
             return
         ts = datetime.now()
         self._display_times.append(ts)
@@ -1213,6 +1548,26 @@ class SSHChatGUI:
             return
         self._set_status(f"已上传: {remote}")
         self._append_chat_line(f"[*] 已上传: {remote}", local_sent=True)
+
+    def _try_handle_canvas_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_CANVAS_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        self._open_native_canvas(url, key)
+        return True
+
+    def _open_native_canvas(self, url: str, key: str) -> None:
+        try:
+            if self._canvas_win is not None:
+                try:
+                    self._canvas_win.close()
+                except Exception:
+                    pass
+            self._canvas_win = NativeCanvasWindow(self.root, url, key)
+            self._append_chat_line("[*] 已在客户端打开共享画布", local_sent=True)
+        except Exception as e:
+            self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
     def _pick_and_send_file(self) -> None:
         path = filedialog.askopenfilename(title="选择要发送的文件")

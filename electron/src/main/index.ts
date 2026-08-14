@@ -2496,6 +2496,43 @@ function setupIPC(): void {
       }
     },
   );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CANVAS_HTTP,
+    async (
+      _event,
+      payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      },
+    ): Promise<{ ok: boolean; status: number; json?: any; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, status: 0, error: 'Invalid canvas URL' };
+      }
+      const method = payload?.method === 'POST' ? 'POST' : 'GET';
+      const headers = { ...(payload?.headers || {}) };
+      const body = payload?.body;
+      try {
+        return await httpJsonRequest(url, method, headers, body, false);
+      } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await httpJsonRequest(url, method, headers, body, true);
+          } catch (e2) {
+            return {
+              ok: false,
+              status: 0,
+              error: e2 instanceof Error ? e2.message : String(e2),
+            };
+          }
+        }
+        return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
 }
 
 function isTlsCertError(e: unknown): boolean {
@@ -2569,6 +2606,64 @@ function postSecureUpload(
       req.destroy(new Error('upload timeout'));
     });
     req.write(body);
+    req.end();
+  });
+}
+
+function httpJsonRequest(
+  urlStr: string,
+  method: 'GET' | 'POST',
+  headers: Record<string, string>,
+  body: string | undefined,
+  insecure: boolean,
+): Promise<{ ok: boolean; status: number; json?: any; error?: string }> {
+  const u = new URL(urlStr);
+  const lib = u.protocol === 'https:' ? https : http;
+  const payload = body ? Buffer.from(body, 'utf8') : undefined;
+  const reqHeaders: Record<string, string | number> = { ...headers };
+  if (payload) {
+    reqHeaders['Content-Length'] = payload.length;
+    if (!reqHeaders['Content-Type'] && !reqHeaders['content-type']) {
+      reqHeaders['Content-Type'] = 'application/json';
+    }
+  }
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method,
+    headers: reqHeaders,
+    rejectUnauthorized: !insecure,
+  };
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let json: any = undefined;
+        try {
+          json = raw.trim() ? JSON.parse(raw) : {};
+        } catch {
+          json = { raw };
+        }
+        const status = res.statusCode || 0;
+        if (status >= 400) {
+          resolve({
+            ok: false,
+            status,
+            json,
+            error: (json && json.error) || `HTTP ${status}`,
+          });
+          return;
+        }
+        resolve({ ok: true, status, json });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(60_000, () => req.destroy(new Error('canvas request timeout')));
+    if (payload) req.write(payload);
     req.end();
   });
 }

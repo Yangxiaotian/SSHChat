@@ -5,6 +5,7 @@ import {
   type SecureLinkPayload,
 } from '../lib/secureLinks';
 import { useTranslation } from '../i18n';
+import { useChatStore } from '../store/chatStore';
 
 interface SecureLinkCardProps {
   payload: SecureLinkPayload;
@@ -13,6 +14,7 @@ interface SecureLinkCardProps {
 export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const { locale, t } = useTranslation();
   const loc = locale === 'zh' ? 'zh' : 'en';
+  const openCanvas = useChatStore((s) => s.openCanvas);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -30,6 +32,10 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
     setBusy(true);
     setError('');
     try {
+      if (payload.kind === 'canvas') {
+        openCanvas({ url: payload.url, key: payload.key });
+        return;
+      }
       const result = await window.api.openSecureWebSession({
         kind: payload.kind,
         url: payload.url,

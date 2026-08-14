@@ -78,6 +78,12 @@ declare global {
         mime: string;
         data: ArrayBuffer;
       }) => Promise<{ ok: boolean; filename?: string; error?: string }>;
+      canvasHttp: (payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      }) => Promise<{ ok: boolean; status: number; json?: any; error?: string }>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;
@@ -107,6 +113,7 @@ interface ChatState {
   doNotDisturb: boolean;
   composerText: string;
   libraryView: LibraryViewState;
+  canvasSession: { url: string; key: string } | null;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -142,6 +149,8 @@ interface ChatState {
   toggleDoNotDisturb: () => void;
   setComposerText: (value: string) => void;
   clearMessages: (room?: string) => void;
+  openCanvas: (session: { url: string; key: string }) => void;
+  closeCanvas: () => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -168,6 +177,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   doNotDisturb: initDndFromStorage(),
   composerText: '',
   libraryView: emptyLibraryViewState(),
+  canvasSession: null,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -332,6 +342,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     rooms: [{ name: 'default', isDefault: true, unreadCount: 0, lastActivity: Date.now() }],
     activeRoom: 'default',
     users: [],
+    canvasSession: null,
   }),
 
   setUsers: (users) => set({ users }),
@@ -371,6 +382,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
+  openCanvas: (session) => set({ canvasSession: session }),
+  closeCanvas: () => set({ canvasSession: null }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

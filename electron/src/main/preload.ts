@@ -108,6 +108,14 @@ const api = {
   }): Promise<{ ok: boolean; filename?: string; error?: string }> => {
     return ipcRenderer.invoke(IPC_CHANNELS.UPLOAD_SECURE_FILE, payload);
   },
+  canvasHttp: (payload: {
+    url: string;
+    method?: 'GET' | 'POST';
+    headers?: Record<string, string>;
+    body?: string;
+  }): Promise<{ ok: boolean; status: number; json?: any; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.CANVAS_HTTP, payload);
+  },
 
   // Event listeners
   onChatMessage: (callback: (message: ChatMessage) => void) => {

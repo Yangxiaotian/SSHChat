@@ -5,6 +5,7 @@ import InputBar from './InputBar';
 import MessageBubble from './MessageBubble';
 import SecureLinkCard from './SecureLinkCard';
 import GameWorkbench from './GameWorkbench';
+import CanvasPanel from './CanvasPanel';
 import { groupSecureLinkMessages } from '../lib/secureLinks';
 import {
   extractFileFromDataTransfer,
@@ -102,7 +103,7 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages } = useChatStore();
+  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
@@ -230,13 +231,19 @@ export default function ChatArea() {
       </div>
 
       <div ref={splitRootRef} className="chat-main-split">
-        <div
-          className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
-          style={doNotDisturb ? undefined : { height: `${workbenchHeight}px` }}
-        >
-          <GameWorkbench />
-        </div>
-        {!doNotDisturb && (
+        {canvasSession ? (
+          <div className="canvas-pane">
+            <CanvasPanel />
+          </div>
+        ) : (
+          <div
+            className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
+            style={doNotDisturb ? undefined : { height: `${workbenchHeight}px` }}
+          >
+            <GameWorkbench />
+          </div>
+        )}
+        {!doNotDisturb && !canvasSession && (
         <div
           className={`chat-splitter ${isResizing ? 'active' : ''}`}
           title="Drag to resize game panel height"
@@ -246,6 +253,11 @@ export default function ChatArea() {
           <span className="chat-splitter-grip">...</span>
         </div>
         )}
+        {canvasSession ? (
+          <div className="chat-splitter canvas-splitter" aria-hidden>
+            <span className="chat-splitter-grip">...</span>
+          </div>
+        ) : null}
 
         <div className="chat-messages-surface">
           <div
