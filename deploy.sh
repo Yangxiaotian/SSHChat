@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # One-shot install: copy app under PREFIX, venv + prompt_toolkit, sshchat.env, systemd unit.
 # Linux: systemd + service user. macOS: auto local-dev (no useradd/groupadd/systemd).
 # iSH (iOS Alpine): auto OpenRC + no Cloudflare + lightweight deps (no pymupdf).
@@ -9,6 +9,28 @@
 #   sudo ./deploy.sh --no-systemd
 #   sudo ./deploy.sh --prefix /opt/sshchat --keep-env   # upgrade: keep sshchat.env
 # Rewrites user authorized_keys command= to PREFIX/chat.sh each run unless --no-migrate-keys (needs perl).
+#
+# Shebang is /bin/sh so Alpine/iSH can start without bash; bootstrap below installs
+# bash via apk when missing, then re-execs. Body requires bash (arrays, [[, pipefail).
+
+# POSIX-only bootstrap — must run before any bashisms.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if ! command -v bash >/dev/null 2>&1; then
+    if command -v apk >/dev/null 2>&1; then
+      echo "info: bash not found; installing via apk (needed for deploy.sh)" >&2
+      if ! apk add --no-cache bash 2>/dev/null && ! apk add bash; then
+        echo "error: failed to install bash; as root run: apk update && apk add bash" >&2
+        echo "error: if apk.ish.app hangs, see DEPLOY-iSH.md (apk mirror)" >&2
+        exit 1
+      fi
+    else
+      echo "error: bash is required but not installed" >&2
+      echo "error: install bash, then re-run this script" >&2
+      exit 1
+    fi
+  fi
+  exec bash "$0" "$@"
+fi
 
 set -euo pipefail
 
