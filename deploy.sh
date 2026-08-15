@@ -110,21 +110,23 @@ ish_apk_add_timed() {
   fi
 }
 
-# Fresh iSH needs apk py3-lxml (venv --system-site-packages). apk.ish.app often
-# fails; switch to Alpine CDN / tuna and retry before aborting.
+# Fresh Alpine/iSH: python3 + py3-lxml (venv --system-site-packages). apk.ish.app
+# often fails; switch to Alpine CDN / tuna and retry before aborting.
 ish_ensure_py_apk_deps() {
   if ! command -v apk &>/dev/null; then
     return 0
   fi
-  if python3 -c "import lxml" 2>/dev/null \
+  if command -v python3 &>/dev/null \
+    && python3 -c "import lxml" 2>/dev/null \
     && { command -v pip3 &>/dev/null || command -v pip &>/dev/null; }; then
-    echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
+    echo "info: iSH: python3/py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
     return 0
   fi
 
-  echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+  echo "info: iSH: ensuring apk packages python3 py3-lxml py3-pip" >&2
   echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
-  if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+  if ish_apk_add_timed python3 py3-lxml py3-pip 2>/dev/null \
+    && command -v python3 &>/dev/null \
     && python3 -c "import lxml" 2>/dev/null; then
     return 0
   fi
@@ -148,17 +150,49 @@ ish_ensure_py_apk_deps() {
     else
       apk update 2>/dev/null || continue
     fi
-    if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+    if ish_apk_add_timed python3 py3-lxml py3-pip 2>/dev/null \
+      && command -v python3 &>/dev/null \
       && python3 -c "import lxml" 2>/dev/null; then
-      echo "info: iSH: installed py3-lxml via $mirror" >&2
+      echo "info: iSH: installed python3/py3-lxml via $mirror" >&2
       return 0
     fi
   done
 
-  echo "error: iSH: py3-lxml still missing after apk mirror retries" >&2
-  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add py3-lxml py3-pip" >&2
+  echo "error: iSH: python3/py3-lxml still missing after apk mirror retries" >&2
+  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add python3 py3-lxml py3-pip" >&2
   echo "error: re-run ./deploy.sh --keep-env (do not continue without lxml — ebooklib needs it)" >&2
   exit 1
+}
+
+# Install python3 (+venv) when missing — mirrors the bash apk bootstrap for Alpine/iSH.
+ensure_python3() {
+  if command -v python3 &>/dev/null; then
+    return 0
+  fi
+  if command -v apk &>/dev/null; then
+    echo "info: python3 not found; installing via apk (needed for deploy.sh)" >&2
+    if ish_apk_add_timed python3 2>/dev/null || apk add --no-cache python3 2>/dev/null || apk add python3; then
+      :
+    else
+      echo "error: failed to install python3; as root run: apk update && apk add python3" >&2
+      echo "error: if apk.ish.app hangs, see DEPLOY-iSH.md (apk mirror)" >&2
+      exit 1
+    fi
+  elif command -v apt-get &>/dev/null; then
+    echo "info: python3 not found; installing via apt-get" >&2
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv; then
+      echo "error: failed to install python3; as root run: apt-get install -y python3 python3-venv" >&2
+      exit 1
+    fi
+  else
+    echo "error: python3 not found" >&2
+    echo "error: install python3, then re-run this script" >&2
+    exit 1
+  fi
+  if ! command -v python3 &>/dev/null; then
+    echo "error: python3 still missing after package install" >&2
+    exit 1
+  fi
 }
 
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
@@ -868,13 +902,16 @@ chmod +x \
   "$SCRIPT_DIR/admin-remove-peer.sh" \
   "$SCRIPT_DIR/federation-bridge.sh"
 
-if ! command -v python3 &>/dev/null; then
-  echo "error: python3 not found" >&2
-  exit 1
-fi
+ensure_python3
 if ! python3 -c "import venv" 2>/dev/null; then
-  echo "error: python3 venv module missing (e.g. apt install python3-venv)" >&2
-  exit 1
+  if command -v apt-get &>/dev/null; then
+    echo "info: python3 venv module missing; installing python3-venv via apt-get" >&2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv || true
+  fi
+  if ! python3 -c "import venv" 2>/dev/null; then
+    echo "error: python3 venv module missing (e.g. apt install python3-venv / apk add python3)" >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "$SERVER_IP" ]]; then
