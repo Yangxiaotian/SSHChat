@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from collections import defaultdict
 from html import unescape
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import canvas_sharing
 import dict_lookup
@@ -965,12 +965,9 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
     authority = payload.get("room_game_authority")
     if isinstance(authority, dict):
         for room, auth in authority.items():
-            if (
-                isinstance(room, str)
-                and room in room_games
-                and isinstance(auth, str)
-                and auth.strip()
-            ):
+            # Keep auth even with no active game (ended-tombstone) so greq can
+            # answer gend and gsync cannot revive a stale peer board after restart.
+            if isinstance(room, str) and isinstance(auth, str) and auth.strip():
                 room_game_authority[room] = auth.strip()
     tokens = payload.get("room_game_tokens")
     if isinstance(tokens, dict):
@@ -2337,10 +2334,111 @@ def _fed_local_file_public() -> str:
 def _fed_on_file_host_request(
     requester: str, req_id: str, payload: dict
 ) -> None:
-    """Peer asked us to host a /sendfile session on our public Cloudflare URL."""
+    """Peer asked us to host a /sendfile or /canvas session on our public URL."""
     hub = federation.get_hub()
     if hub is None:
         return
+    mode = str(payload.get("mode") or "file").strip().lower()
+    if mode == "canvas":
+        reply: dict = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas",
+        }
+        try:
+            if file_http is None:
+                reply["error"] = "canvas disabled on host"
+            elif not file_http_server.is_externally_reachable_url(
+                file_http.get_base_url()
+            ):
+                reply["error"] = "host has no public file URL"
+            else:
+                creator = str(payload.get("creator") or "").strip()
+                participants = payload.get("participants") or []
+                if not isinstance(participants, list):
+                    participants = []
+                participants = [
+                    str(p).strip() for p in participants if str(p).strip()
+                ]
+                room = payload.get("room")
+                room_name = str(room).strip() if room else None
+                title = str(payload.get("title") or "").strip()
+                if not creator or not participants:
+                    reply["error"] = "invalid creator/participants"
+                else:
+                    session = canvas_sharing.canvas_store.create_session(
+                        creator=creator,
+                        participants=participants,
+                        room=room_name,
+                        title=title,
+                    )
+                    base_url = file_http.get_base_url().rstrip("/")
+                    reply = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "mode": "canvas",
+                        "host_node": hub.node_id,
+                        "base_url": base_url,
+                        "session_id": session.session_id,
+                        "creator": session.creator,
+                        "room": room_name,
+                        "tokens": dict(session.tokens),
+                        "keys": dict(session.keys),
+                        "title": session.title,
+                        "expires": session.expires,
+                    }
+                    print(
+                        f"[Canvas] Hosted federated canvas for {requester}: "
+                        f"creator={creator} participants={len(participants)} "
+                        f"via {base_url}"
+                    )
+        except Exception as e:
+            print(f"[Canvas] federated host error: {e!r}")
+            traceback.print_exc()
+            reply = {"ok": False, "error": str(e), "req_id": req_id, "mode": "canvas"}
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas) failed: {e!r}")
+        return
+    if mode == "canvas_close":
+        reply = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas_close",
+        }
+        try:
+            session_id = str(payload.get("session_id") or "").strip()
+            by_user = str(payload.get("by_user") or "").strip()
+            if not session_id or not by_user:
+                reply["error"] = "invalid session_id/by_user"
+            else:
+                ok, err = canvas_sharing.canvas_store.close_session(
+                    session_id, by_user
+                )
+                reply = {
+                    "ok": ok,
+                    "req_id": req_id,
+                    "mode": "canvas_close",
+                    "error": err if not ok else "",
+                }
+        except Exception as e:
+            print(f"[Canvas] federated close error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_close",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_close) failed: {e!r}")
+        return
+
     reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
     try:
         if file_http is None:
@@ -2405,6 +2503,45 @@ def _fed_on_file_host_result(_from_peer: str, req_id: str, payload: dict) -> Non
             event.set()
 
 
+def _federation_request_canvas_host(
+    host_node: str,
+    creator: str,
+    participants: list[str],
+    room: Optional[str],
+    *,
+    title: str = "",
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        creator,
+        participants,
+        room,
+        timeout=timeout,
+        mode="canvas",
+        title=title,
+    )
+
+
+def _federation_request_canvas_close(
+    host_node: str,
+    session_id: str,
+    by_user: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        "",
+        [],
+        None,
+        timeout=timeout,
+        mode="canvas_close",
+        session_id=session_id,
+        by_user=by_user,
+    )
+
+
 def _federation_request_file_host(
     host_node: str,
     sender: str,
@@ -2412,6 +2549,10 @@ def _federation_request_file_host(
     room: Optional[str],
     *,
     timeout: float | None = None,
+    mode: str = "file",
+    title: str = "",
+    session_id: str = "",
+    by_user: str = "",
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -2426,16 +2567,29 @@ def _federation_request_file_host(
     event = threading.Event()
     with _file_host_waiters_lock:
         _file_host_waiters[req_id] = {"event": event, "payload": None}
+    payload: dict = {}
+    if mode == "canvas":
+        payload = {
+            "mode": "canvas",
+            "creator": sender,
+            "participants": recipients,
+            "room": room,
+            "title": title,
+        }
+    elif mode == "canvas_close":
+        payload = {
+            "mode": "canvas_close",
+            "session_id": session_id,
+            "by_user": by_user,
+        }
+    else:
+        payload = {
+            "sender": sender,
+            "recipients": recipients,
+            "room": room,
+        }
     try:
-        if not hub.request_file_host(
-            host_node,
-            req_id,
-            {
-                "sender": sender,
-                "recipients": recipients,
-                "room": room,
-            },
-        ):
+        if not hub.request_file_host(host_node, req_id, payload):
             return {"ok": False, "error": f"无法联系文件代理节点 {host_node}"}
         if not event.wait(timeout):
             return {
@@ -3336,9 +3490,13 @@ def _canvas_invite_message(
 
 def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
     """Privately deliver each participant their canvas URL + key."""
-    if file_http is None:
-        return
-    base_url = file_http.get_base_url()
+    base_url = (session.host_base_url or "").strip()
+    if not base_url:
+        if file_http is None:
+            return
+        base_url = file_http.get_base_url()
+    base_url = base_url.rstrip("/")
+    hub = federation.get_hub()
     for participant, token in session.tokens.items():
         key = session.keys.get(participant) or ""
         url = f"{base_url}/canvas/{token}"
@@ -3350,14 +3508,117 @@ def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
             title=session.title,
         )
         recipient_lower = participant.lower()
+        delivered = False
         with lock:
             for c, info in clients.items():
                 if info["name"].lower() != recipient_lower:
                     continue
                 try:
                     send_line(c, message)
+                    delivered = True
                 except Exception as e:
                     print(f"[Canvas] Failed to notify {participant}: {e}")
+        if (
+            not delivered
+            and hub is not None
+            and hub.enabled
+            and hub.has_remote_user(participant)
+        ):
+            try:
+                hub.send_pm(participant, session.creator, message)
+            except Exception as e:
+                print(f"[Canvas] Federated invite failed for {participant}: {e}")
+
+
+def _create_canvas_via_federation_proxy(
+    conn,
+    sender: str,
+    recipients: list[str],
+    room_name: Optional[str],
+) -> Optional[canvas_sharing.CanvasSession]:
+    """Host canvas on a Cloudflare-capable peer when local file URL is LAN-only."""
+    if file_http is None:
+        return None
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return None
+    if not file_http_server.needs_federation_file_proxy(file_http.get_base_url()):
+        return None
+    if not hub.has_remote_file_public():
+        try:
+            _federation_sync_file_public()
+        except Exception:
+            pass
+    proxy_peer = hub.pick_file_public_peer()
+    if proxy_peer is None:
+        send_line(
+            conn,
+            "[*] 联邦中暂无已广告的 Cloudflare/公网文件节点；"
+            "将使用本机地址（对端可能打不开）。\n",
+        )
+        return None
+    host_node, peer_url = proxy_peer
+    send_line(
+        conn,
+        f"[*] 正在向联邦节点 {host_node} 申请公网画布"
+        f"（{peer_url}）…\n",
+    )
+    hosted = _federation_request_canvas_host(
+        host_node, sender, recipients, room_name
+    )
+    if not hosted.get("ok"):
+        err = hosted.get("error") or "unknown"
+        send_line(
+            conn,
+            f"[*] 联邦公网画布代理（{host_node}）失败：{err}；"
+            f"改用本机地址。\n",
+        )
+        return None
+    session_id = str(hosted.get("session_id") or "").strip()
+    base_url = str(hosted.get("base_url") or "").strip().rstrip("/")
+    tokens = hosted.get("tokens") or {}
+    keys = hosted.get("keys") or {}
+    if not session_id or not base_url or not isinstance(tokens, dict) or not isinstance(keys, dict):
+        send_line(conn, "[*] 联邦公网画布代理返回无效；改用本机地址。\n")
+        return None
+    try:
+        expires = float(hosted.get("expires") or 0)
+    except (TypeError, ValueError):
+        expires = 0.0
+    session = canvas_sharing.canvas_store.register_remote_session(
+        session_id=session_id,
+        creator=str(hosted.get("creator") or sender).strip() or sender,
+        participants=recipients,
+        room=room_name,
+        tokens={str(k): str(v) for k, v in tokens.items()},
+        keys={str(k): str(v) for k, v in keys.items()},
+        host_node=host_node,
+        host_base_url=base_url,
+        title=str(hosted.get("title") or ""),
+        expires=expires,
+    )
+    send_line(
+        conn,
+        f"[*] 画布已托管在联邦节点 {host_node} 的公网通道"
+        f"（本机无 Cloudflare）。\n",
+    )
+    return session
+
+
+def _close_canvas_session(
+    session: canvas_sharing.CanvasSession, by_user: str
+) -> Tuple[bool, str]:
+    if session.host_node:
+        hosted = _federation_request_canvas_close(
+            session.host_node, session.session_id, by_user
+        )
+        if not hosted.get("ok"):
+            err = str(hosted.get("error") or "关闭失败")
+            return False, err
+    ok, err = canvas_sharing.canvas_store.close_session(
+        session.session_id, by_user
+    )
+    return ok, err
 
 
 def _handle_canvas(conn, sender: str, payload: str) -> None:
@@ -3398,7 +3659,7 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         if session is None:
             send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的画布。\n")
             return
-        ok, err = canvas_sharing.canvas_store.close_session(session.session_id, sender)
+        ok, err = _close_canvas_session(session, sender)
         if not ok:
             send_line(conn, f"[*] {err}\n")
             return
@@ -3473,17 +3734,21 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
             return
         recipients = [sender, online[0]]
 
-    try:
-        session = canvas_sharing.canvas_store.create_session(
-            creator=sender,
-            participants=recipients,
-            room=room_name,
-        )
-    except Exception as e:
-        print(f"[Canvas] create failed: {e}")
-        traceback.print_exc()
-        send_line(conn, "[*] 创建画布失败，请稍后重试。\n")
-        return
+    session = _create_canvas_via_federation_proxy(
+        conn, sender, recipients, room_name
+    )
+    if session is None:
+        try:
+            session = canvas_sharing.canvas_store.create_session(
+                creator=sender,
+                participants=recipients,
+                room=room_name,
+            )
+        except Exception as e:
+            print(f"[Canvas] create failed: {e}")
+            traceback.print_exc()
+            send_line(conn, "[*] 创建画布失败，请稍后重试。\n")
+            return
 
     if room_name:
         broadcast_room(
@@ -3988,6 +4253,17 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
     with lock:
         if room_games.get(room) is not None:
             return True
+        # Local authority with no board = ended tombstone. greq would only
+        # fetch a stale peer replica (WSL) and revive the finished game on
+        # /game show / join.
+        auth = (room_game_authority.get(room) or "").strip()
+        local = hub.node_id
+        if auth == local:
+            try:
+                hub.end_game(room, local)
+            except Exception as e:
+                print(f"federation: tombstone gend failed room={room!r}: {e!r}")
+            return False
     try:
         hub.request_game(room)
     except Exception as e:
@@ -4001,6 +4277,29 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
                 return True
         time.sleep(0.05)
     return False
+
+
+def _federation_broadcast_ended_tombstones() -> None:
+    """Tell peers to drop boards for rooms we already ended (auth-only)."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            room
+            for room, auth in list(room_game_authority.items())
+            if (auth or "").strip() == local
+            and (
+                room not in room_games
+                or getattr(room_games.get(room), "state", "ended") == "ended"
+            )
+        ]
+    for room in rooms:
+        try:
+            hub.end_game(room, local)
+        except Exception as e:
+            print(f"federation: tombstone gend failed room={room!r}: {e!r}")
 
 
 def _federation_wait_game_progress(
@@ -4685,6 +4984,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             except Exception as e:
                 print(f"federation: peer-up game reconcile error: {e!r}")
             try:
+                _federation_broadcast_ended_tombstones()
+            except Exception as e:
+                print(f"federation: peer-up ended-tombstone gend error: {e!r}")
+            try:
                 _federation_push_all_game_snapshots()
             except Exception as e:
                 print(f"federation: peer-up game catch-up error: {e!r}")
@@ -4908,6 +5211,10 @@ def _ensure_federation_hub() -> None:
         _federation_reconcile_restored_games()
     except Exception as e:
         print(f"federation: initial game reconcile error: {e!r}")
+    try:
+        _federation_broadcast_ended_tombstones()
+    except Exception as e:
+        print(f"federation: initial ended-tombstone gend error: {e!r}")
 
     # Start library directory watch thread
     if _library_watch_thread is None:

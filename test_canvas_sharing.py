@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 
 import canvas_sharing
@@ -103,6 +104,25 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertTrue(ok)
         found = self.store.find_open_for_room("art")
         self.assertIsNone(found)
+
+    def test_register_remote_session_mirror(self) -> None:
+        session = self.store.register_remote_session(
+            session_id="remote-sid",
+            creator="Alice",
+            participants=["Bob", "Carol"],
+            room="fed",
+            tokens={"Alice": "tok-a", "Bob": "tok-b"},
+            keys={"Alice": "KEYAAA", "Bob": "KEYBBB"},
+            host_node="node-b",
+            host_base_url="https://cf.trycloudflare.com",
+            expires=time.time() + 3600,
+        )
+        self.assertEqual(session.host_node, "node-b")
+        self.assertEqual(session.host_base_url, "https://cf.trycloudflare.com")
+        self.assertIsNone(self.store.get_by_token("tok-a"))
+        found = self.store.find_open_for_room("fed")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.session_id, "remote-sid")
 
     def test_generate_canvas_page_contains_gate(self) -> None:
         import canvas_http

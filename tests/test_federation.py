@@ -1693,6 +1693,140 @@ class FederationServerIntegrationTests(unittest.TestCase):
                 hub_a.stop()
                 hub_b.stop()
 
+    def test_canvas_host_rpc_roundtrip(self) -> None:
+        chat_a = self._free_port()
+        chat_b = self._free_port()
+        fed_a = self._free_port()
+        fed_b = self._free_port()
+
+        with tempfile.TemporaryDirectory() as td:
+            peers_a = Path(td) / "peers_a.json"
+            peers_b = Path(td) / "peers_b.json"
+            peers_a.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_b,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peers_b.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-a",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_a,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            hosted: dict = {}
+            result: dict = {}
+            done = threading.Event()
+
+            def on_host_req(requester, req_id, payload):
+                hosted["payload"] = payload
+                hub_b.reply_file_host(
+                    requester,
+                    req_id,
+                    {
+                        "ok": True,
+                        "mode": "canvas",
+                        "base_url": "https://cf.trycloudflare.com",
+                        "session_id": "canvas-1",
+                        "creator": "alice",
+                        "tokens": {"alice": "tok-a", "bob": "tok-b"},
+                        "keys": {"alice": "AAA111", "bob": "BBB222"},
+                        "host_node": "node-b",
+                    },
+                )
+
+            def on_host_result(origin, req_id, payload):
+                result["origin"] = origin
+                result["payload"] = payload
+                done.set()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-a",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_a),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_a),
+                },
+                clear=False,
+            ):
+                hub_a = federation.FederationHub(
+                    chat_a,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_result=on_host_result,
+                    get_local_file_public=lambda: "",
+                )
+                hub_a.enabled = True
+                hub_a.start()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-b",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_b),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_b),
+                },
+                clear=False,
+            ):
+                hub_b = federation.FederationHub(
+                    chat_b,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_request=on_host_req,
+                    get_local_file_public=lambda: "https://cf.trycloudflare.com",
+                )
+                hub_b.enabled = True
+                hub_b.start()
+
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if hub_a.peer_count and hub_b.peer_count:
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(
+                    hub_a.request_file_host(
+                        "node-b",
+                        "c-req1",
+                        {
+                            "mode": "canvas",
+                            "creator": "alice",
+                            "participants": ["bob"],
+                            "room": "default",
+                        },
+                    )
+                )
+                self.assertTrue(done.wait(5))
+                self.assertEqual(result.get("origin"), "node-b")
+                payload = result.get("payload") or {}
+                self.assertTrue(payload.get("ok"))
+                self.assertEqual(payload.get("mode"), "canvas")
+                self.assertEqual(hosted.get("payload", {}).get("mode"), "canvas")
+            finally:
+                hub_a.stop()
+                hub_b.stop()
+
 
 class FilePublicReachabilityTests(unittest.TestCase):
     def test_trycloudflare_and_private(self) -> None:

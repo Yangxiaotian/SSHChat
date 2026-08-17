@@ -63,6 +63,9 @@ class CanvasSession:
     expires: float = 0.0
     closed: bool = False
     title: str = ""
+    # When set, strokes live on host_node; this node only mirrors invites/lookup.
+    host_node: Optional[str] = None
+    host_base_url: Optional[str] = None
 
 
 class CanvasStore:
@@ -95,6 +98,8 @@ class CanvasStore:
                     expires=float(raw.get("expires") or 0),
                     closed=bool(raw.get("closed")),
                     title=str(raw.get("title") or ""),
+                    host_node=raw.get("host_node") or None,
+                    host_base_url=raw.get("host_base_url") or None,
                 )
                 self.sessions[sid] = session
                 for token in session.tokens.values():
@@ -166,6 +171,51 @@ class CanvasStore:
             self.sessions[session_id] = session
             for token in tokens.values():
                 self.token_to_session[token] = session_id
+            self._save()
+        return session
+
+    def register_remote_session(
+        self,
+        *,
+        session_id: str,
+        creator: str,
+        participants: List[str],
+        room: Optional[str],
+        tokens: Dict[str, str],
+        keys: Dict[str, str],
+        host_node: str,
+        host_base_url: str,
+        title: str = "",
+        expires: float = 0.0,
+    ) -> CanvasSession:
+        """Mirror a canvas hosted on a federation peer (no local stroke storage)."""
+        now = time.time()
+        session = CanvasSession(
+            session_id=session_id,
+            creator=creator,
+            room=room,
+            tokens=dict(tokens),
+            keys=dict(keys),
+            strokes=[],
+            next_seq=1,
+            created_at=now,
+            expires=float(expires) if expires > 0 else now + CANVAS_TTL_SECONDS,
+            closed=False,
+            title=(title or "").strip()[:80],
+            host_node=str(host_node or "").strip() or None,
+            host_base_url=str(host_base_url or "").strip().rstrip("/") or None,
+        )
+        with self.lock:
+            # Drop any prior open canvas for the same room on this node.
+            if room:
+                for sid, existing in list(self.sessions.items()):
+                    if (
+                        existing.room == room
+                        and not existing.closed
+                        and sid != session_id
+                    ):
+                        existing.closed = True
+            self.sessions[session_id] = session
             self._save()
         return session
 
