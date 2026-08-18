@@ -14,7 +14,10 @@
 # bash via apk when missing, then re-execs. Body requires bash (arrays, [[, pipefail).
 
 # POSIX-only bootstrap — must run before any bashisms.
-if [ -z "${BASH_VERSION:-}" ]; then
+# Always re-exec real bash: macOS /bin/sh is bash with POSIXLY_CORRECT set, so
+# BASH_VERSION is already set and a naive check would skip exec, then choke on
+# [[ / =~ / arrays. Guard with SSHCHAT_DEPLOY_IN_BASH so we only exec once.
+if [ -z "${SSHCHAT_DEPLOY_IN_BASH:-}" ]; then
   if ! command -v bash >/dev/null 2>&1; then
     if command -v apk >/dev/null 2>&1; then
       echo "info: bash not found; installing via apk (needed for deploy.sh)" >&2
@@ -29,8 +32,10 @@ if [ -z "${BASH_VERSION:-}" ]; then
       exit 1
     fi
   fi
-  exec bash "$0" "$@"
+  SSHCHAT_DEPLOY_IN_BASH=1 exec bash "$0" "$@"
 fi
+unset POSIXLY_CORRECT
+set +o posix 2>/dev/null || true
 
 set -euo pipefail
 
