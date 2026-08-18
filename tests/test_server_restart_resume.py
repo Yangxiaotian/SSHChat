@@ -203,6 +203,23 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(server.room_game_authority[room], "Mathematics.local")
         self.assertEqual(server.room_game_tokens[room], "tok-abc")
 
+    def test_ended_authority_tombstone_survives_restart(self) -> None:
+        """Auth without an active game must reload so stale peer gsync is rejected."""
+        room = "default"
+        server.room_game_authority[room] = "Mathematics.local"
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertNotIn(room, payload.get("room_games") or {})
+        self.assertEqual(payload["room_game_authority"].get(room), "Mathematics.local")
+        server.session_store.save(payload)
+
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server._load_persisted_sessions()
+
+        self.assertNotIn(room, server.room_games)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+
     def test_parked_game_survives_restart(self) -> None:
         room = "default"
         host = DummyConn()

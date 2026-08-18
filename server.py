@@ -124,6 +124,8 @@ room_games_parked: dict[str, object] = {}
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
 room_game_tokens: dict[str, str] = {}
+# room -> monotonic deadline: we sent greq and should accept the next gsync/gend
+_greq_until: dict[str, float] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
@@ -4056,6 +4058,30 @@ def _route_game_private(room: str, conn, lines) -> None:
             hub.send_game_private_to(conn.node_id, room, conn.nickname, lines)
 
 
+def _note_greq(room: str, ttl: float = 5.0) -> None:
+    """Mark that we asked peers for this room; the reply may replace our board."""
+    room = (room or "").strip()
+    if room:
+        _greq_until[room] = time.monotonic() + max(0.5, float(ttl))
+
+
+def _greq_outstanding(room: str) -> bool:
+    until = _greq_until.get(room) or 0.0
+    return time.monotonic() < until
+
+
+def _clear_greq(room: str) -> None:
+    _greq_until.pop(room, None)
+
+
+def _federation_ask_peers_for_game(room: str) -> None:
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    _note_greq(room)
+    hub.request_game(room)
+
+
 def _federation_sync_game(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -4144,7 +4170,7 @@ def _federation_reconcile_restored_games() -> None:
             # board. Pull from peers before pushing, or we fan-out an old gsync on
             # link-up and can overwrite the real host (e.g. WSL reconnect).
             try:
-                hub.request_game(room)
+                _federation_ask_peers_for_game(room)
             except Exception as e:
                 print(f"federation: reconcile greq failed room={room!r}: {e!r}")
             _federation_wait_after_greq(
@@ -4179,7 +4205,7 @@ def _federation_reconcile_restored_games() -> None:
             continue
         # Unknown or remote authority: ask peers and keep the newer board.
         try:
-            hub.request_game(room)
+            _federation_ask_peers_for_game(room)
         except Exception as e:
             print(f"federation: reconcile greq failed room={room!r}: {e!r}")
             continue
@@ -4265,7 +4291,7 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
                 print(f"federation: tombstone gend failed room={room!r}: {e!r}")
             return False
     try:
-        hub.request_game(room)
+        _federation_ask_peers_for_game(room)
     except Exception as e:
         print(f"federation: greq failed for room {room!r}: {e!r}")
         return False
@@ -4371,7 +4397,7 @@ def _federation_refresh_replica_and_wait(
             return True
         before = _game_progress_score(game)
     try:
-        hub.request_game(room)
+        _federation_ask_peers_for_game(room)
     except Exception as e:
         print(f"federation: refresh greq failed for room {room!r}: {e!r}")
         return False
@@ -4395,23 +4421,6 @@ def _federation_notify_game_end(room: str) -> None:
         hub.end_game(room, hub.node_id)
 
 
-def _game_conflict_winner(
-    auth_a: str, token_a: str, auth_b: str, token_b: str
-) -> tuple[str, str]:
-    """Pick one of two conflicting games. Tokens are random; compare is deterministic."""
-    a_auth = (auth_a or "").strip()
-    b_auth = (auth_b or "").strip()
-    a_tok = (token_a or "").strip() or a_auth
-    b_tok = (token_b or "").strip() or b_auth
-    if a_tok > b_tok:
-        return a_auth, a_tok
-    if b_tok > a_tok:
-        return b_auth, b_tok
-    if a_auth >= b_auth:
-        return a_auth, a_tok
-    return b_auth, b_tok
-
-
 def _game_progress_score(game) -> int:
     """Best-effort ply/move count so newer replicas win dual-authority races."""
     if game is None:
@@ -4431,6 +4440,69 @@ def _game_progress_score(game) -> int:
             except Exception:
                 pass
     return 0
+
+
+def _game_conflict_winner(
+    auth_a: str, token_a: str, auth_b: str, token_b: str
+) -> tuple[str, str]:
+    """Pick one of two conflicting games. Tokens are random; compare is deterministic."""
+    a_auth = (auth_a or "").strip()
+    b_auth = (auth_b or "").strip()
+    a_tok = (token_a or "").strip() or a_auth
+    b_tok = (token_b or "").strip() or b_auth
+    if a_tok > b_tok:
+        return a_auth, a_tok
+    if b_tok > a_tok:
+        return b_auth, b_tok
+    if a_auth >= b_auth:
+        return a_auth, a_tok
+    return b_auth, b_tok
+
+
+def _game_sync_should_keep_local(
+    *,
+    local_game,
+    remote_game,
+    local_auth: str,
+    authority: str,
+    local_id: str,
+    local_token: str,
+    conflict_token: str,
+    greq: bool,
+) -> bool | None:
+    """Return True/False to pick a side, or None to fall through to token tiebreak."""
+    local_active = (
+        local_game is not None
+        and getattr(local_game, "state", "ended") != "ended"
+    )
+    remote_active = getattr(remote_game, "state", "ended") != "ended"
+    if not local_active or not remote_active:
+        return None
+    we_host = local_auth == local_id
+    if we_host and not greq:
+        return True
+    local_ts = games.game_session_updated_at(local_game)
+    remote_ts = games.game_session_updated_at(remote_game)
+    if local_ts > 0 or remote_ts > 0:
+        if remote_ts > local_ts:
+            return False
+        if local_ts > remote_ts:
+            return True
+    local_prog = _game_progress_score(local_game)
+    remote_prog = _game_progress_score(remote_game)
+    if remote_prog < local_prog and not greq:
+        authority_new_session = (
+            authority == local_auth
+            and len(conflict_token) >= 16
+            and conflict_token != local_token
+        )
+        if not authority_new_session:
+            return True
+    if local_prog > remote_prog:
+        return True
+    if remote_prog > local_prog:
+        return False
+    return None
 
 
 def _park_room_game_locked(room: str, game) -> None:
@@ -4498,7 +4570,7 @@ def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
     for room in freed:
         notice = (
             f"[*] 联邦断开：#{room} 对局权威节点不可达，对局已暂存；"
-            f"本房可重新 /game new。联线后若冲突将随机保留一局并暂存另一局。\n"
+            f"联线后若冲突将保留较新的对局并暂存另一局。\n"
         )
         broadcast_room(room, notice.encode("utf-8"))
     if restored or freed:
@@ -4530,6 +4602,7 @@ def _fed_on_game_sync(
     loser_auth = ""
     winner_auth = authority
     keep_local = False
+    greq = _greq_outstanding(room)
     with lock:
         local_game = room_games.get(room)
         local_auth = (room_game_authority.get(room) or "").strip()
@@ -4539,52 +4612,45 @@ def _fed_on_game_sync(
             and getattr(local_game, "state", "ended") != "ended"
         )
         remote_active = getattr(game, "state", "ended") != "ended"
-        local_prog = _game_progress_score(local_game) if local_active else -1
-        remote_prog = _game_progress_score(game) if remote_active else -1
-        if not local_active and remote_active and local_auth == local_id:
-            # Game ended here as authority; ignore stale peer revival.
+        we_host = local_auth == local_id
+        if not local_active and remote_active and we_host and not greq:
+            # Game ended here as authority; ignore unsolicited stale revival.
             return
-        # Never let a stale replica / catch-up push rewind the board — unless
-        # the remote carries a newer session token (/game new after partition).
-        if local_active and remote_active and remote_prog < local_prog:
-            newer_session = (
-                len(conflict_token) >= 16
-                and len(local_token) >= 16
-                and conflict_token > local_token
-            )
-            if not newer_session:
-                return
         if (
             local_active
             and remote_active
-            and local_auth
-            and local_auth != authority
+            and local_auth == authority
+            and not greq
         ):
-            if remote_prog > local_prog:
-                stale_fork = (
-                    local_auth == local_id
-                    and len(local_token) >= 16
-                    and len(conflict_token) >= 16
-                    and local_token > conflict_token
-                    and remote_prog - local_prog
-                    > max(10, local_prog)
-                )
-                if stale_fork:
-                    room_game_tokens[room] = local_token
-                    keep_local = True
-                else:
-                    # Peer resumed/moved further — never keep a staler local board.
-                    winner_auth = authority
-            elif local_prog > remote_prog:
+            local_ts = games.game_session_updated_at(local_game)
+            remote_ts = games.game_session_updated_at(game)
+            if local_ts > 0 or remote_ts > 0:
+                if remote_ts <= local_ts:
+                    return
+            elif _game_progress_score(game) < _game_progress_score(local_game):
+                return
+        if local_active and remote_active and local_auth and local_auth != authority:
+            pick = _game_sync_should_keep_local(
+                local_game=local_game,
+                remote_game=game,
+                local_auth=local_auth,
+                authority=authority,
+                local_id=local_id,
+                local_token=local_token,
+                conflict_token=conflict_token,
+                greq=greq,
+            )
+            if pick is True:
                 room_game_tokens[room] = local_token
                 keep_local = True
+            elif pick is False:
+                winner_auth = authority
             else:
                 win_auth, win_tok = _game_conflict_winner(
                     local_auth, local_token, authority, conflict_token
                 )
                 winner_auth = win_auth
                 if win_auth == local_auth:
-                    # Keep local; ask peers to take ours.
                     room_game_tokens[room] = win_tok or local_token
                     keep_local = True
                 else:
@@ -4611,6 +4677,7 @@ def _fed_on_game_sync(
         except Exception as e:
             print(f"federation: re-push after winning conflict: {e!r}")
         return
+    _clear_greq(room)
 
     # Immediate persist: debounce alone left replicas one ply behind after restart
     # when the host had already flushed the newer move.
@@ -4629,12 +4696,25 @@ def _fed_on_game_sync(
 
 def _fed_on_game_end(room: str, authority: str) -> None:
     hub = federation.get_hub()
-    if hub is not None and authority == hub.node_id:
+    local = hub.node_id if hub is not None else _local_node_id()
+    if authority == local:
         return
+    greq = _greq_outstanding(room)
     with lock:
+        local_auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        local_active = (
+            game is not None and getattr(game, "state", "ended") != "ended"
+        )
+        # A replica must not gend-wipe a live game we host. After we greq
+        # (reconnect), honor the real host's tombstone even if we had claimed
+        # authority while partitioned.
+        if local_auth == local and local_active and not greq:
+            return
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
         room_game_tokens.pop(room, None)
+    _clear_greq(room)
     _persist_after_game_change()
 
 
@@ -4698,6 +4778,8 @@ def _finish_game_action(
     if send_boards and (ended or getattr(game, "send_view_on_move", True)):
         send_oriented_boards(room, game)
     send_sanguo_hand_views(room, game)
+    if not ended:
+        games.touch_session(game)
     _persist_after_game_change()
     if ended:
         with lock:
