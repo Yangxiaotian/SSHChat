@@ -21,6 +21,14 @@ class I18nTests(unittest.TestCase):
         self.assertTrue(any("/lang" in line for line in zh))
         self.assertIn("command help", "".join(en).lower())
         self.assertIn("命令", "".join(zh))
+        en_text = "".join(en)
+        zh_text = "".join(zh)
+        self.assertIn("/canvas", en_text)
+        self.assertIn("/board", en_text)
+        self.assertIn("drawing board", en_text.lower())
+        self.assertIn("/canvas", zh_text)
+        self.assertIn("/board", zh_text)
+        self.assertIn("画板", zh_text)
 
     def test_game_help_lines(self) -> None:
         en = i18n.game_help_lines("en")

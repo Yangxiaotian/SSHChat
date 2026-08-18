@@ -27,6 +27,8 @@ class FedGameLocalReclaimTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         federation._hub = None
         server._greq_until.clear()
@@ -111,6 +113,8 @@ class FedGameSyncProgressTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         federation._hub = None
         server._greq_until.clear()
@@ -247,7 +251,9 @@ class FedGameSyncProgressTests(unittest.TestCase):
             server.room_game_authority["default"], "Mathematics.local"
         )
 
-    def test_gsync_ignores_stale_lower_progress(self) -> None:
+    def test_gsync_replica_takes_authority_snapshot_without_timestamps(self) -> None:
+        """Ply count is not a conflict key; the host snapshot wins."""
+
         class LocalGame:
             name = "gomoku"
             state = "playing"
@@ -262,21 +268,22 @@ class FedGameSyncProgressTests(unittest.TestCase):
             enabled = True
             node_id = "node-b"
 
-        local = LocalGame()
-        server.room_games["lobby"] = local
+        remote = RemoteGame()
+        server.room_games["lobby"] = LocalGame()
         server.room_game_authority["lobby"] = "node-a"
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
-            with mock.patch.object(server.pickle, "loads", return_value=RemoteGame()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
                 with mock.patch.object(server, "_rebind_game_services"):
                     with mock.patch.object(server, "_remap_local_game_seats_locked"):
-                        server._fed_on_game_sync(
-                            "node-a",
-                            "lobby",
-                            "node-a",
-                            "ZmFrZQ==",
-                            "tok",
-                        )
-        self.assertIs(server.room_games["lobby"], local)
+                        with mock.patch.object(server, "_persist_after_game_change"):
+                            server._fed_on_game_sync(
+                                "node-a",
+                                "lobby",
+                                "node-a",
+                                "ZmFrZQ==",
+                                "tok",
+                            )
+        self.assertIs(server.room_games["lobby"], remote)
 
     def test_gsync_authority_new_session_beats_stale_replica_fork(self) -> None:
         """After /game new on the authority, a partitioned replica must not win by ply count."""
@@ -438,6 +445,8 @@ class FedGameParkRestoreTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         federation._hub = None
         server._greq_until.clear()
@@ -575,8 +584,8 @@ class FedGameParkRestoreTests(unittest.TestCase):
             node_id = "mac-node"
             ended: list[tuple[str, str]] = []
 
-            def end_game(self, room: str, authority: str) -> None:
-                self.ended.append((room, authority))
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
+                self.ended.append((room, authority, token))
 
         hub = FakeHub()
         server.room_game_authority["default"] = "mac-node"
@@ -584,7 +593,7 @@ class FedGameParkRestoreTests(unittest.TestCase):
             with mock.patch.object(server, "_federation_push_game_snapshot") as push:
                 server._fed_on_game_request("wsl-node", "default")
                 push.assert_not_called()
-        self.assertEqual(hub.ended, [("default", "mac-node")])
+        self.assertEqual(hub.ended, [("default", "mac-node", "")])
 
     def test_reconcile_clears_stale_game_when_peer_ended(self) -> None:
         """WSL reconnect must drop a stale board when Mac already ended the game."""
@@ -658,8 +667,8 @@ class FedGameParkRestoreTests(unittest.TestCase):
             def request_game(self, room: str) -> None:
                 self.requested.append(room)
 
-            def end_game(self, room: str, authority: str) -> None:
-                self.ended.append((room, authority))
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
+                self.ended.append((room, authority, token))
 
         hub = FakeHub()
         server.room_game_authority["default"] = "mac-node"
@@ -667,7 +676,7 @@ class FedGameParkRestoreTests(unittest.TestCase):
             ok = server._federation_request_game_and_wait("default", timeout=0.2)
         self.assertFalse(ok)
         self.assertEqual(hub.requested, [])
-        self.assertEqual(hub.ended, [("default", "mac-node")])
+        self.assertEqual(hub.ended, [("default", "mac-node", "")])
 
     def test_reconcile_with_no_peers_parks_remote_auth(self) -> None:
         """Restart while partitioned must free the room without waiting for peer-down."""
@@ -693,6 +702,97 @@ class FedGameParkRestoreTests(unittest.TestCase):
                     server._federation_reconcile_restored_games()
         self.assertNotIn("lobby", server.room_games)
         self.assertIs(server.room_games_parked["lobby"], game)
+
+    def test_gsync_ended_id_blocks_revival_even_during_greq(self) -> None:
+        class StaleRemote:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1), (2, 2, 2)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+
+        ended = "dead" + "0" * 28
+        server.room_game_authority["default"] = "mac-node"
+        server.room_game_ended_ids[ended] = "default"
+        server._note_greq("default")
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=StaleRemote()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_persist_after_game_change") as persist:
+                        server._fed_on_game_sync(
+                            "wsl-node",
+                            "default",
+                            "wsl-node",
+                            "ZmFrZQ==",
+                            ended,
+                        )
+                        persist.assert_not_called()
+        self.assertNotIn("default", server.room_games)
+
+    def test_gsync_tombstone_rejects_even_during_greq(self) -> None:
+        class StaleRemote:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+
+        server.room_game_authority["default"] = "mac-node"
+        server._note_greq("default")
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=StaleRemote()):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_persist_after_game_change") as persist:
+                        server._fed_on_game_sync(
+                            "wsl-node",
+                            "default",
+                            "wsl-node",
+                            "ZmFrZQ==",
+                            "aaaa" + "0" * 28,
+                        )
+                        persist.assert_not_called()
+        self.assertNotIn("default", server.room_games)
+
+    def test_gend_token_clears_matching_local_game(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+
+        tok = "sess" + "0" * 28
+        server.room_games["default"] = LocalGame()
+        server.room_game_authority["default"] = "wsl-node"
+        server.room_game_tokens["default"] = tok
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change"):
+                server._fed_on_game_end("default", "mac-node", tok)
+        self.assertNotIn("default", server.room_games)
+        self.assertEqual(server.room_game_ended_ids.get(tok), "default")
+
+    def test_gend_clears_provisional_claim(self) -> None:
+        class LocalGame:
+            name = "gomoku"
+            state = "playing"
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+
+        server.room_games["default"] = LocalGame()
+        server.room_game_authority["default"] = "wsl-node"
+        server.room_game_tokens["default"] = "fork" + "0" * 28
+        server.room_game_provisional.add("default")
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change"):
+                server._fed_on_game_end("default", "mac-node", "orig" + "0" * 28)
+        self.assertNotIn("default", server.room_games)
+        self.assertNotIn("default", server.room_game_provisional)
 
 
 if __name__ == "__main__":

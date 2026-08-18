@@ -7,7 +7,7 @@ English version: [docs/en/file-sharing.md](docs/en/file-sharing.md)
 当用户通过 SSH 连接到服务器后，会看到：
 
 ```
-[*] Active room #default. /names /rooms /join /switch /msg /sendfile /leave /part /announce /game /news /dict /clear /help
+[*] Active room #default. /names /rooms /join /switch /msg /sendfile /canvas /leave /part /announce /game /news /dict /clear /lang /help
 [*] Rooms: #default
 ```
 
@@ -31,6 +31,9 @@ English version: [docs/en/file-sharing.md](docs/en/file-sharing.md)
 [*]              文件名以你实际上传的文件为准，不必在指令里写。
 [*]              密钥不在网址里，打开网页后另行输入；支持图片、视频、PDF等在线预览。
 [*]              上传和下载都只能用一次，用过即作废，链接被别人截获也没用。
+[*] /canvas        当前房间共享画板（网页；别名 /board）；每人独立网址+密钥，解锁后共同绘画。
+[*] /canvas <昵称>    与某位在线用户开私密画板。
+[*] /canvas #<房间>   在指定房间开共享画板（你必须在该房内）。
 [*] /help          显示本说明。
 ```
 

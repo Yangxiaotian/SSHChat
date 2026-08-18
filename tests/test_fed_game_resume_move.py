@@ -27,6 +27,8 @@ class FedGameResumeMoveTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         federation._hub = None
         server._fed_hub = None
 

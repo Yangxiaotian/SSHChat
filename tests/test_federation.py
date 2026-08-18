@@ -36,6 +36,8 @@ class FederationProtocolTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
@@ -748,6 +750,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         federation._hub = None
         server._fed_hub = None
@@ -950,6 +954,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
         server.room_game_authority["lobby"] = "node-a"
         server.room_game_tokens["lobby"] = "aaaa"  # loses to bbbb
         server.room_games_parked.clear()
+        # Unsolicited gsync cannot overwrite a live host; token tiebreak is for greq.
+        server._note_greq("lobby")
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=remote):
                 with mock.patch.object(server, "_rebind_game_services"):

@@ -74,6 +74,17 @@ Host sshchat
 
 Then: `ssh sshchat`.
 
+## 6. Shared drawing board
+
+Type `/canvas` in chat. You get a **URL** and a **6-character key on a separate line**. Copy the URL into Safari (iSH cannot open the web page), enter the key, then draw. Strokes sync to everyone who unlocked the board.
+
+- Current room: `/canvas`
+- One online user: `/canvas theirnick`
+- Close (creator): `/canvas close`
+- Alias: `/board`
+
+If the page will not load, it is the same network issue as `/sendfile` (the phone must reach the server’s file HTTP port). Ask your admin.
+
 ---
 
 More features (games, files, library): see the main [README](../../README.md).

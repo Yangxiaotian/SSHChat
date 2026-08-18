@@ -25,7 +25,7 @@ chmod +x deploy.sh
 ## Tips
 
 - Cellular IPs change; prefer Wi‑Fi + port forward, or an outbound tunnel.
-- For file `/sendfile` HTTPS on the public Internet, a tunnel (Cloudflare or similar) is usually required; on pure LAN, HTTP may suffice.
+- For file `/sendfile` HTTPS on the public Internet, a tunnel (Cloudflare or similar) is usually required; on pure LAN, HTTP may suffice. The shared drawing board (`/canvas`) uses the same file HTTP port.
 - Set `SSHCHAT_DEFAULT_LOCALE=en` (default) or `zh` for the whole server default language.
 
 ## More

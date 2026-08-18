@@ -23,6 +23,10 @@ class ServerRestartResumeTests(unittest.TestCase):
         server.room_announcements.clear()
         server.room_games.clear()
         server.room_games_parked.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -218,6 +222,23 @@ class ServerRestartResumeTests(unittest.TestCase):
         server._load_persisted_sessions()
 
         self.assertNotIn(room, server.room_games)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+
+    def test_ended_game_id_survives_restart(self) -> None:
+        room = "default"
+        token = "ended" + "0" * 27
+        server.room_game_authority[room] = "Mathematics.local"
+        server._remember_ended_game_locked(room, token)
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertEqual(payload["room_game_ended_ids"].get(token), room)
+        server.session_store.save(payload)
+
+        server.room_game_ended_ids.clear()
+        server.room_game_authority.clear()
+        server._load_persisted_sessions()
+
+        self.assertEqual(server.room_game_ended_ids.get(token), room)
         self.assertEqual(server.room_game_authority[room], "Mathematics.local")
 
     def test_parked_game_survives_restart(self) -> None:

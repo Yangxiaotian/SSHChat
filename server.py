@@ -18,7 +18,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from html import unescape
 from pathlib import Path
 from typing import Optional, Tuple
@@ -124,6 +124,11 @@ room_games_parked: dict[str, object] = {}
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
 room_game_tokens: dict[str, str] = {}
+# ended session id -> room (offline peers get this receipt on reconnect)
+room_game_ended_ids: OrderedDict[str, str] = OrderedDict()
+_ENDED_GAME_IDS_MAX = 64
+# rooms where we claimed hostship only because the real host was unreachable
+room_game_provisional: set[str] = set()
 # room -> monotonic deadline: we sent greq and should accept the next gsync/gend
 _greq_until: dict[str, float] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
@@ -904,6 +909,11 @@ def _build_session_payload_locked() -> dict[str, object]:
             for room, tok in room_game_tokens.items()
             if isinstance(room, str) and isinstance(tok, str) and tok.strip()
         },
+        "room_game_ended_ids": {
+            tok: room
+            for tok, room in room_game_ended_ids.items()
+            if isinstance(tok, str) and tok.strip() and isinstance(room, str)
+        },
     }
 
 
@@ -981,6 +991,42 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 and tok.strip()
             ):
                 room_game_tokens[room] = tok.strip()
+    ended_blob = payload.get("room_game_ended_ids")
+    if isinstance(ended_blob, dict):
+        for tok, room in ended_blob.items():
+            if (
+                isinstance(tok, str)
+                and tok.strip()
+                and isinstance(room, str)
+                and room.strip()
+            ):
+                _remember_ended_game_locked(room.strip(), tok.strip())
+
+
+def _remember_ended_game_locked(room: str, token: str) -> None:
+    token = (token or "").strip()
+    room = (room or "").strip()
+    if not token or not room:
+        return
+    room_game_ended_ids.pop(token, None)
+    room_game_ended_ids[token] = room
+    while len(room_game_ended_ids) > _ENDED_GAME_IDS_MAX:
+        room_game_ended_ids.popitem(last=False)
+
+
+def _ended_token_for_room_locked(room: str) -> str:
+    room = (room or "").strip()
+    if not room:
+        return ""
+    for tok, r in reversed(list(room_game_ended_ids.items())):
+        if r == room:
+            return tok
+    return ""
+
+
+def _game_id_is_ended_locked(token: str) -> bool:
+    token = (token or "").strip()
+    return bool(token) and token in room_game_ended_ids
 
 
 def _mark_sessions_dirty() -> None:
@@ -3634,16 +3680,37 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         raw = payload[len("/board") :].strip()
 
     if raw.lower() in ("help", "?", "帮助"):
-        send_line(conn, "[*] 用法：\n")
-        send_line(conn, "[*]   /canvas            - 当前房间共享画布\n")
-        send_line(conn, "[*]   /canvas #<房间>    - 指定房间共享画布\n")
-        send_line(conn, "[*]   /canvas <昵称>     - 与某人私密画布\n")
-        send_line(conn, "[*]   /canvas close      - 发起人关闭当前房间画布\n")
-        send_line(conn, "[*]   /canvas new        - 强制新开一局（即使房间已有）\n")
-        send_line(
-            conn,
-            "[*] 每人收到独立网址和密钥（密钥不在网址里）；解锁后共同绘画。\n",
-        )
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(conn, "[*] Usage:\n")
+            send_line(conn, "[*]   /canvas            - shared drawing board for the current room\n")
+            send_line(conn, "[*]   /canvas #<room>    - board for a specific room\n")
+            send_line(conn, "[*]   /canvas <nick>     - private board with an online user\n")
+            send_line(conn, "[*]   /canvas close      - creator closes the current room board\n")
+            send_line(conn, "[*]   /canvas new        - force a new board even if the room already has one\n")
+            send_line(
+                conn,
+                "[*] Alias: /board. Each person gets a unique URL + key (key is not in the URL).\n",
+            )
+            send_line(
+                conn,
+                "[*] Open the URL in a browser, enter the key, then draw; strokes sync live.\n",
+            )
+        else:
+            send_line(conn, "[*] 用法：\n")
+            send_line(conn, "[*]   /canvas            - 当前房间共享画板\n")
+            send_line(conn, "[*]   /canvas #<房间>    - 指定房间共享画板\n")
+            send_line(conn, "[*]   /canvas <昵称>     - 与某人私密画板\n")
+            send_line(conn, "[*]   /canvas close      - 发起人关闭当前房间画板\n")
+            send_line(conn, "[*]   /canvas new        - 强制新开一局（即使房间已有）\n")
+            send_line(
+                conn,
+                "[*] 别名 /board。每人收到独立网址和密钥（密钥不在网址里）；解锁后共同绘画。\n",
+            )
+            send_line(
+                conn,
+                "[*] 终端请把网址复制到浏览器；图形客户端会自动打开画板。\n",
+            )
         return
 
     parts = raw.split()
@@ -4262,7 +4329,7 @@ def _fed_on_game_request(_from_peer: str, room: str) -> None:
             # Authority with no active game (ended while partitioned) must gend
             # so stale replicas clear instead of fan-out after a silent greq.
             if auth == local:
-                hub.end_game(room, local)
+                hub.end_game(room, local, _ended_token_for_room_locked(room))
             return
         # Empty auth after restart must not answer — a stale replica would claim
         # hostship via push_game_snapshot's `auth or node_id` fallback.
@@ -4286,7 +4353,7 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
         local = hub.node_id
         if auth == local:
             try:
-                hub.end_game(room, local)
+                hub.end_game(room, local, _ended_token_for_room_locked(room))
             except Exception as e:
                 print(f"federation: tombstone gend failed room={room!r}: {e!r}")
             return False
@@ -4313,7 +4380,7 @@ def _federation_broadcast_ended_tombstones() -> None:
     local = hub.node_id
     with lock:
         rooms = [
-            room
+            (room, _ended_token_for_room_locked(room))
             for room, auth in list(room_game_authority.items())
             if (auth or "").strip() == local
             and (
@@ -4321,9 +4388,9 @@ def _federation_broadcast_ended_tombstones() -> None:
                 or getattr(room_games.get(room), "state", "ended") == "ended"
             )
         ]
-    for room in rooms:
+    for room, token in rooms:
         try:
-            hub.end_game(room, local)
+            hub.end_game(room, local, token)
         except Exception as e:
             print(f"federation: tombstone gend failed room={room!r}: {e!r}")
 
@@ -4413,16 +4480,22 @@ def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return
-    auth = (room_game_authority.get(room) or "").strip() or hub.node_id
-    room_game_tokens.pop(room, None)
-    # Keep authority so greq can answer gend after partition (WSL missed gend).
-    room_game_authority[room] = auth
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip() or hub.node_id
+        token = (room_game_tokens.pop(room, None) or "").strip()
+        if token:
+            _remember_ended_game_locked(room, token)
+        # Keep authority so greq can answer gend after partition (WSL missed gend).
+        room_game_authority[room] = auth
+        room_game_provisional.discard(room)
+        room_games_parked.pop(room, None)
+    _persist_after_game_change()
     if auth == hub.node_id:
-        hub.end_game(room, hub.node_id)
+        hub.end_game(room, hub.node_id, token)
 
 
 def _game_progress_score(game) -> int:
-    """Best-effort ply/move count so newer replicas win dual-authority races."""
+    """Best-effort ply/move count for waiting until a replica catches a move."""
     if game is None:
         return 0
     hist = getattr(game, "_history", None)
@@ -4488,20 +4561,6 @@ def _game_sync_should_keep_local(
             return False
         if local_ts > remote_ts:
             return True
-    local_prog = _game_progress_score(local_game)
-    remote_prog = _game_progress_score(remote_game)
-    if remote_prog < local_prog and not greq:
-        authority_new_session = (
-            authority == local_auth
-            and len(conflict_token) >= 16
-            and conflict_token != local_token
-        )
-        if not authority_new_session:
-            return True
-    if local_prog > remote_prog:
-        return True
-    if remote_prog > local_prog:
-        return False
     return None
 
 
@@ -4550,6 +4609,7 @@ def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
                 room_games[room] = parked
                 room_game_authority[room] = local
                 room_game_tokens[room] = secrets.token_hex(16)
+                room_game_provisional.add(room)
                 restored.append((room, parked))
             else:
                 _park_room_game_locked(room, game)
@@ -4613,8 +4673,11 @@ def _fed_on_game_sync(
         )
         remote_active = getattr(game, "state", "ended") != "ended"
         we_host = local_auth == local_id
-        if not local_active and remote_active and we_host and not greq:
-            # Game ended here as authority; ignore unsolicited stale revival.
+        if _game_id_is_ended_locked(conflict_token):
+            # Offline replica of a finished session; never revive by ply count.
+            return
+        if not local_active and remote_active and we_host:
+            # Ended tombstone: ignore even if we greq'd (stale replica answering).
             return
         if (
             local_active
@@ -4627,8 +4690,7 @@ def _fed_on_game_sync(
             if local_ts > 0 or remote_ts > 0:
                 if remote_ts <= local_ts:
                     return
-            elif _game_progress_score(game) < _game_progress_score(local_game):
-                return
+            # Same host: their snapshot is source of truth. Do not compare plies.
         if local_active and remote_active and local_auth and local_auth != authority:
             pick = _game_sync_should_keep_local(
                 local_game=local_game,
@@ -4694,26 +4756,39 @@ def _fed_on_game_sync(
         send_sanguo_hand_views(room, game)
 
 
-def _fed_on_game_end(room: str, authority: str) -> None:
+def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
     hub = federation.get_hub()
     local = hub.node_id if hub is not None else _local_node_id()
     if authority == local:
         return
     greq = _greq_outstanding(room)
+    token = (token or "").strip()
     with lock:
+        if token:
+            _remember_ended_game_locked(room, token)
         local_auth = (room_game_authority.get(room) or "").strip()
+        local_token = (room_game_tokens.get(room) or "").strip()
         game = room_games.get(room)
         local_active = (
             game is not None and getattr(game, "state", "ended") != "ended"
         )
-        # A replica must not gend-wipe a live game we host. After we greq
-        # (reconnect), honor the real host's tombstone even if we had claimed
-        # authority while partitioned.
-        if local_auth == local and local_active and not greq:
+        same_game = bool(token) and local_token == token
+        provisional = room in room_game_provisional
+        # A replica must not gend-wipe a live game we host. Honor the real
+        # host's receipt for this session id, a provisional claim, or greq.
+        if (
+            local_auth == local
+            and local_active
+            and not greq
+            and not same_game
+            and not provisional
+        ):
             return
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
         room_game_tokens.pop(room, None)
+        room_games_parked.pop(room, None)
+        room_game_provisional.discard(room)
     _clear_greq(room)
     _persist_after_game_change()
 
@@ -6006,6 +6081,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             if hub is not None:
                 room_game_authority[room] = hub.node_id
                 room_game_tokens[room] = secrets.token_hex(16)
+                room_game_provisional.discard(room)
             else:
                 room_game_authority.pop(room, None)
                 room_game_tokens.pop(room, None)

@@ -117,7 +117,7 @@ class FederationHub:
         on_pm: Callable[[str, str, str], None],
         get_local_clients: Callable[[], list[dict[str, Any]]],
         on_game_sync: Optional[Callable[..., None]] = None,
-        on_game_end: Optional[Callable[[str, str], None]] = None,
+        on_game_end: Optional[Callable[..., None]] = None,
         on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
         on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
         on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
@@ -909,10 +909,16 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
-    def end_game(self, room: str, authority: str) -> None:
+    def end_game(self, room: str, authority: str, token: str = "") -> None:
         if not self.enabled or not self._peers:
             return
-        line = f"gend\t{self.node_id}\t{room}\t{authority}\n"
+        room = str(room or "").strip()
+        authority = str(authority or "").strip() or self.node_id
+        token = str(token or "").strip()
+        if token:
+            line = f"gend\t{self.node_id}\t{room}\t{authority}\t{token}\n"
+        else:
+            line = f"gend\t{self.node_id}\t{room}\t{authority}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -1780,14 +1786,18 @@ class FederationHub:
                     print(f"federation: on_game_request error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
-        if kind == "gend" and len(parts) >= 3 and self.on_game_end:
+        if kind == "gend" and len(parts) >= 4 and self.on_game_end:
             if self._remember_seen(line):
                 return
             origin, room, authority = parts[1], parts[2], parts[3]
+            token = parts[4].strip() if len(parts) >= 5 else ""
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
-            self.on_game_end(room, authority)
+            try:
+                self.on_game_end(room, authority, token)
+            except TypeError:
+                self.on_game_end(room, authority)
             self._fanout(line + "\n", exclude_node=peer_node)
             return
 
@@ -2339,7 +2349,7 @@ def init_hub(
     on_pm: Callable[[str, str, str], None],
     get_local_clients: Callable[[], list[dict[str, Any]]],
     on_game_sync: Optional[Callable[..., None]] = None,
-    on_game_end: Optional[Callable[[str, str], None]] = None,
+    on_game_end: Optional[Callable[..., None]] = None,
     on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
     on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
     on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
