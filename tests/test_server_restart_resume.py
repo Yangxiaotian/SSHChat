@@ -175,6 +175,18 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(restored.ai_level, "hard")
         self.assertIsInstance(restored.white_conn, DisconnectedSeat)
 
+    def test_unpickleable_game_does_not_block_other_rooms(self) -> None:
+        good_room = "keep"
+        bad_room = "boom"
+        black = DummyConn()
+        good = GomokuGame(black, "zouyu")
+        server.room_games[good_room] = good
+        server.room_games[bad_room] = object()
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertIn(good_room, payload["room_games"])
+        self.assertNotIn(bad_room, payload["room_games"])
+
     def test_ended_games_are_not_persisted(self) -> None:
         room = "default"
         black = DummyConn()
@@ -241,7 +253,7 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(server.room_game_ended_ids.get(token), room)
         self.assertEqual(server.room_game_authority[room], "Mathematics.local")
 
-    def test_parked_game_survives_restart(self) -> None:
+    def test_parked_game_promoted_on_restart_when_room_idle(self) -> None:
         room = "default"
         host = DummyConn()
         game = GomokuGame(host, "parked-player")
@@ -253,9 +265,23 @@ class ServerRestartResumeTests(unittest.TestCase):
 
         server.room_games_parked.clear()
         server._load_persisted_sessions()
-        self.assertIn(room, server.room_games_parked)
-        self.assertEqual(server.room_games_parked[room].name, "gomoku")
-        self.assertEqual(server.room_games_parked[room].state, "waiting")
+        self.assertNotIn(room, server.room_games_parked)
+        self.assertIn(room, server.room_games)
+        self.assertEqual(server.room_games[room].name, "gomoku")
+        self.assertEqual(server.room_games[room].state, "waiting")
+
+    def test_parked_game_not_promoted_over_active(self) -> None:
+        room = "default"
+        host = DummyConn()
+        parked = GomokuGame(host, "parked-player")
+        active = GomokuGame(host, "active-player")
+        server.room_games[room] = active
+        server.room_games_parked[room] = parked
+        with server.lock:
+            restored = server._restore_idle_parked_games_locked()
+        self.assertEqual(restored, [])
+        self.assertIs(server.room_games[room], active)
+        self.assertIs(server.room_games_parked[room], parked)
 
 
 if __name__ == "__main__":

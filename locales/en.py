@@ -77,6 +77,7 @@ MESSAGES: dict = {
         "[*] /game resign           Resign (only while a game is in progress).",
         "[*] /game abort            Abort a game that has not started.",
         "[*] /game end              Room owner may force-end the current game.",
+        "[*] /game restore          Restore a game parked by restart/federation into an idle room.",
         "[*] /game on <name>        Owner enables a game in this room (same name aliases as new).",
         "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected).",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",

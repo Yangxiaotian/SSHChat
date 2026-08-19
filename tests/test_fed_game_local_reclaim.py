@@ -451,7 +451,7 @@ class FedGameParkRestoreTests(unittest.TestCase):
         federation._hub = None
         server._greq_until.clear()
 
-    def test_unreachable_authority_parks_and_frees_room(self) -> None:
+    def test_unreachable_authority_keeps_in_progress_board(self) -> None:
         class ActiveGame:
             name = "chess"
             state = "playing"
@@ -475,10 +475,9 @@ class FedGameParkRestoreTests(unittest.TestCase):
             ):
                 with mock.patch.object(server, "_persist_after_game_change"):
                     server._fed_handle_unreachable_game_authority("node-b")
-        self.assertNotIn("lobby", server.room_games)
-        self.assertIs(server.room_games_parked["lobby"], game)
-        self.assertEqual(len(notices), 1)
-        self.assertIn("保留较新的对局".encode("utf-8"), notices[0])
+        self.assertIs(server.room_games["lobby"], game)
+        self.assertNotIn("lobby", server.room_games_parked)
+        self.assertEqual(notices, [])
 
     def test_unreachable_restores_parked_over_remote_active(self) -> None:
         class RemoteActive:
@@ -678,8 +677,8 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(hub.requested, [])
         self.assertEqual(hub.ended, [("default", "mac-node", "")])
 
-    def test_reconcile_with_no_peers_parks_remote_auth(self) -> None:
-        """Restart while partitioned must free the room without waiting for peer-down."""
+    def test_reconcile_with_no_peers_keeps_remote_auth(self) -> None:
+        """Restart with no peers yet must not hide an in-progress replica board."""
 
         class ActiveGame:
             name = "chess"
@@ -700,8 +699,8 @@ class FedGameParkRestoreTests(unittest.TestCase):
             with mock.patch.object(server, "broadcast_room"):
                 with mock.patch.object(server, "_persist_after_game_change"):
                     server._federation_reconcile_restored_games()
-        self.assertNotIn("lobby", server.room_games)
-        self.assertIs(server.room_games_parked["lobby"], game)
+        self.assertIs(server.room_games["lobby"], game)
+        self.assertNotIn("lobby", server.room_games_parked)
 
     def test_gsync_ended_id_blocks_revival_even_during_greq(self) -> None:
         class StaleRemote:
