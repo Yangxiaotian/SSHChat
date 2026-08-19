@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from games import GomokuGame
 import server
@@ -112,6 +113,37 @@ class MultiDeviceResumeTests(unittest.TestCase):
 
         self.assertTrue(moved)
         self.assertIs(game.players[0][0], new_conn)
+
+    def test_game_show_does_not_run_bot_nudge(self) -> None:
+        room = "default"
+        conn = DummyConn()
+        game = DummyGame(conn, "zouyu")
+        game.name = "gomoku"
+        game.show_calls = 0
+        game.nudge_calls = 0
+
+        def show(_conn=None, **_kwargs):
+            game.show_calls += 1
+            return ["board"]
+
+        def nudge_bots():
+            game.nudge_calls += 1
+            return ["ai moved"]
+
+        game.show = show  # type: ignore[method-assign]
+        game.nudge_bots = nudge_bots  # type: ignore[attr-defined]
+        server.clients[conn] = {
+            "name": "zouyu",
+            "rooms": {room},
+            "current_room": room,
+        }
+        server.rooms[room].add(conn)
+        server.room_games[room] = game
+        with mock.patch.object(server.federation, "get_hub", return_value=None):
+            server._handle_game(conn, "zouyu", room, "/game show")
+        self.assertEqual(game.show_calls, 1)
+        self.assertEqual(game.nudge_calls, 0)
+        self.assertTrue(any(b"board" in chunk for chunk in conn.sent))
 
     def test_reconnected_gomoku_player_can_continue_turn(self) -> None:
         room = "default"

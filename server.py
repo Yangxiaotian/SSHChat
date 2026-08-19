@@ -851,7 +851,7 @@ def _ensure_game_runtime_compat(game) -> None:
 
 
 def _nudge_game_bots_locked(game) -> list[str]:
-    """Advance bot turns when humans are idle; caller holds lock."""
+    """Advance bot turns. Must not run while holding the server lock — AI search blocks all commands."""
     if game is None or getattr(game, "state", "ended") == "ended":
         return []
     nudge = getattr(game, "nudge_bots", None)
@@ -1095,8 +1095,6 @@ def _load_persisted_sessions() -> None:
     with lock:
         _apply_session_payload_locked(payload)
         parked_back = _restore_idle_parked_games_locked()
-        for game in room_games.values():
-            _nudge_game_bots_locked(game)
         active = sum(
             1
             for game in room_games.values()
@@ -5041,11 +5039,6 @@ def _fed_execute_game_cmd(
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(actor, rest)
-                if not ended:
-                    extra = _nudge_game_bots_locked(game)
-                    if extra:
-                        bcast = list(bcast) + extra
-                        ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"fed /game move failed: {e!r}")
             _fed_send_player_notice(
@@ -5055,6 +5048,11 @@ def _fed_execute_game_cmd(
                 [f"/game move 执行失败：{e}"],
             )
             return
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
         _finish_game_action(room, game, actor, priv, bcast, ended)
@@ -5072,11 +5070,11 @@ def _fed_execute_game_cmd(
         with lock:
             resumed = _resume_same_account_seat_locked(room, game, actor, name)
             priv, bcast, ended = game.resign(actor, name)
-            if not ended:
-                extra = _nudge_game_bots_locked(game)
-                if extra:
-                    bcast = list(bcast) + extra
-                    ended = getattr(game, "state", "ended") == "ended"
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
         _finish_game_action(room, game, actor, priv, bcast, ended)
@@ -6255,7 +6253,6 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub == "show":
-        bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
             auth = (room_game_authority.get(room) or "").strip()
@@ -6284,12 +6281,7 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     lines = _game_show_for_conn(game, conn)
                 if resumed:
                     lines = ["已检测到同账号旧终端席位，已自动续玩接管。"] + lines
-                nudge = getattr(game, "nudge_bots", None)
-                if callable(nudge):
-                    bot_lines = nudge()
         send_game_private(conn, room, lines)
-        if bot_lines:
-            broadcast_game(room, bot_lines)
         return
 
     if sub == "move":
@@ -6307,15 +6299,15 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 resumed = _resume_same_account_seat_locked(room, game, conn, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(conn, rest)
-                if not ended:
-                    extra = _nudge_game_bots_locked(game)
-                    if extra:
-                        bcast = list(bcast) + extra
-                        ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"/game move failed: room={room} user={name} cmd={rest!r} err={e!r}")
             send_line(conn, f"[*] /game move 执行失败：{e}\n")
             return
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         _finish_game_action(room, game, conn, priv, bcast, ended)
@@ -6329,11 +6321,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 return
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
             priv, bcast, ended = game.resign(conn, name)
-            if not ended:
-                extra = _nudge_game_bots_locked(game)
-                if extra:
-                    bcast = list(bcast) + extra
-                    ended = getattr(game, "state", "ended") == "ended"
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         _finish_game_action(room, game, conn, priv, bcast, ended)
@@ -6605,10 +6597,14 @@ def handle_client(conn, addr) -> None:
             if resumed_game_rooms:
                 with lock:
                     g = room_games.get(active_room)
-                    nudge = getattr(g, "nudge_bots", None) if g is not None else None
-                    bot_lines = nudge() if callable(nudge) else []
-                if bot_lines:
-                    broadcast_game(active_room, bot_lines)
+                extra = _nudge_game_bots_locked(g) if g is not None else []
+                if extra:
+                    broadcast_game(active_room, extra)
+                    _persist_after_game_change()
+                    try:
+                        _federation_sync_game(active_room)
+                    except Exception as e:
+                        print(f"federation: reconnect bot sync failed: {e!r}")
 
         while True:
             if not buffer:
