@@ -833,12 +833,14 @@ class FederationHub:
         *,
         nick: str = "",
         flags: str = "",
+        query: str = "",
     ) -> bool:
         """Ask owner_node for one page of book_name (0-based page).
 
         flags may include:
           r — resume from owner's bookmark for nick (ignore page)
           s — save this page as nick's bookmark on the owner node
+          f — search the book for query; reply with hits instead of a page
         """
         if not self.enabled:
             return False
@@ -853,12 +855,24 @@ class FederationHub:
             return False
         safe_nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip() or "-"
         safe_flags = (
-            "".join(ch for ch in str(flags or "").lower() if ch in "rs") or "-"
+            "".join(ch for ch in str(flags or "").lower() if ch in "rsf") or "-"
         )
         line = (
             f"lpage\t{self.node_id}\t{owner_node}\t{req_id}\t"
-            f"{book_name}\t{page_i}\t{safe_nick}\t{safe_flags}\n"
+            f"{book_name}\t{page_i}\t{safe_nick}\t{safe_flags}"
         )
+        if "f" in safe_flags:
+            safe_query = (
+                str(query or "")
+                .replace("\t", " ")
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .strip()[:200]
+            )
+            if not safe_query:
+                return False
+            line += f"\t{safe_query}"
+        line += "\n"
         self._remember_seen(line)
         return self._send_toward(owner_node, line)
 
@@ -1399,8 +1413,8 @@ class FederationHub:
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "lpage":
-            # lpage\torigin\towner\treq_id\tbook\tpage[\tnick\tflags]
-            page_parts = line.split("\t", 7)
+            # lpage\torigin\towner\treq_id\tbook\tpage[\tnick\tflags[\tquery]]
+            page_parts = line.split("\t", 8)
             if len(page_parts) < 6:
                 return
             if self._remember_seen(line):
@@ -1414,6 +1428,7 @@ class FederationHub:
             )
             nick = page_parts[6].strip() if len(page_parts) >= 7 else ""
             flags = page_parts[7].strip() if len(page_parts) >= 8 else ""
+            query = page_parts[8].strip() if len(page_parts) >= 9 else ""
             if nick in {"", "-"}:
                 nick = ""
             if flags in {"", "-"}:
@@ -1431,7 +1446,16 @@ class FederationHub:
                     # federation I/O thread — that stalls the duplex link and
                     # SSH tunnels drop mid-request.
                     cb = self.on_library_page_request
-                    args = (owner, req_id, book_name, page_i, origin, nick, flags)
+                    args = (
+                        owner,
+                        req_id,
+                        book_name,
+                        page_i,
+                        origin,
+                        nick,
+                        flags,
+                        query,
+                    )
 
                     def _run_library_page(
                         _cb=cb, _args=args, _req=req_id

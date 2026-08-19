@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import canvas_sharing
 import federation
+import file_http_server
 import library
 import server
 
@@ -763,6 +765,68 @@ class FederationServerIntegrationTests(unittest.TestCase):
         s.close()
         return port
 
+    def test_canvas_nick_invite_reaches_federated_user(self) -> None:
+        """ /canvas <nick> must accept a user who is only online on a peer. """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = canvas_sharing.CanvasStore(
+            store_path=os.path.join(tmp.name, "canvas.json")
+        )
+        alice = DummyConn()
+        server.clients[alice] = {"name": "alice", "current_room": "lobby"}
+        pms: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+
+            def has_remote_user(self, nick: str) -> bool:
+                return str(nick).lower() == "bob"
+
+            def send_pm(self, to_nick, from_name, text) -> bool:
+                pms.append((to_nick, from_name, text))
+                return True
+
+            def has_remote_file_public(self) -> bool:
+                return False
+
+            def pick_file_public_peer(self):
+                return None
+
+        class FakeFileHttp:
+            def get_base_url(self) -> str:
+                return "https://files.example"
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "file_http", FakeFileHttp()):
+                with mock.patch.object(canvas_sharing, "canvas_store", store):
+                    with mock.patch.object(
+                        file_http_server,
+                        "needs_federation_file_proxy",
+                        return_value=False,
+                    ):
+                        server._handle_canvas(alice, "alice", "/canvas bob")
+
+        sent = b"".join(alice.sent).decode("utf-8")
+        self.assertNotIn("不在线", sent)
+        self.assertTrue(pms, sent)
+        self.assertEqual(pms[0][0], "bob")
+        self.assertIn("gui-open canvas", pms[0][2])
+
+    def test_fed_pm_canvas_invite_not_wrapped_as_pm(self) -> None:
+        bob = DummyConn()
+        server.clients[bob] = {"name": "bob", "current_room": "lobby"}
+        invite = (
+            "[*] ========== 共享画布 ==========\n"
+            "[*] gui-open canvas https://files.example/canvas/tok ABCDEF\n"
+        )
+        server._fed_on_pm("bob", "alice", invite)
+        sent = b"".join(bob.sent).decode("utf-8")
+        self.assertNotIn("[PM from alice]", sent)
+        self.assertIn("gui-open canvas", sent)
+        server._fed_on_pm("bob", "alice", "hello there")
+        sent2 = b"".join(bob.sent).decode("utf-8")
+        self.assertIn("[PM from alice] hello there", sent2)
+
     def test_broadcast_forwards_to_hub(self) -> None:
         sent: list[tuple[str, bytes]] = []
 
@@ -1176,6 +1240,71 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(got[-1][5], "yxt")
         self.assertEqual(got[-1][6], "r")
 
+    def test_lpage_search_flag_and_query_reach_owner(self) -> None:
+        got: list[tuple] = []
+        done = threading.Event()
+
+        def on_req(*a):
+            got.append(a)
+            done.set()
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        owner = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_request=on_req,
+        )
+        owner.enabled = True
+        owner.node_id = "node-owner"
+        owner._peers["node-b"] = FakeLink("node-b")
+
+        reader = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        reader.enabled = True
+        reader.node_id = "node-b"
+        reader._peers["node-owner"] = FakeLink("node-owner")
+        reader._routes["node-owner"] = "node-owner"
+
+        self.assertTrue(
+            reader.request_library_page(
+                "node-owner",
+                "req3",
+                "book.epub",
+                0,
+                flags="f",
+                query="hello world",
+            )
+        )
+        line = reader._peers["node-owner"].lines[-1].rstrip("\n")
+        self.assertIn("\tf\t", line)
+        self.assertTrue(line.endswith("hello world"))
+        owner._on_peer_line("node-b", line)
+        self.assertTrue(done.wait(2.0))
+        self.assertEqual(got[-1][6], "f")
+        self.assertEqual(got[-1][7], "hello world")
+        self.assertFalse(
+            reader.request_library_page(
+                "node-owner", "req4", "book.epub", 0, flags="f", query="  "
+            )
+        )
+
     def test_owner_page_request_resumes_bookmark(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1255,6 +1384,53 @@ class FederationServerIntegrationTests(unittest.TestCase):
                     "owner", "rid", "tale.txt", 3, "reader", "yxt", "s"
                 )
         self.assertEqual(server.library_bookmarks.get_page("yxt", "tale.txt"), 3)
+
+    def test_owner_page_request_searches_book(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lib_dir = Path(tmp.name)
+        book = lib_dir / "tale.txt"
+        book.write_text(
+            "alpha " * 40 + "\n\nneedle in hay\n\n" + "omega " * 40,
+            encoding="utf-8",
+        )
+        old_chars = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 80
+        self.addCleanup(lambda: setattr(library, "LIBRARY_PAGE_CHARS", old_chars))
+
+        prev_dir = os.environ.get("SSHCHAT_LIBRARY_DIR")
+        os.environ["SSHCHAT_LIBRARY_DIR"] = str(lib_dir)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("SSHCHAT_LIBRARY_DIR", prev_dir)
+            if prev_dir is not None
+            else os.environ.pop("SSHCHAT_LIBRARY_DIR", None)
+        )
+        prev_bm = server.library_bookmarks
+        store_path = str(Path(tmp.name) / "bm.json")
+        server.library_bookmarks = library.LibraryBookmarkStore(store_path)
+        self.addCleanup(lambda: setattr(server, "library_bookmarks", prev_bm))
+
+        replies: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "owner"
+
+            def reply_library_page(self, requester, req_id, payload):
+                replies.append((requester, req_id, payload))
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            server._fed_on_library_page_request(
+                "owner", "rid", "tale.txt", 0, "reader", "", "f", "needle"
+            )
+        self.assertEqual(len(replies), 1)
+        payload = replies[0][2]
+        self.assertTrue(payload.get("ok"))
+        self.assertIn("results", payload)
+        self.assertNotIn("text", payload)
+        hits = payload["results"]
+        self.assertTrue(hits)
+        self.assertIn("needle", hits[0]["snippet"])
 
     def test_lpage_handler_does_not_block_peer_line(self) -> None:
         """Slow book loads must not stall federation I/O."""

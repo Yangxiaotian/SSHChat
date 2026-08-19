@@ -171,6 +171,19 @@ class TestLibraryTxt(unittest.TestCase):
         self.assertEqual(library.search_catalog(catalog, "   "), catalog)
 
 
+class TestLibrarySearchBook(unittest.TestCase):
+    def test_search_book_returns_page_snippets(self) -> None:
+        doc = library.BookDocument(
+            title="demo",
+            pages=["alpha foo bar", "nothing here", "foo again"],
+            source_path=Path("demo.txt"),
+        )
+        hits = library.search_book(doc, "foo")
+        self.assertEqual([h[0] for h in hits], [0, 2])
+        self.assertIn("foo", hits[0][1])
+        self.assertEqual(library.search_book(doc, "missing"), [])
+
+
 class TestLibraryHtml(unittest.TestCase):
     def test_html_to_text(self) -> None:
         text = library._html_to_text("<p>Hello <b>world</b></p>")

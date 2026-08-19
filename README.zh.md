@@ -601,6 +601,7 @@ npm run build:portable
 | `/library open <序号\|文件名[@节点]>` | 打开图书（有书签则从藏书节点继续） |
 | `/library next` / `prev` | 翻页（自动存书签到藏书节点） |
 | `/library page <页码>` | 跳到指定页 |
+| `/library search <关键词>` | 当前书内检索（联邦书在藏书节点检索，只回片段） |
 | `/library bookmarks` | 列出我的全部书签 |
 | `/library reset <序号\|文件名[@节点]>` | 清除某本书的书签（对端书同时清藏书节点） |
 | `/library close` | 结束阅读（保留书签） |

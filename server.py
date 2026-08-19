@@ -2306,6 +2306,7 @@ def _fed_on_library_page_request(
     requester: str,
     nick: str = "",
     flags: str = "",
+    query: str = "",
 ) -> None:
     """Serve one page from this node's library; bookmarks live on the owner node."""
     hub = federation.get_hub()
@@ -2316,6 +2317,7 @@ def _fed_on_library_page_request(
     flags = str(flags or "").lower()
     resume = "r" in flags
     save = "s" in flags
+    find = "f" in flags
     payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
     try:
         lib_dir = _library_dir()
@@ -2326,38 +2328,51 @@ def _fed_on_library_page_request(
         else:
             doc = _get_cached_book(entry.path)
             total = doc.total_pages
-            bookmark_page = (
-                library_bookmarks.get_page(nick, book_name) if nick else None
-            )
-            had_bookmark = bookmark_page is not None
-            if resume:
-                page = bookmark_page if had_bookmark else 0
-            page = max(0, min(int(page), total - 1))
-            if nick and save:
-                entries = library_bookmarks.set_page(nick, book_name, page)
-                _federation_sync_library_bookmarks(nick, entries)
-                bookmark_page = page
-            text = str(doc.pages[page] or "")
-            if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
-                text = (
-                    text[:_FED_LIBRARY_PAGE_MAX_CHARS]
-                    + "\n…（本页过长，联邦传输已截断）"
+            if find:
+                q = str(query or "").strip()[:200]
+                hits = library.search_book(doc, q) if q else []
+                payload = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "name": entry.name,
+                    "title": doc.title,
+                    "total_pages": total,
+                    "query": q,
+                    "results": [{"page": p, "snippet": s} for p, s in hits],
+                }
+            else:
+                bookmark_page = (
+                    library_bookmarks.get_page(nick, book_name) if nick else None
                 )
-            payload = {
-                "ok": True,
-                "req_id": req_id,
-                "name": entry.name,
-                "title": doc.title,
-                "page": page,
-                "total_pages": total,
-                "text": text,
-                "ext": entry.ext,
-                "size_bytes": entry.size_bytes,
-                "bookmark_page": (
-                    bookmark_page if bookmark_page is not None else page
-                ),
-                "resumed": bool(resume and had_bookmark),
-            }
+                had_bookmark = bookmark_page is not None
+                if resume:
+                    page = bookmark_page if had_bookmark else 0
+                page = max(0, min(int(page), total - 1))
+                if nick and save:
+                    entries = library_bookmarks.set_page(nick, book_name, page)
+                    _federation_sync_library_bookmarks(nick, entries)
+                    bookmark_page = page
+                text = str(doc.pages[page] or "")
+                if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
+                    text = (
+                        text[:_FED_LIBRARY_PAGE_MAX_CHARS]
+                        + "\n…（本页过长，联邦传输已截断）"
+                    )
+                payload = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "name": entry.name,
+                    "title": doc.title,
+                    "page": page,
+                    "total_pages": total,
+                    "text": text,
+                    "ext": entry.ext,
+                    "size_bytes": entry.size_bytes,
+                    "bookmark_page": (
+                        bookmark_page if bookmark_page is not None else page
+                    ),
+                    "resumed": bool(resume and had_bookmark),
+                }
     except Exception as e:
         payload = {"ok": False, "error": str(e), "req_id": req_id}
     try:
@@ -2708,6 +2723,7 @@ def _fetch_remote_library_page(
     *,
     nick: str = "",
     flags: str = "",
+    query: str = "",
     timeout: float = 90.0,
 ) -> dict:
     hub = federation.get_hub()
@@ -2719,7 +2735,7 @@ def _fetch_remote_library_page(
         _library_page_waiters[req_id] = {"event": event, "payload": None}
     try:
         if not hub.request_library_page(
-            owner, req_id, book_name, page, nick=nick, flags=flags
+            owner, req_id, book_name, page, nick=nick, flags=flags, query=query
         ):
             return {"ok": False, "error": f"无法联系图书所在节点 {owner}"}
         if not event.wait(timeout):
@@ -2732,6 +2748,34 @@ def _fetch_remote_library_page(
     finally:
         with _library_page_waiters_lock:
             _library_page_waiters.pop(req_id, None)
+
+
+def _parse_fed_search_hits(raw) -> list[tuple[int, str]]:
+    hits: list[tuple[int, str]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            hits.append((int(item["page"]), str(item.get("snippet") or "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return hits
+
+
+def _emit_library_search_hits(
+    conn, title: str, query: str, results: list[tuple[int, str]]
+) -> None:
+    if not results:
+        send_line(conn, f"[*] 在《{title}》中未找到「{query}」。\n")
+        return
+    send_line(
+        conn,
+        f"[*] 在《{title}》中搜索「{query}」，找到 {len(results)} 处：\n",
+    )
+    for page_idx, snippet in results:
+        send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
+    if len(results) != 1:
+        send_line(conn, "[*] 用 /library page <页码> 跳转到对应页。\n")
 
 
 def _set_library_page(conn, user: str, path: Path, page: int) -> None:
@@ -2985,8 +3029,8 @@ def _handle_library(conn, payload: str) -> None:
                 locale=loc,
             ),
             i18n.tr(
-                en="[*]   /library search <keyword>         Search inside a local book; use find for remote\n",
-                zh="[*]   /library search <关键词> | 搜索    本机书内检索；联邦书请用 find\n",
+                en="[*]   /library search <keyword>         Search inside the current book (local or federated)\n",
+                zh="[*]   /library search <关键词> | 搜索    当前书内检索（本机与联邦书均可）\n",
                 locale=loc,
             ),
             i18n.tr(
@@ -3215,12 +3259,49 @@ def _handle_library(conn, payload: str) -> None:
         if not session:
             _send_library_catalog(conn, user, query)
             return
-        if str(session.get("origin") or "").strip():
-            send_line(
-                conn,
-                "[*] 联邦图书暂不支持书内全文检索；可用 /library find <关键词> 查书目，"
-                "或 /library page <页码> 翻页。\n",
+        origin = str(session.get("origin") or "").strip()
+        if origin:
+            name = str(session.get("name") or "").strip()
+            send_line(conn, f"[*] 正在节点 {origin} 检索「{query}」…\n")
+            payload = _fetch_remote_library_page(
+                origin, name, 0, nick=user, flags="f", query=query
             )
+            if not payload.get("ok"):
+                send_line(
+                    conn,
+                    f"[*] 检索失败：{payload.get('error') or '对端无响应'}\n",
+                )
+                return
+            if "results" not in payload:
+                send_line(conn, "[*] 对端节点不支持书内检索。\n")
+                return
+            title = str(payload.get("title") or name)
+            results = _parse_fed_search_hits(payload.get("results"))
+            _emit_library_search_hits(conn, title, query, results)
+            if len(results) != 1:
+                return
+            page_idx = results[0][0]
+            send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
+            jump = _fetch_remote_library_page(
+                origin, name, page_idx, nick=user, flags="s"
+            )
+            if not jump.get("ok"):
+                send_line(conn, f"[*] 跳转失败：{jump.get('error') or '对端无响应'}\n")
+                return
+            title = str(jump.get("title") or title)
+            total = int(jump.get("total_pages") or 1)
+            page = int(jump.get("page") or page_idx)
+            text = str(jump.get("text") or "")
+            _set_library_session(
+                conn,
+                user,
+                origin=origin,
+                name=name,
+                page=page,
+                title=title,
+                total_pages=total,
+            )
+            _send_library_page_payload(conn, title, page, total, text)
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))
@@ -3230,31 +3311,22 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
         results = library.search_book(doc, query)
-        if not results:
-            send_line(conn, f"[*] 在《{doc.title}》中未找到「{query}」。\n")
+        _emit_library_search_hits(conn, doc.title, query, results)
+        if len(results) != 1:
             return
-        send_line(
+        page_idx = results[0][0]
+        _set_library_session(
             conn,
-            f"[*] 在《{doc.title}》中搜索「{query}」，找到 {len(results)} 处：\n",
+            user,
+            origin="",
+            name=Path(str(session["path"])).name,
+            page=page_idx,
+            path=Path(str(session["path"])),
+            title=doc.title,
+            total_pages=doc.total_pages,
         )
-        for page_idx, snippet in results:
-            send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
-        if len(results) == 1:
-            page_idx = results[0][0]
-            _set_library_session(
-                conn,
-                user,
-                origin="",
-                name=Path(str(session["path"])).name,
-                page=page_idx,
-                path=Path(str(session["path"])),
-                title=doc.title,
-                total_pages=doc.total_pages,
-            )
-            send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
-            _send_library_page(conn, doc, page_idx)
-        else:
-            send_line(conn, "[*] 用 /library page <页码> 跳转到对应页。\n")
+        send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
+        _send_library_page(conn, doc, page_idx)
         return
 
     if head in {"open", "read", "读", "打开"}:
@@ -3795,6 +3867,10 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
                 for info in clients.values()
                 if info["name"].lower() == target_lower
             ]
+        if not online:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled and hub.has_remote_user(target):
+                online = [target]
         if not online:
             send_line(conn, f"[*] 用户 {target} 不在线。\n")
             return
@@ -5198,8 +5274,15 @@ def broadcast_local_notice(text: str) -> None:
 
 def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     targets = find_clients_by_nickname(to_name, local_only=True)
+    # Canvas invites are system blocks (gui-open canvas); keep them unwrapped
+    # so GUI clients can auto-open. Regular PMs still get the PM prefix.
+    canvas_invite = "gui-open canvas " in (text or "")
     for peer_conn, _ in targets:
-        send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+        if canvas_invite:
+            payload = text if text.endswith("\n") else f"{text}\n"
+            send_line(peer_conn, payload)
+        else:
+            send_line(peer_conn, f"[PM from {from_name}] {text}\n")
 
 
 def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
