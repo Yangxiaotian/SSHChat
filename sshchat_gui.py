@@ -71,6 +71,10 @@ _GUI_OPEN_CANVAS_RE = re.compile(
     r"^gui-open\s+canvas\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
+_GUI_OPEN_DOWNLOAD_RE = re.compile(
+    r"^gui-open\s+download\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
 _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
@@ -78,10 +82,40 @@ _SENDFILE_FAIL_RE = re.compile(
     r"File transfer is disabled|no other users",
     re.I,
 )
+_SECURE_BANNER_START_RE = re.compile(
+    r"^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)",
+    re.I,
+)
+_SECURE_BANNER_END_RE = re.compile(r"^=+")
+_SECURE_URL_LABEL_RE = re.compile(
+    r"(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
+    re.I,
+)
+_SECURE_KEY_LINE_RE = re.compile(
+    r"^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)"
+    r"\s*[:：]\s*[A-Z0-9]{6}\s*$",
+    re.I,
+)
+_SECURE_HTTP_URL_RE = re.compile(r"^https?://\S+\s*$", re.I)
+_SECURE_META_LINE_RE = re.compile(
+    r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|"
+    r"From|Sender|Filename|Size|Room|Recipients?)\s*[:：]",
+    re.I,
+)
+_IMAGE_MIME_RE = re.compile(r"^image/(jpeg|jpg|png|gif|webp|bmp)$", re.I)
+_MAX_INLINE_IMAGE_PX = 480
 _MAX_ROOM_HISTORY = 4000
 _DRAIN_BATCH_ITEMS = 200
 _PASTE_UPLOAD_TIMEOUT_S = 45.0
 
+try:
+    from PIL import Image, ImageTk
+
+    _HAS_PIL = True
+except ImportError:
+    Image = None  # type: ignore[assignment, misc]
+    ImageTk = None  # type: ignore[assignment, misc]
+    _HAS_PIL = False
 _TOP_COMMANDS = (
     "/help",
     "/lang",
@@ -298,6 +332,76 @@ def _upload_secure_file(url: str, key: str, path: Path) -> str:
     if isinstance(payload, dict) and payload.get("filename"):
         return str(payload["filename"])
     return filename
+
+
+def _is_secure_invite_noise(body: str) -> bool:
+    """True for multi-line file/canvas invite lines that GUI clients collapse."""
+    t = body.strip()
+    if not t:
+        return True
+    if _SECURE_BANNER_START_RE.match(t) or _SECURE_BANNER_END_RE.match(t):
+        return True
+    if _SECURE_URL_LABEL_RE.search(t) or _SECURE_KEY_LINE_RE.match(t):
+        return True
+    if _SECURE_HTTP_URL_RE.match(t):
+        return True
+    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
+        return True
+    if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
+        return True
+    if re.match(r"^\d+\.\s+", t):
+        return True
+    if _SECURE_META_LINE_RE.match(t):
+        return True
+    if t.startswith("经联邦节点"):
+        return True
+    if "图形客户端会折叠" in t:
+        return True
+    return False
+
+
+def _download_token_from_url(url: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0] != "download":
+        raise ValueError("invalid download url")
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    return base, parts[1]
+
+
+def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
+    """Exchange download key for a ticket, pull bytes locally, return media dict."""
+    base, token = _download_token_from_url(url)
+    tickets = _http_json(
+        f"{base}/download/{token}/ticket",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"key": key.upper()}).encode("utf-8"),
+    )
+    filename = str(tickets.get("filename") or "file").strip() or "file"
+    mime = str(
+        tickets.get("mime")
+        or mimetypes.guess_type(filename)[0]
+        or "application/octet-stream"
+    )
+    download_rel = tickets.get("download")
+    if not download_rel:
+        raise RuntimeError("no download ticket")
+    download_url = urllib.parse.urljoin(base + "/", str(download_rel).lstrip("/"))
+    data = _urlopen_read(urllib.request.Request(download_url), timeout=180)
+    suffix = Path(filename).suffix or mimetypes.guess_extension(mime) or ".bin"
+    fd, tmp_name = tempfile.mkstemp(prefix="sshchat-dl-", suffix=suffix)
+    os.close(fd)
+    path = Path(tmp_name)
+    path.write_bytes(data)
+    return {
+        "_kind": "media",
+        "name": filename,
+        "mime": mime,
+        "path": str(path),
+        "size": len(data),
+        "is_image": bool(_IMAGE_MIME_RE.match(mime)),
+    }
 
 
 def _http_json(
@@ -861,13 +965,15 @@ class SSHChatGUI:
         self._rooms_order: list[str] = ["default"]
         self._active_room = "default"
         self._room_unread: dict[str, int] = {"default": 0}
-        self._room_history: dict[str, list[tuple[str, str]]] = {"default": []}
+        self._room_history: dict[str, list[Any]] = {"default": []}
         self._paste_pending: dict[str, Any] | None = None
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Toplevel | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
         self._canvas_win: NativeCanvasWindow | None = None
+        self._photo_refs: list[Any] = []
+        self._media_widgets: list[tk.Widget] = []
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -1081,8 +1187,19 @@ class SSHChatGUI:
         entries = self._room_history.get(self._active_room, [])
         self.log.configure(state=tk.NORMAL)
         self.log.delete("1.0", tk.END)
-        for text, tag in entries:
-            self._insert_log_fragment(text, tag)
+        self._photo_refs.clear()
+        for w in self._media_widgets:
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        self._media_widgets.clear()
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("_kind") == "media":
+                self._insert_media_entry(entry)
+            else:
+                text, tag = entry
+                self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
@@ -1163,6 +1280,99 @@ class SSHChatGUI:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
             self._refresh_room_list()
 
+    def _format_file_size(self, size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    def _make_inline_photo(self, path: Path) -> Any | None:
+        """Build a Tk image for inline chat preview; keep a ref to avoid GC."""
+        try:
+            if _HAS_PIL and Image is not None and ImageTk is not None:
+                with Image.open(path) as im:
+                    im = im.convert("RGBA") if im.mode not in ("RGB", "RGBA") else im.copy()
+                    im.thumbnail(
+                        (_MAX_INLINE_IMAGE_PX, _MAX_INLINE_IMAGE_PX),
+                        Image.Resampling.LANCZOS,
+                    )
+                    photo = ImageTk.PhotoImage(im)
+            else:
+                photo = tk.PhotoImage(file=str(path))
+                # Rough downscale for oversized PNG/GIF without Pillow.
+                w, h = int(photo.width()), int(photo.height())
+                if w > _MAX_INLINE_IMAGE_PX or h > _MAX_INLINE_IMAGE_PX:
+                    factor = max(
+                        (w + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
+                        (h + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
+                        1,
+                    )
+                    if factor > 1:
+                        photo = photo.subsample(factor, factor)
+        except Exception:
+            return None
+        self._photo_refs.append(photo)
+        return photo
+
+    def _insert_media_entry(self, media: dict[str, Any]) -> None:
+        name = str(media.get("name") or "file")
+        size = int(media.get("size") or 0)
+        path = Path(str(media.get("path") or ""))
+        caption = f"[文件] {name} ({self._format_file_size(size)})\n"
+        self.log.insert(tk.END, caption, ("system",))
+        shown_image = False
+        if media.get("is_image") and path.is_file():
+            photo = self._make_inline_photo(path)
+            if photo is not None:
+                self.log.image_create(tk.END, image=photo)
+                self.log.insert(tk.END, "\n")
+                shown_image = True
+        frm = ttk.Frame(self.log)
+        ttk.Label(frm, text=("图片已内联显示" if shown_image else f"附件: {name}")).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(
+            frm,
+            text="另存为…",
+            command=lambda p=path, n=name: self._save_media_as(p, n),
+        ).pack(side=tk.LEFT)
+        self.log.window_create(tk.END, window=frm)
+        self.log.insert(tk.END, "\n")
+        self._media_widgets.append(frm)
+
+    def _append_room_media(self, room: str, media: dict[str, Any]) -> None:
+        self._ensure_room(room)
+        history = self._room_history[room]
+        history.append(dict(media))
+        if len(history) > _MAX_ROOM_HISTORY:
+            del history[: len(history) - _MAX_ROOM_HISTORY]
+        if room == self._active_room and not self._is_minimized:
+            self.log.configure(state=tk.NORMAL)
+            self._insert_media_entry(media)
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        else:
+            self._room_unread[room] = self._room_unread.get(room, 0) + 1
+            self._refresh_room_list()
+
+    def _save_media_as(self, path: Path, name: str) -> None:
+        if not path.is_file():
+            messagebox.showwarning("SSHChat", "本地文件已失效，请重新接收")
+            return
+        dest = filedialog.asksaveasfilename(
+            title="保存文件",
+            initialfile=name,
+            defaultextension=path.suffix,
+        )
+        if not dest:
+            return
+        try:
+            shutil.copy2(path, dest)
+            self._set_status(f"已保存: {dest}")
+        except OSError as e:
+            messagebox.showerror("SSHChat", f"保存失败: {e}")
+
     def _update_rooms_from_system(self, body: str) -> None:
         # Examples:
         # "Rooms: #default, *#ops"
@@ -1210,6 +1420,10 @@ class SSHChatGUI:
         if parsed and parsed[1] == "*" and self._try_handle_upload_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_canvas_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and _is_secure_invite_noise(parsed[2]):
             return
         ts = datetime.now()
         self._display_times.append(ts)
@@ -1641,6 +1855,45 @@ class SSHChatGUI:
         url, key = m.group(1), m.group(2).upper()
         self._open_native_canvas(url, key)
         return True
+
+    def _try_handle_download_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_DOWNLOAD_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        room = self._active_room
+        self._set_status("正在接收文件…")
+        self._alert_beep()
+
+        def worker() -> None:
+            err: str | None = None
+            media: dict[str, Any] | None = None
+            try:
+                media = _fetch_secure_download(url, key)
+            except Exception as e:
+                err = str(e)
+            self.root.after(
+                0, lambda: self._download_finished(room, media, err)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _download_finished(
+        self,
+        room: str,
+        media: dict[str, Any] | None,
+        err: str | None,
+    ) -> None:
+        if err or not media:
+            self._set_status(f"收文件失败: {err or 'unknown'}")
+            self._append_chat_line(
+                f"[*] 收文件失败: {err or 'unknown'}", local_sent=True
+            )
+            return
+        name = str(media.get("name") or "file")
+        self._set_status(f"已接收: {name}")
+        self._append_room_media(room, media)
 
     def _open_native_canvas(self, url: str, key: str) -> None:
         try:
