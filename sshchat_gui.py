@@ -1116,7 +1116,7 @@ class SSHChatGUI:
         )
         hint = ttk.Label(
             self.root,
-            text="提示: Tab 补全命令；/clear 清屏；可粘贴截图/文件路径，或点「发文件」",
+            text="提示: Tab 补全；粘贴截图发文件；收到的图片会内联显示，其它文件可另存为",
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
