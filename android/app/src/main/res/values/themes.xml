@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SSHChat" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <item name="colorPrimary">#1B5E20</item>
+        <item name="colorPrimaryVariant">#003300</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#546E7A</item>
+    </style>
+</resources>
