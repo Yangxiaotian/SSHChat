@@ -53,8 +53,11 @@ python -m PyInstaller `
   --name SSHChat `
   --paths $root `
   --hidden-import sshchat_client_util `
+  --hidden-import PIL `
+  --hidden-import PIL.Image `
   --collect-all paramiko `
   --collect-all cryptography `
+  --collect-all PIL `
   --distpath $distPath `
   --workpath $workPath `
   --add-data "$BundleFile;." `

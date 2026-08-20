@@ -109,12 +109,11 @@ _DRAIN_BATCH_ITEMS = 200
 _PASTE_UPLOAD_TIMEOUT_S = 45.0
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image
 
     _HAS_PIL = True
 except ImportError:
     Image = None  # type: ignore[assignment, misc]
-    ImageTk = None  # type: ignore[assignment, misc]
     _HAS_PIL = False
 _TOP_COMMANDS = (
     "/help",
@@ -402,6 +401,64 @@ def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
         "size": len(data),
         "is_image": bool(_IMAGE_MIME_RE.match(mime)),
     }
+
+
+def _media_from_local_path(path: Path, *, display_name: str | None = None) -> dict[str, Any]:
+    """Build a media history entry from an already-local file (sender preview)."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(str(path))
+    name = (display_name or resolved.name).replace("\\", "_").replace("/", "_")[:200] or "file"
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    # Copy into a stable temp so clipboard temps / user moves don't break history.
+    suffix = Path(name).suffix or mimetypes.guess_extension(mime) or ".bin"
+    fd, tmp_name = tempfile.mkstemp(prefix="sshchat-sent-", suffix=suffix)
+    os.close(fd)
+    dest = Path(tmp_name)
+    shutil.copy2(resolved, dest)
+    return {
+        "_kind": "media",
+        "name": name,
+        "mime": mime,
+        "path": str(dest),
+        "size": dest.stat().st_size,
+        "is_image": bool(_IMAGE_MIME_RE.match(mime)),
+    }
+
+
+def _prepare_tk_preview_png(path: Path, max_px: int = _MAX_INLINE_IMAGE_PX) -> Path | None:
+    """
+    Convert any supported image to a small RGB PNG for tk.PhotoImage.
+    Avoids ImageTk/RGBA crashes that hard-abort some Windows Tk builds.
+    """
+    if not path.is_file():
+        return None
+    suffix = path.suffix.lower()
+    # Native PhotoImage formats — still downscale via Pillow when available.
+    if not _HAS_PIL or Image is None:
+        if suffix in {".png", ".gif", ".ppm", ".pgm"}:
+            return path
+        return None
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if getattr(im, "n_frames", 1) > 1:
+                im.seek(0)
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                rgba = im.convert("RGBA")
+                bg.paste(rgba, mask=rgba.split()[-1])
+                rgb = bg
+            else:
+                rgb = im.convert("RGB")
+            rgb.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+            fd, tmp_name = tempfile.mkstemp(prefix="sshchat-prev-", suffix=".png")
+            os.close(fd)
+            out = Path(tmp_name)
+            rgb.save(out, format="PNG", optimize=True)
+            return out
+    except Exception:
+        return None
 
 
 def _http_json(
@@ -1289,28 +1346,32 @@ class SSHChatGUI:
 
     def _make_inline_photo(self, path: Path) -> Any | None:
         """Build a Tk image for inline chat preview; keep a ref to avoid GC."""
+        preview: Path | None = None
+        photo = None
         try:
-            if _HAS_PIL and Image is not None and ImageTk is not None:
-                with Image.open(path) as im:
-                    im = im.convert("RGBA") if im.mode not in ("RGB", "RGBA") else im.copy()
-                    im.thumbnail(
-                        (_MAX_INLINE_IMAGE_PX, _MAX_INLINE_IMAGE_PX),
-                        Image.Resampling.LANCZOS,
-                    )
-                    photo = ImageTk.PhotoImage(im)
-            else:
-                photo = tk.PhotoImage(file=str(path))
-                # Rough downscale for oversized PNG/GIF without Pillow.
-                w, h = int(photo.width()), int(photo.height())
-                if w > _MAX_INLINE_IMAGE_PX or h > _MAX_INLINE_IMAGE_PX:
-                    factor = max(
-                        (w + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
-                        (h + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
-                        1,
-                    )
-                    if factor > 1:
-                        photo = photo.subsample(factor, factor)
+            preview = _prepare_tk_preview_png(path)
+            if preview is None:
+                return None
+            photo = tk.PhotoImage(file=str(preview))
+            w, h = int(photo.width()), int(photo.height())
+            if w > _MAX_INLINE_IMAGE_PX or h > _MAX_INLINE_IMAGE_PX:
+                factor = max(
+                    (w + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
+                    (h + _MAX_INLINE_IMAGE_PX - 1) // _MAX_INLINE_IMAGE_PX,
+                    1,
+                )
+                if factor > 1:
+                    photo = photo.subsample(factor, factor)
         except Exception:
+            photo = None
+        finally:
+            # Drop converted temp if different from source; PhotoImage already loaded pixels.
+            if preview is not None and preview != path:
+                try:
+                    preview.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if photo is None:
             return None
         self._photo_refs.append(photo)
         return photo
@@ -1320,26 +1381,45 @@ class SSHChatGUI:
         size = int(media.get("size") or 0)
         path = Path(str(media.get("path") or ""))
         caption = f"[文件] {name} ({self._format_file_size(size)})\n"
-        self.log.insert(tk.END, caption, ("system",))
+        try:
+            self.log.insert(tk.END, caption, ("system",))
+        except tk.TclError:
+            return
         shown_image = False
-        if media.get("is_image") and path.is_file():
-            photo = self._make_inline_photo(path)
-            if photo is not None:
-                self.log.image_create(tk.END, image=photo)
-                self.log.insert(tk.END, "\n")
-                shown_image = True
-        frm = ttk.Frame(self.log)
-        ttk.Label(frm, text=("图片已内联显示" if shown_image else f"附件: {name}")).pack(
-            side=tk.LEFT, padx=(0, 8)
-        )
-        ttk.Button(
-            frm,
-            text="另存为…",
-            command=lambda p=path, n=name: self._save_media_as(p, n),
-        ).pack(side=tk.LEFT)
-        self.log.window_create(tk.END, window=frm)
-        self.log.insert(tk.END, "\n")
-        self._media_widgets.append(frm)
+        try:
+            if media.get("is_image") and path.is_file():
+                photo = self._make_inline_photo(path)
+                if photo is not None:
+                    self.log.image_create(tk.END, image=photo)
+                    self.log.insert(tk.END, "\n")
+                    shown_image = True
+        except Exception:
+            shown_image = False
+        try:
+            # Use classic tk widgets — ttk embedded in Text hard-crashes on some Win Tk builds.
+            frm = tk.Frame(self.log, bg="#f4f4f4", padx=4, pady=2)
+            tk.Label(
+                frm,
+                text=("图片预览" if shown_image else f"附件: {name}"),
+                bg="#f4f4f4",
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            tk.Button(
+                frm,
+                text="另存为",
+                command=lambda p=path, n=name: self._save_media_as(p, n),
+            ).pack(side=tk.LEFT)
+            self.log.window_create(tk.END, window=frm)
+            self.log.insert(tk.END, "\n")
+            self._media_widgets.append(frm)
+        except Exception:
+            try:
+                self.log.insert(
+                    tk.END,
+                    f"[*] 文件已接收: {name}（预览控件加载失败，可用另存逻辑重试）\n",
+                    ("system",),
+                )
+            except tk.TclError:
+                pass
 
     def _append_room_media(self, room: str, media: dict[str, Any]) -> None:
         self._ensure_room(room)
@@ -1348,10 +1428,17 @@ class SSHChatGUI:
         if len(history) > _MAX_ROOM_HISTORY:
             del history[: len(history) - _MAX_ROOM_HISTORY]
         if room == self._active_room and not self._is_minimized:
-            self.log.configure(state=tk.NORMAL)
-            self._insert_media_entry(media)
-            self.log.see(tk.END)
-            self.log.configure(state=tk.DISABLED)
+            try:
+                self.log.configure(state=tk.NORMAL)
+                self._insert_media_entry(media)
+                self.log.see(tk.END)
+                self.log.configure(state=tk.DISABLED)
+            except Exception as e:
+                self._set_status(f"预览失败: {e}")
+                try:
+                    self.log.configure(state=tk.DISABLED)
+                except tk.TclError:
+                    pass
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
             self._refresh_room_list()
@@ -1828,14 +1915,22 @@ class SSHChatGUI:
             except Exception as e:
                 err = str(e)
             self.root.after(
-                0, lambda: self._paste_upload_finished(name, remote, err)
+                0,
+                lambda n=name, r=remote, e=err, p=path: self._paste_upload_finished(
+                    n, r, e, local_path=p
+                ),
             )
 
         threading.Thread(target=worker, daemon=True).start()
         return True
 
     def _paste_upload_finished(
-        self, name: str, remote: str, err: str | None
+        self,
+        name: str,
+        remote: str,
+        err: str | None,
+        *,
+        local_path: Path | None = None,
     ) -> None:
         self._paste_pending = None
         self._cancel_paste_timer()
@@ -1846,7 +1941,19 @@ class SSHChatGUI:
             )
             return
         self._set_status(f"已上传: {remote}")
-        self._append_chat_line(f"[*] 已上传: {remote}", local_sent=True)
+        shown = False
+        if local_path is not None:
+            try:
+                media = _media_from_local_path(local_path, display_name=remote or name)
+                self._append_room_media(self._active_room, media)
+                shown = True
+            except Exception as e:
+                self._append_chat_line(
+                    f"[*] 已上传: {remote}（本地预览失败: {e}）", local_sent=True
+                )
+                shown = True
+        if not shown:
+            self._append_chat_line(f"[*] 已上传: {remote}", local_sent=True)
 
     def _try_handle_canvas_invite(self, body: str) -> bool:
         m = _GUI_OPEN_CANVAS_RE.match(body.strip())
@@ -1873,7 +1980,8 @@ class SSHChatGUI:
             except Exception as e:
                 err = str(e)
             self.root.after(
-                0, lambda: self._download_finished(room, media, err)
+                0,
+                lambda r=room, m=media, e=err: self._download_finished(r, m, e),
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1893,7 +2001,12 @@ class SSHChatGUI:
             return
         name = str(media.get("name") or "file")
         self._set_status(f"已接收: {name}")
-        self._append_room_media(room, media)
+        try:
+            self._append_room_media(room, media)
+        except Exception as e:
+            self._append_chat_line(
+                f"[*] 已接收: {name}（显示失败: {e}）", local_sent=True
+            )
 
     def _open_native_canvas(self, url: str, key: str) -> None:
         try:
