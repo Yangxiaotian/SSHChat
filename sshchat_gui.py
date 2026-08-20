@@ -7,6 +7,7 @@ SSHChat 图形客户端：通过 SSH（与命令行相同）进入服务端强�
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import mimetypes
 import os
@@ -103,7 +104,7 @@ _SECURE_META_LINE_RE = re.compile(
     re.I,
 )
 _IMAGE_MIME_RE = re.compile(r"^image/(jpeg|jpg|png|gif|webp|bmp)$", re.I)
-_MAX_INLINE_IMAGE_PX = 480
+_MAX_INLINE_IMAGE_PX = 360
 _MAX_ROOM_HISTORY = 4000
 _DRAIN_BATCH_ITEMS = 200
 _PASTE_UPLOAD_TIMEOUT_S = 45.0
@@ -1030,7 +1031,10 @@ class SSHChatGUI:
         self._suggest_items: list[str] = []
         self._canvas_win: NativeCanvasWindow | None = None
         self._photo_refs: list[Any] = []
-        self._media_widgets: list[tk.Widget] = []
+        self._media_save_targets: dict[str, tuple[str, str]] = {}
+        self._media_preview_targets: dict[str, tuple[str, str]] = {}
+        self._media_tag_seq = 0
+        self._preview_win: tk.Toplevel | None = None
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -1144,9 +1148,11 @@ class SSHChatGUI:
         self.log.tag_configure("system", foreground="#8e24aa")
         self.log.tag_configure("xq_red", foreground="#c62828")
         self.log.tag_configure("xq_black", foreground="#263238")
+        self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("media_preview", foreground="#0b57d0", underline=True)
         self.log.bind("<<Paste>>", self._on_paste_file, add="+")
-        # Allow paste/drop focus even when text widget is disabled.
-        self.log.bind("<Button-1>", lambda e: self.log.focus_set(), add="+")
+        # DISABLED Text swallows tag_bind on Aqua/Win; handle clicks at widget level.
+        self.log.bind("<Button-1>", self._on_log_click, add="+")
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -1245,12 +1251,8 @@ class SSHChatGUI:
         self.log.configure(state=tk.NORMAL)
         self.log.delete("1.0", tk.END)
         self._photo_refs.clear()
-        for w in self._media_widgets:
-            try:
-                w.destroy()
-            except tk.TclError:
-                pass
-        self._media_widgets.clear()
+        self._media_save_targets.clear()
+        self._media_preview_targets.clear()
         for entry in entries:
             if isinstance(entry, dict) and entry.get("_kind") == "media":
                 self._insert_media_entry(entry)
@@ -1345,14 +1347,15 @@ class SSHChatGUI:
         return f"{size / (1024 * 1024):.1f} MB"
 
     def _make_inline_photo(self, path: Path) -> Any | None:
-        """Build a Tk image for inline chat preview; keep a ref to avoid GC."""
+        """Build a small RGB PNG PhotoImage via base64 (safe for Label, not Text)."""
         preview: Path | None = None
         photo = None
         try:
             preview = _prepare_tk_preview_png(path)
-            if preview is None:
+            if preview is None or not preview.is_file():
                 return None
-            photo = tk.PhotoImage(file=str(preview))
+            b64 = base64.b64encode(preview.read_bytes()).decode("ascii")
+            photo = tk.PhotoImage(data=b64)
             w, h = int(photo.width()), int(photo.height())
             if w > _MAX_INLINE_IMAGE_PX or h > _MAX_INLINE_IMAGE_PX:
                 factor = max(
@@ -1365,7 +1368,6 @@ class SSHChatGUI:
         except Exception:
             photo = None
         finally:
-            # Drop converted temp if different from source; PhotoImage already loaded pixels.
             if preview is not None and preview != path:
                 try:
                     preview.unlink(missing_ok=True)
@@ -1376,50 +1378,82 @@ class SSHChatGUI:
         self._photo_refs.append(photo)
         return photo
 
+    def _on_log_click(self, event) -> None:
+        self.log.focus_set()
+        try:
+            index = self.log.index(f"@{event.x},{event.y}")
+            tags = self.log.tag_names(index)
+        except tk.TclError:
+            return
+        for tag in tags:
+            prev = self._media_preview_targets.get(tag)
+            if prev:
+                self._open_media_preview(Path(prev[0]), prev[1])
+                return
+            save = self._media_save_targets.get(tag)
+            if save:
+                self._save_media_as(Path(save[0]), save[1])
+                return
+
+    def _open_media_preview(self, path: Path, name: str) -> None:
+        """Show image in a Toplevel Label — never embed into the chat Text."""
+        if not path.is_file():
+            messagebox.showwarning("SSHChat", "本地文件已失效，请重新接收")
+            return
+        photo = self._make_inline_photo(path)
+        if photo is None:
+            messagebox.showinfo("SSHChat", f"无法预览: {name}\n可点「另存为」保存后用系统查看器打开")
+            return
+        try:
+            if self._preview_win is not None:
+                try:
+                    self._preview_win.destroy()
+                except tk.TclError:
+                    pass
+            win = tk.Toplevel(self.root)
+            win.title(f"预览 — {name}")
+            win.transient(self.root)
+            lbl = tk.Label(win, image=photo)
+            lbl.pack(padx=8, pady=8)
+            tk.Button(
+                win,
+                text="另存为",
+                command=lambda: self._save_media_as(path, name),
+            ).pack(pady=(0, 8))
+            self._preview_win = win
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"预览失败: {e}")
+
     def _insert_media_entry(self, media: dict[str, Any]) -> None:
+        """
+        Insert file/image notice without embedding images or child widgets in Text.
+
+        Aqua Tk (macOS) and some Windows builds hard-crash on Text.image_create
+        and Text.window_create; preview opens in a separate Toplevel instead.
+        """
         name = str(media.get("name") or "file")
         size = int(media.get("size") or 0)
         path = Path(str(media.get("path") or ""))
-        caption = f"[文件] {name} ({self._format_file_size(size)})\n"
+        is_image = bool(media.get("is_image") and path.is_file())
+        kind = "图片" if is_image else "文件"
+        caption = f"[{kind}] {name} ({self._format_file_size(size)})  "
         try:
             self.log.insert(tk.END, caption, ("system",))
         except tk.TclError:
             return
-        shown_image = False
+
+        self._media_tag_seq += 1
+        tag = f"media_id_{self._media_tag_seq}"
+        self._media_save_targets[tag] = (str(path), name)
         try:
-            if media.get("is_image") and path.is_file():
-                photo = self._make_inline_photo(path)
-                if photo is not None:
-                    self.log.image_create(tk.END, image=photo)
-                    self.log.insert(tk.END, "\n")
-                    shown_image = True
-        except Exception:
-            shown_image = False
-        try:
-            # Use classic tk widgets — ttk embedded in Text hard-crashes on some Win Tk builds.
-            frm = tk.Frame(self.log, bg="#f4f4f4", padx=4, pady=2)
-            tk.Label(
-                frm,
-                text=("图片预览" if shown_image else f"附件: {name}"),
-                bg="#f4f4f4",
-            ).pack(side=tk.LEFT, padx=(0, 8))
-            tk.Button(
-                frm,
-                text="另存为",
-                command=lambda p=path, n=name: self._save_media_as(p, n),
-            ).pack(side=tk.LEFT)
-            self.log.window_create(tk.END, window=frm)
+            if is_image:
+                self._media_preview_targets[tag] = (str(path), name)
+                self.log.insert(tk.END, "预览", ("media_preview", tag))
+                self.log.insert(tk.END, "  ")
+            self.log.insert(tk.END, "另存为", ("media_save", tag))
             self.log.insert(tk.END, "\n")
-            self._media_widgets.append(frm)
-        except Exception:
-            try:
-                self.log.insert(
-                    tk.END,
-                    f"[*] 文件已接收: {name}（预览控件加载失败，可用另存逻辑重试）\n",
-                    ("system",),
-                )
-            except tk.TclError:
-                pass
+        except tk.TclError:
+            pass
 
     def _append_room_media(self, room: str, media: dict[str, Any]) -> None:
         self._ensure_room(room)
@@ -1438,6 +1472,13 @@ class SSHChatGUI:
                 try:
                     self.log.configure(state=tk.DISABLED)
                 except tk.TclError:
+                    pass
+                try:
+                    self._append_chat_line(
+                        f"[*] 已收到文件: {media.get('name') or 'file'}",
+                        local_sent=True,
+                    )
+                except Exception:
                     pass
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
