@@ -349,7 +349,17 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
         return True
-    if re.match(r"^\d+\.\s+", t):
+    # File-invite instruction bullets only — do NOT match library rows like
+    # "1. [EPUB] title.epub (1.2 MB)" or "2. [PDF] notes.pdf".
+    if re.match(
+        r"^\d+\.\s+("
+        r"打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|"
+        r"Enter|Open|Click|Choose|Select|Upload|Download|Preview|"
+        r"This page|Each recipient|The key|Verify"
+        r")",
+        t,
+        re.I,
+    ):
         return True
     if _SECURE_META_LINE_RE.match(t):
         return True
@@ -1467,6 +1477,13 @@ class SSHChatGUI:
                 self._insert_media_entry(media)
                 self.log.see(tk.END)
                 self.log.configure(state=tk.DISABLED)
+                if media.get("is_image") and Path(str(media.get("path") or "")).is_file():
+                    name = str(media.get("name") or "file")
+                    path = Path(str(media["path"]))
+                    self.root.after(
+                        80,
+                        lambda p=path, n=name: self._open_media_preview(p, n),
+                    )
             except Exception as e:
                 self._set_status(f"预览失败: {e}")
                 try:
