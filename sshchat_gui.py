@@ -658,11 +658,17 @@ def _clipboard_existing_path(root: tk.Misc) -> Path | None:
     return None
 
 
+def _temp_clip_png() -> Path:
+    fd, name = tempfile.mkstemp(prefix="sshchat-clip-", suffix=".png")
+    os.close(fd)
+    return Path(name)
+
+
 def _mac_clipboard_image_file() -> Path | None:
     """Write PNG from macOS clipboard to a temp file, if present."""
     if sys.platform != "darwin":
         return None
-    out = Path(tempfile.mkstemp(prefix="sshchat-clip-", suffix=".png")[1])
+    out = _temp_clip_png()
     script = (
         f'set outPath to "{out}"\n'
         "try\n"
@@ -695,6 +701,85 @@ def _mac_clipboard_image_file() -> Path | None:
     except OSError:
         pass
     return None
+
+
+def _windows_clipboard_image_file() -> Path | None:
+    """Write PNG from Windows clipboard (screenshot / copied image) to a temp file."""
+    if sys.platform != "win32":
+        return None
+    out = _temp_clip_png()
+    # Escape for PowerShell single-quoted string ('' = literal ')
+    ps_path = str(out).replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$img = [System.Windows.Forms.Clipboard]::GetImage(); "
+        "if ($null -eq $img) { exit 2 }; "
+        f"$img.Save('{ps_path}', [System.Drawing.Imaging.ImageFormat]::Png)"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if r.returncode == 0 and out.is_file() and out.stat().st_size > 0:
+            return out
+    except (subprocess.SubprocessError, OSError):
+        pass
+    try:
+        out.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
+
+
+def _linux_clipboard_image_file() -> Path | None:
+    """Write PNG from Wayland/X11 clipboard to a temp file, if tools exist."""
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return None
+    out = _temp_clip_png()
+    cmds: list[list[str]] = [
+        ["wl-paste", "--type", "image/png"],
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+    ]
+    for cmd in cmds:
+        try:
+            with open(out, "wb") as f:
+                r = subprocess.run(
+                    cmd,
+                    stdout=f,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            if r.returncode == 0 and out.is_file() and out.stat().st_size > 0:
+                return out
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
+    try:
+        out.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
+
+
+def _clipboard_image_file() -> Path | None:
+    """Platform clipboard bitmap → temp PNG (for paste-to-/sendfile)."""
+    if sys.platform == "darwin":
+        return _mac_clipboard_image_file()
+    if sys.platform == "win32":
+        return _windows_clipboard_image_file()
+    return _linux_clipboard_image_file()
 
 
 def _clean_chunk(s: str) -> str:
@@ -1579,7 +1664,7 @@ class SSHChatGUI:
             return None
         path = _clipboard_existing_path(self.root)
         if path is None:
-            path = _mac_clipboard_image_file()
+            path = _clipboard_image_file()
         if path is None:
             return None
         self._start_paste_sendfile(path)
