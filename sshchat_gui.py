@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -105,6 +106,9 @@ _SECURE_META_LINE_RE = re.compile(
 )
 _IMAGE_MIME_RE = re.compile(r"^image/(jpeg|jpg|png|gif|webp|bmp)$", re.I)
 _MAX_INLINE_IMAGE_PX = 360
+_MAX_PREVIEW_SOURCE_PX = 4096
+_PREVIEW_ZOOM_MIN = 0.1
+_PREVIEW_ZOOM_MAX = 8.0
 _MAX_ROOM_HISTORY = 4000
 _DRAIN_BATCH_ITEMS = 200
 _PASTE_UPLOAD_TIMEOUT_S = 45.0
@@ -514,6 +518,233 @@ def _canvas_token_from_url(url: str) -> tuple[str, str]:
         raise ValueError("invalid canvas url")
     base = f"{parsed.scheme}://{parsed.netloc}"
     return base, parts[1]
+
+
+def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
+    """Load image as RGB PIL.Image, capped on longest side. None if unavailable."""
+    if not _HAS_PIL or Image is None or not path.is_file():
+        return None
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if getattr(im, "n_frames", 1) > 1:
+                im.seek(0)
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                rgba = im.convert("RGBA")
+                bg.paste(rgba, mask=rgba.split()[-1])
+                rgb = bg
+            else:
+                rgb = im.convert("RGB")
+            if max(rgb.size) > max_px:
+                rgb = rgb.copy()
+                rgb.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+            else:
+                rgb = rgb.copy()
+            return rgb
+    except Exception:
+        return None
+
+
+def _pil_to_photoimage(im: Any) -> tk.PhotoImage | None:
+    """Encode a PIL RGB image as tk.PhotoImage via PNG base64 (no ImageTk)."""
+    if im is None or not _HAS_PIL or Image is None:
+        return None
+    try:
+        buf = io.BytesIO()
+        im.save(buf, format="PNG", optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return tk.PhotoImage(data=b64)
+    except Exception:
+        return None
+
+
+class ImagePreviewWindow:
+    """Zoomable image preview in a Toplevel (Canvas + scrollbars, never Text embed)."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        path: Path,
+        name: str,
+        *,
+        on_save: Any,
+    ) -> None:
+        self.path = path
+        self.name = name
+        self.on_save = on_save
+        self._pil = _pil_rgb_image(path)
+        if self._pil is None:
+            raise RuntimeError("无法解码图片")
+        self._scale = 1.0
+        self._photo: tk.PhotoImage | None = None
+        self._photo_refs: list[Any] = []
+        self._fit_pending = True
+
+        self.win = tk.Toplevel(master)
+        self.win.title(f"预览 — {name}")
+        self.win.geometry("720x560")
+        self.win.minsize(360, 280)
+        self.win.transient(master)
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+        bar = ttk.Frame(self.win)
+        bar.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Button(bar, text="－", width=3, command=lambda: self._zoom_by(1 / 1.25)).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(bar, text="＋", width=3, command=lambda: self._zoom_by(1.25)).pack(
+            side=tk.LEFT, padx=(4, 0)
+        )
+        ttk.Button(bar, text="适应窗口", command=self._fit_to_window).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(bar, text="100%", command=lambda: self._set_scale(1.0)).pack(
+            side=tk.LEFT, padx=(4, 0)
+        )
+        self.var_zoom = tk.StringVar(value="100%")
+        ttk.Label(bar, textvariable=self.var_zoom).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(bar, text="另存为", command=lambda: self.on_save(self.path, self.name)).pack(
+            side=tk.RIGHT
+        )
+        ttk.Label(bar, text="滚轮缩放 · 拖拽平移").pack(side=tk.RIGHT, padx=(0, 12))
+
+        body = ttk.Frame(self.win)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.canvas = tk.Canvas(body, bg="#2b2b2b", highlightthickness=0)
+        self._scroll_y = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.canvas.yview)
+        self._scroll_x = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.canvas.configure(
+            xscrollcommand=self._scroll_x.set,
+            yscrollcommand=self._scroll_y.set,
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self._scroll_y.grid(row=0, column=1, sticky="ns")
+        self._scroll_x.grid(row=1, column=0, sticky="ew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        self._drag_last: tuple[int, int] | None = None
+        self.canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._on_drag_end)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        # Also catch wheel when the window has focus but pointer is over chrome.
+        self.win.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda e: self._zoom_at(1.25, e.x, e.y))
+        self.canvas.bind("<Button-5>", lambda e: self._zoom_at(1 / 1.25, e.x, e.y))
+        self.win.bind("<Button-4>", lambda e: self._zoom_by(1.25))
+        self.win.bind("<Button-5>", lambda e: self._zoom_by(1 / 1.25))
+        self.win.bind("<plus>", lambda _e: self._zoom_by(1.25))
+        self.win.bind("<minus>", lambda _e: self._zoom_by(1 / 1.25))
+        self.win.bind("<equal>", lambda _e: self._zoom_by(1.25))
+        self.win.bind("<KP_Add>", lambda _e: self._zoom_by(1.25))
+        self.win.bind("<KP_Subtract>", lambda _e: self._zoom_by(1 / 1.25))
+        self.win.bind("<Configure>", self._on_configure, add="+")
+        self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+
+        self._render()
+
+    def close(self) -> None:
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+    def _on_configure(self, _event=None) -> None:
+        return
+
+    def _on_canvas_configure(self, _event=None) -> None:
+        if self._fit_pending and self.canvas.winfo_width() > 40:
+            self._fit_pending = False
+            self._fit_to_window()
+
+    def _on_drag_start(self, event) -> None:
+        self._drag_last = (event.x, event.y)
+        self.canvas.scan_mark(event.x, event.y)
+
+    def _on_drag_move(self, event) -> None:
+        if self._drag_last is None:
+            return
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _on_drag_end(self, _event) -> None:
+        self._drag_last = None
+
+    def _on_mousewheel(self, event) -> None:
+        # Windows / macOS: event.delta; zoom toward cursor.
+        delta = getattr(event, "delta", 0) or 0
+        if delta == 0:
+            return
+        factor = 1.25 if delta > 0 else 1 / 1.25
+        self._zoom_at(factor, event.x, event.y)
+
+    def _zoom_by(self, factor: float) -> None:
+        cw = max(self.canvas.winfo_width(), 1)
+        ch = max(self.canvas.winfo_height(), 1)
+        self._zoom_at(factor, cw // 2, ch // 2)
+
+    def _set_scale(self, scale: float) -> None:
+        self._scale = max(_PREVIEW_ZOOM_MIN, min(_PREVIEW_ZOOM_MAX, float(scale)))
+        self._render()
+
+    def _fit_to_window(self) -> None:
+        cw = max(self.canvas.winfo_width() - 8, 40)
+        ch = max(self.canvas.winfo_height() - 8, 40)
+        iw, ih = self._pil.size
+        if iw < 1 or ih < 1:
+            return
+        scale = min(cw / iw, ch / ih, 1.0)
+        self._set_scale(scale)
+
+    def _zoom_at(self, factor: float, canvas_x: int, canvas_y: int) -> None:
+        old = self._scale
+        new = max(_PREVIEW_ZOOM_MIN, min(_PREVIEW_ZOOM_MAX, old * factor))
+        if abs(new - old) < 1e-6:
+            return
+        try:
+            ix = float(self.canvas.canvasx(canvas_x))
+            iy = float(self.canvas.canvasy(canvas_y))
+        except tk.TclError:
+            ix = float(canvas_x)
+            iy = float(canvas_y)
+        self._scale = new
+        self._render()
+        try:
+            ratio = new / old
+            tw = max(1, int(round(self._pil.size[0] * self._scale)))
+            th = max(1, int(round(self._pil.size[1] * self._scale)))
+            nx, ny = ix * ratio, iy * ratio
+            left = (nx - canvas_x) / tw
+            top = (ny - canvas_y) / th
+            self.canvas.xview_moveto(max(0.0, min(1.0, left)))
+            self.canvas.yview_moveto(max(0.0, min(1.0, top)))
+        except tk.TclError:
+            pass
+
+    def _render(self) -> None:
+        iw, ih = self._pil.size
+        tw = max(1, int(round(iw * self._scale)))
+        th = max(1, int(round(ih * self._scale)))
+        try:
+            if tw == iw and th == ih:
+                resized = self._pil
+            else:
+                resized = self._pil.resize((tw, th), Image.Resampling.LANCZOS)
+            photo = _pil_to_photoimage(resized)
+        except Exception:
+            photo = None
+        if photo is None:
+            return
+        self._photo = photo
+        self._photo_refs.append(photo)
+        # Cap refs so long zoom sessions don't leak forever.
+        if len(self._photo_refs) > 8:
+            self._photo_refs = self._photo_refs[-4:]
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        self.canvas.configure(scrollregion=(0, 0, tw, th))
+        self.var_zoom.set(f"{int(round(self._scale * 100))}%")
 
 
 class NativeCanvasWindow:
@@ -1044,7 +1275,7 @@ class SSHChatGUI:
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
-        self._preview_win: tk.Toplevel | None = None
+        self._preview_win: ImagePreviewWindow | None = None
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -1406,31 +1637,28 @@ class SSHChatGUI:
                 return
 
     def _open_media_preview(self, path: Path, name: str) -> None:
-        """Show image in a Toplevel Label — never embed into the chat Text."""
+        """Show zoomable image preview in a Toplevel — never embed into chat Text."""
         if not path.is_file():
             messagebox.showwarning("SSHChat", "本地文件已失效，请重新接收")
             return
-        photo = self._make_inline_photo(path)
-        if photo is None:
-            messagebox.showinfo("SSHChat", f"无法预览: {name}\n可点「另存为」保存后用系统查看器打开")
+        if not _HAS_PIL:
+            messagebox.showinfo(
+                "SSHChat",
+                f"当前客户端未包含 Pillow，无法预览: {name}\n可点「另存为」后用系统查看器打开",
+            )
             return
         try:
             if self._preview_win is not None:
                 try:
-                    self._preview_win.destroy()
-                except tk.TclError:
+                    self._preview_win.close()
+                except Exception:
                     pass
-            win = tk.Toplevel(self.root)
-            win.title(f"预览 — {name}")
-            win.transient(self.root)
-            lbl = tk.Label(win, image=photo)
-            lbl.pack(padx=8, pady=8)
-            tk.Button(
-                win,
-                text="另存为",
-                command=lambda: self._save_media_as(path, name),
-            ).pack(pady=(0, 8))
-            self._preview_win = win
+            self._preview_win = ImagePreviewWindow(
+                self.root,
+                path,
+                name,
+                on_save=self._save_media_as,
+            )
         except Exception as e:
             messagebox.showerror("SSHChat", f"预览失败: {e}")
 
