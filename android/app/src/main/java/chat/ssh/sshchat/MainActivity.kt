@@ -27,7 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var keys: DeviceKeyStore.Keys
     private var client: SshChatClient? = null
     private val bg = Executors.newSingleThreadExecutor()
-    private var chatSp = 11f
+    private var chatSp = 13f
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
     private var cameraTarget: File? = null
