@@ -187,6 +187,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("'/canvas/' + token + '/auth'", page)
         self.assertIn("replayHistory", page)
         self.assertIn("paintAll", page)
+        self.assertIn("bindStrokeSeq", page)
         self.assertIn("history = []", page)
         self.assertIn("X-Canvas-Ticket", page)
         self.assertIn("&ticket=", page)

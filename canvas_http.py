@@ -308,10 +308,28 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
 
         function rememberStroke(ev) {{
-            if (!ev || ev.kind !== 'stroke') return;
+            if (!ev || ev.kind !== 'stroke') return false;
             const seq = Number(ev.seq || 0);
-            if (seq && history.some(h => Number(h.seq || 0) === seq)) return;
+            if (seq && history.some(h => Number(h.seq || 0) === seq)) return false;
             history.push(ev);
+            return true;
+        }}
+
+        function bindStrokeSeq(ev) {{
+            const seq = Number(ev && ev.seq || 0);
+            if (!seq) {{
+                rememberStroke(ev);
+                return;
+            }}
+            for (let i = history.length - 1; i >= 0; i--) {{
+                if (!Number(history[i].seq || 0)) {{
+                    history[i].seq = seq;
+                    if (ev.color) history[i].color = ev.color;
+                    if (ev.width != null) history[i].width = ev.width;
+                    return;
+                }}
+            }}
+            rememberStroke(ev);
         }}
 
         function replayHistory() {{
@@ -336,10 +354,11 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         function applyEvent(ev) {{
             if (!ev) return;
             if (ev.kind === 'clear') {{
+                clearLocal();
                 history = [];
                 return;
             }}
-            if (ev.kind === 'stroke') rememberStroke(ev);
+            if (ev.kind === 'stroke' && rememberStroke(ev)) drawStroke(ev);
         }}
 
         async function auth() {{
@@ -391,7 +410,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 // Periodic / visibility full rebuild: canvas bitmaps can be wiped by
                 // the browser while `since` stays high, leaving only new strokes.
                 pollCount += 1;
-                const rebuild = !!initial || (pollCount % 40 === 0);
+                // Android WebView may wipe the bitmap; rebuild more often there.
+                const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent || '');
+                const rebuildEvery = mobile ? 8 : 40;
+                const rebuild = !!initial || (pollCount % rebuildEvery === 0);
                 if (rebuild) since = 0;
                 if (!initial && !rebuild) setStatus(i18n.statusSync, false);
                 const res = await fetch(
@@ -419,14 +441,24 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }}
                 renderMeta(data);
                 const events = data.events || [];
-                if (rebuild) history = [];
-                for (const ev of events) {{
-                    applyEvent(ev);
-                    since = Math.max(since, Number(ev.seq || 0));
+                // Only full-clear on rebuild: clearing every poll makes strokes flash.
+                if (rebuild) {{
+                    const pending = history.filter(h => !Number(h.seq || 0));
+                    history = [];
+                    for (const ev of events) {{
+                        if (!ev) continue;
+                        if (ev.kind === 'clear') history = [];
+                        else if (ev.kind === 'stroke') rememberStroke(ev);
+                        since = Math.max(since, Number(ev.seq || 0));
+                    }}
+                    for (const p of pending) history.push(p);
+                    paintAll();
+                }} else {{
+                    for (const ev of events) {{
+                        applyEvent(ev);
+                        since = Math.max(since, Number(ev.seq || 0));
+                    }}
                 }}
-                // Android WebView often drops the canvas bitmap while `since`
-                // stays ahead — redraw from history every poll.
-                paintAll();
                 setStatus(i18n.statusReady, false);
             }} catch (e) {{
                 setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
@@ -461,7 +493,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     seq: 0
                 }};
                 if (!ev.kind) ev.kind = 'stroke';
-                rememberStroke(ev);
+                bindStrokeSeq(ev);
                 if (ev.seq) since = Math.max(since, Number(ev.seq));
             }} catch (e) {{
                 setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
@@ -500,6 +532,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             drawing = false;
             const pts = current || [];
             current = null;
+            // Keep stroke in history before sync can rebuild, so it does not flash away.
+            rememberStroke({{
+                kind: 'stroke',
+                color: colorEl.value,
+                width: Number(widthEl.value),
+                points: pts,
+                seq: 0
+            }});
             await postStroke(pts);
         }}
 

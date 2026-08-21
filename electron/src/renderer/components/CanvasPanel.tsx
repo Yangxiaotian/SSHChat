@@ -70,12 +70,31 @@ export default function CanvasPanel() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const rememberStroke = useCallback((ev: StrokeEvent) => {
-    if (ev.kind !== 'stroke') return;
+  const rememberStroke = useCallback((ev: StrokeEvent): boolean => {
+    if (ev.kind !== 'stroke') return false;
     const seq = Number(ev.seq || 0);
-    if (seq && historyRef.current.some((h) => Number(h.seq || 0) === seq)) return;
+    if (seq && historyRef.current.some((h) => Number(h.seq || 0) === seq)) return false;
     historyRef.current.push(ev);
+    return true;
   }, []);
+
+  const bindStrokeSeq = useCallback(
+    (ev: StrokeEvent) => {
+      const seq = Number(ev.seq || 0);
+      if (!seq) {
+        rememberStroke(ev);
+        return;
+      }
+      for (let i = historyRef.current.length - 1; i >= 0; i -= 1) {
+        if (!Number(historyRef.current[i].seq || 0)) {
+          historyRef.current[i] = { ...historyRef.current[i], ...ev, seq };
+          return;
+        }
+      }
+      rememberStroke(ev);
+    },
+    [rememberStroke],
+  );
 
   const replayHistory = useCallback(() => {
     clearLocal();
@@ -98,12 +117,13 @@ export default function CanvasPanel() {
     (ev: StrokeEvent) => {
       if (!ev) return;
       if (ev.kind === 'clear') {
+        clearLocal();
         historyRef.current = [];
         return;
       }
-      if (ev.kind === 'stroke') rememberStroke(ev);
+      if (ev.kind === 'stroke' && rememberStroke(ev)) drawStroke(ev);
     },
-    [rememberStroke],
+    [clearLocal, drawStroke, rememberStroke],
   );
 
   const stopPoll = useCallback(() => {
@@ -136,12 +156,24 @@ export default function CanvasPanel() {
         if (data.participant) bits.push(`${t('canvasPanel.you')}: ${data.participant}`);
         if (data.room) bits.push(`${t('canvasPanel.room')}: #${data.room}`);
         setMeta(bits.join(' · '));
-        if (rebuild) historyRef.current = [];
-        for (const ev of data.events || []) {
-          applyEvent(ev);
-          sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
+        const events = data.events || [];
+        if (rebuild) {
+          const pending = historyRef.current.filter((h) => !Number(h.seq || 0));
+          historyRef.current = [];
+          for (const ev of events) {
+            if (!ev) continue;
+            if (ev.kind === 'clear') historyRef.current = [];
+            else if (ev.kind === 'stroke') rememberStroke(ev);
+            sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
+          }
+          historyRef.current.push(...pending);
+          paintAll();
+        } else {
+          for (const ev of events) {
+            applyEvent(ev);
+            sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
+          }
         }
-        paintAll();
         if (!initial) setStatus(t('canvasPanel.ready'));
         setError('');
       } finally {
@@ -241,7 +273,7 @@ export default function CanvasPanel() {
     }
     const seq = Number(res.json?.event?.seq || 0);
     if (seq) sinceRef.current = Math.max(sinceRef.current, seq);
-    rememberStroke({
+    bindStrokeSeq({
       seq,
       kind: 'stroke',
       color,
@@ -271,6 +303,7 @@ export default function CanvasPanel() {
     drawingRef.current = false;
     const pts = pointsRef.current.slice();
     pointsRef.current = [];
+    rememberStroke({ kind: 'stroke', color, width, points: pts, seq: 0 });
     void postStroke(pts);
   };
 
