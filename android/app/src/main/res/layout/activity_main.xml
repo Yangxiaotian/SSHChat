@@ -49,6 +49,12 @@
             android:layout_height="wrap_content"
             android:text="复制公钥" />
 
+        <Button
+            android:id="@+id/btnRestoreKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="从备份文件恢复密钥" />
+
         <EditText
             android:id="@+id/etUsername"
             android:layout_width="match_parent"
@@ -73,40 +79,110 @@
         android:textSize="12sp"
         android:textColor="#666666" />
 
-    <ScrollView
-        android:id="@+id/scrollChat"
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="棋盘：左右滑 · A± 调字号"
+            android:textSize="11sp"
+            android:textColor="#888888" />
+
+        <Button
+            android:id="@+id/btnFontMinus"
+            android:layout_width="48dp"
+            android:layout_height="40dp"
+            android:text="A−"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnFontPlus"
+            android:layout_width="48dp"
+            android:layout_height="40dp"
+            android:text="A+"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <HorizontalScrollView
+        android:id="@+id/hScrollChat"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="4dp"
         android:background="#FAFAFA"
-        android:fillViewport="true">
+        android:fillViewport="true"
+        android:scrollbars="horizontal">
 
-        <TextView
-            android:id="@+id/tvChat"
-            android:layout_width="match_parent"
+        <ScrollView
+            android:id="@+id/scrollChat"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:fillViewport="true"
+            android:scrollbars="vertical">
+
+            <TextView
+                android:id="@+id/tvChat"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="360dp"
+                android:padding="8dp"
+                android:textIsSelectable="true"
+                android:textSize="11sp"
+                android:typeface="monospace"
+                android:lineSpacingExtra="0dp"
+                android:letterSpacing="0" />
+        </ScrollView>
+    </HorizontalScrollView>
+
+    <HorizontalScrollView
+        android:id="@+id/suggestScroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/suggestRow"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:padding="8dp"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:typeface="monospace" />
-    </ScrollView>
+            android:orientation="horizontal"
+            android:paddingTop="4dp"
+            android:paddingBottom="2dp" />
+    </HorizontalScrollView>
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="8dp">
+        android:layout_marginTop="4dp">
 
         <EditText
             android:id="@+id/etDraft"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="消息或 /命令"
+            android:hint="消息或 /命令（点候选补全）"
             android:imeOptions="actionSend"
             android:inputType="text"
             android:importantForAutofill="no" />
+
+        <Button
+            android:id="@+id/btnTab"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tab" />
+
+        <Button
+            android:id="@+id/btnPhoto"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="拍照" />
 
         <Button
             android:id="@+id/btnSend"

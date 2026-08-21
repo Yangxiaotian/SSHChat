@@ -6,7 +6,7 @@ import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.userauth.keyprovider.KeyPairWrapper
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.io.OutputStream
 import java.security.KeyPair
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,14 +23,15 @@ class SshChatClient(
     private val onStatus: (String) -> Unit,
     private val onDisconnected: (String?) -> Unit,
 ) {
-    private val io = Executors.newSingleThreadExecutor()
+    private val reader = Executors.newSingleThreadExecutor()
+    private val writeLock = Any()
     private val closed = AtomicBoolean(false)
     @Volatile private var ssh: SSHClient? = null
     @Volatile private var shell: Session.Shell? = null
-    @Volatile private var writer: OutputStreamWriter? = null
+    @Volatile private var out: OutputStream? = null
 
     fun connect() {
-        io.execute {
+        reader.execute {
             try {
                 onStatus("连接中 $host:$port …")
                 SshCrypto.ensureInstalled()
@@ -40,15 +41,16 @@ class SshChatClient(
                 client.connect(host, port)
                 client.authPublickey(username, KeyPairWrapper(keyPair))
                 val session = client.startSession()
-                session.allocatePTY("xterm", 80, 40, 0, 0, emptyMap())
+                // Wide PTY so ASCII go/chess boards don't wrap on phones.
+                session.allocatePTY("xterm", 160, 48, 0, 0, emptyMap())
                 val sh = session.startShell()
                 ssh = client
                 shell = sh
-                writer = OutputStreamWriter(sh.outputStream, Charsets.UTF_8)
+                out = sh.outputStream
                 onStatus("已连接 $host:$port")
-                val reader = BufferedReader(InputStreamReader(sh.inputStream, Charsets.UTF_8))
+                val br = BufferedReader(InputStreamReader(sh.inputStream, Charsets.UTF_8))
                 while (!closed.get()) {
-                    val line = reader.readLine() ?: break
+                    val line = br.readLine() ?: break
                     val cleaned = cleanLine(line)
                     if (cleaned.isNotEmpty()) {
                         onLine(cleaned)
@@ -66,30 +68,34 @@ class SshChatClient(
     }
 
     fun send(text: String) {
-        io.execute {
-            try {
-                val w = writer ?: return@execute
-                val payload = if (text.endsWith("\n")) text else "$text\n"
-                w.write(payload)
-                w.flush()
-            } catch (e: Exception) {
-                onStatus("发送失败：${e.message}")
+        // Must not queue on the reader thread — it blocks in readLine forever.
+        try {
+            val stream = out ?: return
+            val payload = if (text.endsWith("\n")) text else "$text\n"
+            val bytes = payload.toByteArray(Charsets.UTF_8)
+            synchronized(writeLock) {
+                stream.write(bytes)
+                stream.flush()
             }
+        } catch (e: Exception) {
+            onStatus("发送失败：${e.message}")
         }
     }
 
     fun disconnect() {
         closed.set(true)
         closeQuietly()
-        io.shutdownNow()
+        reader.shutdownNow()
     }
 
     private fun closeQuietly() {
-        try {
-            writer?.close()
-        } catch (_: Exception) {
+        synchronized(writeLock) {
+            try {
+                out?.close()
+            } catch (_: Exception) {
+            }
+            out = null
         }
-        writer = null
         try {
             shell?.close()
         } catch (_: Exception) {

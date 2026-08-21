@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Plain identity mirror — EncryptedSharedPreferences cannot survive reinstall. -->
+    <include domain="sharedpref" path="sshchat_identity_backup.xml" />
+</full-backup-content>
