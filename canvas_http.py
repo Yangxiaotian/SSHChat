@@ -261,13 +261,23 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         let drawing = false;
         let current = null;
         let pollTimer = null;
+        let guardTimer = null;
         let syncing = false;
         let pollCount = 0;
         /** Strokes since last clear — used to rebuild if the bitmap is wiped. */
         let history = [];
 
+        // Offscreen layer is the source of truth; visible canvas is a blit target.
+        // Android WebView often discards the on-screen bitmap between paints.
+        const layer = document.createElement('canvas');
+        layer.width = canvas.width;
+        layer.height = canvas.height;
+        const lctx = layer.getContext('2d');
+
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+        lctx.lineCap = 'round';
+        lctx.lineJoin = 'round';
 
         keyInput.addEventListener('input', function () {{
             this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -289,22 +299,51 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             ];
         }}
 
-        function drawStroke(stroke) {{
+        function strokeOn(target, stroke) {{
             const pts = stroke.points || [];
             if (pts.length < 1) return;
-            ctx.strokeStyle = stroke.color || '#222';
-            ctx.lineWidth = stroke.width || 3;
-            ctx.beginPath();
-            ctx.moveTo(pts[0][0], pts[0][1]);
-            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            target.strokeStyle = stroke.color || '#222';
+            target.lineWidth = stroke.width || 3;
+            target.beginPath();
+            target.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) target.lineTo(pts[i][0], pts[i][1]);
             if (pts.length === 1) {{
-                ctx.lineTo(pts[0][0] + 0.01, pts[0][1]);
+                target.lineTo(pts[0][0] + 0.01, pts[0][1]);
             }}
-            ctx.stroke();
+            target.stroke();
+        }}
+
+        function present() {{
+            // One-shot replace — avoids clear-then-draw flash.
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalCompositeOperation = 'copy';
+            ctx.drawImage(layer, 0, 0);
+            ctx.restore();
+        }}
+
+        function drawStroke(stroke) {{
+            strokeOn(lctx, stroke);
+            present();
         }}
 
         function clearLocal() {{
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            lctx.clearRect(0, 0, layer.width, layer.height);
+            present();
+        }}
+
+        function layerLooksEmpty() {{
+            try {{
+                const w = Math.min(layer.width, 48);
+                const h = Math.min(layer.height, 48);
+                const data = lctx.getImageData(0, 0, w, h).data;
+                for (let i = 3; i < data.length; i += 16) {{
+                    if (data[i] !== 0) return false;
+                }}
+                return true;
+            }} catch (e) {{
+                return false;
+            }}
         }}
 
         function rememberStroke(ev) {{
@@ -332,21 +371,22 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             rememberStroke(ev);
         }}
 
-        function replayHistory() {{
-            clearLocal();
-            for (const ev of history) drawStroke(ev);
-        }}
-
-        /** Full paint: history + in-progress stroke (WebView often wipes the bitmap). */
         function paintAll() {{
-            replayHistory();
+            lctx.clearRect(0, 0, layer.width, layer.height);
+            for (const ev of history) strokeOn(lctx, ev);
             if (drawing && current && current.length) {{
-                drawStroke({{
+                strokeOn(lctx, {{
                     color: colorEl.value,
                     width: Number(widthEl.value),
                     points: current
                 }});
             }}
+            present();
+        }}
+
+        function ensureBitmap() {{
+            if (history.length && layerLooksEmpty()) paintAll();
+            else present();
         }}
         // Android WebView onResume can call this after the bitmap was discarded.
         window.paintAll = paintAll;
@@ -354,8 +394,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         function applyEvent(ev) {{
             if (!ev) return;
             if (ev.kind === 'clear') {{
-                clearLocal();
                 history = [];
+                clearLocal();
                 return;
             }}
             if (ev.kind === 'stroke' && rememberStroke(ev)) drawStroke(ev);
@@ -385,6 +425,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 await syncOnce(true);
                 if (pollTimer) clearInterval(pollTimer);
                 pollTimer = setInterval(() => syncOnce(false), 900);
+                if (guardTimer) clearInterval(guardTimer);
+                // Re-blit often: WebView may wipe the visible canvas between syncs.
+                guardTimer = setInterval(() => {{ if (ticket) ensureBitmap(); }}, 320);
             }} catch (e) {{
                 alert(e.message || String(e));
                 unlockBtn.disabled = false;
@@ -410,10 +453,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 // Periodic / visibility full rebuild: canvas bitmaps can be wiped by
                 // the browser while `since` stays high, leaving only new strokes.
                 pollCount += 1;
-                // Android WebView may wipe the bitmap; rebuild more often there.
-                const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent || '');
-                const rebuildEvery = mobile ? 8 : 40;
-                const rebuild = !!initial || (pollCount % rebuildEvery === 0);
+                const rebuild = !!initial || (pollCount % 40 === 0);
                 if (rebuild) since = 0;
                 if (!initial && !rebuild) setStatus(i18n.statusSync, false);
                 const res = await fetch(
@@ -430,6 +470,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     if (res.status === 403) {{
                         ticket = '';
                         if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
+                        if (guardTimer) {{ clearInterval(guardTimer); guardTimer = null; }}
                         board.style.display = 'none';
                         gate.style.display = 'block';
                         unlockBtn.disabled = false;
@@ -441,7 +482,6 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }}
                 renderMeta(data);
                 const events = data.events || [];
-                // Only full-clear on rebuild: clearing every poll makes strokes flash.
                 if (rebuild) {{
                     const pending = history.filter(h => !Number(h.seq || 0));
                     history = [];
@@ -458,6 +498,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                         applyEvent(ev);
                         since = Math.max(since, Number(ev.seq || 0));
                     }}
+                    ensureBitmap();
                 }}
                 setStatus(i18n.statusReady, false);
             }} catch (e) {{
@@ -551,12 +592,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         canvas.addEventListener('touchend', endDraw);
         document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'visible' && ticket) {{
-                paintAll();
+                ensureBitmap();
                 syncOnce(true);
             }}
         }});
         window.addEventListener('pageshow', () => {{
-            if (ticket) paintAll();
+            if (ticket) ensureBitmap();
         }});
 
         clearBtn.addEventListener('click', async () => {{

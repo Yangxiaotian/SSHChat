@@ -29,6 +29,7 @@ export default function CanvasPanel() {
   const session = useChatStore((s) => s.canvasSession);
   const closeCanvas = useChatStore((s) => s.closeCanvas);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const layerRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef(false);
   const pointsRef = useRef<number[][]>([]);
   const ticketRef = useRef('');
@@ -37,6 +38,7 @@ export default function CanvasPanel() {
   const syncingRef = useRef(false);
   const pollCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const guardRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [meta, setMeta] = useState('');
@@ -44,31 +46,89 @@ export default function CanvasPanel() {
   const [width, setWidth] = useState(3);
   const [ready, setReady] = useState(false);
 
-  const drawStroke = useCallback((stroke: StrokeEvent) => {
+  const ensureLayer = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const pts = stroke.points || [];
-    if (!pts.length) return;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = stroke.color || '#222';
-    ctx.lineWidth = stroke.width || 3;
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i][0], pts[i][1]);
-    if (pts.length === 1) ctx.lineTo(pts[0][0] + 0.01, pts[0][1]);
-    ctx.stroke();
+    if (!canvas) return null;
+    let layer = layerRef.current;
+    if (!layer || layer.width !== canvas.width || layer.height !== canvas.height) {
+      layer = document.createElement('canvas');
+      layer.width = canvas.width;
+      layer.height = canvas.height;
+      const lctx = layer.getContext('2d');
+      if (lctx) {
+        lctx.lineCap = 'round';
+        lctx.lineJoin = 'round';
+      }
+      layerRef.current = layer;
+    }
+    return layer;
   }, []);
 
-  const clearLocal = useCallback(() => {
+  const present = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const layer = ensureLayer();
+    if (!canvas || !layer) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(layer, 0, 0);
+    ctx.restore();
+  }, [ensureLayer]);
+
+  const strokeOn = useCallback((target: CanvasRenderingContext2D, stroke: StrokeEvent) => {
+    const pts = stroke.points || [];
+    if (!pts.length) return;
+    target.lineCap = 'round';
+    target.lineJoin = 'round';
+    target.strokeStyle = stroke.color || '#222';
+    target.lineWidth = stroke.width || 3;
+    target.beginPath();
+    target.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i += 1) target.lineTo(pts[i][0], pts[i][1]);
+    if (pts.length === 1) target.lineTo(pts[0][0] + 0.01, pts[0][1]);
+    target.stroke();
   }, []);
+
+  const drawStroke = useCallback(
+    (stroke: StrokeEvent) => {
+      const layer = ensureLayer();
+      if (!layer) return;
+      const lctx = layer.getContext('2d');
+      if (!lctx) return;
+      strokeOn(lctx, stroke);
+      present();
+    },
+    [ensureLayer, present, strokeOn],
+  );
+
+  const clearLocal = useCallback(() => {
+    const layer = ensureLayer();
+    if (!layer) return;
+    const lctx = layer.getContext('2d');
+    if (!lctx) return;
+    lctx.clearRect(0, 0, layer.width, layer.height);
+    present();
+  }, [ensureLayer, present]);
+
+  const layerLooksEmpty = useCallback(() => {
+    const layer = ensureLayer();
+    if (!layer) return false;
+    const lctx = layer.getContext('2d');
+    if (!lctx) return false;
+    try {
+      const w = Math.min(layer.width, 48);
+      const h = Math.min(layer.height, 48);
+      const data = lctx.getImageData(0, 0, w, h).data;
+      for (let i = 3; i < data.length; i += 16) {
+        if (data[i] !== 0) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, [ensureLayer]);
 
   const rememberStroke = useCallback((ev: StrokeEvent): boolean => {
     if (ev.kind !== 'stroke') return false;
@@ -96,29 +156,35 @@ export default function CanvasPanel() {
     [rememberStroke],
   );
 
-  const replayHistory = useCallback(() => {
-    clearLocal();
-    for (const ev of historyRef.current) drawStroke(ev);
-  }, [clearLocal, drawStroke]);
-
   const paintAll = useCallback(() => {
-    replayHistory();
+    const layer = ensureLayer();
+    if (!layer) return;
+    const lctx = layer.getContext('2d');
+    if (!lctx) return;
+    lctx.clearRect(0, 0, layer.width, layer.height);
+    for (const ev of historyRef.current) strokeOn(lctx, ev);
     if (drawingRef.current && pointsRef.current.length) {
-      drawStroke({
+      strokeOn(lctx, {
         points: pointsRef.current,
         color,
         width,
         kind: 'stroke',
       });
     }
-  }, [color, drawStroke, replayHistory, width]);
+    present();
+  }, [color, ensureLayer, present, strokeOn, width]);
+
+  const ensureBitmap = useCallback(() => {
+    if (historyRef.current.length && layerLooksEmpty()) paintAll();
+    else present();
+  }, [layerLooksEmpty, paintAll, present]);
 
   const applyEvent = useCallback(
     (ev: StrokeEvent) => {
       if (!ev) return;
       if (ev.kind === 'clear') {
-        clearLocal();
         historyRef.current = [];
+        clearLocal();
         return;
       }
       if (ev.kind === 'stroke' && rememberStroke(ev)) drawStroke(ev);
@@ -130,6 +196,10 @@ export default function CanvasPanel() {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
+    }
+    if (guardRef.current) {
+      clearInterval(guardRef.current);
+      guardRef.current = null;
     }
   }, []);
 
@@ -173,6 +243,7 @@ export default function CanvasPanel() {
             applyEvent(ev);
             sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
           }
+          ensureBitmap();
         }
         if (!initial) setStatus(t('canvasPanel.ready'));
         setError('');
@@ -180,7 +251,7 @@ export default function CanvasPanel() {
         syncingRef.current = false;
       }
     },
-    [applyEvent, paintAll, t],
+    [applyEvent, ensureBitmap, paintAll, rememberStroke, t],
   );
 
   useEffect(() => {
@@ -232,13 +303,16 @@ export default function CanvasPanel() {
       pollRef.current = setInterval(() => {
         void syncOnce(baseUrl, token, false);
       }, 900);
+      guardRef.current = setInterval(() => {
+        if (ticketRef.current) ensureBitmap();
+      }, 320);
     })();
 
     return () => {
       cancelled = true;
       stopPoll();
     };
-  }, [session, clearLocal, stopPoll, syncOnce, t]);
+  }, [session, clearLocal, ensureBitmap, stopPoll, syncOnce, t]);
 
   const pointerPos = (e: React.PointerEvent<HTMLCanvasElement>): number[] => {
     const canvas = canvasRef.current!;
