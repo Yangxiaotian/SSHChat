@@ -761,6 +761,9 @@ class NativeCanvasWindow:
         self.width = 3.0
         self._drawing = False
         self._points: list[list[float]] = []
+        self._history: list[dict[str, Any]] = []
+        self._syncing = False
+        self._poll_count = 0
         self._poll_id: str | int | None = None
         self._closed = False
 
@@ -768,6 +771,8 @@ class NativeCanvasWindow:
         self.win.title("SSHChat 共享画布")
         self.win.geometry("900x640")
         self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.win.bind("<FocusIn>", lambda _e: self._on_focus())
+        self.win.bind("<Map>", lambda _e: self._on_focus())
 
         bar = ttk.Frame(self.win)
         bar.pack(fill=tk.X, padx=8, pady=6)
@@ -880,45 +885,106 @@ class NativeCanvasWindow:
             return
         self._poll_id = self.win.after(900, self._poll_tick)
 
+    def _on_focus(self) -> None:
+        if self._closed or not self.ticket:
+            return
+        self._replay_history()
+        self._sync_once(initial=True)
+
+    def _remember_stroke(self, ev: dict[str, Any]) -> None:
+        if str(ev.get("kind") or "") != "stroke":
+            return
+        seq = int(ev.get("seq") or 0)
+        if seq and any(int(h.get("seq") or 0) == seq for h in self._history):
+            return
+        self._history.append(dict(ev))
+
+    def _replay_history(self) -> None:
+        try:
+            self.canvas.delete("all")
+        except tk.TclError:
+            return
+        for ev in self._history:
+            pts = ev.get("points") or []
+            if isinstance(pts, list):
+                self._draw_stroke(
+                    [
+                        [float(p[0]), float(p[1])]
+                        for p in pts
+                        if isinstance(p, (list, tuple)) and len(p) >= 2
+                    ],
+                    str(ev.get("color") or "#222"),
+                    float(ev.get("width") or 3),
+                )
+
+    def _sync_worker(self, *, rebuild: bool = False) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            since = 0 if rebuild else self.since
+            data = _http_json(
+                f"{self.base}/canvas/{self.token}/sync"
+                f"?since={since}&ticket={urllib.parse.quote(self.ticket)}",
+                method="GET",
+                headers={"X-Canvas-Ticket": self.ticket},
+            )
+            self.master.after(0, lambda: self._apply_sync(data, None, rebuild=rebuild))
+        except Exception as e:
+            self.master.after(0, lambda: self._apply_sync(None, str(e), rebuild=rebuild))
+
     def _poll_tick(self) -> None:
         self._poll_id = None
         if self._closed:
             return
-        threading.Thread(target=self._sync_worker, daemon=True).start()
-
-    def _sync_worker(self) -> None:
-        try:
-            data = _http_json(
-                f"{self.base}/canvas/{self.token}/sync"
-                f"?since={self.since}&ticket={urllib.parse.quote(self.ticket)}",
-                method="GET",
-                headers={"X-Canvas-Ticket": self.ticket},
-            )
-            self.master.after(0, lambda: self._apply_sync(data, None))
-        except Exception as e:
-            self.master.after(0, lambda: self._apply_sync(None, str(e)))
+        self._poll_count += 1
+        rebuild = self._poll_count % 40 == 0
+        threading.Thread(
+            target=self._sync_worker, kwargs={"rebuild": rebuild}, daemon=True
+        ).start()
 
     def _sync_once(self, *, initial: bool) -> None:
-        threading.Thread(target=self._sync_worker, daemon=True).start()
+        threading.Thread(
+            target=self._sync_worker, kwargs={"rebuild": initial}, daemon=True
+        ).start()
 
-    def _apply_sync(self, data: dict[str, Any] | None, err: str | None) -> None:
+    def _apply_sync(
+        self, data: dict[str, Any] | None, err: str | None, *, rebuild: bool = False
+    ) -> None:
+        self._syncing = False
         if self._closed:
             return
         if err or data is None:
             self.var_status.set(f"同步出错: {err or 'unknown'}")
             self._schedule_poll()
             return
+        if rebuild:
+            self.since = 0
+            self._history.clear()
+            try:
+                self.canvas.delete("all")
+            except tk.TclError:
+                pass
         for ev in data.get("events") or []:
             kind = str(ev.get("kind") or "")
             seq = int(ev.get("seq") or 0)
             self.since = max(self.since, seq)
             if kind == "clear":
-                self.canvas.delete("all")
+                self._history.clear()
+                try:
+                    self.canvas.delete("all")
+                except tk.TclError:
+                    pass
             elif kind == "stroke":
+                self._remember_stroke(ev if isinstance(ev, dict) else {})
                 pts = ev.get("points") or []
                 if isinstance(pts, list):
                     self._draw_stroke(
-                        [[float(p[0]), float(p[1])] for p in pts if isinstance(p, (list, tuple)) and len(p) >= 2],
+                        [
+                            [float(p[0]), float(p[1])]
+                            for p in pts
+                            if isinstance(p, (list, tuple)) and len(p) >= 2
+                        ],
                         str(ev.get("color") or "#222"),
                         float(ev.get("width") or 3),
                     )
@@ -984,11 +1050,11 @@ class NativeCanvasWindow:
                 seq = int((data.get("event") or {}).get("seq") or 0)
             except Exception as e:
                 err = str(e)
-            self.master.after(0, lambda: self._stroke_done(seq, err))
+            self.master.after(0, lambda s=seq, e=err, p=pts: self._stroke_done(s, e, p))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _stroke_done(self, seq: int, err: str | None) -> None:
+    def _stroke_done(self, seq: int, err: str | None, pts: list[list[float]] | None = None) -> None:
         if self._closed:
             return
         if err:
@@ -996,6 +1062,15 @@ class NativeCanvasWindow:
             return
         if seq:
             self.since = max(self.since, seq)
+            self._remember_stroke(
+                {
+                    "seq": seq,
+                    "kind": "stroke",
+                    "color": self.color,
+                    "width": self.width,
+                    "points": list(pts or []),
+                }
+            )
 
     def _clear(self) -> None:
         if not self.ticket:
@@ -1025,6 +1100,7 @@ class NativeCanvasWindow:
         if err:
             self.var_status.set(f"清空失败: {err}")
             return
+        self._history.clear()
         self.canvas.delete("all")
         if seq:
             self.since = max(self.since, seq)

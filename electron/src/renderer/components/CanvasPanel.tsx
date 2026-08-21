@@ -33,6 +33,9 @@ export default function CanvasPanel() {
   const pointsRef = useRef<number[][]>([]);
   const ticketRef = useRef('');
   const sinceRef = useRef(0);
+  const historyRef = useRef<StrokeEvent[]>([]);
+  const syncingRef = useRef(false);
+  const pollCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -67,16 +70,32 @@ export default function CanvasPanel() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
+  const rememberStroke = useCallback((ev: StrokeEvent) => {
+    if (ev.kind !== 'stroke') return;
+    const seq = Number(ev.seq || 0);
+    if (seq && historyRef.current.some((h) => Number(h.seq || 0) === seq)) return;
+    historyRef.current.push(ev);
+  }, []);
+
+  const replayHistory = useCallback(() => {
+    clearLocal();
+    for (const ev of historyRef.current) drawStroke(ev);
+  }, [clearLocal, drawStroke]);
+
   const applyEvent = useCallback(
     (ev: StrokeEvent) => {
       if (!ev) return;
       if (ev.kind === 'clear') {
         clearLocal();
+        historyRef.current = [];
         return;
       }
-      if (ev.kind === 'stroke') drawStroke(ev);
+      if (ev.kind === 'stroke') {
+        rememberStroke(ev);
+        drawStroke(ev);
+      }
     },
-    [clearLocal, drawStroke],
+    [clearLocal, drawStroke, rememberStroke],
   );
 
   const stopPoll = useCallback(() => {
@@ -88,30 +107,42 @@ export default function CanvasPanel() {
 
   const syncOnce = useCallback(
     async (baseUrl: string, token: string, initial: boolean) => {
-      if (!ticketRef.current) return;
-      const res = await window.api.canvasHttp({
-        url: `${baseUrl}/canvas/${token}/sync?since=${sinceRef.current}&ticket=${encodeURIComponent(ticketRef.current)}`,
-        method: 'GET',
-        headers: { 'X-Canvas-Ticket': ticketRef.current },
-      });
-      if (!res.ok) {
-        setStatus(t('canvasPanel.syncError'));
-        setError(res.error || 'sync failed');
-        return;
+      if (!ticketRef.current || syncingRef.current) return;
+      syncingRef.current = true;
+      try {
+        pollCountRef.current += 1;
+        const rebuild = initial || pollCountRef.current % 40 === 0;
+        if (rebuild) sinceRef.current = 0;
+        const res = await window.api.canvasHttp({
+          url: `${baseUrl}/canvas/${token}/sync?since=${sinceRef.current}&ticket=${encodeURIComponent(ticketRef.current)}`,
+          method: 'GET',
+          headers: { 'X-Canvas-Ticket': ticketRef.current },
+        });
+        if (!res.ok) {
+          setStatus(t('canvasPanel.syncError'));
+          setError(res.error || 'sync failed');
+          return;
+        }
+        const data = res.json || {};
+        const bits: string[] = [];
+        if (data.participant) bits.push(`${t('canvasPanel.you')}: ${data.participant}`);
+        if (data.room) bits.push(`${t('canvasPanel.room')}: #${data.room}`);
+        setMeta(bits.join(' · '));
+        if (rebuild) {
+          clearLocal();
+          historyRef.current = [];
+        }
+        for (const ev of data.events || []) {
+          applyEvent(ev);
+          sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
+        }
+        if (!initial) setStatus(t('canvasPanel.ready'));
+        setError('');
+      } finally {
+        syncingRef.current = false;
       }
-      const data = res.json || {};
-      const bits: string[] = [];
-      if (data.participant) bits.push(`${t('canvasPanel.you')}: ${data.participant}`);
-      if (data.room) bits.push(`${t('canvasPanel.room')}: #${data.room}`);
-      setMeta(bits.join(' · '));
-      for (const ev of data.events || []) {
-        applyEvent(ev);
-        sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
-      }
-      if (!initial) setStatus(t('canvasPanel.ready'));
-      setError('');
     },
-    [applyEvent, t],
+    [applyEvent, clearLocal, t],
   );
 
   useEffect(() => {
@@ -119,6 +150,8 @@ export default function CanvasPanel() {
     stopPoll();
     ticketRef.current = '';
     sinceRef.current = 0;
+    historyRef.current = [];
+    pollCountRef.current = 0;
     setReady(false);
     setError('');
     setMeta('');
@@ -202,6 +235,13 @@ export default function CanvasPanel() {
     }
     const seq = Number(res.json?.event?.seq || 0);
     if (seq) sinceRef.current = Math.max(sinceRef.current, seq);
+    rememberStroke({
+      seq,
+      kind: 'stroke',
+      color,
+      width,
+      points,
+    });
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -245,6 +285,7 @@ export default function CanvasPanel() {
       return;
     }
     clearLocal();
+    historyRef.current = [];
     const seq = Number(res.json?.event?.seq || 0);
     if (seq) sinceRef.current = Math.max(sinceRef.current, seq);
   };

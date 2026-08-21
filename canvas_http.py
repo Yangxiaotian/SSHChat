@@ -261,6 +261,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         let drawing = false;
         let current = null;
         let pollTimer = null;
+        let syncing = false;
+        let pollCount = 0;
+        /** Strokes since last clear — used to rebuild if the bitmap is wiped. */
+        let history = [];
 
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
@@ -303,13 +307,29 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         }}
 
+        function rememberStroke(ev) {{
+            if (!ev || ev.kind !== 'stroke') return;
+            const seq = Number(ev.seq || 0);
+            if (seq && history.some(h => Number(h.seq || 0) === seq)) return;
+            history.push(ev);
+        }}
+
+        function replayHistory() {{
+            clearLocal();
+            for (const ev of history) drawStroke(ev);
+        }}
+
         function applyEvent(ev) {{
             if (!ev) return;
             if (ev.kind === 'clear') {{
                 clearLocal();
+                history = [];
                 return;
             }}
-            if (ev.kind === 'stroke') drawStroke(ev);
+            if (ev.kind === 'stroke') {{
+                rememberStroke(ev);
+                drawStroke(ev);
+            }}
         }}
 
         async function auth() {{
@@ -334,6 +354,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 subtitle.textContent = data.title || '';
                 renderMeta(data);
                 await syncOnce(true);
+                if (pollTimer) clearInterval(pollTimer);
                 pollTimer = setInterval(() => syncOnce(false), 900);
             }} catch (e) {{
                 alert(e.message || String(e));
@@ -354,9 +375,15 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
 
         async function syncOnce(initial) {{
-            if (!ticket) return;
+            if (!ticket || syncing) return;
+            syncing = true;
             try {{
-                if (!initial) setStatus(i18n.statusSync, false);
+                // Periodic / visibility full rebuild: canvas bitmaps can be wiped by
+                // the browser while `since` stays high, leaving only new strokes.
+                pollCount += 1;
+                const rebuild = !!initial || (pollCount % 40 === 0);
+                if (rebuild) since = 0;
+                if (!initial && !rebuild) setStatus(i18n.statusSync, false);
                 const res = await fetch(
                     '/canvas/' + token + '/sync?since=' + since
                     + '&ticket=' + encodeURIComponent(ticket),
@@ -381,13 +408,20 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     throw new Error(msg);
                 }}
                 renderMeta(data);
-                for (const ev of (data.events || [])) {{
+                const events = data.events || [];
+                if (rebuild) {{
+                    clearLocal();
+                    history = [];
+                }}
+                for (const ev of events) {{
                     applyEvent(ev);
-                    since = Math.max(since, ev.seq || 0);
+                    since = Math.max(since, Number(ev.seq || 0));
                 }}
                 setStatus(i18n.statusReady, false);
             }} catch (e) {{
                 setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
+            }} finally {{
+                syncing = false;
             }}
         }}
 
@@ -409,16 +443,26 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }});
                 const data = await res.json().catch(() => ({{}}));
                 if (!res.ok) throw new Error(data.error || 'stroke failed');
-                if (data.event && data.event.seq) {{
-                    since = Math.max(since, data.event.seq);
-                }}
+                const ev = data.event || {{
+                    kind: 'stroke',
+                    color: colorEl.value,
+                    width: Number(widthEl.value),
+                    points: points,
+                    seq: 0
+                }};
+                if (!ev.kind) ev.kind = 'stroke';
+                rememberStroke(ev);
+                if (ev.seq) since = Math.max(since, Number(ev.seq));
             }} catch (e) {{
                 setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
             }}
         }}
 
         function startDraw(evt) {{
-            evt.preventDefault();
+            // Ignore the synthetic mouse event that follows touch.
+            if (evt.pointerType === 'mouse' && evt.sourceCapabilities
+                && evt.sourceCapabilities.firesTouchEvents) return;
+            if (evt.cancelable) evt.preventDefault();
             drawing = true;
             current = [logicalPos(evt)];
             drawStroke({{
@@ -429,7 +473,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
         function moveDraw(evt) {{
             if (!drawing || !current) return;
-            evt.preventDefault();
+            if (evt.cancelable) evt.preventDefault();
             const p = logicalPos(evt);
             const last = current[current.length - 1];
             if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 1.5) return;
@@ -442,7 +486,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
         async function endDraw(evt) {{
             if (!drawing) return;
-            evt.preventDefault();
+            if (evt && evt.cancelable) evt.preventDefault();
             drawing = false;
             const pts = current || [];
             current = null;
@@ -455,6 +499,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         canvas.addEventListener('touchstart', startDraw, {{ passive: false }});
         canvas.addEventListener('touchmove', moveDraw, {{ passive: false }});
         canvas.addEventListener('touchend', endDraw);
+        document.addEventListener('visibilitychange', () => {{
+            if (document.visibilityState === 'visible' && ticket) {{
+                replayHistory();
+                syncOnce(true);
+            }}
+        }});
 
         clearBtn.addEventListener('click', async () => {{
             if (!confirm(i18n.clearConfirm)) return;
@@ -466,7 +516,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 const data = await res.json().catch(() => ({{}}));
                 if (!res.ok) throw new Error(data.error || 'clear failed');
                 clearLocal();
-                if (data.event && data.event.seq) since = Math.max(since, data.event.seq);
+                history = [];
+                if (data.event && data.event.seq) since = Math.max(since, Number(data.event.seq));
             }} catch (e) {{
                 alert(e.message || String(e));
             }}
