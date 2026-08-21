@@ -357,11 +357,29 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (!ticket) return;
             try {{
                 if (!initial) setStatus(i18n.statusSync, false);
-                const res = await fetch('/canvas/' + token + '/sync?since=' + since, {{
-                    headers: {{ 'X-Canvas-Ticket': ticket }}
-                }});
+                const res = await fetch(
+                    '/canvas/' + token + '/sync?since=' + since
+                    + '&ticket=' + encodeURIComponent(ticket),
+                    {{
+                        headers: {{ 'X-Canvas-Ticket': ticket }},
+                        cache: 'no-store'
+                    }}
+                );
                 const data = await res.json().catch(() => ({{}}));
-                if (!res.ok) throw new Error(data.error || 'sync failed');
+                if (!res.ok) {{
+                    const msg = data.error || ('HTTP ' + res.status);
+                    if (res.status === 403) {{
+                        ticket = '';
+                        if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
+                        board.style.display = 'none';
+                        gate.style.display = 'block';
+                        unlockBtn.disabled = false;
+                        unlockBtn.textContent = i18n.retry;
+                        setStatus(i18n.statusErr, true);
+                        throw new Error(msg);
+                    }}
+                    throw new Error(msg);
+                }}
                 renderMeta(data);
                 for (const ev of (data.events || [])) {{
                     applyEvent(ev);
@@ -369,7 +387,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }}
                 setStatus(i18n.statusReady, false);
             }} catch (e) {{
-                setStatus(i18n.statusErr, true);
+                setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
             }}
         }}
 
@@ -386,7 +404,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                         color: colorEl.value,
                         width: Number(widthEl.value),
                         points: points
-                    }})
+                    }}),
+                    cache: 'no-store'
                 }});
                 const data = await res.json().catch(() => ({{}}));
                 if (!res.ok) throw new Error(data.error || 'stroke failed');
@@ -394,7 +413,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     since = Math.max(since, data.event.seq);
                 }}
             }} catch (e) {{
-                setStatus(i18n.statusErr, true);
+                setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
             }}
         }}
 
@@ -499,6 +518,8 @@ def handle_canvas_get(handler: "BaseHTTPRequestHandler") -> bool:
         token = parts[1]
         ticket = (handler.headers.get("X-Canvas-Ticket") or "").strip()
         qs = parse_qs(parsed.query or "")
+        if not ticket:
+            ticket = (qs.get("ticket") or [""])[0].strip()
         since_raw = (qs.get("since") or ["0"])[0]
         try:
             since = int(since_raw)

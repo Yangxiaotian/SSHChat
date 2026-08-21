@@ -25,7 +25,7 @@ import threading
 import mimetypes
 import socket
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, quote, parse_qs
 from pathlib import Path
 from typing import Optional
@@ -1475,7 +1475,7 @@ class FileHTTPServer:
         self.public_host = public_host
         # Port shown in user-facing links (e.g. 443 behind Cloudflare); listen port stays self.port
         self.public_port = public_port
-        self.server: Optional[HTTPServer] = None
+        self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
         
     def setup_certificates(self):
@@ -1597,7 +1597,9 @@ class FileHTTPServer:
                 print("[FileHTTP] Failed to setup certificates, falling back to HTTP")
                 self.use_https = False
         
-        self.server = HTTPServer((self.host, self.port), FileTransferHandler)
+        # Threading: canvas sync polls + uploads must not block each other
+        # (plain HTTPServer is single-request and causes "Sync error — will retry").
+        self.server = ThreadingHTTPServer((self.host, self.port), FileTransferHandler)
         
         if self.use_https and self.cert_file and self.key_file:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

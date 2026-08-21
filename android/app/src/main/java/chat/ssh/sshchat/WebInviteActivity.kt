@@ -50,24 +50,30 @@ class WebInviteActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 if (keyInjected) return
-                keyInjected = true
-                val safe = key.replace("\\", "\\\\").replace("'", "\\'")
-                view.evaluateJavascript(
-                    """
-                    (function(){
-                      var el = document.getElementById('key');
-                      if (!el) return 'no-key';
-                      el.value = '$safe';
-                      el.dispatchEvent(new Event('input', {bubbles:true}));
-                      var btn = document.getElementById('unlockBtn')
-                        || document.querySelector('button[type=submit]')
-                        || document.querySelector('button');
-                      if (btn) btn.click();
-                      return 'ok';
-                    })();
-                    """.trimIndent(),
-                    null,
-                )
+                // Wait a tick so canvas JS listeners are bound; avoid double unlock.
+                view.postDelayed({
+                    if (isFinishing || isDestroyed) return@postDelayed
+                    if (keyInjected) return@postDelayed
+                    keyInjected = true
+                    val safe = key.replace("\\", "\\\\").replace("'", "\\'")
+                    view.evaluateJavascript(
+                        """
+                        (function(){
+                          if (document.getElementById('board')
+                              && document.getElementById('board').style.display === 'block')
+                            return 'already';
+                          var el = document.getElementById('key');
+                          if (!el) return 'no-key';
+                          el.value = '$safe';
+                          el.dispatchEvent(new Event('input', {bubbles:true}));
+                          var btn = document.getElementById('unlockBtn');
+                          if (btn && !btn.disabled) btn.click();
+                          return 'ok';
+                        })();
+                        """.trimIndent(),
+                        null,
+                    )
+                }, 250L)
             }
         }
         binding.web.loadUrl(url)

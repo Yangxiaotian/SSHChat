@@ -124,6 +124,61 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found.session_id, "remote-sid")
 
+    def test_reauth_keeps_recent_ticket_alive(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="lab"
+        )
+        token = session.tokens["Alice"]
+        key = session.keys["Alice"]
+        _, _, t1, err = self.store.issue_access_ticket(token, key)
+        self.assertEqual(err, "")
+        _, _, t2, err = self.store.issue_access_ticket(token, key)
+        self.assertEqual(err, "")
+        # Both tickets must remain usable so a sync poller is not killed by re-auth.
+        _, _, err1 = self.store.resolve_ticket(token, t1)
+        _, _, err2 = self.store.resolve_ticket(token, t2)
+        self.assertEqual(err1, "")
+        self.assertEqual(err2, "")
+        payload, err = self.store.sync_since(token, t1, 0)
+        self.assertEqual(err, "")
+        self.assertIsNotNone(payload)
+
+    def test_sync_accepts_ticket_query_param(self) -> None:
+        """HTTP layer: header optional when ?ticket= is present."""
+        import canvas_http
+        import canvas_sharing as cs
+
+        session = self.store.create_session(
+            creator="Alice", participants=[], room="q"
+        )
+        token = session.tokens["Alice"]
+        key = session.keys["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(token, key)
+
+        class Fake:
+            def __init__(self) -> None:
+                self.path = f"/canvas/{token}/sync?since=0&ticket={ticket}"
+                self.headers = {}
+                self.code = None
+                self.data = None
+
+            def _send_error_json(self, code, msg):
+                self.code, self.msg = code, msg
+
+            def _send_json_response(self, code, data):
+                self.code, self.data = code, data
+
+        old = cs.canvas_store
+        cs.canvas_store = self.store
+        try:
+            fake = Fake()
+            self.assertTrue(canvas_http.handle_canvas_get(fake))  # type: ignore
+            self.assertEqual(fake.code, 200)
+            self.assertIsNotNone(fake.data)
+            self.assertIn("events", fake.data)
+        finally:
+            cs.canvas_store = old
+
     def test_generate_canvas_page_contains_gate(self) -> None:
         import canvas_http
 
@@ -131,6 +186,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("访问密钥", page)
         self.assertIn("'/canvas/' + token + '/auth'", page)
         self.assertIn("X-Canvas-Ticket", page)
+        self.assertIn("&ticket=", page)
+        self.assertIn("cache: 'no-store'", page)
 
 
 if __name__ == "__main__":

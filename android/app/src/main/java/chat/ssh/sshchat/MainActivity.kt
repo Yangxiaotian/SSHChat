@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
@@ -15,6 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -153,6 +155,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnFile.setOnClickListener { pickAndSendFile() }
         binding.btnCanvas.setOnClickListener { startCanvas() }
+        binding.btnClear.setOnClickListener { clearScreen(announce = true) }
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
         setupVoiceButton()
@@ -307,7 +310,7 @@ class MainActivity : AppCompatActivity() {
         voiceRecorder = null
         binding.btnVoice.clearColorFilter()
         binding.btnVoice.contentDescription = "按住说话"
-        binding.tvMediaHint.text = "话筒按住发语音 · 相机点拍照/长按录像 · 文件夹发文件 · 画板"
+        binding.tvMediaHint.text = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 垃圾桶清屏"
         if (!send) {
             rec.cancel()
             binding.tvStatus.text = "已取消录音"
@@ -581,13 +584,43 @@ class MainActivity : AppCompatActivity() {
         lastSendText = text
         lastSendAt = now
         binding.etDraft.setText("")
+        val cmd = text.trim().lowercase()
+        if (cmd == "/cls" || cmd == "/clear") {
+            // Clear locally like PC/terminal clients; still notify server for ack.
+            clearScreen(announce = false)
+            client?.send(text.trim())
+            return
+        }
         // Don't local-echo: server broadcast is the source of truth (same as desktop GUI).
         client?.send(text)
     }
 
+    private fun clearScreen(announce: Boolean) {
+        binding.chatLog.removeAllViews()
+        if (announce) {
+            appendLine("[*] Screen cleared.")
+        }
+    }
+
+    private val screenCleared = Regex(
+        """^(?:\[[\d:.\sAPMapm/-]+]\s*)?(?:\[\*]\s*)?Screen cleared\.?\s*$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val ansiClear = Regex("""\u001B\[[0-9;]*[HJKjk]""")
+
     private fun handleIncoming(line: String) {
         if (PtyNoise.shouldDrop(line)) return
-        val open = SecureInvite.parseGuiOpen(line)
+        val stripped = ansiClear.replace(line, "").trim()
+        if (stripped.isEmpty()) return
+        if (screenCleared.matches(stripped) ||
+            stripped.equals("Screen cleared.", ignoreCase = true) ||
+            stripped.equals("[*] Screen cleared.", ignoreCase = true)
+        ) {
+            clearScreen(announce = false)
+            appendLine("[*] Screen cleared.")
+            return
+        }
+        val open = SecureInvite.parseGuiOpen(stripped)
         if (open != null) {
             when (open.kind) {
                 SecureInvite.Kind.DOWNLOAD -> startDownload(open.url, open.key)
@@ -608,16 +641,16 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        if (pendingUpload != null && line.contains("sendfile", ignoreCase = true) &&
-            (line.contains("失败") || line.contains("fail", ignoreCase = true) || line.contains("错误"))
+        if (pendingUpload != null && stripped.contains("sendfile", ignoreCase = true) &&
+            (stripped.contains("失败") || stripped.contains("fail", ignoreCase = true) || stripped.contains("错误"))
         ) {
             pendingUpload = null
-            appendLine(line)
+            appendLine(stripped)
             binding.tvStatus.text = "发文件失败"
             return
         }
-        if (SecureInvite.isInviteNoise(line)) return
-        appendLine(line)
+        if (SecureInvite.isInviteNoise(stripped)) return
+        appendLine(stripped)
     }
 
     private fun startUpload(url: String, key: String, file: File) {
@@ -660,54 +693,87 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Same shape as PC GUI: [图片] name (size)  预览 — no raw URL/key. */
+    /** Chat chip + optional thumb; tap anytime to reopen preview (like PC 预览). */
     private fun appendMediaEntry(media: DownloadedMedia, autoOpen: Boolean) {
         val kind = MediaMime.kindLabel(media.mime, media.name)
-        val previewLabel = if (media.isAudio) "播放" else "预览"
+        val action = when {
+            media.isAudio -> "点按播放"
+            media.isVideo -> "点按播放"
+            media.isImage -> "点按再次查看"
+            else -> "点按打开"
+        }
         val size = formatSize(media.file.length())
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        val caption = TextView(this).apply {
-            text = "[$kind] ${media.name} ($size)  "
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
-            setTextColor(0xFF333333.toInt())
-            typeface = Typeface.MONOSPACE
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val preview = TextView(this).apply {
-            text = previewLabel
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
-            setTextColor(0xFF0B57D0.toInt())
-            paint.isUnderlineText = true
-            setPadding(dp(8), dp(4), dp(8), dp(4))
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundColor(0xFFE8F5E9.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).also { it.topMargin = dp(4); it.bottomMargin = dp(4) }
+            isClickable = true
+            isFocusable = true
             setOnClickListener {
+                if (!media.file.isFile) {
+                    Toast.makeText(this@MainActivity, "本地文件已失效", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
                 startActivity(MediaPreviewActivity.intent(this@MainActivity, media))
             }
         }
-        row.addView(caption)
-        row.addView(preview)
-        if (!media.isImage && !media.isVideo && !media.isAudio) {
-            val open = TextView(this).apply {
-                text = "打开"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
-                setTextColor(0xFF0B57D0.toInt())
-                paint.isUnderlineText = true
-                setPadding(dp(8), dp(4), dp(8), dp(4))
-                setOnClickListener {
-                    startActivity(MediaPreviewActivity.intent(this@MainActivity, media))
-                }
-            }
-            row.addView(open)
+        val title = TextView(this).apply {
+            text = "[$kind] ${media.name} ($size)"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF1B5E20.toInt())
+            typeface = Typeface.MONOSPACE
+            setTypeface(typeface, Typeface.BOLD)
         }
-        binding.chatLog.addView(row)
+        val hint = TextView(this).apply {
+            text = action
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 1f).coerceAtLeast(10f))
+            setTextColor(0xFF0B57D0.toInt())
+            paint.isUnderlineText = true
+            setPadding(0, dp(2), 0, 0)
+        }
+        card.addView(title)
+        if (media.isImage && media.file.isFile) {
+            val thumb = ImageView(this).apply {
+                adjustViewBounds = true
+                scaleType = ImageView.ScaleType.FIT_START
+                maxHeight = dp(160)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).also { it.topMargin = dp(6) }
+                contentDescription = media.name
+                setImageBitmap(decodeThumb(media.file, dp(320)))
+            }
+            card.addView(thumb)
+        }
+        card.addView(hint)
+        binding.chatLog.addView(card)
         scrollChatToBottom()
         if (autoOpen) {
             binding.chatLog.postDelayed({
-                startActivity(MediaPreviewActivity.intent(this, media))
+                if (media.file.isFile) {
+                    startActivity(MediaPreviewActivity.intent(this, media))
+                }
             }, 80L)
+        }
+    }
+
+    private fun decodeThumb(file: File, maxPx: Int): android.graphics.Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            var sample = 1
+            val w = bounds.outWidth.coerceAtLeast(1)
+            val h = bounds.outHeight.coerceAtLeast(1)
+            while (w / sample > maxPx || h / sample > maxPx) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(file.absolutePath, opts)
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -751,6 +817,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
+        binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
         val iconAlpha = if (on) 1f else 0.35f
@@ -758,6 +825,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
+        binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {
             binding.suggestScroll.visibility = View.GONE

@@ -889,7 +889,8 @@ class NativeCanvasWindow:
     def _sync_worker(self) -> None:
         try:
             data = _http_json(
-                f"{self.base}/canvas/{self.token}/sync?since={self.since}",
+                f"{self.base}/canvas/{self.token}/sync"
+                f"?since={self.since}&ticket={urllib.parse.quote(self.ticket)}",
                 method="GET",
                 headers={"X-Canvas-Ticket": self.ticket},
             )

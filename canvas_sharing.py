@@ -216,6 +216,8 @@ class CanvasStore:
                     ):
                         existing.closed = True
             self.sessions[session_id] = session
+            # Do NOT index tokens here: stroke/auth must hit host_base_url.
+            # Local token→session maps would mint empty local boards by mistake.
             self._save()
         return session
 
@@ -259,14 +261,18 @@ class CanvasStore:
             expected = session.keys.get(participant, "")
             if not expected or key != expected.upper():
                 return None, None, None, "密钥错误"
-            # Drop older tickets for this participant on this session.
+            # Keep a few concurrent tickets so re-auth / multi-tab / GUI+web
+            # does not instantly invalidate an in-flight sync poller.
             stale = [
                 t
                 for t, entry in self.tickets.items()
                 if entry.session_id == session.session_id
                 and entry.participant.lower() == participant.lower()
             ]
-            for t in stale:
+            stale.sort(
+                key=lambda t: self.tickets[t].expires if t in self.tickets else 0.0
+            )
+            for t in stale[:-4]:
                 self.tickets.pop(t, None)
             ticket = _generate_token()
             self.tickets[ticket] = CanvasAccessTicket(

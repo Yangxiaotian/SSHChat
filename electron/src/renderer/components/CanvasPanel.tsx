@@ -90,7 +90,7 @@ export default function CanvasPanel() {
     async (baseUrl: string, token: string, initial: boolean) => {
       if (!ticketRef.current) return;
       const res = await window.api.canvasHttp({
-        url: `${baseUrl}/canvas/${token}/sync?since=${sinceRef.current}`,
+        url: `${baseUrl}/canvas/${token}/sync?since=${sinceRef.current}&ticket=${encodeURIComponent(ticketRef.current)}`,
         method: 'GET',
         headers: { 'X-Canvas-Ticket': ticketRef.current },
       });
