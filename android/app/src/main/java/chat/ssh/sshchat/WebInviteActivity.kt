@@ -79,6 +79,17 @@ class WebInviteActivity : AppCompatActivity() {
         binding.web.loadUrl(url)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // WebView may discard the canvas bitmap while paused; ask the page to repaint.
+        if (::binding.isInitialized) {
+            binding.web.evaluateJavascript(
+                "(function(){ try { if (typeof paintAll === 'function') paintAll(); } catch(e) {} })();",
+                null,
+            )
+        }
+    }
+
     override fun onDestroy() {
         binding.web.destroy()
         super.onDestroy()

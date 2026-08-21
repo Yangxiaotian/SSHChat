@@ -319,17 +319,27 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             for (const ev of history) drawStroke(ev);
         }}
 
+        /** Full paint: history + in-progress stroke (WebView often wipes the bitmap). */
+        function paintAll() {{
+            replayHistory();
+            if (drawing && current && current.length) {{
+                drawStroke({{
+                    color: colorEl.value,
+                    width: Number(widthEl.value),
+                    points: current
+                }});
+            }}
+        }}
+        // Android WebView onResume can call this after the bitmap was discarded.
+        window.paintAll = paintAll;
+
         function applyEvent(ev) {{
             if (!ev) return;
             if (ev.kind === 'clear') {{
-                clearLocal();
                 history = [];
                 return;
             }}
-            if (ev.kind === 'stroke') {{
-                rememberStroke(ev);
-                drawStroke(ev);
-            }}
+            if (ev.kind === 'stroke') rememberStroke(ev);
         }}
 
         async function auth() {{
@@ -409,14 +419,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }}
                 renderMeta(data);
                 const events = data.events || [];
-                if (rebuild) {{
-                    clearLocal();
-                    history = [];
-                }}
+                if (rebuild) history = [];
                 for (const ev of events) {{
                     applyEvent(ev);
                     since = Math.max(since, Number(ev.seq || 0));
                 }}
+                // Android WebView often drops the canvas bitmap while `since`
+                // stays ahead — redraw from history every poll.
+                paintAll();
                 setStatus(i18n.statusReady, false);
             }} catch (e) {{
                 setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
@@ -501,9 +511,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         canvas.addEventListener('touchend', endDraw);
         document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'visible' && ticket) {{
-                replayHistory();
+                paintAll();
                 syncOnce(true);
             }}
+        }});
+        window.addEventListener('pageshow', () => {{
+            if (ticket) paintAll();
         }});
 
         clearBtn.addEventListener('click', async () => {{

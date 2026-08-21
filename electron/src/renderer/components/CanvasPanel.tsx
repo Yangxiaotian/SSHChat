@@ -82,20 +82,28 @@ export default function CanvasPanel() {
     for (const ev of historyRef.current) drawStroke(ev);
   }, [clearLocal, drawStroke]);
 
+  const paintAll = useCallback(() => {
+    replayHistory();
+    if (drawingRef.current && pointsRef.current.length) {
+      drawStroke({
+        points: pointsRef.current,
+        color,
+        width,
+        kind: 'stroke',
+      });
+    }
+  }, [color, drawStroke, replayHistory, width]);
+
   const applyEvent = useCallback(
     (ev: StrokeEvent) => {
       if (!ev) return;
       if (ev.kind === 'clear') {
-        clearLocal();
         historyRef.current = [];
         return;
       }
-      if (ev.kind === 'stroke') {
-        rememberStroke(ev);
-        drawStroke(ev);
-      }
+      if (ev.kind === 'stroke') rememberStroke(ev);
     },
-    [clearLocal, drawStroke, rememberStroke],
+    [rememberStroke],
   );
 
   const stopPoll = useCallback(() => {
@@ -128,21 +136,19 @@ export default function CanvasPanel() {
         if (data.participant) bits.push(`${t('canvasPanel.you')}: ${data.participant}`);
         if (data.room) bits.push(`${t('canvasPanel.room')}: #${data.room}`);
         setMeta(bits.join(' · '));
-        if (rebuild) {
-          clearLocal();
-          historyRef.current = [];
-        }
+        if (rebuild) historyRef.current = [];
         for (const ev of data.events || []) {
           applyEvent(ev);
           sinceRef.current = Math.max(sinceRef.current, Number(ev.seq || 0));
         }
+        paintAll();
         if (!initial) setStatus(t('canvasPanel.ready'));
         setError('');
       } finally {
         syncingRef.current = false;
       }
     },
-    [applyEvent, clearLocal, t],
+    [applyEvent, paintAll, t],
   );
 
   useEffect(() => {
