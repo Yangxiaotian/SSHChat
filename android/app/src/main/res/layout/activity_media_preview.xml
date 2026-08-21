@@ -61,5 +61,29 @@
             android:layout_height="match_parent"
             android:layout_gravity="center"
             android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/audioPanel"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone"
+            android:padding="24dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="语音消息"
+                android:textColor="#EEEEEE"
+                android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/btnPlayAudio"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="播放" />
+        </LinearLayout>
     </FrameLayout>
 </LinearLayout>

@@ -19,20 +19,33 @@ object SecureInvite {
         RegexOption.IGNORE_CASE,
     )
     private val bannerEnd = Regex("""^=+\s*$""")
-    private val urlLabel = Regex("""(下载|上传|画布|Download|Upload|Canvas).{0,12}(链接|URL|link)""", RegexOption.IGNORE_CASE)
-    private val keyLine = Regex("""^(密钥|Key)\s*[:：]""", RegexOption.IGNORE_CASE)
+    private val urlLabel = Regex(
+        """(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val keyLine = Regex(
+        """^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*[A-Z0-9]{6}\s*$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val httpOnly = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
     private val metaLine = Regex(
-        """^(房间|Room|发送者|Sender|文件名|Filename|大小|Size|过期|Expires)\s*[:：]""",
+        """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|""" +
+            """From|Sender|Filename|Size|Room|Recipients?)\s*[:：]""",
         RegexOption.IGNORE_CASE,
     )
     private val instrBullet = Regex(
-        """^\d+\.\s+(打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|Enter|Open|Click|Choose|Select|Upload|Download|Preview|This page|Each recipient|The key|Verify)""",
+        """^\d+\.\s+(打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|""" +
+            """Enter|Open|Click|Choose|Select|Upload|Download|Preview|""" +
+            """This page|Each recipient|The key|Verify)""",
         RegexOption.IGNORE_CASE,
+    )
+    private val starPrefix = Regex("""^\[\*]\s*""")
+    private val timePrefix = Regex(
+        """^(?:\[[\d:.\sAPMapm/-]+]\s*)+""",
     )
 
     fun parseGuiOpen(line: String): Open? {
-        val m = guiOpen.matchEntire(line.trim()) ?: return null
+        val m = guiOpen.matchEntire(normalize(line)) ?: return null
         val kind = when (m.groupValues[1].lowercase()) {
             "download" -> Kind.DOWNLOAD
             "canvas" -> Kind.CANVAS
@@ -44,18 +57,29 @@ object SecureInvite {
 
     /** Hide invite boilerplate; keep normal chat. */
     fun isInviteNoise(line: String): Boolean {
-        val t = line.trim()
+        val t = normalize(line)
         if (t.isEmpty()) return true
         if (parseGuiOpen(t) != null) return true
         if (bannerStart.containsMatchIn(t) || bannerEnd.matches(t)) return true
-        if (urlLabel.containsMatchIn(t) || keyLine.containsMatchIn(t)) return true
+        if (urlLabel.containsMatchIn(t) || keyLine.matches(t)) return true
         if (httpOnly.matches(t)) return true
-        if (t.equals("说明:", ignoreCase = true) || t.equals("Instructions:", ignoreCase = true)) return true
-        if (t.matches(Regex("""^(说明|Instructions?)\s*:?\s*$""", RegexOption.IGNORE_CASE))) return true
+        if (t.matches(Regex("""^(说明|Instructions?)\s*:?\s*$""", RegexOption.IGNORE_CASE))) {
+            return true
+        }
         if (instrBullet.containsMatchIn(t)) return true
         if (metaLine.containsMatchIn(t)) return true
         if (t.startsWith("经联邦节点")) return true
         if ("图形客户端会折叠" in t) return true
+        if (t.contains("只能下载一次") || t.contains("存好之前别关")) return true
+        if (t.contains("网址和密钥都不同")) return true
+        if (t.contains("此网址随后作废")) return true
         return false
+    }
+
+    private fun normalize(raw: String): String {
+        var s = raw.trim()
+        s = timePrefix.replaceFirst(s, "").trim()
+        s = starPrefix.replaceFirst(s, "").trim()
+        return s
     }
 }

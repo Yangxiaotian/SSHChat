@@ -9,12 +9,9 @@ import java.util.UUID
 
 object SecureUpload {
     fun upload(url: String, key: String, file: File): String {
-        val filename = file.name.replace('\\', '_').replace('/', '_').take(200).ifBlank { "photo.jpg" }
-        val mime = when {
-            filename.endsWith(".png", true) -> "image/png"
-            filename.endsWith(".webp", true) -> "image/webp"
-            filename.endsWith(".gif", true) -> "image/gif"
-            else -> "image/jpeg"
+        val filename = file.name.replace('\\', '_').replace('/', '_').take(200).ifBlank { "file.bin" }
+        val mime = MediaMime.guess(filename).let {
+            if (it == "application/octet-stream") "application/octet-stream" else it
         }
         val boundary = "----SSHChat${UUID.randomUUID().toString().replace("-", "")}"
         val head = (

@@ -12,9 +12,11 @@ data class DownloadedMedia(
     val mime: String,
 ) {
     val isImage: Boolean
-        get() = mime.startsWith("image/", ignoreCase = true)
+        get() = MediaMime.isImage(mime)
     val isVideo: Boolean
-        get() = mime.startsWith("video/", ignoreCase = true)
+        get() = MediaMime.isVideo(mime)
+    val isAudio: Boolean
+        get() = MediaMime.isAudio(mime)
 }
 
 object SecureDownload {
@@ -30,7 +32,7 @@ object SecureDownload {
         )
         val filename = ticketJson.optString("filename").ifBlank { "file" }
         val mime = ticketJson.optString("mime").ifBlank {
-            guessMime(filename)
+            MediaMime.guess(filename)
         }
         val rel = ticketJson.optString("download")
         if (rel.isBlank()) error("no download ticket")
@@ -48,20 +50,6 @@ object SecureDownload {
         require(parts.size >= 2 && parts[0] == "download") { "invalid download url" }
         val base = "${u.protocol}://${u.authority}"
         return base to parts[1]
-    }
-
-    private fun guessMime(name: String): String {
-        val n = name.lowercase()
-        return when {
-            n.endsWith(".png") -> "image/png"
-            n.endsWith(".jpg") || n.endsWith(".jpeg") -> "image/jpeg"
-            n.endsWith(".gif") -> "image/gif"
-            n.endsWith(".webp") -> "image/webp"
-            n.endsWith(".mp4") -> "video/mp4"
-            n.endsWith(".webm") -> "video/webm"
-            n.endsWith(".mkv") -> "video/x-matroska"
-            else -> "application/octet-stream"
-        }
     }
 
     private fun httpJson(

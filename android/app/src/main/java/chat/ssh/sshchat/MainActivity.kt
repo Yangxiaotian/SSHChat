@@ -8,10 +8,16 @@ import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.graphics.Typeface
 import android.util.TypedValue
+import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -31,45 +37,79 @@ class MainActivity : AppCompatActivity() {
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
     private var cameraTarget: File? = null
+    private var videoTarget: File? = null
+    private var voiceRecorder: VoiceRecorder? = null
+    /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
+    @Volatile private var mediaPickerOpen = false
+    private var onConnectedOnce: (() -> Unit)? = null
+
+    private val requestNotifyPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* keep-alive still works without; notification may be hidden */ }
+
+    private val requestAudioPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(this, "需要麦克风权限才能发语音", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) launchCamera()
-        else Toast.makeText(this, "需要相机权限才能拍照发送", Toast.LENGTH_SHORT).show()
+        if (granted) pendingCameraAction?.invoke()
+        else {
+            mediaPickerOpen = false
+            Toast.makeText(this, "需要相机权限", Toast.LENGTH_SHORT).show()
+        }
+        pendingCameraAction = null
     }
+    private var pendingCameraAction: (() -> Unit)? = null
 
     private val takePicture = registerForActivityResult(
         ActivityResultContracts.TakePicture(),
     ) { ok ->
+        mediaPickerOpen = false
         val file = cameraTarget
         cameraTarget = null
         if (ok && file != null && file.isFile && file.length() > 0L) {
-            beginSendFile(file)
+            ensureConnectedThen { beginSendFile(file) }
         } else {
             file?.delete()
             Toast.makeText(this, "未拍到照片", Toast.LENGTH_SHORT).show()
         }
     }
 
+    private val takeVideo = registerForActivityResult(
+        ActivityResultContracts.CaptureVideo(),
+    ) { ok ->
+        mediaPickerOpen = false
+        val file = videoTarget
+        videoTarget = null
+        if (ok && file != null && file.isFile && file.length() > 0L) {
+            ensureConnectedThen { beginSendFile(file) }
+        } else {
+            file?.delete()
+            Toast.makeText(this, "未录到视频", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private val pickImage = registerForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri: Uri? ->
+        mediaPickerOpen = false
         if (uri == null) return@registerForActivityResult
-        bg.execute {
-            try {
-                val dir = File(cacheDir, "sshchat-media").also { it.mkdirs() }
-                val out = File(dir, "pick-${System.currentTimeMillis()}.jpg")
-                contentResolver.openInputStream(uri)?.use { input ->
-                    out.outputStream().use { input.copyTo(it) }
-                } ?: error("无法读取图片")
-                runOnUiThread { beginSendFile(out) }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    Toast.makeText(this, "读图失败: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        copyUriAndSend(uri, "pick-${System.currentTimeMillis()}.jpg")
+    }
+
+    private val pickFile = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        mediaPickerOpen = false
+        if (uri == null) return@registerForActivityResult
+        val name = guessDisplayName(uri) ?: "file-${System.currentTimeMillis()}"
+        copyUriAndSend(uri, name)
     }
 
     private val pickIdentity = registerForActivityResult(
@@ -107,12 +147,29 @@ class MainActivity : AppCompatActivity() {
         binding.btnDisconnect.setOnClickListener { disconnect() }
         binding.btnSend.setOnClickListener { send() }
         binding.btnPhoto.setOnClickListener { showPhotoMenu() }
+        binding.btnPhoto.setOnLongClickListener {
+            ensureCameraThen { launchVideo() }
+            true
+        }
+        binding.btnFile.setOnClickListener { pickAndSendFile() }
+        binding.btnCanvas.setOnClickListener { startCanvas() }
+        binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
+        setupVoiceButton()
         binding.btnFontMinus.setOnClickListener { bumpFont(-1f) }
         binding.btnFontPlus.setOnClickListener { bumpFont(1f) }
-        binding.etDraft.setOnEditorActionListener { _, _, _ ->
-            send()
-            true
+        binding.etDraft.setOnEditorActionListener { _, actionId, event ->
+            val fromIme = actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND ||
+                actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            val fromEnter = event != null &&
+                event.keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                event.action == android.view.KeyEvent.ACTION_DOWN
+            if (fromIme || fromEnter) {
+                send()
+                true
+            } else {
+                false
+            }
         }
         binding.etDraft.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -154,6 +211,18 @@ class MainActivity : AppCompatActivity() {
         refreshSuggestions(fill)
     }
 
+    private fun insertSlash() {
+        val et = binding.etDraft
+        val text = et.text?.toString().orEmpty()
+        val start = et.selectionStart.coerceIn(0, text.length)
+        val end = et.selectionEnd.coerceIn(0, text.length)
+        val next = text.substring(0, start) + "/" + text.substring(end)
+        et.setText(next)
+        et.setSelection(start + 1)
+        et.requestFocus()
+        refreshSuggestions(next)
+    }
+
     private fun applyTabComplete() {
         val text = binding.etDraft.text?.toString().orEmpty()
         val next = CommandCompletions.applyTab(text)
@@ -180,6 +249,130 @@ class MainActivity : AppCompatActivity() {
         const val DURABLE = "SSHChat/${DeviceKeyStore.DURABLE_NAME}"
     }
 
+    private fun setupVoiceButton() {
+        binding.btnVoice.setOnTouchListener { v, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (client == null) {
+                        Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+                        return@setOnTouchListener true
+                    }
+                    if (pendingUpload != null) {
+                        Toast.makeText(this, "已有文件正在上传，请稍候", Toast.LENGTH_SHORT).show()
+                        return@setOnTouchListener true
+                    }
+                    if (!hasAudioPermission()) {
+                        requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+                        return@setOnTouchListener true
+                    }
+                    startVoiceRecord()
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    finishVoiceRecord(send = true)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    finishVoiceRecord(send = false)
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun hasAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun startVoiceRecord() {
+        try {
+            val dir = File(cacheDir, "sshchat-voice").also { it.mkdirs() }
+            val rec = VoiceRecorder(this, dir)
+            rec.start()
+            voiceRecorder = rec
+            binding.btnVoice.setColorFilter(0xFFC62828.toInt())
+            binding.btnVoice.contentDescription = "松开发送"
+            binding.tvStatus.text = "正在录音…"
+            binding.tvMediaHint.text = "松开手指发送"
+        } catch (e: Exception) {
+            voiceRecorder = null
+            Toast.makeText(this, "无法录音: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun finishVoiceRecord(send: Boolean) {
+        val rec = voiceRecorder ?: return
+        voiceRecorder = null
+        binding.btnVoice.clearColorFilter()
+        binding.btnVoice.contentDescription = "按住说话"
+        binding.tvMediaHint.text = "话筒按住发语音 · 相机点拍照/长按录像 · 文件夹发文件 · 画板"
+        if (!send) {
+            rec.cancel()
+            binding.tvStatus.text = "已取消录音"
+            return
+        }
+        val file = rec.stop(minMs = 400L)
+        if (file == null) {
+            binding.tvStatus.text = "录音太短"
+            Toast.makeText(this, "录音太短", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ensureConnectedThen { beginSendFile(file) }
+    }
+
+    private fun pickAndSendFile() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (pendingUpload != null) {
+            Toast.makeText(this, "已有文件正在上传，请稍候", Toast.LENGTH_SHORT).show()
+            return
+        }
+        mediaPickerOpen = true
+        pickFile.launch(arrayOf("*/*"))
+    }
+
+    private fun startCanvas() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在创建共享画板…（/canvas）")
+        client?.send("/canvas")
+    }
+
+    private fun copyUriAndSend(uri: Uri, fallbackName: String) {
+        bg.execute {
+            try {
+                val dir = File(cacheDir, "sshchat-media").also { it.mkdirs() }
+                val safe = fallbackName.replace(Regex("""[\\/]"""), "_").take(180)
+                val out = File(dir, "${System.currentTimeMillis()}-$safe")
+                contentResolver.openInputStream(uri)?.use { input ->
+                    out.outputStream().use { input.copyTo(it) }
+                } ?: error("无法读取文件")
+                runOnUiThread { ensureConnectedThen { beginSendFile(out) } }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "读取失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun guessDisplayName(uri: Uri): String? {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c ->
+                if (c.moveToFirst()) {
+                    val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (i >= 0) return c.getString(i)?.takeIf { it.isNotBlank() }
+                }
+            }
+        return uri.lastPathSegment?.substringAfterLast('/')
+    }
+
     private fun showPhotoMenu() {
         if (client == null) {
             Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
@@ -191,28 +384,53 @@ class MainActivity : AppCompatActivity() {
         }
         AlertDialog.Builder(this)
             .setTitle("发图")
-            .setItems(arrayOf("拍照发送", "从相册选择")) { _, which ->
+            .setItems(arrayOf("拍照发送", "从相册选择", "录像发送")) { _, which ->
                 when (which) {
-                    0 -> ensureCameraThenShoot()
-                    1 -> pickImage.launch("image/*")
+                    0 -> ensureCameraThen { launchCamera() }
+                    1 -> {
+                        mediaPickerOpen = true
+                        pickImage.launch("image/*")
+                    }
+                    2 -> ensureCameraThen { launchVideo() }
                 }
             }
             .show()
     }
 
-    private fun ensureCameraThenShoot() {
+    private fun ensureCameraThen(action: () -> Unit) {
         val ok = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
-        if (ok) launchCamera()
-        else requestCameraPermission.launch(Manifest.permission.CAMERA)
+        if (ok) action()
+        else {
+            pendingCameraAction = action
+            requestCameraPermission.launch(Manifest.permission.CAMERA)
+        }
     }
 
     private fun launchCamera() {
+        mediaPickerOpen = true
         val dir = File(cacheDir, "sshchat-camera").also { it.mkdirs() }
         val file = File(dir, "cap-${System.currentTimeMillis()}.jpg")
         cameraTarget = file
         val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
         takePicture.launch(uri)
+    }
+
+    private fun launchVideo() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (pendingUpload != null) {
+            Toast.makeText(this, "已有文件正在上传，请稍候", Toast.LENGTH_SHORT).show()
+            return
+        }
+        mediaPickerOpen = true
+        val dir = File(cacheDir, "sshchat-camera").also { it.mkdirs() }
+        val file = File(dir, "vid-${System.currentTimeMillis()}.mp4")
+        videoTarget = file
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+        takeVideo.launch(uri)
     }
 
     private fun beginSendFile(file: File) {
@@ -226,24 +444,67 @@ class MainActivity : AppCompatActivity() {
         client?.send("/sendfile")
     }
 
+    /** Reconnect if camera/gallery killed the SSH socket, then run [block]. */
+    private fun ensureConnectedThen(block: () -> Unit) {
+        if (client != null) {
+            block()
+            return
+        }
+        val user = binding.etUsername.text?.toString()?.trim().orEmpty().ifEmpty {
+            getSharedPreferences("sshchat_ui", MODE_PRIVATE).getString("username", "").orEmpty()
+        }
+        if (user.isEmpty()) {
+            Toast.makeText(this, "连接已断，请重新登录", Toast.LENGTH_SHORT).show()
+            setConnected(false)
+            return
+        }
+        if (binding.etUsername.text.isNullOrEmpty()) {
+            binding.etUsername.setText(user)
+        }
+        appendLine("[*] 拍照/录像/选图期间连接中断，正在重连…")
+        onConnectedOnce = block
+        connect(clearChat = false)
+    }
+
     private fun bumpFont(delta: Float) {
         chatSp = (chatSp + delta).coerceIn(7f, 22f)
         applyFont()
     }
 
     private fun applyFont() {
-        binding.tvChat.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+        for (i in 0 until binding.chatLog.childCount) {
+            when (val child = binding.chatLog.getChildAt(i)) {
+                is TextView -> child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+                is ViewGroup -> applyFontToGroup(child)
+            }
+        }
     }
 
-    private fun connect() {
+    private fun applyFontToGroup(group: ViewGroup) {
+        for (i in 0 until group.childCount) {
+            when (val child = group.getChildAt(i)) {
+                is TextView -> if (child !is Button) {
+                    child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+                }
+                is ViewGroup -> applyFontToGroup(child)
+            }
+        }
+    }
+
+    private fun connect(clearChat: Boolean = true) {
         val user = binding.etUsername.text?.toString()?.trim().orEmpty()
         if (user.isEmpty()) {
             Toast.makeText(this, "请填写 Linux 用户名", Toast.LENGTH_SHORT).show()
+            onConnectedOnce = null
             return
         }
-        disconnect()
-        binding.tvChat.text = ""
-        appendLine("[*] connecting…")
+        maybeAskNotifyPermission()
+        client?.disconnect()
+        client = null
+        if (clearChat) {
+            binding.chatLog.removeAllViews()
+            appendLine("[*] connecting…")
+        }
         val kp = DeviceKeyStore.toKeyPair(keys.privateSeed)
         val c = SshChatClient(
             host = BuildConfig.DEFAULT_HOST,
@@ -251,9 +512,25 @@ class MainActivity : AppCompatActivity() {
             username = user,
             keyPair = kp,
             onLine = { line -> runOnUiThread { handleIncoming(line) } },
-            onStatus = { s -> runOnUiThread { binding.tvStatus.text = s } },
+            onStatus = { s ->
+                runOnUiThread {
+                    binding.tvStatus.text = s
+                    if (s.startsWith("已连接")) {
+                        SshKeepAliveService.start(this)
+                        val once = onConnectedOnce
+                        onConnectedOnce = null
+                        once?.invoke()
+                    }
+                }
+            },
             onDisconnected = { reason ->
                 runOnUiThread {
+                    client = null
+                    SshKeepAliveService.stop(this)
+                    if (mediaPickerOpen) {
+                        binding.tvStatus.text = "拍照/选图中（返回后自动重连）…"
+                        return@runOnUiThread
+                    }
                     setConnected(false)
                     binding.tvStatus.text = reason?.let { "断开：$it" } ?: "已断开"
                 }
@@ -268,23 +545,48 @@ class MainActivity : AppCompatActivity() {
             .apply()
     }
 
+    private fun maybeAskNotifyPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val ok = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!ok) requestNotifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     private fun disconnect() {
+        mediaPickerOpen = false
+        onConnectedOnce = null
         pendingUpload = null
+        voiceRecorder?.cancel()
+        voiceRecorder = null
+        binding.btnVoice.clearColorFilter()
+        binding.btnVoice.contentDescription = "按住说话"
+        SshKeepAliveService.stop(this)
         client?.disconnect()
         client = null
         setConnected(false)
         binding.tvStatus.text = "未连接"
     }
 
+    private var lastSendAt = 0L
+    private var lastSendText = ""
+
     private fun send() {
         val text = binding.etDraft.text?.toString().orEmpty()
         if (text.isBlank()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        // Soft keyboard + Send button (or repeated IME_ACTION) can fire twice quickly.
+        if (text == lastSendText && now - lastSendAt < 500L) return
+        lastSendText = text
+        lastSendAt = now
         binding.etDraft.setText("")
-        appendLine("› $text")
+        // Don't local-echo: server broadcast is the source of truth (same as desktop GUI).
         client?.send(text)
     }
 
     private fun handleIncoming(line: String) {
+        if (PtyNoise.shouldDrop(line)) return
         val open = SecureInvite.parseGuiOpen(line)
         if (open != null) {
             when (open.kind) {
@@ -324,15 +626,11 @@ class MainActivity : AppCompatActivity() {
         bg.execute {
             try {
                 val remote = SecureUpload.upload(url, key, file)
+                val mime = MediaMime.guess(remote.ifBlank { file.name })
+                val media = DownloadedMedia(file, remote.ifBlank { file.name }, mime)
                 runOnUiThread {
-                    binding.tvStatus.text = "已上传: $remote"
-                    appendLine("[*] 已上传: $remote")
-                    startActivity(
-                        MediaPreviewActivity.intent(
-                            this,
-                            DownloadedMedia(file, remote, "image/jpeg"),
-                        ),
-                    )
+                    binding.tvStatus.text = "已上传: ${media.name}"
+                    appendMediaEntry(media, autoOpen = media.isImage || media.isVideo)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -345,15 +643,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun startDownload(url: String, key: String) {
         binding.tvStatus.text = "正在接收文件…"
-        appendLine("[*] 正在接收文件…")
         bg.execute {
             try {
                 val dir = File(cacheDir, "sshchat-media")
                 val media = SecureDownload.fetch(url, key, dir)
                 runOnUiThread {
                     binding.tvStatus.text = "已接收: ${media.name}"
-                    appendLine("[*] 已接收: ${media.name}")
-                    startActivity(MediaPreviewActivity.intent(this, media))
+                    appendMediaEntry(media, autoOpen = media.isImage || media.isVideo || media.isAudio)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -364,12 +660,86 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Same shape as PC GUI: [图片] name (size)  预览 — no raw URL/key. */
+    private fun appendMediaEntry(media: DownloadedMedia, autoOpen: Boolean) {
+        val kind = MediaMime.kindLabel(media.mime, media.name)
+        val previewLabel = if (media.isAudio) "播放" else "预览"
+        val size = formatSize(media.file.length())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val caption = TextView(this).apply {
+            text = "[$kind] ${media.name} ($size)  "
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF333333.toInt())
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val preview = TextView(this).apply {
+            text = previewLabel
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF0B57D0.toInt())
+            paint.isUnderlineText = true
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener {
+                startActivity(MediaPreviewActivity.intent(this@MainActivity, media))
+            }
+        }
+        row.addView(caption)
+        row.addView(preview)
+        if (!media.isImage && !media.isVideo && !media.isAudio) {
+            val open = TextView(this).apply {
+                text = "打开"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+                setTextColor(0xFF0B57D0.toInt())
+                paint.isUnderlineText = true
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    startActivity(MediaPreviewActivity.intent(this@MainActivity, media))
+                }
+            }
+            row.addView(open)
+        }
+        binding.chatLog.addView(row)
+        scrollChatToBottom()
+        if (autoOpen) {
+            binding.chatLog.postDelayed({
+                startActivity(MediaPreviewActivity.intent(this, media))
+            }, 80L)
+        }
+    }
+
     private fun appendLine(line: String) {
-        val cur = binding.tvChat.text?.toString().orEmpty()
-        binding.tvChat.text = if (cur.isEmpty()) line else "$cur\n$line"
+        val tv = TextView(this).apply {
+            text = line
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF222222.toInt())
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        binding.chatLog.addView(tv)
+        scrollChatToBottom()
+    }
+
+    private fun scrollChatToBottom() {
         binding.scrollChat.post {
             binding.scrollChat.fullScroll(ScrollView.FOCUS_DOWN)
         }
+    }
+
+    private fun dp(v: Int): Int =
+        (v * resources.displayMetrics.density).toInt()
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
+        else -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
     }
 
     private fun setConnected(on: Boolean) {
@@ -378,7 +748,16 @@ class MainActivity : AppCompatActivity() {
         binding.etDraft.isEnabled = on
         binding.btnSend.isEnabled = on
         binding.btnPhoto.isEnabled = on
+        binding.btnVoice.isEnabled = on
+        binding.btnFile.isEnabled = on
+        binding.btnCanvas.isEnabled = on
+        binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
+        val iconAlpha = if (on) 1f else 0.35f
+        binding.btnPhoto.alpha = iconAlpha
+        binding.btnVoice.alpha = iconAlpha
+        binding.btnFile.alpha = iconAlpha
+        binding.btnCanvas.alpha = iconAlpha
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {
             binding.suggestScroll.visibility = View.GONE
