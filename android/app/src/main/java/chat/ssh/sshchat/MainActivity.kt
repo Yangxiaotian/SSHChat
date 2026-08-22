@@ -181,6 +181,7 @@ class MainActivity : AppCompatActivity() {
                 refreshSuggestions(s?.toString().orEmpty())
             }
         })
+        chatSp = uiPrefs().getFloat(PREF_CHAT_FONT_SP, 13f).coerceIn(7f, 22f)
         applyFont()
         setConnected(false)
     }
@@ -250,6 +251,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val DURABLE = "SSHChat/${DeviceKeyStore.DURABLE_NAME}"
+        const val PREFS_UI = "sshchat_ui"
+        const val PREF_CHAT_FONT_SP = "chat_font_sp"
     }
 
     private fun setupVoiceButton() {
@@ -471,8 +474,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun bumpFont(delta: Float) {
         chatSp = (chatSp + delta).coerceIn(7f, 22f)
+        uiPrefs().edit().putFloat(PREF_CHAT_FONT_SP, chatSp).apply()
         applyFont()
     }
+
+    private fun uiPrefs() = getSharedPreferences(PREFS_UI, MODE_PRIVATE)
 
     private fun applyFont() {
         for (i in 0 until binding.chatLog.childCount) {

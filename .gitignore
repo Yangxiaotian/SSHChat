@@ -23,6 +23,7 @@ electron/engines/
 
 # iOS tryout: vendored Citadel clone + Xcode local junk
 ios/Packages/Citadel/
+ios/build/
 ios/**/xcuserdata/
 ios/**/DerivedData/
 ios/*.xcworkspace/xcuserdata/
