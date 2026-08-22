@@ -39,6 +39,8 @@ class MainActivity : AppCompatActivity() {
     private val pendingFileMeta = SecureInvite.FileMeta()
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var uploadWaitRunnable: Runnable? = null
     private var cameraTarget: File? = null
     private var videoTarget: File? = null
     private var voiceRecorder: VoiceRecorder? = null
@@ -466,7 +468,27 @@ class MainActivity : AppCompatActivity() {
         pendingUpload = file
         binding.tvStatus.text = "等待上传通道…"
         appendLine("[*] 正在发文件: ${file.name}（${sendTarget.sendfileCommand()}）")
+        scheduleUploadWaitTimeout()
         client?.send(sendTarget.sendfileCommand())
+    }
+
+    private fun cancelUploadWait() {
+        uploadWaitRunnable?.let { mainHandler.removeCallbacks(it) }
+        uploadWaitRunnable = null
+    }
+
+    private fun scheduleUploadWaitTimeout() {
+        cancelUploadWait()
+        val r = Runnable {
+            uploadWaitRunnable = null
+            if (pendingUpload != null) {
+                pendingUpload = null
+                appendLine("[*] 发文件失败: 等待上传通道超时")
+                binding.tvStatus.text = "发文件失败"
+            }
+        }
+        uploadWaitRunnable = r
+        mainHandler.postDelayed(r, 45_000L)
     }
 
     /** Reconnect if camera/gallery killed the SSH socket, then run [block]. */
@@ -620,6 +642,7 @@ class MainActivity : AppCompatActivity() {
     private fun disconnect() {
         mediaPickerOpen = false
         onConnectedOnce = null
+        cancelUploadWait()
         pendingUpload = null
         voiceRecorder?.cancel()
         voiceRecorder = null
@@ -729,6 +752,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyRoomFromServer(line: String) {
         ChatLineParsers.parseActiveRoom(line)?.let { room ->
+            if (pendingUpload != null) {
+                cancelUploadWait()
+                pendingUpload = null
+                binding.tvStatus.text = "已切换房间，取消待发文件"
+            }
             SendTargetStore.saveCurrentRoom(this, room)
             if (sendTarget is SendTarget.CurrentRoom) {
                 sendTarget = SendTarget.CurrentRoom(room)
@@ -792,6 +820,7 @@ class MainActivity : AppCompatActivity() {
                 SecureInvite.Kind.UPLOAD -> {
                     val pending = pendingUpload
                     if (pending != null) {
+                        cancelUploadWait()
                         pendingUpload = null
                         startUpload(open.url, open.key, pending)
                     } else {
@@ -802,9 +831,8 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        if (pendingUpload != null && stripped.contains("sendfile", ignoreCase = true) &&
-            (stripped.contains("失败") || stripped.contains("fail", ignoreCase = true) || stripped.contains("错误"))
-        ) {
+        if (pendingUpload != null && SecureInvite.isSendfileFailure(stripped)) {
+            cancelUploadWait()
             pendingUpload = null
             appendLine(stripped)
             binding.tvStatus.text = "发文件失败"
@@ -815,6 +843,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startUpload(url: String, key: String, file: File) {
+        cancelUploadWait()
         binding.tvStatus.text = "上传中: ${file.name}"
         appendLine("[*] 上传中: ${file.name}")
         bg.execute {

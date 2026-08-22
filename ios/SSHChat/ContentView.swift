@@ -53,6 +53,7 @@ final class ChatViewModel: ObservableObject {
 
     private let session = SSHSession()
     private var pendingUpload: URL?
+    private var uploadWaitTask: Task<Void, Never>?
     private var voiceRecorder: VoiceRecorder?
     private var voiceFingerDown = false
     private var onConnectedOnce: (() -> Void)?
@@ -253,6 +254,7 @@ final class ChatViewModel: ObservableObject {
     func disconnect() {
         mediaPickerOpen = false
         onConnectedOnce = nil
+        cancelUploadWait()
         pendingUpload = nil
         voiceRecorder?.cancel()
         voiceRecorder = nil
@@ -315,7 +317,29 @@ final class ChatViewModel: ObservableObject {
         pendingUpload = url
         status = "等待上传通道…"
         appendText("[*] 正在发文件: \(url.lastPathComponent)（\(sendfileCommand())）")
+        scheduleUploadWaitTimeout()
         Task { try? await session.send(sendfileCommand()) }
+    }
+
+    private func cancelUploadWait() {
+        uploadWaitTask?.cancel()
+        uploadWaitTask = nil
+    }
+
+    private func scheduleUploadWaitTimeout() {
+        cancelUploadWait()
+        uploadWaitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                if self.pendingUpload != nil {
+                    self.pendingUpload = nil
+                    self.status = "发文件失败"
+                    self.appendText("[*] 发文件失败: 等待上传通道超时")
+                }
+            }
+        }
     }
 
     func ensureConnectedThen(_ block: @escaping () -> Void) {
@@ -533,6 +557,7 @@ final class ChatViewModel: ObservableObject {
                 webInvite = WebInvitePayload(title: "共享画布", url: open.url, key: open.key)
             case .upload:
                 if let pending = pendingUpload {
+                    cancelUploadWait()
                     pendingUpload = nil
                     startUpload(url: open.url, key: open.key, file: pending)
                 } else {
@@ -543,10 +568,8 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
-        if pendingUpload != nil,
-           stripped.localizedCaseInsensitiveContains("sendfile"),
-           stripped.contains("失败") || stripped.localizedCaseInsensitiveContains("fail") || stripped.contains("错误")
-        {
+        if pendingUpload != nil, SecureInvite.isSendfileFailure(stripped) {
+            cancelUploadWait()
             pendingUpload = nil
             appendText(stripped)
             status = "发文件失败"
@@ -559,6 +582,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func startUpload(url: String, key: String, file: URL) {
+        cancelUploadWait()
         status = "上传中: \(file.lastPathComponent)"
         appendText("[*] 上传中: \(file.lastPathComponent)")
         Task {
@@ -599,6 +623,11 @@ final class ChatViewModel: ObservableObject {
 
     private func applyRoomFromServer(_ line: String) {
         guard let room = ChatLineParsers.parseActiveRoom(line) else { return }
+        if pendingUpload != nil {
+            cancelUploadWait()
+            pendingUpload = nil
+            status = "已切换房间，取消待发文件"
+        }
         SendTargetStore.saveCurrentRoom(room)
         if case .currentRoom = sendTarget {
             sendTarget = .currentRoom(room)

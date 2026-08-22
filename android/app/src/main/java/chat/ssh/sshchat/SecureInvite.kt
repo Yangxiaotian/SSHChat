@@ -55,6 +55,11 @@ object SecureInvite {
     private val timePrefix = Regex(
         """^(?:\[[\d:.\sAPMapm/-]+]\s*)+""",
     )
+    private val sendfileFailure = Regex(
+        """(没有其他用户|no other users|文件传输功能未启用|创建文件传输失败|""" +
+            """File transfer is disabled|无效的房间名|你不在房间|房间\s+#\S+\s+不存在)""",
+        RegexOption.IGNORE_CASE,
+    )
 
     /** Collect sender/filename/room from invite lines before gui-open arrives. */
     fun absorbFileMeta(line: String, meta: FileMeta) {
@@ -80,6 +85,13 @@ object SecureInvite {
             else -> return null
         }
         return Open(kind, m.groupValues[2], m.groupValues[3].uppercase())
+    }
+
+    /** Server rejected /sendfile before issuing gui-open upload. */
+    fun isSendfileFailure(line: String): Boolean {
+        val t = normalize(line)
+        if (t.isEmpty()) return false
+        return sendfileFailure.containsMatchIn(t)
     }
 
     /** Hide invite boilerplate; keep normal chat. */

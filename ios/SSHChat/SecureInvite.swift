@@ -99,6 +99,16 @@ enum SecureInvite {
         return false
     }
 
+    /** Server rejected /sendfile before issuing gui-open upload. */
+    static func isSendfileFailure(_ line: String) -> Bool {
+        let t = normalize(line)
+        if t.isEmpty { return false }
+        return t.range(
+            of: #"(没有其他用户|no other users|文件传输功能未启用|创建文件传输失败|File transfer is disabled|无效的房间名|你不在房间|房间\s+#\S+\s+不存在)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
     private static func normalize(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let re = try? NSRegularExpression(pattern: #"^(?:\[[\d:.\sAPMapm/-]+]\s*)+"#) {

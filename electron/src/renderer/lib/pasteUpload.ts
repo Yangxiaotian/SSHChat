@@ -153,7 +153,7 @@ export function tryHandleUploadInviteLine(content: string): boolean {
   const text = String(content || '').trim();
   if (pending && !pending.consumed) {
     if (
-      /没有其他用户|文件传输功能未启用|创建文件传输失败|File transfer is disabled|no other users/i.test(
+      /没有其他用户|文件传输功能未启用|创建文件传输失败|File transfer is disabled|no other users|无效的房间名|你不在房间|房间\s+#\S+\s+不存在/i.test(
         text,
       )
     ) {

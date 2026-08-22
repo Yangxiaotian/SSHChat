@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -81,7 +82,8 @@ _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
     r"没有其他用户|文件传输功能未启用|创建文件传输失败|"
-    r"File transfer is disabled|no other users",
+    r"File transfer is disabled|no other users|"
+    r"无效的房间名|你不在房间|房间\s+#\S+\s+不存在",
     re.I,
 )
 _SECURE_BANNER_START_RE = re.compile(
@@ -552,13 +554,78 @@ def _http_json(
     return payload
 
 
+def _is_dns_error(exc: BaseException) -> bool:
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, socket.gaierror):
+            return True
+        if isinstance(cur, OSError) and getattr(cur, "errno", None) in (8, -2, -3):
+            return True
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "reason", None)
+        cur = nxt if isinstance(nxt, BaseException) else None
+    text = str(exc).lower()
+    return any(
+        s in text
+        for s in (
+            "nodename nor servname",
+            "name or service not known",
+            "getaddrinfo failed",
+            "unknown host",
+        )
+    )
+
+
+def _http_base_candidates(url: str, fallback_host: str) -> list[str]:
+    """Ordered base URLs to reach file/canvas HTTP when the server-advertised host fails."""
+    parsed = urllib.parse.urlparse(url.strip())
+    scheme = parsed.scheme or "https"
+    orig_host = (parsed.hostname or "").strip()
+    orig_port = parsed.port
+    fb = (fallback_host or "").strip()
+
+    def _make_base(sch: str, host: str, port: int | None) -> str:
+        host = host.strip().strip("[]")
+        if not host:
+            return ""
+        if port and not (
+            (sch == "http" and port == 80) or (sch == "https" and port == 443)
+        ):
+            return f"{sch}://{host}:{port}"
+        return f"{sch}://{host}"
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(sch: str, host: str, port: int | None) -> None:
+        base = _make_base(sch, host, port)
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+
+    add(scheme, orig_host, orig_port)
+    if fb and fb.lower() != orig_host.lower():
+        add(scheme, fb, orig_port)
+        # Cloudflare links use https:443; LAN clients often need the local HTTP port.
+        if scheme == "https" and orig_port in (None, 443):
+            add("http", fb, 8443)
+            add("https", fb, 8443)
+        elif orig_port not in (None, 80, 443):
+            add("http", fb, orig_port)
+
+    if not out:
+        raise ValueError("invalid http url")
+    return out
+
+
 def _canvas_token_from_url(url: str) -> tuple[str, str]:
-    parsed = urllib.parse.urlparse(url)
+    parsed = urllib.parse.urlparse(url.strip())
     parts = [p for p in parsed.path.split("/") if p]
     if len(parts) < 2 or parts[0] != "canvas":
         raise ValueError("invalid canvas url")
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    return base, parts[1]
+    bases = _http_base_candidates(url, "")
+    return bases[0], parts[1]
 
 
 def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
@@ -791,11 +858,25 @@ class ImagePreviewWindow:
 class NativeCanvasWindow:
     """Tk canvas client talking to the same /canvas HTTP API as the web page."""
 
-    def __init__(self, master: tk.Misc, url: str, key: str) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        url: str,
+        key: str,
+        *,
+        reachability_host: str = "",
+    ) -> None:
         self.master = master
         self.url = url
         self.key = key.strip().upper()
-        self.base, self.token = _canvas_token_from_url(url)
+        self.reachability_host = reachability_host.strip()
+        parsed = urllib.parse.urlparse(url.strip())
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) < 2 or parts[0] != "canvas":
+            raise ValueError("invalid canvas url")
+        self.token = parts[1]
+        self.base = ""
+        self._base_candidates = _http_base_candidates(url, self.reachability_host)
         self.ticket = ""
         self.since = 0
         self.color = "#222222"
@@ -890,32 +971,47 @@ class NativeCanvasWindow:
         err: str | None = None
         ticket = ""
         meta = ""
-        try:
-            data = _http_json(
-                f"{self.base}/canvas/{self.token}/auth",
-                method="POST",
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"key": self.key}).encode("utf-8"),
-            )
-            ticket = str(data.get("ticket") or "")
-            bits = []
-            if data.get("participant"):
-                bits.append(f"你: {data['participant']}")
-            if data.get("room"):
-                bits.append(f"房间: #{data['room']}")
-            meta = " · ".join(bits)
-            if not ticket:
-                raise RuntimeError("auth failed")
-        except Exception as e:
-            err = str(e)
-        self.master.after(0, lambda: self._auth_done(ticket, meta, err))
+        base = ""
+        for candidate in self._base_candidates:
+            try:
+                data = _http_json(
+                    f"{candidate}/canvas/{self.token}/auth",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"key": self.key}).encode("utf-8"),
+                )
+                ticket = str(data.get("ticket") or "")
+                bits = []
+                if data.get("participant"):
+                    bits.append(f"你: {data['participant']}")
+                if data.get("room"):
+                    bits.append(f"房间: #{data['room']}")
+                meta = " · ".join(bits)
+                if not ticket:
+                    raise RuntimeError("auth failed")
+                base = candidate
+                err = None
+                break
+            except RuntimeError as e:
+                err = str(e)
+                break
+            except Exception as e:
+                err = str(e)
+        self.master.after(0, lambda: self._auth_done(ticket, meta, err, base))
 
-    def _auth_done(self, ticket: str, meta: str, err: str | None) -> None:
+    def _auth_done(
+        self,
+        ticket: str,
+        meta: str,
+        err: str | None,
+        base: str = "",
+    ) -> None:
         if self._closed:
             return
-        if err or not ticket:
+        if err or not ticket or not base:
             self.var_status.set(f"进入失败: {err or 'unknown'}")
             return
+        self.base = base
         self.ticket = ticket
         self.var_status.set(meta or "已连接")
         self._sync_once(initial=True)
@@ -1629,6 +1725,12 @@ class SSHChatGUI:
         self.log.configure(state=tk.DISABLED)
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
+        if (
+            room != self._active_room
+            and self._paste_pending
+            and not self._paste_pending.get("consumed")
+        ):
+            self._fail_paste("已切换房间")
         self._ensure_room(room)
         self._active_room = room
         self._room_unread[room] = 0
@@ -2462,7 +2564,14 @@ class SSHChatGUI:
                     self._canvas_win.close()
                 except Exception:
                     pass
-            self._canvas_win = NativeCanvasWindow(self.root, url, key)
+            reach = ""
+            if self._bundle:
+                reach = str(self._bundle.get("host") or "").strip()
+            else:
+                reach = self.var_host.get().strip()
+            self._canvas_win = NativeCanvasWindow(
+                self.root, url, key, reachability_host=reach
+            )
             self._append_chat_line("[*] 已在客户端打开共享画布", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
