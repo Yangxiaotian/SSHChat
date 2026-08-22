@@ -53,7 +53,9 @@ class MainActivity : AppCompatActivity() {
     private val requestAudioPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (!granted) {
+        if (granted) {
+            Toast.makeText(this, "麦克风已授权，请按住话筒说话", Toast.LENGTH_SHORT).show()
+        } else {
             Toast.makeText(this, "需要麦克风权限才能发语音", Toast.LENGTH_SHORT).show()
         }
     }
@@ -147,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnConnect.setOnClickListener { connect() }
-        binding.btnDisconnect.setOnClickListener { disconnect() }
+        binding.btnDisconnect.setOnClickListener { confirmDisconnect() }
         binding.btnSend.setOnClickListener { send() }
         binding.btnPhoto.setOnClickListener { showPhotoMenu() }
         binding.btnPhoto.setOnLongClickListener {
@@ -562,6 +564,16 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
         if (!ok) requestNotifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun confirmDisconnect() {
+        if (client == null) return
+        AlertDialog.Builder(this)
+            .setTitle("确认断开？")
+            .setMessage("断开后将退出当前聊天连接。")
+            .setPositiveButton("断开") { _, _ -> disconnect() }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun disconnect() {

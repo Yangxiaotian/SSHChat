@@ -45,6 +45,7 @@ final class ChatViewModel: ObservableObject {
     private let session = SSHSession()
     private var pendingUpload: URL?
     private var voiceRecorder: VoiceRecorder?
+    private var voiceFingerDown = false
     private var onConnectedOnce: (() -> Void)?
     var mediaPickerOpen = false
     private var lastSendAt: Date = .distantPast
@@ -358,19 +359,37 @@ final class ChatViewModel: ObservableObject {
     func voicePressBegan() {
         guard connected else { toast = "请先连接"; return }
         if pendingUpload != nil { toast = "已有文件正在上传，请稍候"; return }
-        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] ok in
-            Task { @MainActor in
+        if recording { return }
+        voiceFingerDown = true
+
+        let startIfStillHolding = { [weak self] in
+            guard let self, self.voiceFingerDown, !self.recording else { return }
+            self.startVoiceRecord()
+        }
+
+        switch VoicePermission.status() {
+        case .granted:
+            startIfStillHolding()
+        case .denied:
+            voiceFingerDown = false
+            toast = "需要麦克风权限才能发语音（请在「设置 → SSHChat → 麦克风」中开启）"
+        case .undetermined:
+            VoicePermission.request { [weak self] ok in
                 guard let self else { return }
                 guard ok else {
+                    self.voiceFingerDown = false
                     self.toast = "需要麦克风权限才能发语音"
                     return
                 }
-                self.startVoiceRecord()
+                startIfStillHolding()
             }
+        @unknown default:
+            voiceFingerDown = false
         }
     }
 
     func voicePressEnded(send: Bool) {
+        voiceFingerDown = false
         finishVoiceRecord(send: send)
     }
 
@@ -533,6 +552,7 @@ final class ChatViewModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = ChatViewModel()
     @FocusState private var draftFocused: Bool
+    @State private var showDisconnectConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -569,6 +589,12 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color.white)
+        .alert("确认断开？", isPresented: $showDisconnectConfirm) {
+            Button("断开", role: .destructive) { model.disconnect() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("断开后将退出当前聊天连接。")
+        }
         .confirmationDialog("发图", isPresented: $model.showPhotoMenu, titleVisibility: .visible) {
             Button("拍照发送") { model.launchCameraPhoto() }
             Button("从相册选择") { model.launchPhotoLibrary() }
@@ -799,21 +825,13 @@ struct ContentView: View {
 
     private var actionRow: some View {
         HStack(spacing: 4) {
-            iconBtn(system: "mic.fill", active: model.recording, enabled: model.connected) {
-                // hold handled via gesture below
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !model.recording { model.voicePressBegan() }
-                    }
-                    .onEnded { _ in
-                        model.voicePressEnded(send: true)
-                    }
+            PushToTalkButton(
+                active: model.recording,
+                enabled: model.connected,
+                onPressBegan: { model.voicePressBegan() },
+                onPressEnded: { send in model.voicePressEnded(send: send) }
             )
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.01).onEnded { _ in }
-            )
+            .frame(maxWidth: .infinity, minHeight: 44)
 
             iconBtn(system: "camera.fill", enabled: model.connected) {
                 model.openPhotoMenu()
@@ -835,7 +853,7 @@ struct ContentView: View {
                 .font(.system(size: 12))
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .disabled(!model.connected)
-            Button("断开") { model.disconnect() }
+            Button("断开") { showDisconnectConfirm = true }
                 .font(.system(size: 12))
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .disabled(!model.connected)
