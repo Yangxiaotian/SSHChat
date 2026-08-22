@@ -211,6 +211,32 @@
                 android:paddingBottom="2dp" />
         </HorizontalScrollView>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="发送至"
+                android:textColor="#555555"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnSendTarget"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:minHeight="40dp"
+                android:text="当前房间 #default"
+                android:textAllCaps="false"
+                android:textSize="12sp" />
+        </LinearLayout>
+
         <EditText
             android:id="@+id/etDraft"
             android:layout_width="match_parent"

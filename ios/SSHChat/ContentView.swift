@@ -6,11 +6,13 @@ import UniformTypeIdentifiers
 
 enum ChatEntry: Identifiable, Equatable {
     case text(id: UUID, String)
+    case pm(id: UUID, from: String, body: String)
     case media(DownloadedMedia)
 
     var id: UUID {
         switch self {
         case .text(let id, _): return id
+        case .pm(let id, _, _): return id
         case .media(let m): return m.id
         }
     }
@@ -41,8 +43,13 @@ final class ChatViewModel: ObservableObject {
     @Published var fileImportKind: FileImportKind = .media
     @Published var showPhotoLibrary = false
     @Published var photoItem: PhotosPickerItem?
+    @Published var sendTarget: SendTarget = .currentRoom("default")
+    @Published var onlineUsers: [String] = []
+    @Published var showSendTargetPicker = false
 
     enum FileImportKind { case media, identity }
+
+    private var expectingNames = false
 
     private let session = SSHSession()
     private var pendingUpload: URL?
@@ -86,6 +93,28 @@ final class ChatViewModel: ObservableObject {
             let saved = UserDefaults.standard.double(forKey: Self.chatFontKey)
             chatFont = min(22, max(7, CGFloat(saved)))
         }
+        sendTarget = SendTargetStore.loadTarget()
+    }
+
+    func refreshSendTargetLabel() {
+        if case .currentRoom = sendTarget {
+            sendTarget = .currentRoom(SendTargetStore.loadCurrentRoom())
+        }
+    }
+
+    func setSendTarget(_ target: SendTarget) {
+        sendTarget = target
+        SendTargetStore.saveTarget(target)
+    }
+
+    func refreshOnlineUsers() {
+        expectingNames = true
+        Task { try? await session.send("/names") }
+    }
+
+    func replyToPm(_ nick: String) {
+        setSendTarget(.user(nick))
+        toast = "已切换为私聊 \(nick)"
     }
 
     var keyHint: String {
@@ -188,6 +217,8 @@ final class ChatViewModel: ObservableObject {
                             if s.hasPrefix("已连接") {
                                 self?.connected = true
                                 self?.busy = false
+                                self?.sendTarget = SendTargetStore.loadTarget()
+                                self?.refreshOnlineUsers()
                                 let once = self?.onConnectedOnce
                                 self?.onConnectedOnce = nil
                                 once?()
@@ -253,11 +284,16 @@ final class ChatViewModel: ObservableObject {
         }
         Task {
             do {
-                try await session.send(text)
+                let outbound = SendTarget.outboundText(target: sendTarget, draft: text)
+                try await session.send(outbound)
             } catch {
                 status = "发送失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    private func sendfileCommand() -> String {
+        sendTarget.sendfileCommand
     }
 
     func clearScreen(announce: Bool) {
@@ -278,8 +314,8 @@ final class ChatViewModel: ObservableObject {
         }
         pendingUpload = url
         status = "等待上传通道…"
-        appendText("[*] 正在发文件: \(url.lastPathComponent)（/sendfile）")
-        Task { try? await session.send("/sendfile") }
+        appendText("[*] 正在发文件: \(url.lastPathComponent)（\(sendfileCommand())）")
+        Task { try? await session.send(sendfileCommand()) }
     }
 
     func ensureConnectedThen(_ block: @escaping () -> Void) {
@@ -469,6 +505,21 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        applyRoomFromServer(stripped)
+        if expectingNames, let names = ChatLineParsers.parseNames(stripped) {
+            onlineUsers = names.members
+            expectingNames = false
+            if case .currentRoom = sendTarget {
+                sendTarget = .currentRoom(names.room)
+                SendTargetStore.saveCurrentRoom(names.room)
+            }
+            return
+        }
+        if let pm = ChatLineParsers.parsePm(stripped) {
+            appendPm(from: pm.from, body: pm.body)
+            return
+        }
+
         SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
 
         if let open = SecureInvite.parseGuiOpen(stripped) {
@@ -546,6 +597,22 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func applyRoomFromServer(_ line: String) {
+        guard let room = ChatLineParsers.parseActiveRoom(line) else { return }
+        SendTargetStore.saveCurrentRoom(room)
+        if case .currentRoom = sendTarget {
+            sendTarget = .currentRoom(room)
+            SendTargetStore.saveTarget(sendTarget)
+        }
+    }
+
+    private func appendPm(from: String, body: String) {
+        if entries.count > 2000 {
+            entries.removeFirst(entries.count - 1500)
+        }
+        entries.append(.pm(id: UUID(), from: from, body: body))
+    }
+
     private func appendText(_ line: String) {
         // Cap history so SwiftUI stays responsive on long sessions.
         if entries.count > 2000 {
@@ -583,6 +650,9 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if !model.connected {
                     loginPanel
+                }
+                if model.connected {
+                    sendTargetRow
                 }
                 Text(model.status)
                     .font(.system(size: 12))
@@ -664,6 +734,9 @@ struct ContentView: View {
         }
         .sheet(item: $model.previewMedia) { media in
             MediaPreviewView(media: media)
+        }
+        .sheet(isPresented: $model.showSendTargetPicker) {
+            SendTargetPickerView(model: model)
         }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
@@ -804,6 +877,29 @@ struct ContentView: View {
                 .foregroundStyle(Color(white: 0.13))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        case .pm(_, let from, let body):
+            Button {
+                model.replyToPm(from)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("私聊 · \(from)")
+                        .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
+                        .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
+                    Text(body)
+                        .font(.system(size: model.chatFont, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.13))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("点按回复")
+                        .font(.system(size: max(10, model.chatFont - 1)))
+                        .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
+                        .underline()
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(red: 0.89, green: 0.95, blue: 0.99))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
         case .media(let media):
             mediaCard(media)
         }
@@ -864,6 +960,25 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var sendTargetRow: some View {
+        HStack(spacing: 8) {
+            Text("发送至")
+                .font(.system(size: 12))
+                .foregroundStyle(Color(white: 0.33))
+            Button {
+                model.showSendTargetPicker = true
+            } label: {
+                Text(model.sendTarget.label)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!model.connected)
+        }
+        .padding(.top, 4)
     }
 
     private var draftRow: some View {

@@ -45,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
     @Volatile private var mediaPickerOpen = false
     private var onConnectedOnce: (() -> Unit)? = null
+    private var sendTarget: SendTarget = SendTarget.CurrentRoom("default")
+    private var onlineUsers: List<String> = emptyList()
+    private var expectingNames = false
 
     private val requestNotifyPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -164,6 +167,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
         setupVoiceButton()
+        sendTarget = SendTargetStore.loadTarget(this)
+        refreshSendTargetButton()
+        binding.btnSendTarget.setOnClickListener { showSendTargetPicker() }
         binding.btnFontMinus.setOnClickListener { bumpFont(-1f) }
         binding.btnFontPlus.setOnClickListener { bumpFont(1f) }
         binding.etDraft.setOnEditorActionListener { _, actionId, event ->
@@ -459,8 +465,8 @@ class MainActivity : AppCompatActivity() {
         }
         pendingUpload = file
         binding.tvStatus.text = "等待上传通道…"
-        appendLine("[*] 正在发文件: ${file.name}（/sendfile）")
-        client?.send("/sendfile")
+        appendLine("[*] 正在发文件: ${file.name}（${sendTarget.sendfileCommand()}）")
+        client?.send(sendTarget.sendfileCommand())
     }
 
     /** Reconnect if camera/gallery killed the SSH socket, then run [block]. */
@@ -561,6 +567,9 @@ class MainActivity : AppCompatActivity() {
                     binding.tvStatus.text = s
                     if (s.startsWith("已连接")) {
                         SshKeepAliveService.start(this)
+                        sendTarget = SendTargetStore.loadTarget(this@MainActivity)
+                        refreshSendTargetButton()
+                        refreshOnlineUsers()
                         val once = onConnectedOnce
                         onConnectedOnce = null
                         once?.invoke()
@@ -642,7 +651,91 @@ class MainActivity : AppCompatActivity() {
             return
         }
         // Don't local-echo: server broadcast is the source of truth (same as desktop GUI).
-        client?.send(text)
+        val outbound = SendTarget.outboundText(sendTarget, text)
+        client?.send(outbound)
+    }
+
+    private fun refreshSendTargetButton() {
+        binding.btnSendTarget.text = sendTarget.label()
+        binding.btnSendTarget.isEnabled = client != null
+    }
+
+    private fun setSendTarget(target: SendTarget) {
+        sendTarget = target
+        SendTargetStore.saveTarget(this, target)
+        refreshSendTargetButton()
+    }
+
+    private fun refreshOnlineUsers() {
+        expectingNames = true
+        client?.send("/names")
+    }
+
+    private fun showSendTargetPicker() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val me = binding.etUsername.text?.toString()?.trim().orEmpty()
+        val room = SendTargetStore.loadCurrentRoom(this)
+        val items = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+
+        items.add("当前房间 #$room")
+        actions.add {
+            setSendTarget(SendTarget.CurrentRoom(room))
+        }
+
+        val seen = mutableSetOf<String>()
+        fun addUser(nick: String) {
+            val n = nick.trim()
+            if (n.isEmpty() || n.equals(me, ignoreCase = true)) return
+            val key = n.lowercase()
+            if (!seen.add(key)) return
+            items.add("私聊 $n")
+            actions.add { setSendTarget(SendTarget.User(n)) }
+        }
+
+        onlineUsers.forEach { addUser(it) }
+        SendTargetStore.loadRecentUsers(this).forEach { addUser(it) }
+
+        items.add("指定房间 #…")
+        actions.add {
+            val input = android.widget.EditText(this).apply {
+                hint = "房间名（不含 #）"
+                setText("")
+            }
+            AlertDialog.Builder(this)
+                .setTitle("发送到房间")
+                .setView(input)
+                .setPositiveButton("确定") { _, _ ->
+                    val r = input.text?.toString()?.trim()?.removePrefix("#").orEmpty()
+                    if (r.isNotEmpty()) setSendTarget(SendTarget.NamedRoom(r))
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        items.add("刷新在线用户")
+        actions.add { refreshOnlineUsers() }
+
+        AlertDialog.Builder(this)
+            .setTitle("发送至")
+            .setItems(items.toTypedArray()) { _, which ->
+                actions.getOrNull(which)?.invoke()
+            }
+            .show()
+    }
+
+    private fun applyRoomFromServer(line: String) {
+        ChatLineParsers.parseActiveRoom(line)?.let { room ->
+            SendTargetStore.saveCurrentRoom(this, room)
+            if (sendTarget is SendTarget.CurrentRoom) {
+                sendTarget = SendTarget.CurrentRoom(room)
+                SendTargetStore.saveTarget(this, sendTarget)
+            }
+            refreshSendTargetButton()
+        }
     }
 
     private fun clearScreen(announce: Boolean) {
@@ -668,6 +761,23 @@ class MainActivity : AppCompatActivity() {
         ) {
             clearScreen(announce = false)
             appendLine("[*] Screen cleared.")
+            return
+        }
+        applyRoomFromServer(stripped)
+        if (expectingNames) {
+            ChatLineParsers.parseNames(stripped)?.let { names ->
+                onlineUsers = names.members
+                expectingNames = false
+                if (sendTarget is SendTarget.CurrentRoom) {
+                    sendTarget = SendTarget.CurrentRoom(names.room)
+                    SendTargetStore.saveCurrentRoom(this, names.room)
+                    refreshSendTargetButton()
+                }
+                return
+            }
+        }
+        ChatLineParsers.parsePm(stripped)?.let { pm ->
+            appendPmLine(pm.from, pm.body)
             return
         }
         SecureInvite.absorbFileMeta(stripped, pendingFileMeta)
@@ -840,6 +950,49 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun appendPmLine(from: String, body: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundColor(0xFFE3F2FD.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).also { it.topMargin = dp(4); it.bottomMargin = dp(4) }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                setSendTarget(SendTarget.User(from))
+                Toast.makeText(this@MainActivity, "已切换为私聊 $from", Toast.LENGTH_SHORT).show()
+            }
+        }
+        val tag = TextView(this).apply {
+            text = "私聊 · $from"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 1f).coerceAtLeast(10f))
+            setTextColor(0xFF1565C0.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val bodyTv = TextView(this).apply {
+            text = body
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF222222.toInt())
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        val hint = TextView(this).apply {
+            text = "点按回复"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 1f).coerceAtLeast(10f))
+            setTextColor(0xFF0B57D0.toInt())
+            paint.isUnderlineText = true
+            setPadding(0, dp(2), 0, 0)
+        }
+        card.addView(tag)
+        card.addView(bodyTv)
+        card.addView(hint)
+        binding.chatLog.addView(card)
+        scrollChatToBottom()
+    }
+
     private fun appendLine(line: String) {
         val tv = TextView(this).apply {
             text = line
@@ -876,6 +1029,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnDisconnect.isEnabled = on
         binding.etDraft.isEnabled = on
         binding.btnSend.isEnabled = on
+        binding.btnSendTarget.isEnabled = on
         binding.btnPhoto.isEnabled = on
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
