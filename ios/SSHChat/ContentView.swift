@@ -53,6 +53,7 @@ final class ChatViewModel: ObservableObject {
         pattern: #"^(?:\[[\d:.\sAPMapm/-]+]\s*)?(?:\[\*]\s*)?Screen cleared\.?\s*$"#,
         options: [.caseInsensitive]
     )
+    private var pendingFileMeta = SecureInvite.FileMeta()
     private let ansiClear = try! NSRegularExpression(pattern: #"\u001B\[[0-9;]*[HJKjk]"#)
 
     struct WebInvitePayload: Identifiable {
@@ -426,10 +427,14 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
+
         if let open = SecureInvite.parseGuiOpen(stripped) {
             switch open.kind {
             case .download:
-                startDownload(url: open.url, key: open.key)
+                let from = pendingFileMeta.sender
+                pendingFileMeta.reset()
+                startDownload(url: open.url, key: open.key, sender: from)
             case .canvas:
                 appendText("[*] 打开共享画布…")
                 webInvite = WebInvitePayload(title: "共享画布", url: open.url, key: open.key)
@@ -455,6 +460,7 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
         if SecureInvite.isInviteNoise(stripped) { return }
         appendText(stripped)
     }
@@ -466,7 +472,12 @@ final class ChatViewModel: ObservableObject {
             do {
                 let remote = try await SecureUpload.upload(url: url, key: key, fileURL: file)
                 let mime = MediaMime.guess(remote.isEmpty ? file.lastPathComponent : remote)
-                let media = DownloadedMedia(url: file, name: remote.isEmpty ? file.lastPathComponent : remote, mime: mime)
+                let media = DownloadedMedia(
+                    url: file,
+                    name: remote.isEmpty ? file.lastPathComponent : remote,
+                    mime: mime,
+                    sender: username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : username
+                )
                 status = "已上传: \(media.name)"
                 appendMedia(media, autoOpen: media.isImage || media.isVideo)
             } catch {
@@ -476,12 +487,14 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func startDownload(url: String, key: String) {
+    private func startDownload(url: String, key: String, sender: String?) {
         status = "正在接收文件…"
+        let from = sender?.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             do {
                 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sshchat-media", isDirectory: true)
-                let media = try await SecureDownload.fetch(pageURL: url, key: key, outDir: dir)
+                var media = try await SecureDownload.fetch(pageURL: url, key: key, outDir: dir)
+                media.sender = from?.isEmpty == false ? from : nil
                 status = "已接收: \(media.name)"
                 appendMedia(media, autoOpen: media.isImage || media.isVideo || media.isAudio)
             } catch {
@@ -724,11 +737,17 @@ struct ContentView: View {
             if media.isImage { return "点按再次查看" }
             return "点按打开"
         }()
+        let headline: String = {
+            var s = ""
+            if let who = media.sender, !who.isEmpty { s += "来自 \(who) · " }
+            s += "[\(kind)] \(media.name) (\(ChatViewModel.formatSize(size)))"
+            return s
+        }()
         return Button {
             model.previewMedia = media
         } label: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("[\(kind)] \(media.name) (\(ChatViewModel.formatSize(size)))")
+                Text(headline)
                     .font(.system(size: model.chatFont, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color(red: 0.106, green: 0.369, blue: 0.125))
                 if media.isImage, let ui = UIImage(contentsOfFile: media.url.path) {

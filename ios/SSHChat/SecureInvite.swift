@@ -9,10 +9,46 @@ enum SecureInvite {
         let key: String
     }
 
+    struct FileMeta {
+        var sender: String?
+        var filename: String?
+        var room: String?
+
+        mutating func reset() {
+            sender = nil
+            filename = nil
+            room = nil
+        }
+    }
+
     private static let guiOpen = try! NSRegularExpression(
         pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$"#,
         options: [.caseInsensitive]
     )
+
+    static func absorbFileMeta(_ line: String, into meta: inout FileMeta) {
+        let t = normalize(line)
+        if t.hasPrefix("共享画布") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件")
+            || t.lowercased().hasPrefix("shared canvas") || t.lowercased().hasPrefix("file upload")
+            || t.lowercased().hasPrefix("new file")
+        {
+            meta.reset()
+            return
+        }
+        let patterns: [(String, WritableKeyPath<FileMeta, String?>)] = [
+            (#"^(?:发起人|发件人|From|Sender)\s*[:：]\s*(.+)$"#, \.sender),
+            (#"^(?:文件名|Filename)\s*[:：]\s*(.+)$"#, \.filename),
+            (#"^(?:范围|来自房间|Room)\s*[:：]\s*(.+)$"#, \.room),
+        ]
+        for (pattern, keyPath) in patterns {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let m = re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+                  let r = Range(m.range(at: 1), in: t)
+            else { continue }
+            meta[keyPath: keyPath] = String(t[r]).trimmingCharacters(in: .whitespaces)
+            return
+        }
+    }
 
     static func parseGuiOpen(_ line: String) -> Open? {
         let t = normalize(line)

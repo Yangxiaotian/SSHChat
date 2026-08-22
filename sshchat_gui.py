@@ -338,6 +338,21 @@ def _upload_secure_file(url: str, key: str, path: Path) -> str:
     return filename
 
 
+def _parse_file_meta_field(body: str) -> tuple[str, str] | None:
+    """Return (field, value) for file-invite meta lines."""
+    t = body.strip()
+    patterns = (
+        (r"^(?:发起人|发件人|From|Sender)\s*[:：]\s*(.+)$", "sender"),
+        (r"^(?:文件名|Filename)\s*[:：]\s*(.+)$", "filename"),
+        (r"^(?:范围|来自房间|Room)\s*[:：]\s*(.+)$", "room"),
+    )
+    for pat, key in patterns:
+        m = re.match(pat, t, re.I)
+        if m:
+            return key, m.group(1).strip()
+    return None
+
+
 def _is_secure_invite_noise(body: str) -> bool:
     """True for multi-line file/canvas invite lines that GUI clients collapse."""
     t = body.strip()
@@ -418,7 +433,12 @@ def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
     }
 
 
-def _media_from_local_path(path: Path, *, display_name: str | None = None) -> dict[str, Any]:
+def _media_from_local_path(
+    path: Path,
+    *,
+    display_name: str | None = None,
+    sender: str | None = None,
+) -> dict[str, Any]:
     """Build a media history entry from an already-local file (sender preview)."""
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
@@ -438,6 +458,7 @@ def _media_from_local_path(path: Path, *, display_name: str | None = None) -> di
         "path": str(dest),
         "size": dest.stat().st_size,
         "is_image": bool(_IMAGE_MIME_RE.match(mime)),
+        "sender": (sender or "").strip() or None,
     }
 
 
@@ -1343,6 +1364,7 @@ class SSHChatGUI:
         self._room_unread: dict[str, int] = {"default": 0}
         self._room_history: dict[str, list[Any]] = {"default": []}
         self._paste_pending: dict[str, Any] | None = None
+        self._pending_file_meta: dict[str, str] = {}
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Toplevel | None = None
         self._suggest_list: tk.Listbox | None = None
@@ -1751,7 +1773,9 @@ class SSHChatGUI:
         path = Path(str(media.get("path") or ""))
         is_image = bool(media.get("is_image") and path.is_file())
         kind = "图片" if is_image else "文件"
-        caption = f"[{kind}] {name} ({self._format_file_size(size)})  "
+        sender = str(media.get("sender") or "").strip()
+        prefix = f"来自 {sender} · " if sender else ""
+        caption = f"{prefix}[{kind}] {name} ({self._format_file_size(size)})  "
         try:
             self.log.insert(tk.END, caption, ("system",))
         except tk.TclError:
@@ -1873,6 +1897,13 @@ class SSHChatGUI:
             return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
+        if parsed and parsed[1] == "*":
+            body = parsed[2].strip()
+            if _SECURE_BANNER_START_RE.match(body):
+                self._pending_file_meta = {}
+            field = _parse_file_meta_field(body)
+            if field:
+                self._pending_file_meta[field[0]] = field[1]
         if parsed and parsed[1] == "*" and _is_secure_invite_noise(parsed[2]):
             return
         ts = datetime.now()
@@ -2307,7 +2338,11 @@ class SSHChatGUI:
         shown = False
         if local_path is not None:
             try:
-                media = _media_from_local_path(local_path, display_name=remote or name)
+                media = _media_from_local_path(
+                    local_path,
+                    display_name=remote or name,
+                    sender=self.var_user.get().strip(),
+                )
                 self._append_room_media(self._active_room, media)
                 shown = True
             except Exception as e:
@@ -2364,6 +2399,11 @@ class SSHChatGUI:
             return
         name = str(media.get("name") or "file")
         self._set_status(f"已接收: {name}")
+        sender = str(self._pending_file_meta.get("sender") or "").strip() or None
+        self._pending_file_meta = {}
+        if sender and isinstance(media, dict):
+            media = dict(media)
+            media["sender"] = sender
         try:
             self._append_room_media(room, media)
         except Exception as e:

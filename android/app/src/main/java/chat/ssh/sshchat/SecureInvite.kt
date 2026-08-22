@@ -9,6 +9,18 @@ object SecureInvite {
 
     data class Open(val kind: Kind, val url: String, val key: String)
 
+    data class FileMeta(
+        var sender: String? = null,
+        var filename: String? = null,
+        var room: String? = null,
+    ) {
+        fun reset() {
+            sender = null
+            filename = null
+            room = null
+        }
+    }
+
     private val guiOpen = Regex(
         """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$""",
         RegexOption.IGNORE_CASE,
@@ -43,6 +55,21 @@ object SecureInvite {
     private val timePrefix = Regex(
         """^(?:\[[\d:.\sAPMapm/-]+]\s*)+""",
     )
+
+    /** Collect sender/filename/room from invite lines before gui-open arrives. */
+    fun absorbFileMeta(line: String, meta: FileMeta) {
+        val t = normalize(line)
+        if (bannerStart.containsMatchIn(t)) {
+            meta.reset()
+            return
+        }
+        Regex("""^(?:发起人|发件人|From|Sender)\s*[:：]\s*(.+)$""", RegexOption.IGNORE_CASE)
+            .matchEntire(t)?.let { meta.sender = it.groupValues[1].trim(); return }
+        Regex("""^(?:文件名|Filename)\s*[:：]\s*(.+)$""", RegexOption.IGNORE_CASE)
+            .matchEntire(t)?.let { meta.filename = it.groupValues[1].trim(); return }
+        Regex("""^(?:范围|来自房间|Room)\s*[:：]\s*(.+)$""", RegexOption.IGNORE_CASE)
+            .matchEntire(t)?.let { meta.room = it.groupValues[1].trim(); return }
+    }
 
     fun parseGuiOpen(line: String): Open? {
         val m = guiOpen.matchEntire(normalize(line)) ?: return null

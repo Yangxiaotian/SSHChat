@@ -43,6 +43,7 @@ struct DownloadedMedia: Identifiable, Equatable {
     let url: URL
     let name: String
     let mime: String
+    var sender: String?
 
     var isImage: Bool { MediaMime.isImage(mime) }
     var isVideo: Bool { MediaMime.isVideo(mime) }

@@ -31,6 +31,14 @@ const HTTP_URL = /^(https?:\/\/\S+)\s*$/i;
 const GUI_OPEN =
   /^gui-open\s+(canvas|upload|download)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
 
+function normalizeInviteLine(line: string): string {
+  return line
+    .trim()
+    .replace(/^(?:\[[\d:.\sAPMapm/-]+]\s*)+/, '')
+    .replace(/^\[\*]\s*/, '')
+    .trim();
+}
+
 function kindFromBanner(text: string): SecureLinkKind | null {
   const t = text.toLowerCase();
   if (t.includes('画布') || t.includes('canvas')) return 'canvas';
@@ -43,9 +51,10 @@ function kindFromBanner(text: string): SecureLinkKind | null {
 
 function extractMeta(lines: string[], kind: SecureLinkKind): Partial<SecureLinkPayload> {
   const meta: Partial<SecureLinkPayload> = { kind };
-  for (const line of lines) {
+  for (const raw of lines) {
+    const line = normalizeInviteLine(raw);
     const sender = line.match(/^(?:发起人|发件人|From|Sender)\s*[:：]\s*(.+)$/i);
-    if (sender) meta.subtitle = sender[1].trim();
+    if (sender) meta.subtitle = `来自 ${sender[1].trim()}`;
     const filename = line.match(/^(?:文件名|Filename)\s*[:：]\s*(.+)$/i);
     if (filename) meta.title = filename[1].trim();
     const room = line.match(/^(?:范围|来自房间|Room)\s*[:：]\s*(.+)$/i);
@@ -59,7 +68,8 @@ function parseBlock(messages: ChatMessage[]): SecureLinkPayload | null {
 
   // Prefer explicit machine helper line if present.
   for (const line of lines) {
-    const gui = GUI_OPEN.exec(line);
+    const normalized = normalizeInviteLine(line);
+    const gui = GUI_OPEN.exec(normalized);
     if (gui) {
       const kind = gui[1].toLowerCase() as SecureLinkKind;
       return {
@@ -78,7 +88,8 @@ function parseBlock(messages: ChatMessage[]): SecureLinkPayload | null {
   let url = '';
   let key = '';
   let expectUrl = false;
-  for (const line of lines) {
+  for (const raw of lines) {
+    const line = normalizeInviteLine(raw);
     if (URL_LABEL.test(line)) {
       expectUrl = true;
       continue;

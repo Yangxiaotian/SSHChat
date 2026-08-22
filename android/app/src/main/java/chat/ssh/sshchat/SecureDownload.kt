@@ -10,6 +10,7 @@ data class DownloadedMedia(
     val file: File,
     val name: String,
     val mime: String,
+    val sender: String? = null,
 ) {
     val isImage: Boolean
         get() = MediaMime.isImage(mime)

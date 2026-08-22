@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private var client: SshChatClient? = null
     private val bg = Executors.newSingleThreadExecutor()
     private var chatSp = 13f
+    private val pendingFileMeta = SecureInvite.FileMeta()
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
     private var cameraTarget: File? = null
@@ -626,10 +627,11 @@ class MainActivity : AppCompatActivity() {
             appendLine("[*] Screen cleared.")
             return
         }
+        SecureInvite.absorbFileMeta(stripped, pendingFileMeta)
         val open = SecureInvite.parseGuiOpen(stripped)
         if (open != null) {
             when (open.kind) {
-                SecureInvite.Kind.DOWNLOAD -> startDownload(open.url, open.key)
+                SecureInvite.Kind.DOWNLOAD -> startDownload(open.url, open.key, pendingFileMeta.sender)
                 SecureInvite.Kind.CANVAS -> {
                     appendLine("[*] 打开共享画布…")
                     startActivity(WebInviteActivity.canvas(this, open.url, open.key))
@@ -666,7 +668,13 @@ class MainActivity : AppCompatActivity() {
             try {
                 val remote = SecureUpload.upload(url, key, file)
                 val mime = MediaMime.guess(remote.ifBlank { file.name })
-                val media = DownloadedMedia(file, remote.ifBlank { file.name }, mime)
+                val who = binding.etUsername.text?.toString()?.trim().orEmpty()
+                val media = DownloadedMedia(
+                    file,
+                    remote.ifBlank { file.name },
+                    mime,
+                    sender = who.ifBlank { null },
+                )
                 runOnUiThread {
                     binding.tvStatus.text = "已上传: ${media.name}"
                     appendMediaEntry(media, autoOpen = media.isImage || media.isVideo)
@@ -680,12 +688,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startDownload(url: String, key: String) {
+    private fun startDownload(url: String, key: String, sender: String?) {
         binding.tvStatus.text = "正在接收文件…"
+        val from = sender?.trim()?.ifBlank { null }
+        pendingFileMeta.reset()
         bg.execute {
             try {
                 val dir = File(cacheDir, "sshchat-media")
-                val media = SecureDownload.fetch(url, key, dir)
+                val fetched = SecureDownload.fetch(url, key, dir)
+                val media = fetched.copy(sender = from)
                 runOnUiThread {
                     binding.tvStatus.text = "已接收: ${media.name}"
                     appendMediaEntry(media, autoOpen = media.isImage || media.isVideo || media.isAudio)
@@ -728,7 +739,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val title = TextView(this).apply {
-            text = "[$kind] ${media.name} ($size)"
+            text = buildString {
+                media.sender?.takeIf { it.isNotBlank() }?.let { append("来自 $it · ") }
+                append("[$kind] ${media.name} ($size)")
+            }
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF1B5E20.toInt())
             typeface = Typeface.MONOSPACE
