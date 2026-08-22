@@ -48,25 +48,33 @@ struct Utf8LineBuffer {
         guard usable > 0 else { return "" }
         let slice = data.prefix(usable)
         let s = String(decoding: slice, as: UTF8.self)
-        data.removeFirst(usable)
+        // Rebuild contiguous Data so later 0-based scans stay valid.
+        if hold == 0 {
+            data.removeAll(keepingCapacity: true)
+        } else {
+            data = Data(data.suffix(hold))
+        }
         return s
     }
 
     /// How many trailing bytes form an incomplete UTF-8 character (0 if none).
     static func trailingIncompleteUTF8Count(_ data: Data) -> Int {
-        let n = data.count
+        // Copy to [UInt8]: Data after removeFirst/prefix may have startIndex != 0,
+        // and data[i] with i = count-1 then traps (EXC_BREAKPOINT).
+        let bytes = [UInt8](data)
+        let n = bytes.count
         guard n > 0 else { return 0 }
 
         var i = n - 1
         var cont = 0
-        while i >= 0 && cont < 3 && (data[i] & 0xC0) == 0x80 {
+        while i >= 0 && cont < 3 && (bytes[i] & 0xC0) == 0x80 {
             cont += 1
             i -= 1
         }
         if i < 0 {
             return 0
         }
-        let lead = data[i]
+        let lead = bytes[i]
         let need: Int
         if lead < 0x80 {
             return 0

@@ -27,7 +27,7 @@ targets:
       - SSHChat
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.qq.267267275.SSHChat
+        PRODUCT_BUNDLE_IDENTIFIER: com.stdlib.SSHChat
         PRODUCT_NAME: SSHChat
         MARKETING_VERSION: "0.3.6"
         CURRENT_PROJECT_VERSION: "19"
@@ -36,7 +36,8 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: JVKAWTMQZ4
+        # Leave empty: pick stdlib@foxmail.com Team in Xcode Signing & Capabilities.
+        DEVELOPMENT_TEAM: ""
         CODE_SIGN_IDENTITY: "Apple Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"

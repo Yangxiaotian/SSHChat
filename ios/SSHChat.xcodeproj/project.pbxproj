@@ -49,7 +49,7 @@
 		B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C90E177203159780DB095D76 /* SecureDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDownload.swift; sourceTree = "<group>"; };
 		CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInvite.swift; sourceTree = "<group>"; };
-		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
 		E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		F0CCD510639ECD134A68FF28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -157,7 +157,6 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					739AF9DBED3E5B04161507A4 = {
-						DevelopmentTeam = JVKAWTMQZ4;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -244,7 +243,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -269,7 +268,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
