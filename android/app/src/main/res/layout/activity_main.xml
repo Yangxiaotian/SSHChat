@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:fitsSystemWindows="true"
     android:background="#FFFFFF">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
 
     <!-- Sticky top banner (outside chat scroll). -->
     <LinearLayout
@@ -115,6 +119,22 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="从备份文件恢复密钥" />
+
+            <EditText
+                android:id="@+id/etHost"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="SSH 主机"
+                android:inputType="textUri|textNoSuggestions"
+                android:importantForAutofill="no" />
+
+            <EditText
+                android:id="@+id/etPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="SSH 端口"
+                android:inputType="number"
+                android:importantForAutofill="no" />
 
             <EditText
                 android:id="@+id/etUsername"
@@ -318,3 +338,42 @@
             android:textColor="#888888" />
     </LinearLayout>
 </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/voiceRecordingOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_voice_recording_panel"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingHorizontal="36dp"
+        android:paddingVertical="28dp"
+        android:visibility="gone"
+        android:elevation="12dp">
+
+        <ImageView
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:contentDescription="@null"
+            android:src="@drawable/ic_mic"
+            android:tint="#EF5350" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="正在录音"
+            android:textColor="#FFFFFF"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="松开手指发送"
+            android:textColor="#E0E0E0"
+            android:textSize="17sp" />
+    </LinearLayout>
+</FrameLayout>

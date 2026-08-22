@@ -136,7 +136,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         keys = DeviceKeyStore.getOrCreate(this)
-        binding.tvHost.text = "${BuildConfig.DEFAULT_HOST}:${BuildConfig.DEFAULT_PORT}"
+        binding.etHost.setText(ServerSettings.loadHost(this))
+        binding.etPort.setText(ServerSettings.loadPort(this).toString())
+        refreshHostLabel()
         refreshKeyUi()
 
         binding.btnCopyPubkey.setOnClickListener {
@@ -295,18 +297,28 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
+    private fun setVoiceRecordingUi(active: Boolean) {
+        binding.voiceRecordingOverlay.visibility = if (active) View.VISIBLE else View.GONE
+        if (active) {
+            binding.btnVoice.setColorFilter(0xFFC62828.toInt())
+            binding.btnVoice.contentDescription = "松开发送"
+            binding.tvStatus.text = "正在录音…"
+        } else {
+            binding.btnVoice.clearColorFilter()
+            binding.btnVoice.contentDescription = "按住说话"
+        }
+    }
+
     private fun startVoiceRecord() {
         try {
             val dir = File(cacheDir, "sshchat-voice").also { it.mkdirs() }
             val rec = VoiceRecorder(this, dir)
             rec.start()
             voiceRecorder = rec
-            binding.btnVoice.setColorFilter(0xFFC62828.toInt())
-            binding.btnVoice.contentDescription = "松开发送"
-            binding.tvStatus.text = "正在录音…"
-            binding.tvMediaHint.text = "松开手指发送"
+            setVoiceRecordingUi(true)
         } catch (e: Exception) {
             voiceRecorder = null
+            setVoiceRecordingUi(false)
             Toast.makeText(this, "无法录音: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
@@ -314,9 +326,7 @@ class MainActivity : AppCompatActivity() {
     private fun finishVoiceRecord(send: Boolean) {
         val rec = voiceRecorder ?: return
         voiceRecorder = null
-        binding.btnVoice.clearColorFilter()
-        binding.btnVoice.contentDescription = "按住说话"
-        binding.tvMediaHint.text = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 垃圾桶清屏"
+        setVoiceRecordingUi(false)
         if (!send) {
             rec.cancel()
             binding.tvStatus.text = "已取消录音"
@@ -503,6 +513,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun refreshHostLabel() {
+        val host = binding.etHost.text?.toString()?.trim().orEmpty()
+            .ifEmpty { BuildConfig.DEFAULT_HOST }
+        val port = ServerSettings.parsePort(binding.etPort.text?.toString())
+            ?: BuildConfig.DEFAULT_PORT
+        binding.tvHost.text = "$host:$port"
+    }
+
     private fun connect(clearChat: Boolean = true) {
         val user = binding.etUsername.text?.toString()?.trim().orEmpty()
         if (user.isEmpty()) {
@@ -510,6 +528,20 @@ class MainActivity : AppCompatActivity() {
             onConnectedOnce = null
             return
         }
+        val host = binding.etHost.text?.toString()?.trim().orEmpty()
+        if (host.isEmpty()) {
+            Toast.makeText(this, "请填写 SSH 主机", Toast.LENGTH_SHORT).show()
+            onConnectedOnce = null
+            return
+        }
+        val port = ServerSettings.parsePort(binding.etPort.text?.toString())
+        if (port == null) {
+            Toast.makeText(this, "SSH 端口必须是 1–65535 的数字", Toast.LENGTH_SHORT).show()
+            onConnectedOnce = null
+            return
+        }
+        ServerSettings.save(this, host, port)
+        refreshHostLabel()
         maybeAskNotifyPermission()
         client?.disconnect()
         client = null
@@ -519,8 +551,8 @@ class MainActivity : AppCompatActivity() {
         }
         val kp = DeviceKeyStore.toKeyPair(keys.privateSeed)
         val c = SshChatClient(
-            host = BuildConfig.DEFAULT_HOST,
-            port = BuildConfig.DEFAULT_PORT,
+            host = host,
+            port = port,
             username = user,
             keyPair = kp,
             onLine = { line -> runOnUiThread { handleIncoming(line) } },
@@ -582,8 +614,7 @@ class MainActivity : AppCompatActivity() {
         pendingUpload = null
         voiceRecorder?.cancel()
         voiceRecorder = null
-        binding.btnVoice.clearColorFilter()
-        binding.btnVoice.contentDescription = "按住说话"
+        setVoiceRecordingUi(false)
         SshKeepAliveService.stop(this)
         client?.disconnect()
         client = null
@@ -862,8 +893,15 @@ class MainActivity : AppCompatActivity() {
         if (!on) {
             binding.suggestScroll.visibility = View.GONE
             binding.suggestRow.removeAllViews()
-            val saved = getSharedPreferences("sshchat_ui", MODE_PRIVATE)
-                .getString("username", "")
+            val prefs = uiPrefs()
+            if (binding.etHost.text.isNullOrBlank()) {
+                binding.etHost.setText(ServerSettings.loadHost(this))
+            }
+            if (binding.etPort.text.isNullOrBlank()) {
+                binding.etPort.setText(ServerSettings.loadPort(this).toString())
+            }
+            refreshHostLabel()
+            val saved = prefs.getString("username", "")
             if (!saved.isNullOrEmpty() && binding.etUsername.text.isNullOrEmpty()) {
                 binding.etUsername.setText(saved)
             }

@@ -19,6 +19,8 @@ enum ChatEntry: Identifiable, Equatable {
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var username = ""
+    @Published var sshHost = ""
+    @Published var sshPort = ""
     @Published var draft = ""
     @Published var entries: [ChatEntry] = []
     @Published var status = "未连接"
@@ -66,11 +68,20 @@ final class ChatViewModel: ObservableObject {
 
     private static let chatFontKey = "chat_font_sp"
 
+    var serverDisplay: String {
+        let host = sshHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let h = host.isEmpty ? AppConfig.defaultHost : host
+        let p = AppConfig.parsePort(sshPort) ?? AppConfig.defaultPort
+        return "\(h):\(p)"
+    }
+
     init() {
         keys = DeviceKeyStore.getOrCreate()
         if let u = UserDefaults.standard.string(forKey: "sshchat.username"), !u.isEmpty {
             username = u
         }
+        sshHost = AppConfig.sshHost
+        sshPort = String(AppConfig.sshPort)
         if UserDefaults.standard.object(forKey: Self.chatFontKey) != nil {
             let saved = UserDefaults.standard.double(forKey: Self.chatFontKey)
             chatFont = min(22, max(7, CGFloat(saved)))
@@ -138,6 +149,18 @@ final class ChatViewModel: ObservableObject {
             onConnectedOnce = nil
             return
         }
+        let host = sshHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else {
+            toast = "请填写 SSH 主机"
+            onConnectedOnce = nil
+            return
+        }
+        guard let port = AppConfig.parsePort(sshPort) else {
+            toast = "SSH 端口必须是 1–65535 的数字"
+            onConnectedOnce = nil
+            return
+        }
+        AppConfig.saveServer(host: host, port: port)
         guard !busy else { return }
         busy = true
         if clearChat {
@@ -150,8 +173,8 @@ final class ChatViewModel: ObservableObject {
         Task {
             do {
                 try await session.connect(
-                    host: AppConfig.defaultHost,
-                    port: AppConfig.defaultPort,
+                    host: host,
+                    port: port,
                     username: user,
                     privateSeed: keys.privateSeed,
                     onLine: { [weak self] line in
@@ -658,6 +681,30 @@ struct ContentView: View {
                     }
             }
         }
+        .overlay {
+            if model.recording {
+                voiceRecordingOverlay
+            }
+        }
+    }
+
+    private var voiceRecordingOverlay: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.red)
+            Text("正在录音")
+                .font(.system(size: 24, weight: .semibold))
+            Text("松开手指发送")
+                .font(.system(size: 17))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 36)
+        .padding(.vertical, 28)
+        .background(.black.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .allowsHitTesting(false)
     }
 
     private var topBar: some View {
@@ -674,7 +721,7 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .fontWeight(.bold)
             }
-            Text(AppConfig.displayHost)
+            Text(model.serverDisplay)
                 .font(.system(size: 12))
                 .foregroundStyle(Color(red: 0.78, green: 0.90, blue: 0.79))
         }
@@ -699,6 +746,14 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
             Button("从备份文件恢复密钥") { model.openKeyImporter() }
                 .frame(maxWidth: .infinity)
+            TextField("SSH 主机", text: $model.sshHost)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .textFieldStyle(.roundedBorder)
+            TextField("SSH 端口", text: $model.sshPort)
+                .keyboardType(.numberPad)
+                .textFieldStyle(.roundedBorder)
             TextField("Linux 用户名", text: $model.username)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -831,7 +886,8 @@ struct ContentView: View {
                 onPressBegan: { model.voicePressBegan() },
                 onPressEnded: { send in model.voicePressEnded(send: send) }
             )
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
 
             iconBtn(system: "camera.fill", enabled: model.connected) {
                 model.openPhotoMenu()

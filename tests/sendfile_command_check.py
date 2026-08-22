@@ -216,4 +216,18 @@ try:
 finally:
     _fed.get_hub = _prev_get
 
+# 14. Same nick on two sessions: sender's other device is not a recipient
+alice_desktop = object()
+server.clients[alice_desktop] = {
+    "name": "alice",
+    "rooms": {"dev"},
+    "current_room": "dev",
+}
+server.rooms["dev"].add(alice_desktop)
+out = run("/sendfile #dev")
+t = latest()
+assert "alice" not in t.download_tokens, sorted(t.download_tokens.keys())
+assert "bob" in t.download_tokens and "carol" in t.download_tokens
+print("14. 同名双端在线：发送者的另一会话不会占收件名额")
+
 print("\n✅ /sendfile 参数解析全部通过")

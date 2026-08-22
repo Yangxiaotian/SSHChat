@@ -109,6 +109,11 @@ struct PushToTalkButton: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIButton {
         let button = UIButton(type: .system)
+        button.clipsToBounds = true
+        button.contentVerticalAlignment = .center
+        button.contentHorizontalAlignment = .center
+        button.setContentHuggingPriority(.required, for: .vertical)
+        button.setContentCompressionResistancePriority(.required, for: .vertical)
         button.addTarget(context.coordinator, action: #selector(Coordinator.touchDown), for: .touchDown)
         button.addTarget(context.coordinator, action: #selector(Coordinator.touchUpInside), for: .touchUpInside)
         button.addTarget(context.coordinator, action: #selector(Coordinator.touchUpOutside), for: .touchUpOutside)
@@ -123,13 +128,18 @@ struct PushToTalkButton: UIViewRepresentable {
         update(uiView)
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIButton, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 44, height: 44)
+    }
+
     private func update(_ button: UIButton) {
-        let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
-        let image = UIImage(systemName: "mic.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = active ? UIColor.systemRed : UIColor.label
-        button.backgroundColor = UIColor(white: 0.94, alpha: 1)
-        button.layer.cornerRadius = 8
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .regular))
+        config.baseForegroundColor = active ? .systemRed : .label
+        config.background.backgroundColor = UIColor(white: 0.94, alpha: 1)
+        config.background.cornerRadius = 8
+        config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+        button.configuration = config
         button.isEnabled = enabled || active
         button.alpha = (enabled || active) ? 1 : 0.35
     }

@@ -3972,10 +3972,19 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                 send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
                 return
             
-            # Get all users in room except sender
+            # Everyone in the room except the sender (by nick, not just this SSH
+            # session — same user may be logged in on phone + desktop).
+            sender_lower = sender.lower()
+            seen_names = {sender_lower}
             for c in rooms[room_name]:
-                if c != conn and c in clients:
-                    recipients.append(clients[c]["name"])
+                if c == conn or c not in clients:
+                    continue
+                nick = clients[c]["name"]
+                key = nick.lower()
+                if key in seen_names:
+                    continue
+                recipients.append(nick)
+                seen_names.add(key)
         
         # Federated peers in the same room (presence) also get a download slot.
         hub = federation.get_hub()

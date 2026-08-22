@@ -280,6 +280,26 @@ def _is_ssl_verify_error(exc: BaseException) -> bool:
     return "CERTIFICATE_VERIFY_FAILED" in msg or "SSL:" in msg
 
 
+def _http_error_message(exc: urllib.error.HTTPError) -> str:
+    """Prefer server JSON `error` over generic HTTPError text."""
+    try:
+        raw = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        raw = ""
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if isinstance(payload, dict):
+        msg = str(payload.get("error") or "").strip()
+        if msg:
+            return msg
+    snippet = raw.strip()[:200]
+    if snippet:
+        return snippet
+    return f"HTTP {exc.code}"
+
+
 def _urlopen_read(req: urllib.request.Request, timeout: float = 120) -> bytes:
     """urlopen with default verify, then unverified fallback (frozen macOS CA gaps)."""
     strategies: list[ssl.SSLContext | None] = [None]
@@ -293,6 +313,8 @@ def _urlopen_read(req: urllib.request.Request, timeout: float = 120) -> bytes:
                     return resp.read()
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                 return resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(_http_error_message(e)) from e
         except Exception as e:
             last = e
             if ctx is None and _is_ssl_verify_error(e):
@@ -373,6 +395,7 @@ def _is_secure_invite_noise(body: str) -> bool:
     if re.match(
         r"^\d+\.\s+("
         r"打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|"
+        r"图片|视频|PDF|确认后再|"
         r"Enter|Open|Click|Choose|Select|Upload|Download|Preview|"
         r"This page|Each recipient|The key|Verify"
         r")",
@@ -385,6 +408,10 @@ def _is_secure_invite_noise(body: str) -> bool:
     if t.startswith("经联邦节点"):
         return True
     if "图形客户端会折叠" in t:
+        return True
+    if "只能下载一次" in t or "存好之前别关" in t:
+        return True
+    if "网址和密钥都不同" in t or "此网址随后作废" in t:
         return True
     return False
 
@@ -512,15 +539,8 @@ def _http_json(
     )
     try:
         raw = _urlopen_read(req, timeout=60).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace")
-        try:
-            payload = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            payload = {}
-        if isinstance(payload, dict) and payload.get("error"):
-            raise RuntimeError(str(payload["error"])) from e
-        raise RuntimeError(f"HTTP {e.code}") from e
+    except RuntimeError:
+        raise
     try:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
@@ -1326,6 +1346,10 @@ def _parse_chat_line(line: str) -> tuple[str, str, str] | None:
         return m_room.group(1), m_room.group(2), m_room.group(3)
     m = _CHAT_LINE_RE.match(t)
     if not m:
+        # PTY line-wrap sometimes drops the opening "[" from "[+] …" join notices.
+        m_join = re.match(r"^\+?\] (.+)$", t)
+        if m_join:
+            return "", "+", m_join.group(1)
         all_matches = re.findall(r"\[([^\]]+)\] ([^\[]*)", t)
         if all_matches:
             sender, body = all_matches[-1]
@@ -2367,6 +2391,15 @@ class SSHChatGUI:
             return False
         url, key = m.group(1), m.group(2).upper()
         room = self._active_room
+        meta_snapshot = dict(self._pending_file_meta)
+        self._pending_file_meta = {}
+        sender = str(meta_snapshot.get("sender") or "").strip()
+        me = self.var_user.get().strip()
+        # Same nick on another device sent this file; that session already got
+        # a recipient slot — don't burn the one-time link on this GUI copy.
+        if sender and me and sender.lower() == me.lower():
+            self._set_status("已在其他设备发送，跳过自动下载")
+            return True
         self._set_status("正在接收文件…")
         self._alert_beep()
 
@@ -2379,7 +2412,9 @@ class SSHChatGUI:
                 err = str(e)
             self.root.after(
                 0,
-                lambda r=room, m=media, e=err: self._download_finished(r, m, e),
+                lambda r=room, m=media, e=err, meta=meta_snapshot: self._download_finished(
+                    r, m, e, meta
+                ),
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2390,16 +2425,18 @@ class SSHChatGUI:
         room: str,
         media: dict[str, Any] | None,
         err: str | None,
+        meta: dict[str, str] | None = None,
     ) -> None:
+        sender = str((meta or self._pending_file_meta).get("sender") or "").strip() or None
         if err or not media:
-            self._set_status(f"收文件失败: {err or 'unknown'}")
-            self._append_chat_line(
-                f"[*] 收文件失败: {err or 'unknown'}", local_sent=True
-            )
+            detail = err or "unknown"
+            if sender:
+                detail = f"{detail}（来自 {sender}）"
+            self._set_status(f"收文件失败: {detail}")
+            self._append_chat_line(f"[*] 收文件失败: {detail}", local_sent=True)
             return
         name = str(media.get("name") or "file")
         self._set_status(f"已接收: {name}")
-        sender = str(self._pending_file_meta.get("sender") or "").strip() or None
         self._pending_file_meta = {}
         if sender and isinstance(media, dict):
             media = dict(media)
