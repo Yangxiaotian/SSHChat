@@ -5913,7 +5913,8 @@ def handle_command(conn, payload: str) -> None:
 
     if cmd == "/help":
         for hline in i18n.help_lines(conn_locale(conn)):
-            send_line(conn, hline)
+            for part in library.wrap_output_lines(hline):
+                send_line(conn, part)
         return
 
     if cmd in ("/lang", "/language", "/locale"):
@@ -6036,7 +6037,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if not raw or raw.lower() == "help":
         send_line(conn, _ts(conn, "game_usage_header"))
         for ln in i18n.game_help_lines(conn_locale(conn)):
-            send_line(conn, ln + "\n")
+            for part in library.wrap_output_lines(ln + "\n"):
+                send_line(conn, part)
         with lock:
             enabled = _enabled_games_for_room_locked(room)
         send_line(

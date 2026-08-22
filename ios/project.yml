@@ -27,7 +27,7 @@ targets:
       - SSHChat
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: chat.ssh.SSHChat
+        PRODUCT_BUNDLE_IDENTIFIER: com.qq.267267275.SSHChat
         PRODUCT_NAME: SSHChat
         MARKETING_VERSION: "0.3.6"
         CURRENT_PROJECT_VERSION: "19"

@@ -862,6 +862,24 @@ def wrap_page_lines(text: str, width: int = LIBRARY_WRAP_WIDTH) -> list[str]:
     )
 
 
+def wrap_output_lines(line: str, max_bytes: int | None = None) -> list[str]:
+    """Split one outbound chat line for mobile SSH UTF-8 byte wrapping.
+
+    Many mobile terminals soft-wrap near ~80 UTF-8 bytes (not Unicode columns).
+    A mid-codepoint split drops the rest of the line or shows ``???``. Keep each
+    piece under the library byte budget; ``max_bytes<=0`` disables splitting.
+    """
+    budget = LIBRARY_WRAP_BYTES if max_bytes is None else int(max_bytes)
+    body = line[:-1] if line.endswith("\n") else line
+    if budget <= 0:
+        return [body + "\n"]
+    if not body:
+        return ["\n"]
+    if len(body.encode("utf-8")) <= budget:
+        return [body + "\n"]
+    return [part + "\n" for part in _wrap_page_lines_utf8_bytes(body, budget)]
+
+
 def _normalize_user(name: str) -> str:
     return (name or "").strip().lower()
 

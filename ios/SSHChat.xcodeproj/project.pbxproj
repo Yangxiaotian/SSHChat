@@ -17,6 +17,7 @@
 		6D8C2BDF171F8707B91D4BC1 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3103F546C3513D85EBDEAFC /* AppConfig.swift */; };
 		75099855702B2A4E70101994 /* WebInviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62D55F063B5A6E13A717437 /* WebInviteView.swift */; };
 		8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */; };
+		8391A408EA4A0149C68D4D66 /* Utf8LineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */; };
 		8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */; };
 		97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */; };
 		9996DD63FE8CB7193177B88A /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = B245092BF3D02215B8999CDE /* NIOSSH */; };
@@ -33,6 +34,7 @@
 /* Begin PBXFileReference section */
 		02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCompletions.swift; sourceTree = "<group>"; };
 		0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyNoise.swift; sourceTree = "<group>"; };
+		1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
 		22BD7B5CD5B7AD933D8031A2 /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
 		41AF976063059AD5181A7784 /* CameraPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPicker.swift; sourceTree = "<group>"; };
 		4659214F0C54010180B570ED /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -105,6 +107,7 @@
 				B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */,
 				64243685BD8B9E650897F969 /* SSHChatApp.swift */,
 				6F61DA43C55F21565952BCA3 /* SSHSession.swift */,
+				1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */,
 				E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */,
 				A62D55F063B5A6E13A717437 /* WebInviteView.swift */,
 			);
@@ -214,6 +217,7 @@
 				25648748AA6143FECF4EE327 /* SecureUpload.swift in Sources */,
 				9C35480F9106C8DDB6A7118F /* SendTarget.swift in Sources */,
 				D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */,
+				8391A408EA4A0149C68D4D66 /* Utf8LineBuffer.swift in Sources */,
 				8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */,
 				75099855702B2A4E70101994 /* WebInviteView.swift in Sources */,
 			);
@@ -240,7 +244,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.ssh.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -265,7 +269,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.ssh.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";

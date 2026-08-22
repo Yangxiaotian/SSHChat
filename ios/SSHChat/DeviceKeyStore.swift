@@ -6,7 +6,7 @@ import UIKit
 /// Ed25519 identity with Keychain + Documents backup (same file format as Android).
 enum DeviceKeyStore {
     static let durableName = "SSHChat-ed25519.identity"
-    private static let keychainService = "chat.ssh.SSHChat.identity"
+    private static let keychainService = "com.qq.267267275.SSHChat.identity"
     private static let keychainAccount = "ed25519"
 
     struct Keys {

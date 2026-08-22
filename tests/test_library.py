@@ -487,5 +487,24 @@ class TestLibraryIsolatedLoad(unittest.TestCase):
         self.assertIn("boom", str(ctx.exception))
 
 
+class TestWrapOutputLines(unittest.TestCase):
+    def test_splits_before_utf8_byte_budget(self) -> None:
+        # 30 CJK chars = 90 UTF-8 bytes; must split under default 78-byte budget.
+        line = "[*] " + ("测" * 30) + "\n"
+        parts = library.wrap_output_lines(line)
+        self.assertGreater(len(parts), 1)
+        joined = "".join(p.rstrip("\n") for p in parts)
+        self.assertEqual(joined, line.rstrip("\n"))
+        for part in parts:
+            self.assertLessEqual(
+                len(part.rstrip("\n").encode("utf-8")),
+                library.LIBRARY_WRAP_BYTES,
+            )
+
+    def test_short_line_unchanged(self) -> None:
+        line = "[*] short\n"
+        self.assertEqual(library.wrap_output_lines(line), [line])
+
+
 if __name__ == "__main__":
     unittest.main()

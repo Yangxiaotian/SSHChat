@@ -50,24 +50,19 @@ actor SSHSession {
                 try await client.withPTY(pty) { inbound, outbound in
                     await self?.storeOutbound(outbound)
                     await ready.resumeOnce(())
-                    var buf = ""
+                    // Decode UTF-8 across chunk boundaries (per-chunk String(buffer:)
+                    // turns a split 房 into two replacement chars / ??).
+                    var lines = Utf8LineBuffer()
                     for try await chunk in inbound {
                         switch chunk {
                         case .stdout(let bytes), .stderr(let bytes):
-                            buf += String(buffer: bytes)
-                            // PTY often uses \r\n or bare \r (same as Java BufferedReader.readLine).
-                            buf = buf
-                                .replacingOccurrences(of: "\r\n", with: "\n")
-                                .replacingOccurrences(of: "\r", with: "\n")
-                            while let range = buf.range(of: "\n") {
-                                let line = String(buf[..<range.lowerBound])
-                                buf.removeSubrange(..<range.upperBound)
+                            for line in lines.append(bytes) {
                                 Self.emitLine(line, onLine: onLine)
                             }
                         }
                     }
-                    if !buf.isEmpty {
-                        Self.emitLine(buf, onLine: onLine)
+                    if let rest = lines.finish() {
+                        Self.emitLine(rest, onLine: onLine)
                     }
                 }
                 onDisconnect(nil)

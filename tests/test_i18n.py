@@ -30,6 +30,24 @@ class I18nTests(unittest.TestCase):
         self.assertIn("/board", zh_text)
         self.assertIn("画板", zh_text)
 
+    def test_zh_help_wraps_under_mobile_utf8_byte_budget(self) -> None:
+        # Mobile SSH often soft-wraps near 80 UTF-8 bytes; mid-CJK splits truncate
+        # or show ???. Server uses library.wrap_output_lines for /help.
+        import library
+
+        budget = library.LIBRARY_WRAP_BYTES
+        self.assertGreater(budget, 0)
+        joined = []
+        for line in i18n.help_lines("zh"):
+            parts = library.wrap_output_lines(line)
+            self.assertTrue(parts)
+            for part in parts:
+                self.assertLessEqual(len(part.rstrip("\n").encode("utf-8")), budget)
+                joined.append(part)
+        text = "".join(joined)
+        self.assertIn("发件人会收到汇总提示", text)
+        self.assertIn("按昵称分组编号", text)
+
     def test_game_help_lines(self) -> None:
         en = i18n.game_help_lines("en")
         self.assertTrue(any("holdem" in line.lower() for line in en))
