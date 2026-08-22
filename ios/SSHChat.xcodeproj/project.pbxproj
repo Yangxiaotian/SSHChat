@@ -20,11 +20,13 @@
 		8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */; };
 		97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */; };
 		9996DD63FE8CB7193177B88A /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = B245092BF3D02215B8999CDE /* NIOSSH */; };
+		9C35480F9106C8DDB6A7118F /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92176ADAA13D9659017E1D65 /* SendTarget.swift */; };
 		9DDB3D80244E190346BBAE96 /* SecureInvite.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */; };
 		A144E0E8EA6E802EB015A427 /* SecureDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90E177203159780DB095D76 /* SecureDownload.swift */; };
 		B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4659214F0C54010180B570ED /* ContentView.swift */; };
 		B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41AF976063059AD5181A7784 /* CameraPicker.swift */; };
 		B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5382B5859F78E00B2C7A222 /* MediaMime.swift */; };
+		D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */; };
 		DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64243685BD8B9E650897F969 /* SSHChatApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -38,7 +40,9 @@
 		559396D782E192802F9A441C /* SecureUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureUpload.swift; sourceTree = "<group>"; };
 		64243685BD8B9E650897F969 /* SSHChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHChatApp.swift; sourceTree = "<group>"; };
 		6F61DA43C55F21565952BCA3 /* SSHSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHSession.swift; sourceTree = "<group>"; };
+		92176ADAA13D9659017E1D65 /* SendTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTarget.swift; sourceTree = "<group>"; };
 		A62D55F063B5A6E13A717437 /* WebInviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInviteView.swift; sourceTree = "<group>"; };
+		B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTargetPickerView.swift; sourceTree = "<group>"; };
 		B5382B5859F78E00B2C7A222 /* MediaMime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaMime.swift; sourceTree = "<group>"; };
 		B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C90E177203159780DB095D76 /* SecureDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDownload.swift; sourceTree = "<group>"; };
@@ -97,6 +101,8 @@
 				C90E177203159780DB095D76 /* SecureDownload.swift */,
 				CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */,
 				559396D782E192802F9A441C /* SecureUpload.swift */,
+				92176ADAA13D9659017E1D65 /* SendTarget.swift */,
+				B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */,
 				64243685BD8B9E650897F969 /* SSHChatApp.swift */,
 				6F61DA43C55F21565952BCA3 /* SSHSession.swift */,
 				E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */,
@@ -206,6 +212,8 @@
 				A144E0E8EA6E802EB015A427 /* SecureDownload.swift in Sources */,
 				9DDB3D80244E190346BBAE96 /* SecureInvite.swift in Sources */,
 				25648748AA6143FECF4EE327 /* SecureUpload.swift in Sources */,
+				9C35480F9106C8DDB6A7118F /* SendTarget.swift in Sources */,
+				D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */,
 				8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */,
 				75099855702B2A4E70101994 /* WebInviteView.swift in Sources */,
 			);
