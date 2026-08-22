@@ -1509,7 +1509,9 @@ class SSHChatGUI:
         self.log.tag_configure("meta", foreground="#7f8c8d")
         self.log.tag_configure("me", foreground="#2e7d32")
         self.log.tag_configure("peer", foreground="#1565c0")
-        self.log.tag_configure("system", foreground="#8e24aa")
+        # Match Electron: muted gray for [*] system lines (not bright purple).
+        self.log.tag_configure("system", foreground="#969696")
+        self.log.tag_configure("notice", foreground="#6a737d")
         self.log.tag_configure("xq_red", foreground="#c62828")
         self.log.tag_configure("xq_black", foreground="#263238")
         self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
@@ -1801,7 +1803,7 @@ class SSHChatGUI:
         prefix = f"来自 {sender} · " if sender else ""
         caption = f"{prefix}[{kind}] {name} ({self._format_file_size(size)})  "
         try:
-            self.log.insert(tk.END, caption, ("system",))
+            self.log.insert(tk.END, caption, ("notice",))
         except tk.TclError:
             return
 
@@ -1942,7 +1944,12 @@ class SSHChatGUI:
                 prefix += f"[#{room}] "
             me = self.var_user.get().strip()
             is_system_sender = sender in {"+", "-", "*", "!"}
-            role_tag = "system" if is_system_sender else ("me" if sender == me else "peer")
+            if local_sent and is_system_sender:
+                role_tag = "notice"
+            elif is_system_sender:
+                role_tag = "meta" if sender in {"+", "-", "!"} else "system"
+            else:
+                role_tag = "me" if sender == me else "peer"
             if not local_sent:
                 if role_tag == "peer":
                     self._alert_beep()
