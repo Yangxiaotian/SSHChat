@@ -1422,7 +1422,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                 self._send_html_error(403, errs["upload_used"], lang=lang)
                 return
             
-            if time.time() > transfer.upload_expires:
+            if (file_sharing.UPLOAD_TTL_MINUTES > 0 and transfer.upload_expires > 0
+                    and time.time() > transfer.upload_expires):
                 self._send_html_error(403, errs["upload_expired"], lang=lang)
                 return
             
@@ -1441,7 +1442,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                 self._send_html_error(403, errs["download_waiting"], lang=lang)
                 return
             
-            if time.time() > transfer.download_expires:
+            if (file_sharing.DOWNLOAD_TTL_MINUTES > 0 and transfer.download_expires > 0
+                    and time.time() > transfer.download_expires):
                 self._send_html_error(403, errs["download_expired"], lang=lang)
                 return
             

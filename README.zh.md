@@ -19,6 +19,7 @@
 
 - **可在 iPhone/iPad 的 iSH（Alpine）上部署聊天服务器**：`deploy.sh` 自动识别 `/ish`，默认关 Cloudflare、精简依赖、OpenRC 保活。说明见 **`DEPLOY-iSH.md`**。
 - 手机端只当 SSH **客户端**登录时，仍用 **`小白使用说明书-iSH.md`**。
+- 手机 **SSHChat App**（iOS / Android 原生客户端）用户请看 **`小白使用说明书-手机App.md`**。
 
 ## Update (2026-08 安全文件收发)
 

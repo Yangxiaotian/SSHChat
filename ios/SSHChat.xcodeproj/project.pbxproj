@@ -247,7 +247,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -272,7 +272,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";

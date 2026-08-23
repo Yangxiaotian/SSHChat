@@ -107,20 +107,28 @@ Are you sure you want to continue connecting (yes/no)?
 | 你想做的事 | 怎么做 |
 |------------|--------|
 | 看有哪些书 | `/library` 或 `/lib` |
+| 按书名找书（未打开书时） | `/lib find 关键词`（也可用 `/lib 查找 …`） |
 | 打开第 1 本 | `/lib open 1`（数字是书目里的序号） |
 | 下一页 | `/lib next` |
 | 上一页 | `/lib prev` |
 | 跳到第 N 页 | `/lib page 10` |
+| **在当前书里搜内容** | `/lib search 关键词`（也可用 `/lib 搜索 …`） |
 | 看我的书签 | `/lib bookmarks` |
 | 清掉某本书的书签 | `/lib reset 1` |
 | 结束阅读 | `/lib close`（书签仍保留） |
 
+### 查找 vs 搜索
+
+- **`/lib find`**：在**全部书目**里按书名、扩展名找书（还没打开任何书时用）。
+- **`/lib search`**：在**当前打开的书**里搜正文；会列出「第几页 + 片段」。若只找到 1 处，会自动跳到那一页；找到多处时，用 `/lib page 页码` 跳转。
+
 示例流程：
 
 ```text
-/lib
+/lib find 三国          ← 在书目里找书名含「三国」的书
 /lib open 1
-/lib next
+/lib search 刘备        ← 在当前书里搜「刘备」
+/lib page 5             ← 跳到第 5 页
 /lib next
 /lib close
 ```

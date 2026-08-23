@@ -31,7 +31,7 @@ import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any
 
 try:
@@ -86,6 +86,23 @@ _SENDFILE_FAIL_RE = re.compile(
     r"无效的房间名|你不在房间|房间\s+#\S+\s+不存在",
     re.I,
 )
+_NAMES_LINE_RE = re.compile(
+    r"^\[\*]\s+#([^\s(]+)\s+\(\d+\):\s*(.*)$",
+    re.I,
+)
+
+
+def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
+    t = line.strip()
+    m = _NAMES_LINE_RE.match(t)
+    if not m:
+        return None
+    room = m.group(1).strip()
+    tail = m.group(2).strip()
+    if not tail or tail.lower() == "(empty)":
+        return room, []
+    members = [x.strip() for x in tail.split(",") if x.strip()]
+    return room, members
 _SECURE_BANNER_START_RE = re.compile(
     r"^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)",
     re.I,
@@ -1495,6 +1512,11 @@ class SSHChatGUI:
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
         self._preview_win: ImagePreviewWindow | None = None
+        self._send_target_kind = "room"
+        self._send_target_value = ""
+        self._online_users: list[str] = []
+        self._recent_users: list[str] = []
+        self._expecting_names = False
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -1633,6 +1655,10 @@ class SSHChatGUI:
         ttk.Button(bot, text="发送", command=self._send_clicked).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        self.btn_send_target = ttk.Button(
+            bot, text=self._send_target_label(), command=self._show_send_target_picker
+        )
+        self.btn_send_target.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bot, text="发文件", command=self._pick_and_send_file).pack(
             side=tk.LEFT, padx=(8, 0)
         )
@@ -1641,7 +1667,7 @@ class SSHChatGUI:
         )
         hint = ttk.Label(
             self.root,
-            text="提示: Tab 补全；粘贴截图发文件；收到的图片会内联显示，其它文件可另存为",
+            text="提示: 「发送至」可选私聊/房间再发文件或聊天；Tab 补全；粘贴截图发文件",
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
@@ -1736,11 +1762,137 @@ class SSHChatGUI:
         self._room_unread[room] = 0
         self._refresh_room_list()
         self._render_active_room()
+        if self._send_target_kind == "room":
+            self._refresh_send_target_button()
         if send_switch and self._chan and not self._chan.closed:
             try:
                 self._chan_send_bytes((f"/switch {room}\n").encode("utf-8"))
             except Exception:
                 pass
+
+    def _send_target_label(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"私聊 {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"房间 #{self._send_target_value}"
+        return f"当前房间 #{self._active_room}"
+
+    def _sendfile_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/sendfile {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/sendfile #{self._send_target_value}"
+        return "/sendfile"
+
+    def _outbound_text(self, draft: str) -> str:
+        t = draft.strip()
+        if t.startswith("/"):
+            return draft
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/msg {self._send_target_value} {draft}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/msg #{self._send_target_value} {draft}"
+        return draft
+
+    def _set_send_target(self, kind: str, value: str = "") -> None:
+        self._send_target_kind = kind
+        self._send_target_value = value.strip()
+        if kind == "user" and self._send_target_value:
+            self._remember_recent_user(self._send_target_value)
+        self._refresh_send_target_button()
+        self._save_profile(warn_on_error=False)
+
+    def _remember_recent_user(self, nick: str) -> None:
+        n = nick.strip()
+        if not n:
+            return
+        me = self.var_user.get().strip()
+        if me and n.lower() == me.lower():
+            return
+        self._recent_users = [n] + [x for x in self._recent_users if x.lower() != n.lower()]
+        self._recent_users = self._recent_users[:12]
+
+    def _refresh_send_target_button(self) -> None:
+        if hasattr(self, "btn_send_target"):
+            self.btn_send_target.configure(text=self._send_target_label())
+
+    def _refresh_online_users(self) -> None:
+        if not self._chan or self._chan.closed:
+            return
+        self._expecting_names = True
+        try:
+            self._chan_send_bytes(b"/names\n")
+        except Exception as e:
+            self._expecting_names = False
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _show_send_target_picker(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("发送至")
+        win.transient(self.root)
+        win.grab_set()
+
+        items: list[tuple[str, str, str]] = []
+        items.append((f"当前房间 #{self._active_room}", "room", ""))
+
+        me = self.var_user.get().strip().lower()
+        seen: set[str] = set()
+
+        def add_user(nick: str) -> None:
+            n = nick.strip()
+            if not n or (me and n.lower() == me):
+                return
+            key = n.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            items.append((f"私聊 {n}", "user", n))
+
+        for u in self._online_users:
+            add_user(u)
+        for u in self._recent_users:
+            add_user(u)
+
+        lb = tk.Listbox(win, width=44, height=min(14, max(4, len(items) + 2)))
+        lb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        for label, _, _ in items:
+            lb.insert(tk.END, label)
+
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def apply_choice() -> None:
+            sel = lb.curselection()
+            if not sel:
+                return
+            _, kind, value = items[sel[0]]
+            self._set_send_target(kind, value)
+            win.destroy()
+
+        def pick_named_room() -> None:
+            r = simpledialog.askstring("发送到房间", "房间名（不含 #）:", parent=win)
+            if r:
+                room = r.strip().lstrip("#")
+                if room:
+                    self._set_send_target("named_room", room)
+                    win.destroy()
+
+        def refresh_online() -> None:
+            self._refresh_online_users()
+            self._set_status("正在刷新在线用户…")
+            win.destroy()
+
+        ttk.Button(btn_row, text="确定", command=apply_choice).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="刷新在线", command=refresh_online).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        lb.bind("<Double-Button-1>", lambda _e: apply_choice())
+        if items:
+            lb.selection_set(0)
 
     def _on_room_selected(self, _event=None) -> None:
         if not self.room_list.curselection():
@@ -2010,7 +2162,23 @@ class SSHChatGUI:
         t = cleaned
         if not t:
             return
+        if self._expecting_names:
+            names = _parse_names_line(t)
+            if names is not None:
+                _room, members = names
+                self._online_users = members
+                self._expecting_names = False
+                self._refresh_send_target_button()
+                return
         parsed = _parse_chat_line(t)
+        if self._expecting_names and parsed and parsed[1] == "*":
+            names = _parse_names_line(f"[*] {parsed[2]}")
+            if names is not None:
+                _room, members = names
+                self._online_users = members
+                self._expecting_names = False
+                self._refresh_send_target_button()
+                return
         if (
             parsed
             and parsed[0] == ""
@@ -2091,6 +2259,17 @@ class SSHChatGUI:
             self.var_port.set(str(port))
         if isinstance(cfg.get("user"), str):
             self.var_user.set(cfg["user"])
+        kind = cfg.get("send_target_kind")
+        if isinstance(kind, str) and kind in ("room", "user", "named_room"):
+            self._send_target_kind = kind
+            value = cfg.get("send_target_value")
+            self._send_target_value = str(value).strip() if value else ""
+        recent = cfg.get("send_target_recent")
+        if isinstance(recent, list):
+            self._recent_users = [
+                str(x).strip() for x in recent if str(x).strip()
+            ][:12]
+        self._refresh_send_target_button()
 
     def _collect_profile_dict(self) -> dict[str, Any]:
         user = self.var_user.get().strip()
@@ -2116,6 +2295,9 @@ class SSHChatGUI:
         existing = load_client_config(self.config_path) or {}
         if isinstance(existing.get("extra_ssh_options"), list):
             data["extra_ssh_options"] = existing["extra_ssh_options"]
+        data["send_target_kind"] = self._send_target_kind
+        data["send_target_value"] = self._send_target_value
+        data["send_target_recent"] = self._recent_users[:12]
         return data
 
     def _save_profile(self, *, warn_on_error: bool = True) -> bool:
@@ -2250,6 +2432,10 @@ class SSHChatGUI:
         self._reader_thread = threading.Thread(target=self._reader_loop, args=(sid,), daemon=True)
         self._reader_thread.start()
         self._schedule_drain()
+        self._online_users = []
+        self._expecting_names = False
+        self._refresh_send_target_button()
+        self.root.after(500, self._refresh_online_users)
 
     def _connect_failed(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
@@ -2398,15 +2584,16 @@ class SSHChatGUI:
             "consumed": False,
             "started": time.time(),
         }
+        cmd = self._sendfile_command()
         self._set_status(f"等待上传通道: {resolved.name}")
         self._append_chat_line(
-            f"[*] 正在发文件: {resolved.name}（/sendfile）", local_sent=True
+            f"[*] 正在发文件: {resolved.name}（{cmd}）", local_sent=True
         )
         self._paste_timer = self.root.after(
             int(_PASTE_UPLOAD_TIMEOUT_S * 1000), self._on_paste_timeout
         )
         try:
-            self._chan_send_bytes(b"/sendfile\n")
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:
             self._fail_paste(str(e))
 
@@ -2754,12 +2941,13 @@ class SSHChatGUI:
                         self._active_room = self._rooms_order[0]
                     self._refresh_room_list()
                     self._render_active_room()
+            outbound = self._outbound_text(line)
             # Slash commands have no [user]-prefixed broadcast; show a local hint.
             # Plain messages rely on the server broadcast (which the server also
             # delivers back to us) to render exactly once.
-            if line.startswith("/"):
-                self._append_chat_line(f"[*] {line}", local_sent=True)
-            self._chan_send_bytes((line + "\n").encode("utf-8"))
+            if outbound.startswith("/"):
+                self._append_chat_line(f"[*] {outbound}", local_sent=True)
+            self._chan_send_bytes((outbound + "\n").encode("utf-8"))
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
             self._disconnect()
@@ -2799,13 +2987,18 @@ class SSHChatGUI:
 
         self.btn_connect.configure(state=tk.NORMAL)
         self.btn_disconnect.configure(state=tk.DISABLED)
+        self._online_users = []
+        self._expecting_names = False
         if clear_log:
             self._rooms_order = ["default"]
             self._active_room = "default"
             self._room_unread = {"default": 0}
             self._room_history = {"default": []}
+            self._send_target_kind = "room"
+            self._send_target_value = ""
             self._refresh_room_list()
             self._render_active_room()
+        self._refresh_send_target_button()
 
     def _on_close(self) -> None:
         self._disconnect(clear_log=False)
