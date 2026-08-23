@@ -15,9 +15,11 @@ struct Utf8LineBuffer {
             pending.append(contentsOf: bytes)
         }
         text.append(Self.takeCompleteUTF8(from: &pending))
+        // PTY / prompt_toolkit uses bare \r for same-line redraws. Treating \r as \n
+        // fabricated empty chat rows and double-fired alerts. Only real \n ends a line.
         text = text
             .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\r", with: "")
         var lines: [String] = []
         while let range = text.range(of: "\n") {
             lines.append(String(text[..<range.lowerBound]))
@@ -34,7 +36,7 @@ struct Utf8LineBuffer {
         }
         text = text
             .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\r", with: "")
         let rest = text
         text = ""
         return rest.isEmpty ? nil : rest

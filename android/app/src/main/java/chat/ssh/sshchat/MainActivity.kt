@@ -156,18 +156,41 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnConnect.setOnClickListener { connect() }
-        binding.btnDisconnect.setOnClickListener { confirmDisconnect() }
-        binding.btnSend.setOnClickListener { send() }
-        binding.btnPhoto.setOnClickListener { showPhotoMenu() }
+        binding.btnDisconnect.setOnClickListener {
+            hidePlusPanel()
+            confirmDisconnect()
+        }
+        binding.btnSend.setOnClickListener {
+            hidePlusPanel()
+            send()
+        }
+        binding.btnPlus.setOnClickListener { togglePlusPanel() }
+        binding.btnPhoto.setOnClickListener {
+            hidePlusPanel()
+            showPhotoMenu()
+        }
         binding.btnPhoto.setOnLongClickListener {
+            hidePlusPanel()
             ensureCameraThen { launchVideo() }
             true
         }
-        binding.btnFile.setOnClickListener { pickAndSendFile() }
-        binding.btnCanvas.setOnClickListener { startCanvas() }
-        binding.btnClear.setOnClickListener { clearScreen(announce = true) }
+        binding.btnFile.setOnClickListener {
+            hidePlusPanel()
+            pickAndSendFile()
+        }
+        binding.btnCanvas.setOnClickListener {
+            hidePlusPanel()
+            startCanvas()
+        }
+        binding.btnClear.setOnClickListener {
+            hidePlusPanel()
+            clearScreen(announce = true)
+        }
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
+        binding.etDraft.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) hidePlusPanel()
+        }
         setupVoiceButton()
         sendTarget = SendTargetStore.loadTarget(this)
         refreshSendTargetButton()
@@ -675,6 +698,15 @@ class MainActivity : AppCompatActivity() {
         }
         // Don't local-echo: server broadcast is the source of truth (same as desktop GUI).
         val outbound = SendTarget.outboundText(sendTarget, text)
+        val trimmed = text.trim()
+        val bodyForEcho = when {
+            trimmed.lowercase().startsWith("/msg ") -> {
+                val parts = trimmed.split(Regex("""\s+"""), limit = 3)
+                if (parts.size >= 3) parts[2] else trimmed
+            }
+            else -> trimmed
+        }
+        MessageAlert.noteOutbound(bodyForEcho)
         client?.send(outbound)
     }
 
@@ -805,6 +837,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         ChatLineParsers.parsePm(stripped)?.let { pm ->
+            MessageAlert.playIfNeeded(this, stripped, binding.etUsername.text?.toString().orEmpty())
             appendPmLine(pm.from, pm.body)
             return
         }
@@ -812,7 +845,15 @@ class MainActivity : AppCompatActivity() {
         val open = SecureInvite.parseGuiOpen(stripped)
         if (open != null) {
             when (open.kind) {
-                SecureInvite.Kind.DOWNLOAD -> startDownload(open.url, open.key, pendingFileMeta.sender)
+                SecureInvite.Kind.DOWNLOAD -> {
+                    val from = pendingFileMeta.sender
+                    val me = binding.etUsername.text?.toString()?.trim().orEmpty()
+                    val ownCopy = !from.isNullOrBlank() && me.isNotEmpty() && from.equals(me, ignoreCase = true)
+                    if (!ownCopy) {
+                        MessageAlert.play(this)
+                    }
+                    startDownload(open.url, open.key, from)
+                }
                 SecureInvite.Kind.CANVAS -> {
                     appendLine("[*] 打开共享画布…")
                     startActivity(WebInviteActivity.canvas(this, open.url, open.key))
@@ -839,6 +880,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (SecureInvite.isInviteNoise(stripped)) return
+        MessageAlert.playIfNeeded(this, stripped, binding.etUsername.text?.toString().orEmpty())
         appendLine(stripped)
     }
 
@@ -1053,12 +1095,29 @@ class MainActivity : AppCompatActivity() {
         else -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
     }
 
+    private fun togglePlusPanel() {
+        if (!binding.etDraft.isEnabled) return
+        val open = binding.plusPanel.visibility != View.VISIBLE
+        binding.plusPanel.visibility = if (open) View.VISIBLE else View.GONE
+        binding.btnPlus.setImageResource(
+            if (open) android.R.drawable.ic_menu_close_clear_cancel
+            else android.R.drawable.ic_input_add,
+        )
+        if (open) binding.etDraft.clearFocus()
+    }
+
+    private fun hidePlusPanel() {
+        binding.plusPanel.visibility = View.GONE
+        binding.btnPlus.setImageResource(android.R.drawable.ic_input_add)
+    }
+
     private fun setConnected(on: Boolean) {
         binding.btnConnect.isEnabled = !on
         binding.btnDisconnect.isEnabled = on
         binding.etDraft.isEnabled = on
         binding.btnSend.isEnabled = on
         binding.btnSendTarget.isEnabled = on
+        binding.btnPlus.isEnabled = on
         binding.btnPhoto.isEnabled = on
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
@@ -1067,6 +1126,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
         val iconAlpha = if (on) 1f else 0.35f
+        binding.btnPlus.alpha = iconAlpha
         binding.btnPhoto.alpha = iconAlpha
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
@@ -1074,6 +1134,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {
+            hidePlusPanel()
             binding.suggestScroll.visibility = View.GONE
             binding.suggestRow.removeAllViews()
             val prefs = uiPrefs()

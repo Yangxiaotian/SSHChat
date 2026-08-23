@@ -151,4 +151,136 @@ enum ChatLineParsers {
         else { return nil }
         return PmLine(from: String(t[fromR]), body: String(t[bodyR]))
     }
+
+    // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
+    // Body separator is \\s+ so odd PTY spacing still matches.
+    private static let roomChat = try! NSRegularExpression(
+        pattern: #"^\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$"#
+    )
+    private static let plainChat = try! NSRegularExpression(
+        pattern: #"^\[([^\]]+)]\s+(.*)$"#
+    )
+    /// Non-anchored: last `[#room] [nick] body` in a noisy PTY line.
+    private static let roomChatLoose = try! NSRegularExpression(
+        pattern: #"\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$"#
+    )
+    private static let timePrefix = try! NSRegularExpression(
+        pattern: #"^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?))\s+"#
+    )
+    private static let leadingGarbageScalars = CharacterSet(charactersIn: "\u{FFFD}\u{25A1}\u{FEFF}\u{00A0}")
+        .union(.whitespacesAndNewlines)
+    private static let systemSenders: Set<String> = ["+", "-", "*", "!"]
+    /// Non-user bracket tags that must never chime (e.g. command acks).
+    private static let ignoredSenders: Set<String> = [
+        "OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT",
+    ]
+
+    /// Strip local clock / prompt prefixes before parsing chat.
+    static func normalizeForParse(_ line: String) -> String {
+        var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = t.unicodeScalars.first, leadingGarbageScalars.contains(first) {
+            t = String(t.unicodeScalars.dropFirst())
+        }
+        while true {
+            let range = NSRange(t.startIndex..., in: t)
+            guard let m = timePrefix.firstMatch(in: t, range: range),
+                  let r = Range(m.range, in: t)
+            else { break }
+            t = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        if t.hasPrefix(">") {
+            t = String(t.drop(while: { $0 == ">" || $0 == " " }))
+        }
+        return t
+    }
+
+    struct ChatLine {
+        let room: String?
+        let sender: String
+        let body: String
+    }
+
+    static func parseChat(_ line: String) -> ChatLine? {
+        let t = normalizeForParse(line)
+        let range = NSRange(t.startIndex..., in: t)
+        if let m = roomChat.firstMatch(in: t, range: range),
+           let roomR = Range(m.range(at: 1), in: t),
+           let senderR = Range(m.range(at: 2), in: t),
+           let bodyR = Range(m.range(at: 3), in: t)
+        {
+            return ChatLine(room: String(t[roomR]), sender: String(t[senderR]), body: String(t[bodyR]))
+        }
+        if let m = plainChat.firstMatch(in: t, range: range),
+           let senderR = Range(m.range(at: 1), in: t),
+           let bodyR = Range(m.range(at: 2), in: t)
+        {
+            let sender = String(t[senderR])
+            // Avoid treating "[PM from x] …" as a plain chat sender.
+            if sender.lowercased().hasPrefix("pm from ") { return nil }
+            return ChatLine(room: nil, sender: sender, body: String(t[bodyR]))
+        }
+        // PTY sometimes leaves junk before the real chat brackets — take the last pair.
+        if let m = roomChatLoose.firstMatch(in: t, range: range),
+           let roomR = Range(m.range(at: 1), in: t),
+           let senderR = Range(m.range(at: 2), in: t),
+           let bodyR = Range(m.range(at: 3), in: t)
+        {
+            return ChatLine(room: String(t[roomR]), sender: String(t[senderR]), body: String(t[bodyR]))
+        }
+        return nil
+    }
+
+    /// Whether an incoming line should trigger a receive chime (peer / PM / join-leave).
+    static func shouldAlert(
+        _ line: String,
+        myName: String,
+        recentOutboundBody: String = "",
+        recentOutboundAt: TimeInterval = 0
+    ) -> Bool {
+        let t = normalizeForParse(line)
+        if t.isEmpty { return false }
+        if parsePm(t) != nil { return true }
+
+        guard let chat = parseChat(t) else {
+            let lower = t.lowercased()
+            return lower.contains(" joined ") || lower.contains(" left ")
+        }
+        var sender = chat.sender
+        var body = chat.body
+        // If a leftover clock was parsed as sender, the real chat is in the body.
+        if sender.range(of: #"^\d{1,2}:\d{2}"#, options: .regularExpression) != nil {
+            guard let nested = parseChat(body) else { return false }
+            sender = nested.sender
+            body = nested.body
+        }
+        // If `[#room]` was eaten as plain sender (spacing quirk), body is `[nick] text`.
+        if sender.hasPrefix("#") {
+            guard let nested = parseChat(body) else { return false }
+            sender = nested.sender
+            body = nested.body
+        }
+        if ignoredSenders.contains(sender.uppercased()) { return false }
+        if systemSenders.contains(sender) {
+            if sender == "+" || sender == "-" { return true }
+            if sender == "!" {
+                let lower = body.lowercased()
+                return lower.contains(" joined ") || lower.contains(" left ")
+            }
+            return false
+        }
+        let me = myName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !me.isEmpty, sender.caseInsensitiveCompare(me) == .orderedSame {
+            return false
+        }
+        // Suppress exact echo of what we just sent (do NOT use hasSuffix — short Chinese
+        // words like "好" would suppress peer "你好").
+        let recent = recentOutboundBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !recent.isEmpty,
+           Date().timeIntervalSince1970 - recentOutboundAt < 4,
+           body == recent
+        {
+            return false
+        }
+        return true
+    }
 }

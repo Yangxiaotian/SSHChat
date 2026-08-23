@@ -207,9 +207,9 @@ final class ChatViewModel: ObservableObject {
                     port: port,
                     username: user,
                     privateSeed: keys.privateSeed,
-                    onLine: { [weak self] line in
+                    onLine: { [weak self] line, serverBell in
                         Task { @MainActor in
-                            self?.handleIncoming(line)
+                            self?.handleIncoming(line, serverBell: serverBell)
                         }
                     },
                     onStatus: { [weak self] s in
@@ -287,6 +287,20 @@ final class ChatViewModel: ObservableObject {
         Task {
             do {
                 let outbound = SendTarget.outboundText(target: sendTarget, draft: text)
+                // Remember plain chat body so our server echo does not chime.
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let bodyForEcho: String = {
+                    if trimmed.lowercased().hasPrefix("/msg ") {
+                        let parts = trimmed.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+                        if parts.count >= 3 { return String(parts[2]) }
+                    }
+                    // When sendTarget is .user, outbound becomes "/msg nick body" but echo body is still draft.
+                    if case .user(_) = sendTarget, !trimmed.hasPrefix("/") {
+                        return trimmed
+                    }
+                    return trimmed
+                }()
+                MessageAlert.noteOutbound(body: bodyForEcho)
                 try await session.send(outbound)
             } catch {
                 status = "发送失败：\(error.localizedDescription)"
@@ -510,7 +524,7 @@ final class ChatViewModel: ObservableObject {
         ensureConnectedThen { [weak self] in self?.beginSendFile(file) }
     }
 
-    private func handleIncoming(_ line: String) {
+    private func handleIncoming(_ line: String, serverBell: Bool = false) {
         if PtyNoise.shouldDrop(line) { return }
         let stripped = ansiClear.stringByReplacingMatches(
             in: line,
@@ -518,6 +532,10 @@ final class ChatViewModel: ObservableObject {
             withTemplate: ""
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         if stripped.isEmpty { return }
+        // Ignore invisible-only / prompt-redraw leftovers so they don't show as blank bubbles.
+        if stripped.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) || $0.properties.isDefaultIgnorableCodePoint }) {
+            return
+        }
 
         let clearRange = NSRange(stripped.startIndex..., in: stripped)
         if screenCleared.firstMatch(in: stripped, range: clearRange) != nil
@@ -540,6 +558,7 @@ final class ChatViewModel: ObservableObject {
             return
         }
         if let pm = ChatLineParsers.parsePm(stripped) {
+            MessageAlert.playIfNeeded(for: stripped, myName: username, serverBell: serverBell)
             appendPm(from: pm.from, body: pm.body)
             return
         }
@@ -551,6 +570,13 @@ final class ChatViewModel: ObservableObject {
             case .download:
                 let from = pendingFileMeta.sender
                 pendingFileMeta.reset()
+                let me = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                let sender = (from ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let ownCopy = !sender.isEmpty && !me.isEmpty
+                    && sender.caseInsensitiveCompare(me) == .orderedSame
+                if !ownCopy {
+                    MessageAlert.play()
+                }
                 startDownload(url: open.url, key: open.key, sender: from)
             case .canvas:
                 appendText("[*] 打开共享画布…")
@@ -578,6 +604,7 @@ final class ChatViewModel: ObservableObject {
 
         SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
         if SecureInvite.isInviteNoise(stripped) { return }
+        MessageAlert.playIfNeeded(for: stripped, myName: username, serverBell: serverBell)
         appendText(stripped)
     }
 
@@ -672,6 +699,7 @@ struct ContentView: View {
     @StateObject private var model = ChatViewModel()
     @FocusState private var draftFocused: Bool
     @State private var showDisconnectConfirm = false
+    @State private var showPlusPanel = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -698,13 +726,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 suggestRow
-                draftRow
-                actionRow
-                Text(model.mediaHint)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color(white: 0.53))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 2)
+                composerSection
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -1010,71 +1032,136 @@ struct ContentView: View {
         .padding(.top, 4)
     }
 
-    private var draftRow: some View {
-        TextField("消息或 /命令（点候选补全）", text: $model.draft)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .textFieldStyle(.roundedBorder)
-            .focused($draftFocused)
-            .disabled(!model.connected)
-            .onChange(of: model.draft) { _, _ in model.refreshSuggestions() }
-            .onSubmit { model.send() }
+    private var composerSection: some View {
+        VStack(spacing: 8) {
+            if showPlusPanel {
+                plusPanel
+            }
+            HStack(spacing: 8) {
+                Button {
+                    draftFocused = false
+                    showPlusPanel.toggle()
+                } label: {
+                    Image(systemName: showPlusPanel ? "xmark" : "plus")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                        .frame(width: 40, height: 40)
+                        .background(Color(white: 0.92))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.connected)
+                .opacity(model.connected ? 1 : 0.35)
+
+                TextField("消息或 /命令", text: $model.draft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(white: 0.95))
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .focused($draftFocused)
+                    .disabled(!model.connected)
+                    .onChange(of: model.draft) { _, _ in model.refreshSuggestions() }
+                    .onSubmit { model.send() }
+                    .onChange(of: draftFocused) { _, focused in
+                        if focused { showPlusPanel = false }
+                    }
+
+                Button("/") { model.insertSlash() }
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 36, height: 40)
+                    .disabled(!model.connected)
+
+                Button("Tab") { model.applyTab() }
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 40, height: 40)
+                    .disabled(!model.connected)
+
+                Button("发送") {
+                    showPlusPanel = false
+                    model.send()
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                .background(model.connected ? Color(red: 0.106, green: 0.369, blue: 0.125) : Color(white: 0.8))
+                .foregroundStyle(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .disabled(!model.connected)
+            }
             .padding(.top, 6)
+        }
     }
 
-    private var actionRow: some View {
-        HStack(spacing: 4) {
-            PushToTalkButton(
-                active: model.recording,
-                enabled: model.connected,
-                onPressBegan: { model.voicePressBegan() },
-                onPressEnded: { send in model.voicePressEnded(send: send) }
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 44)
-
-            iconBtn(system: "camera.fill", enabled: model.connected) {
+    private var plusPanel: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 14) {
+            VStack(spacing: 6) {
+                PushToTalkButton(
+                    active: model.recording,
+                    enabled: model.connected,
+                    onPressBegan: { model.voicePressBegan() },
+                    onPressEnded: { send in model.voicePressEnded(send: send) }
+                )
+                .frame(width: 56, height: 56)
+                Text("语音")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 0.35))
+            }
+            plusCell(title: "拍照", system: "camera.fill") {
+                showPlusPanel = false
                 model.openPhotoMenu()
             }
-
-            iconBtn(system: "folder.fill", enabled: model.connected) { model.pickAndSendFile() }
-            iconBtn(system: "paintbrush.pointed.fill", enabled: model.connected) { model.startCanvas() }
-            iconBtn(system: "trash", enabled: true) { model.clearScreen(announce: true) }
-
-            Button("/") { model.insertSlash() }
-                .font(.system(size: 18, weight: .bold))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .disabled(!model.connected)
-            Button("Tab") { model.applyTab() }
-                .font(.system(size: 12))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .disabled(!model.connected)
-            Button("发送") { model.send() }
-                .font(.system(size: 12))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .disabled(!model.connected)
-            Button("断开") { showDisconnectConfirm = true }
-                .font(.system(size: 12))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .disabled(!model.connected)
+            plusCell(title: "文件", system: "folder.fill") {
+                showPlusPanel = false
+                model.pickAndSendFile()
+            }
+            plusCell(title: "画板", system: "paintbrush.pointed.fill") {
+                showPlusPanel = false
+                model.startCanvas()
+            }
+            plusCell(title: "清屏", system: "trash", alwaysEnabled: true) {
+                showPlusPanel = false
+                model.clearScreen(announce: true)
+            }
+            plusCell(title: "断开", system: "phone.down.fill") {
+                showPlusPanel = false
+                showDisconnectConfirm = true
+            }
         }
-        .padding(.top, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 12)
+        .background(Color(white: 0.96))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.top, 6)
     }
 
-    private func iconBtn(system: String, active: Bool = false, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 18))
-                .foregroundStyle(active ? Color.red : Color.primary)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .background(Color(white: 0.94))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .opacity(enabled ? 1 : 0.35)
+    private func plusCell(
+        title: String,
+        system: String,
+        alwaysEnabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        let enabled = alwaysEnabled || model.connected
+        return VStack(spacing: 6) {
+            Button(action: action) {
+                Image(systemName: system)
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 56, height: 56)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .buttonStyle(.plain)
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.35)
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(Color(white: 0.35))
         }
-        .disabled(!enabled && !active)
-        .buttonStyle(.plain)
     }
 }
+
 
 #Preview {
     ContentView()

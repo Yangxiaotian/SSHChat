@@ -15,7 +15,7 @@ actor SSHSession {
         port: Int,
         username: String,
         privateSeed: Data,
-        onLine: @escaping @Sendable (String) -> Void,
+        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onDisconnect: @escaping @Sendable (String?) -> Void
     ) async throws {
@@ -104,13 +104,36 @@ actor SSHSession {
         outbound = writer
     }
 
-    private static func emitLine(_ raw: String, onLine: @escaping @Sendable (String) -> Void) {
-        // Clear CSI alone becomes empty after strip — drop it (do NOT wipe the chat UI).
-        // Only the textual "[*] Screen cleared." ack should clear the transcript.
-        let cleaned = cleanLine(raw)
-        if !cleaned.isEmpty {
-            onLine(cleaned)
+    private static func emitLine(
+        _ raw: String,
+        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void
+    ) {
+        // OSC / title sequences are BEL-terminated (`ESC ] … BEL`). Strip those first so
+        // their BEL is not mistaken for client.py's peer-chat alert bell.
+        let withoutOSC = stripOSC(raw)
+        let serverBell = withoutOSC.contains("\u{0007}")
+        let cleaned = cleanLine(withoutOSC)
+        guard hasVisibleContent(cleaned) else { return }
+        onLine(cleaned, serverBell)
+    }
+
+    /// Remove ESC] … BEL (and ESC] … ST) operating-system commands.
+    private static func stripOSC(_ raw: String) -> String {
+        var s = raw
+        if let re = try? NSRegularExpression(pattern: #"\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)"#) {
+            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
         }
+        return s
+    }
+
+    private static func hasVisibleContent(_ s: String) -> Bool {
+        // Need a real chat/system marker or a letter/digit/CJK — not a lone "?" from mangled CSI.
+        if s.contains("["), s.contains("]") { return true }
+        for ch in s where !ch.isWhitespace && !ch.isNewline {
+            if ch.isLetter || ch.isNumber { return true }
+            if ch.unicodeScalars.contains(where: { $0.value > 0x7F }) { return true }
+        }
+        return false
     }
 
     static func cleanLine(_ raw: String) -> String {

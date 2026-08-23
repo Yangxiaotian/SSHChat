@@ -25,6 +25,7 @@
 		9DDB3D80244E190346BBAE96 /* SecureInvite.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */; };
 		A144E0E8EA6E802EB015A427 /* SecureDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90E177203159780DB095D76 /* SecureDownload.swift */; };
 		B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4659214F0C54010180B570ED /* ContentView.swift */; };
+		B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = F19D61F982D7132AB0491F6A /* MessageAlert.swift */; };
 		B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41AF976063059AD5181A7784 /* CameraPicker.swift */; };
 		B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5382B5859F78E00B2C7A222 /* MediaMime.swift */; };
 		D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */; };
@@ -53,6 +54,7 @@
 		D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
 		E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		F0CCD510639ECD134A68FF28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		F19D61F982D7132AB0491F6A /* MessageAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAlert.swift; sourceTree = "<group>"; };
 		F3103F546C3513D85EBDEAFC /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -99,6 +101,7 @@
 				F0CCD510639ECD134A68FF28 /* Info.plist */,
 				B5382B5859F78E00B2C7A222 /* MediaMime.swift */,
 				D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */,
+				F19D61F982D7132AB0491F6A /* MessageAlert.swift */,
 				0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */,
 				C90E177203159780DB095D76 /* SecureDownload.swift */,
 				CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */,
@@ -208,6 +211,7 @@
 				5E0AFB179A7265C6895357F9 /* DeviceKeyStore.swift in Sources */,
 				B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */,
 				8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */,
+				B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */,
 				33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */,
 				DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */,
 				5BF3FF2AB7A2FDF229DC96A4 /* SSHSession.swift in Sources */,
@@ -232,7 +236,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
@@ -257,7 +261,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
