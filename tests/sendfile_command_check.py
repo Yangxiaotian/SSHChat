@@ -133,7 +133,8 @@ store.mark_upload_complete(t.upload_token, uploaded2, len(b"offline-file"), "给
 captured.clear()
 prev_box = server.offline_messages.count("eve")
 server._notify_file_ready(store.get_transfer_by_token(t.upload_token))
-assert "".join(captured) == "", "offline recipient should not get live notice"
+joined_notify = "".join(captured)
+assert "eve" in joined_notify and "留言" in joined_notify, joined_notify
 assert server.offline_messages.count("eve") == prev_box + 1
 listed = server.offline_messages.list_sent_unread("alice", "eve")
 assert listed and listed[-1]["kind"] == "file"

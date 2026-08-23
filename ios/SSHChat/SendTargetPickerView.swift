@@ -5,6 +5,8 @@ struct SendTargetPickerView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var roomDraft = ""
     @State private var showRoomPrompt = false
+    @State private var userDraft = ""
+    @State private var showUserPrompt = false
 
     var body: some View {
         NavigationStack {
@@ -17,6 +19,7 @@ struct SendTargetPickerView: View {
                         Text("当前房间 #\(SendTargetStore.loadCurrentRoom())")
                     }
                     Button("指定其他房间 #…") { showRoomPrompt = true }
+                    Button("指定用户（可离线留言/发文件）…") { showUserPrompt = true }
                 }
                 if !userChoices.isEmpty {
                     Section("私聊") {
@@ -52,6 +55,19 @@ struct SendTargetPickerView: View {
                     }
                 }
                 Button("取消", role: .cancel) {}
+            }
+            .alert("私聊指定用户", isPresented: $showUserPrompt) {
+                TextField("昵称", text: $userDraft)
+                Button("确定") {
+                    let n = userDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !n.isEmpty {
+                        model.setSendTarget(.user(n))
+                        dismiss()
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("对方不在线时，文字与文件都会以留言形式送达。")
             }
         }
     }

@@ -3588,6 +3588,19 @@ def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
                 "leave_ts": leave_ts,
             },
         )
+        with lock:
+            sender_lower = transfer.sender.lower()
+            for conn, info in clients.items():
+                if info["name"].lower() != sender_lower:
+                    continue
+                try:
+                    send_line(
+                        conn,
+                        f"[*] {recipient!r} 当前不在线，文件已留言；"
+                        f"对方下次上线时会收到。\n",
+                    )
+                except Exception as e:
+                    print(f"[FileTransfer] Failed to notify sender about offline leave: {e}")
 
 
 def _canvas_invite_message(

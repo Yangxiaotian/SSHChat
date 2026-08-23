@@ -1667,7 +1667,7 @@ class SSHChatGUI:
         )
         hint = ttk.Label(
             self.root,
-            text="提示: 「发送至」可选私聊/房间再发文件或聊天；Tab 补全；粘贴截图发文件",
+            text="提示: 「发送至」可选私聊/房间；指定用户可对不在线的人留言或发文件",
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
@@ -1873,6 +1873,18 @@ class SSHChatGUI:
             self._set_send_target(kind, value)
             win.destroy()
 
+        def pick_named_user() -> None:
+            r = simpledialog.askstring(
+                "私聊指定用户",
+                "昵称（不在线也会留言发文件）:",
+                parent=win,
+            )
+            if r:
+                nick = r.strip()
+                if nick:
+                    self._set_send_target("user", nick)
+                    win.destroy()
+
         def pick_named_room() -> None:
             r = simpledialog.askstring("发送到房间", "房间名（不含 #）:", parent=win)
             if r:
@@ -1887,6 +1899,7 @@ class SSHChatGUI:
             win.destroy()
 
         ttk.Button(btn_row, text="确定", command=apply_choice).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_row, text="刷新在线", command=refresh_online).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="取消", command=win.destroy).pack(side=tk.RIGHT)

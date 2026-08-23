@@ -754,6 +754,23 @@ class MainActivity : AppCompatActivity() {
         onlineUsers.forEach { addUser(it) }
         SendTargetStore.loadRecentUsers(this).forEach { addUser(it) }
 
+        items.add("私聊指定用户…")
+        actions.add {
+            val input = android.widget.EditText(this).apply {
+                hint = "昵称（不在线也会留言发文件）"
+                setText("")
+            }
+            AlertDialog.Builder(this)
+                .setTitle("私聊指定用户")
+                .setView(input)
+                .setPositiveButton("确定") { _, _ ->
+                    val n = input.text?.toString()?.trim().orEmpty()
+                    if (n.isNotEmpty()) setSendTarget(SendTarget.User(n))
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
         items.add("指定房间 #…")
         actions.add {
             val input = android.widget.EditText(this).apply {
