@@ -58,6 +58,10 @@ final class ChatViewModel: ObservableObject {
     private var voiceFingerDown = false
     private var onConnectedOnce: (() -> Void)?
     var mediaPickerOpen = false
+    private var userDisconnectRequested = false
+    private var wantSession = false
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
     private var lastSendAt: Date = .distantPast
     private var lastSendText = ""
     private let screenCleared = try! NSRegularExpression(
@@ -192,6 +196,9 @@ final class ChatViewModel: ObservableObject {
         }
         AppConfig.saveServer(host: host, port: port)
         guard !busy else { return }
+        userDisconnectRequested = false
+        wantSession = true
+        cancelReconnect()
         busy = true
         if clearChat {
             entries.removeAll()
@@ -216,6 +223,7 @@ final class ChatViewModel: ObservableObject {
                         Task { @MainActor in
                             self?.status = s
                             if s.hasPrefix("已连接") {
+                                self?.reconnectAttempt = 0
                                 self?.connected = true
                                 self?.busy = false
                                 self?.sendTarget = SendTargetStore.loadTarget()
@@ -230,13 +238,18 @@ final class ChatViewModel: ObservableObject {
                         Task { @MainActor in
                             guard let self else { return }
                             self.busy = false
+                            self.connected = false
+                            UIApplication.shared.isIdleTimerDisabled = false
                             if self.mediaPickerOpen {
                                 self.status = "拍照/选图中（返回后自动重连）…"
                                 return
                             }
-                            self.connected = false
-                            UIApplication.shared.isIdleTimerDisabled = false
+                            if self.userDisconnectRequested || !self.wantSession {
+                                self.status = reason.map { "断开：\($0)" } ?? "已断开"
+                                return
+                            }
                             self.status = reason.map { "断开：\($0)" } ?? "已断开"
+                            self.scheduleReconnect(reason: reason)
                         }
                     }
                 )
@@ -247,11 +260,17 @@ final class ChatViewModel: ObservableObject {
                 UIApplication.shared.isIdleTimerDisabled = false
                 onConnectedOnce = nil
                 status = "连接失败：\(error.localizedDescription)"
+                if wantSession && !userDisconnectRequested && !mediaPickerOpen {
+                    scheduleReconnect(reason: error.localizedDescription)
+                }
             }
         }
     }
 
     func disconnect() {
+        userDisconnectRequested = true
+        wantSession = false
+        cancelReconnect()
         mediaPickerOpen = false
         onConnectedOnce = nil
         cancelUploadWait()
@@ -267,6 +286,37 @@ final class ChatViewModel: ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = false
             status = "未连接"
         }
+    }
+
+    func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+    }
+
+    func scheduleReconnect(reason: String?) {
+        guard wantSession, !userDisconnectRequested, !mediaPickerOpen, !busy else { return }
+        cancelReconnect()
+        let attempt = min(reconnectAttempt, 6)
+        let delay = min(60.0, Double(1 << attempt))
+        reconnectAttempt = attempt + 1
+        status = reason.map { "断开：\($0)，\(Int(delay))s 后重连…" }
+            ?? "已断开，\(Int(delay))s 后重连…"
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.reconnectTask = nil
+                guard self.wantSession, !self.userDisconnectRequested, !self.mediaPickerOpen, !self.connected, !self.busy else { return }
+                self.connect(clearChat: false)
+            }
+        }
+    }
+
+    func handleBecameActive() {
+        guard wantSession, !userDisconnectRequested, !mediaPickerOpen, !connected, !busy else { return }
+        cancelReconnect()
+        connect(clearChat: false)
     }
 
     func send() {
@@ -700,6 +750,7 @@ struct ContentView: View {
     @FocusState private var draftFocused: Bool
     @State private var showDisconnectConfirm = false
     @State private var showPlusPanel = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         VStack(spacing: 0) {
@@ -733,6 +784,11 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color.white)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                model.handleBecameActive()
+            }
+        }
         .alert("确认断开？", isPresented: $showDisconnectConfirm) {
             Button("断开", role: .destructive) { model.disconnect() }
             Button("取消", role: .cancel) {}

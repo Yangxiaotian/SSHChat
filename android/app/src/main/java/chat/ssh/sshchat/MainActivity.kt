@@ -46,6 +46,13 @@ class MainActivity : AppCompatActivity() {
     private var voiceRecorder: VoiceRecorder? = null
     /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
     @Volatile private var mediaPickerOpen = false
+    /** User pressed "断开" — disable auto-reconnect. */
+    @Volatile private var userDisconnectRequested = false
+    /** True after the user taps 连接 until they tap 断开. */
+    @Volatile private var wantSession = false
+    /** Exponential backoff attempt counter for auto-reconnect. */
+    private var reconnectAttempt = 0
+    private var reconnectRunnable: Runnable? = null
     private var onConnectedOnce: (() -> Unit)? = null
     private var sendTarget: SendTarget = SendTarget.CurrentRoom("default")
     private var onlineUsers: List<String> = emptyList()
@@ -594,6 +601,9 @@ class MainActivity : AppCompatActivity() {
         ServerSettings.save(this, host, port)
         refreshHostLabel()
         maybeAskNotifyPermission()
+        userDisconnectRequested = false
+        wantSession = true
+        cancelReconnect()
         client?.disconnect()
         client = null
         if (clearChat) {
@@ -611,6 +621,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     binding.tvStatus.text = s
                     if (s.startsWith("已连接")) {
+                        reconnectAttempt = 0
                         SshKeepAliveService.start(this)
                         sendTarget = SendTargetStore.loadTarget(this@MainActivity)
                         refreshSendTargetButton()
@@ -626,11 +637,18 @@ class MainActivity : AppCompatActivity() {
                     client = null
                     SshKeepAliveService.stop(this)
                     if (mediaPickerOpen) {
+                        setConnected(false)
                         binding.tvStatus.text = "拍照/选图中（返回后自动重连）…"
+                        return@runOnUiThread
+                    }
+                    if (userDisconnectRequested) {
+                        setConnected(false)
+                        binding.tvStatus.text = reason?.let { "断开：$it" } ?: "已断开"
                         return@runOnUiThread
                     }
                     setConnected(false)
                     binding.tvStatus.text = reason?.let { "断开：$it" } ?: "已断开"
+                    scheduleReconnect(reason)
                 }
             },
         )
@@ -653,7 +671,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmDisconnect() {
-        if (client == null) return
+        if (client == null && reconnectRunnable == null) return
         AlertDialog.Builder(this)
             .setTitle("确认断开？")
             .setMessage("断开后将退出当前聊天连接。")
@@ -663,6 +681,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnect() {
+        userDisconnectRequested = true
+        wantSession = false
+        cancelReconnect()
         mediaPickerOpen = false
         onConnectedOnce = null
         cancelUploadWait()
@@ -675,6 +696,40 @@ class MainActivity : AppCompatActivity() {
         client = null
         setConnected(false)
         binding.tvStatus.text = "未连接"
+    }
+
+    private fun cancelReconnect() {
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
+    }
+
+    private fun scheduleReconnect(reason: String? = null) {
+        if (userDisconnectRequested || !wantSession || mediaPickerOpen) return
+        cancelReconnect()
+        val attempt = reconnectAttempt.coerceAtMost(6)
+        val delayMs = minOf(60_000L, 1_000L shl attempt)
+        reconnectAttempt = attempt + 1
+        binding.tvStatus.text = reason?.let { "断开：$it，${delayMs / 1000}s 后重连…" }
+            ?: "已断开，${delayMs / 1000}s 后重连…"
+        val r = Runnable {
+            reconnectRunnable = null
+            if (userDisconnectRequested || !wantSession || mediaPickerOpen) return@Runnable
+            connect(clearChat = false)
+        }
+        reconnectRunnable = r
+        mainHandler.postDelayed(r, delayMs)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!wantSession || userDisconnectRequested || mediaPickerOpen || client != null) return
+        val user = binding.etUsername.text?.toString()?.trim().orEmpty().ifEmpty {
+            uiPrefs().getString("username", "").orEmpty()
+        }
+        if (user.isEmpty()) return
+        if (binding.etUsername.text.isNullOrEmpty()) binding.etUsername.setText(user)
+        cancelReconnect()
+        connect(clearChat = false)
     }
 
     private var lastSendAt = 0L

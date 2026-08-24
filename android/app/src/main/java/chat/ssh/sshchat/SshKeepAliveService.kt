@@ -46,7 +46,7 @@ class SshKeepAliveService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SSHChat 已连接")
-            .setContentText("保持连接，拍照/选图时不断线")
+            .setContentText("前台保活中，断线会自动重连")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentIntent(launch)
             .setOngoing(true)

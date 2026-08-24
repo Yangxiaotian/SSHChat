@@ -44,7 +44,24 @@ class SshChatClient(
                 client.addHostKeyVerifier(PromiscuousVerifier()) // ponytail: tryout; pin keys later
                 client.connectTimeout = 20_000
                 client.connect(host, port)
+                try {
+                    client.socket?.keepAlive = true
+                } catch (_: Exception) {
+                }
                 client.authPublickey(username, KeyPairWrapper(keyPair))
+                // Keep the SSH transport alive even when the phone goes idle.
+                // SSHJ keep-alive sends protocol-level heartbeats so NAT/Wi-Fi
+                // idle reaping is less likely to drop the socket.
+                try {
+                    val ka = client.connection.keepAlive
+                    if (ka != null) {
+                        ka.setKeepAliveInterval(30) // seconds
+                        if (!ka.isAlive) ka.start()
+                    }
+                } catch (_: Exception) {
+                    // Best-effort: if keep-alive isn't supported/enabled on some
+                    // builds, just continue without it.
+                }
                 val session = client.startSession()
                 session.allocatePTY("xterm", 160, 48, 0, 0, emptyMap())
                 val sh = session.startShell()
