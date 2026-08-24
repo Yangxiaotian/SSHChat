@@ -132,7 +132,8 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStart=$HELPER
 Restart=on-failure
-RestartSec=300
+# Boot often races WAN/DNS; retry quickly instead of waiting 5 minutes.
+RestartSec=30
 Environment=SSHCHAT_ENV_FILE=$ENV_FILE
 Environment=SSHCHAT_FILE_LOCAL_URL=$LOCAL_URL
 Environment=SSHCHAT_PREFIX=$PREFIX
@@ -145,6 +146,49 @@ TimeoutStopSec=20
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
+}
+
+install_macos_server_daemon() {
+  # Chat server must come up on boot so the tunnel helper can reach :8443 and
+  # then rewrite PUBLIC_HOST. Without this, only cloudflared auto-starts.
+  local server_plist=/Library/LaunchDaemons/com.sshchat.server.plist
+  cat >"$server_plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sshchat.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$PREFIX/server.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$PREFIX</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>$PREFIX/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>$PREFIX/server.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>
+EOF
+  chmod 644 "$server_plist"
+  launchctl bootout system "$server_plist" 2>/dev/null || true
+  launchctl bootstrap system "$server_plist" 2>/dev/null || launchctl load -w "$server_plist"
+  echo "info: installed $server_plist (boot autostart for chat server)"
 }
 
 install_macos_daemon() {
@@ -198,19 +242,24 @@ stop_existing() {
   if is_darwin && [[ -f "$PLIST" ]]; then
     launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
   fi
-  # Also clear a user LaunchAgent leftover from earlier ad-hoc setups
+  # Remove leftover user LaunchAgents from earlier ad-hoc setups (they mint a
+  # second Quick Tunnel and often rewrite sshchat.env without restarting sshchat).
   if is_darwin; then
     local user_plist
     for user_plist in /Users/*/Library/LaunchAgents/com.sshchat.cloudflared.plist; do
       [[ -f "$user_plist" ]] || continue
       local u
       u=$(echo "$user_plist" | cut -d/ -f3)
+      launchctl asuser "$(id -u "$u" 2>/dev/null)" launchctl bootout "gui/$(id -u "$u" 2>/dev/null)/com.sshchat.cloudflared" 2>/dev/null || true
       launchctl asuser "$(id -u "$u" 2>/dev/null)" launchctl unload "$user_plist" 2>/dev/null || true
+      rm -f "$user_plist"
+      echo "info: removed leftover user LaunchAgent $user_plist"
     done
   fi
   # KillMode=process used to leave orphans; always reap them so the next start gets a NEW trycloudflare URL.
   pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   pkill -f '/usr/local/sbin/sshchat-cloudflared-tunnel.sh' 2>/dev/null || true
+  pkill -f '/Users/.*/var/sshchat-cloudflared/run-tunnel.sh' 2>/dev/null || true
   sleep 1
   pkill -9 -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   rm -f "$STATE_DIR/public_url"
@@ -338,6 +387,7 @@ install_cloudflared_bin || exit 1
 install_helper
 stop_existing
 if is_darwin; then
+  install_macos_server_daemon
   install_macos_daemon
 else
   install_linux_unit

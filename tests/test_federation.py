@@ -2027,6 +2027,38 @@ class FilePublicReachabilityTests(unittest.TestCase):
                 fhs.needs_federation_file_proxy("http://10.0.0.5:8443")
             )
 
+    def test_live_cloudflare_url_overrides_stale_env(self) -> None:
+        """Boot refreshes public_url; long-lived server must prefer the live file."""
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("https://fresh-boot-host.trycloudflare.com\n")
+            with mock.patch.dict(
+                os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}
+            ):
+                self.assertEqual(
+                    fhs.live_cloudflare_base_url(),
+                    "https://fresh-boot-host.trycloudflare.com",
+                )
+                srv = fhs.FileHTTPServer(
+                    host="127.0.0.1",
+                    port=8443,
+                    use_https=False,
+                    public_host="stale-old-host.trycloudflare.com",
+                    public_port=443,
+                )
+                self.assertEqual(
+                    srv.get_base_url(),
+                    "https://fresh-boot-host.trycloudflare.com",
+                )
+                self.assertEqual(srv.get_public_host(), "fresh-boot-host.trycloudflare.com")
+        finally:
+            os.unlink(path)
+
 
 if __name__ == "__main__":
     unittest.main()

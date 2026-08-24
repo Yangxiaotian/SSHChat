@@ -18,6 +18,8 @@ def _normalize_user(name: str) -> str:
 # Cap abuse / disk growth; oldest messages are dropped when exceeded.
 DEFAULT_MAX_PER_USER = 50
 DEFAULT_MAX_TEXT_LEN = 500
+# After /leave recall or delivery, peers may catch-up re-seed; refuse for a while.
+DEFAULT_CLEARED_TTL_SEC = 7 * 24 * 3600
 
 
 class OfflineMessageStore:
@@ -29,15 +31,87 @@ class OfflineMessageStore:
         *,
         max_per_user: int = DEFAULT_MAX_PER_USER,
         max_text_len: int = DEFAULT_MAX_TEXT_LEN,
+        cleared_ttl_sec: int = DEFAULT_CLEARED_TTL_SEC,
     ) -> None:
         self.path = path
         self.max_per_user = max(1, int(max_per_user))
         self.max_text_len = max(1, int(max_text_len))
+        self.cleared_ttl_sec = max(60, int(cleared_ttl_sec))
         self._lock = threading.RLock()
         self._cache: dict[str, Any] | None = None
 
     def _empty_data(self) -> dict[str, Any]:
-        return {"version": 1, "mailboxes": {}}
+        return {"version": 1, "mailboxes": {}, "cleared": {"pm": {}, "file": {}}}
+
+    def _cleared_maps_locked(self) -> tuple[dict[str, float], dict[str, float]]:
+        assert self._cache is not None
+        raw = self._cache.get("cleared")
+        if not isinstance(raw, dict):
+            raw = {"pm": {}, "file": {}}
+            self._cache["cleared"] = raw
+        pm = raw.get("pm")
+        fl = raw.get("file")
+        if not isinstance(pm, dict):
+            pm = {}
+            raw["pm"] = pm
+        if not isinstance(fl, dict):
+            fl = {}
+            raw["file"] = fl
+        return pm, fl  # type: ignore[return-value]
+
+    def _prune_cleared_locked(self) -> bool:
+        """Drop expired tombstones. Returns True if anything changed."""
+        now = time.time()
+        pm, fl = self._cleared_maps_locked()
+        dirty = False
+        for bucket in (pm, fl):
+            for key, exp in list(bucket.items()):
+                try:
+                    expiry = float(exp)
+                except (TypeError, ValueError):
+                    bucket.pop(key, None)
+                    dirty = True
+                    continue
+                if expiry <= now:
+                    bucket.pop(key, None)
+                    dirty = True
+        return dirty
+
+    @staticmethod
+    def _cleared_key(recipient: str, item_id: str) -> str:
+        return f"{_normalize_user(recipient)}\t{str(item_id or '').strip()}"
+
+    def _mark_cleared_pm_locked(self, recipient: str, leave_id: str) -> bool:
+        lid = str(leave_id or "").strip()
+        if not _normalize_user(recipient) or not lid:
+            return False
+        pm, _ = self._cleared_maps_locked()
+        pm[self._cleared_key(recipient, lid)] = time.time() + self.cleared_ttl_sec
+        return True
+
+    def _mark_cleared_file_locked(self, recipient: str, transfer_id: str) -> bool:
+        tid = str(transfer_id or "").strip()
+        if not _normalize_user(recipient) or not tid:
+            return False
+        _, fl = self._cleared_maps_locked()
+        fl[self._cleared_key(recipient, tid)] = time.time() + self.cleared_ttl_sec
+        return True
+
+    def _is_cleared_pm_locked(self, recipient: str, leave_id: str) -> bool:
+        lid = str(leave_id or "").strip()
+        if not lid:
+            return False
+        self._prune_cleared_locked()
+        pm, _ = self._cleared_maps_locked()
+        return self._cleared_key(recipient, lid) in pm
+
+    def _is_cleared_file_locked(self, recipient: str, transfer_id: str) -> bool:
+        tid = str(transfer_id or "").strip()
+        if not tid:
+            return False
+        self._prune_cleared_locked()
+        _, fl = self._cleared_maps_locked()
+        return self._cleared_key(recipient, tid) in fl
 
     def _ensure_loaded_locked(self) -> None:
         if self._cache is not None:
@@ -53,6 +127,8 @@ class OfflineMessageStore:
         mailboxes = data.get("mailboxes")
         if not isinstance(mailboxes, dict):
             data = self._empty_data()
+        if "cleared" not in data or not isinstance(data.get("cleared"), dict):
+            data["cleared"] = {"pm": {}, "file": {}}
         self._cache = data
 
     def _save_locked(self) -> None:
@@ -166,6 +242,13 @@ class OfflineMessageStore:
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
+            # Reject federation catch-up after /leave recall or delivery.
+            if self._is_cleared_pm_locked(key, lid):
+                return None
+            if msg_kind == "file" and isinstance(meta, dict):
+                tid = str(meta.get("transfer_id") or "").strip()
+                if tid and self._is_cleared_file_locked(key, tid):
+                    return None
             mailboxes = self._cache["mailboxes"]
             box = mailboxes.get(key)
             if not isinstance(box, list):
@@ -295,7 +378,10 @@ class OfflineMessageStore:
     def remove_file_by_transfer(
         self, recipient: str, transfer_id: str
     ) -> list[dict[str, Any]]:
-        """Remove pending file leave(s) for recipient matching transfer_id."""
+        """Remove pending file leave(s) for recipient matching transfer_id.
+
+        Always tombstones the transfer id so a late fleave catch-up cannot restore it.
+        """
         key = _normalize_user(recipient)
         tid = str(transfer_id or "").strip()
         if not key or not tid:
@@ -303,9 +389,11 @@ class OfflineMessageStore:
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
+            self._mark_cleared_file_locked(key, tid)
             mailboxes = self._cache["mailboxes"]
             box = mailboxes.get(key)
             if not isinstance(box, list) or not box:
+                self._save_locked()
                 return []
             kept: list[Any] = []
             removed: list[dict[str, Any]] = []
@@ -318,11 +406,12 @@ class OfflineMessageStore:
                     continue
                 meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
                 if str(meta.get("transfer_id") or "").strip() == tid:
+                    lid = str(parsed.get("id") or "").strip()
+                    if lid:
+                        self._mark_cleared_pm_locked(key, lid)
                     removed.append(parsed)
                 else:
                     kept.append(item)
-            if not removed:
-                return []
             if kept:
                 mailboxes[key] = kept
             else:
@@ -440,11 +529,22 @@ class OfflineMessageStore:
                 mailboxes[to_key] = box
             else:
                 mailboxes.pop(to_key, None)
+            lid = str(removed.get("id") or "").strip()
+            if lid:
+                self._mark_cleared_pm_locked(to_key, lid)
+            if (removed.get("kind") or "pm") == "file":
+                meta = removed.get("meta") if isinstance(removed.get("meta"), dict) else {}
+                tid = str(meta.get("transfer_id") or "").strip()
+                if tid:
+                    self._mark_cleared_file_locked(to_key, tid)
             self._save_locked()
             return removed
 
     def remove_by_id(self, recipient: str, leave_id: str) -> dict[str, Any] | None:
-        """Remove one pending leave by federated id."""
+        """Remove one pending leave by federated id.
+
+        Always tombstones the id so a late pleave catch-up cannot restore it.
+        """
         key = _normalize_user(recipient)
         lid = str(leave_id or "").strip()
         if not key or not lid:
@@ -452,9 +552,11 @@ class OfflineMessageStore:
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
+            self._mark_cleared_pm_locked(key, lid)
             mailboxes = self._cache["mailboxes"]
             box = mailboxes.get(key)
             if not isinstance(box, list) or not box:
+                self._save_locked()
                 return None
             for i, item in enumerate(box):
                 if not isinstance(item, dict):
@@ -467,8 +569,18 @@ class OfflineMessageStore:
                     mailboxes[key] = box
                 else:
                     mailboxes.pop(key, None)
+                if parsed and (parsed.get("kind") or "pm") == "file":
+                    meta = (
+                        parsed.get("meta")
+                        if isinstance(parsed.get("meta"), dict)
+                        else {}
+                    )
+                    tid = str(meta.get("transfer_id") or "").strip()
+                    if tid:
+                        self._mark_cleared_file_locked(key, tid)
                 self._save_locked()
                 return parsed
+            self._save_locked()
             return None
 
     def take_all(self, recipient: str) -> list[dict[str, Any]]:
@@ -483,10 +595,23 @@ class OfflineMessageStore:
             box = mailboxes.pop(key, None)
             if not isinstance(box, list) or not box:
                 return []
-            self._save_locked()
             out: list[dict[str, Any]] = []
             for item in box:
                 parsed = self._parse_entry(item)
-                if parsed is not None:
-                    out.append(parsed)
+                if parsed is None:
+                    continue
+                out.append(parsed)
+                lid = str(parsed.get("id") or "").strip()
+                if lid:
+                    self._mark_cleared_pm_locked(key, lid)
+                if (parsed.get("kind") or "pm") == "file":
+                    meta = (
+                        parsed.get("meta")
+                        if isinstance(parsed.get("meta"), dict)
+                        else {}
+                    )
+                    tid = str(meta.get("transfer_id") or "").strip()
+                    if tid:
+                        self._mark_cleared_file_locked(key, tid)
+            self._save_locked()
             return out

@@ -29,8 +29,17 @@ restart_sshchat() {
     sleep 1
   fi
   if [[ -x "$PREFIX/server.sh" ]]; then
-    # macOS LaunchDaemon has no TTY; nohup often fails. Prefer launchctl submit.
+    # macOS LaunchDaemon has no TTY; nohup often fails. Prefer launchctl submit / bootstrap.
     if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+      if [[ -f /Library/LaunchDaemons/com.sshchat.server.plist ]]; then
+        launchctl kickstart -k system/com.sshchat.server 2>/dev/null \
+          || launchctl bootstrap system /Library/LaunchDaemons/com.sshchat.server.plist 2>/dev/null \
+          || true
+        sleep 1
+        if pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+          return 0
+        fi
+      fi
       launchctl remove com.sshchat.server 2>/dev/null || true
       if launchctl submit -l com.sshchat.server -o "$PREFIX/server.log" -e "$PREFIX/server.log" -- "$PREFIX/server.sh"; then
         return 0
@@ -66,12 +75,14 @@ update_public_host() {
   current=$(grep -E '^SSHCHAT_FILE_PUBLIC_HOST=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
   owner=$(file_stat_owner "$ENV_FILE")
   mode=$(file_stat_mode "$ENV_FILE")
-  [[ "$current" == "$host" ]] && { echo "[sshchat-cloudflared] PUBLIC_HOST unchanged"; return 0; }
-  local tmp
-  tmp=$(mktemp)
-  grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
-    | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
-  cat >>"$tmp" <<ENV
+  if [[ "$current" == "$host" ]]; then
+    echo "[sshchat-cloudflared] PUBLIC_HOST already $host (still bouncing sshchat for boot/federation)"
+  else
+    local tmp
+    tmp=$(mktemp)
+    grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
+      | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
+    cat >>"$tmp" <<ENV
 
 # File transfer via Cloudflare Tunnel (managed by sshchat-cloudflared)
 SSHCHAT_FILE_TRANSFER_ENABLED=1
@@ -82,11 +93,13 @@ SSHCHAT_FILE_PUBLIC_HOST=$host
 SSHCHAT_FILE_PUBLIC_PORT=443
 SSHCHAT_FILE_STORAGE_DIR=$STORAGE_DIR
 ENV
-  cat "$tmp" >"$ENV_FILE"
-  rm -f "$tmp"
-  chown "$owner" "$ENV_FILE" 2>/dev/null || true
-  chmod "$mode" "$ENV_FILE" 2>/dev/null || true
-  echo "[sshchat-cloudflared] updated env -> $host"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+    chown "$owner" "$ENV_FILE" 2>/dev/null || true
+    chmod "$mode" "$ENV_FILE" 2>/dev/null || true
+    echo "[sshchat-cloudflared] updated env -> $host"
+  fi
+  # Always restart once per helper run so boot-time servers reload env + federation ads.
   restart_sshchat
 }
 
@@ -97,12 +110,32 @@ port_ready() {
   (echo >/dev/tcp/127.0.0.1/"${FILE_HTTP_PORT}") 2>/dev/null
 }
 
-for _ in $(seq 1 90); do
-  port_ready && break
+network_ready() {
+  # Boot often brings up launchd/systemd before WAN/DNS; avoid burning a Quick Tunnel slot.
+  if command -v curl >/dev/null 2>&1; then
+    curl -s --max-time 3 -o /dev/null https://1.1.1.1 && return 0
+    curl -s --max-time 3 -o /dev/null https://cloudflare.com && return 0
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 1.1.1.1 443 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+echo "[sshchat-cloudflared] waiting for origin :${FILE_HTTP_PORT} and WAN..."
+for _ in $(seq 1 120); do
+  port_ready && network_ready && break
   sleep 1
 done
+if ! port_ready; then
+  echo "[sshchat-cloudflared] WARN: origin :${FILE_HTTP_PORT} not up yet; starting tunnel anyway" >&2
+fi
+if ! network_ready; then
+  echo "[sshchat-cloudflared] WARN: WAN not ready yet; starting tunnel anyway" >&2
+fi
 
 echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL)"
+# Drop stale hostname so a half-booted server cannot keep advertising a dead tunnel.
 rm -f "$URL_FILE"
 
 run_tunnel() {
@@ -122,6 +155,7 @@ run_tunnel() {
 run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
   echo "$line"
   if [[ "$line" =~ https://[a-zA-Z0-9-]+\.trycloudflare\.com ]]; then
+    # URL_FILE is the latch for this helper run (rm'd before tunnel start).
     if [[ ! -f "$URL_FILE" ]]; then
       update_public_host "${BASH_REMATCH[0]}"
     fi

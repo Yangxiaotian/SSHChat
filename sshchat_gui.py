@@ -1506,6 +1506,7 @@ class SSHChatGUI:
         self._suggest_win: tk.Toplevel | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
+        self._suggest_geom_job: str | int | None = None
         self._canvas_win: NativeCanvasWindow | None = None
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
@@ -1522,10 +1523,13 @@ class SSHChatGUI:
         self._apply_profile(load_client_config(self.config_path))
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.bind("<ButtonPress-1>", self._on_root_button_press, add="+")
         self.root.bind("<<Paste>>", self._on_paste_file, add="+")
         self.root.bind("<Command-v>", self._on_paste_file, add="+")
         self.root.bind("<Control-v>", self._on_paste_file, add="+")
         self._is_minimized = False
+        self._last_root_geom = ""
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1678,8 +1682,8 @@ class SSHChatGUI:
         # unresponsive until a manual move/resize. Force a post-map refresh.
         self._is_minimized = False
         self.root.after_idle(self._stabilize_initial_interaction)
-        self.root.after(120, self._stabilize_initial_interaction)
-        self.root.after(320, self._stabilize_initial_interaction)
+        self.root.after(200, self._stabilize_initial_interaction)
+        self.root.after(60, self._render_active_room)
         self.root.after(60, self._render_active_room)
 
     def _on_window_unmapped(self, _event=None) -> None:
@@ -1687,21 +1691,71 @@ class SSHChatGUI:
             self._is_minimized = self.root.state() == "iconic"
         except tk.TclError:
             self._is_minimized = False
+        self._hide_suggestions()
+
+    def _on_root_configure(self, event=None) -> None:
+        # Only react to the toplevel itself (not child widget configures).
+        if event is not None and event.widget is not self.root:
+            return
+        try:
+            geom = self.root.geometry()
+        except tk.TclError:
+            return
+        if geom == self._last_root_geom:
+            return
+        self._last_root_geom = geom
+        # Absolute-positioned completion popup does not move with the parent;
+        # leave it up and it keeps eating clicks at the old screen coords.
+        if self._suggest_win is not None:
+            if self._suggest_geom_job is not None:
+                try:
+                    self.root.after_cancel(self._suggest_geom_job)
+                except (tk.TclError, ValueError):
+                    pass
+            self._suggest_geom_job = self.root.after(40, self._reposition_or_hide_suggestions)
+
+    def _on_root_button_press(self, event) -> None:
+        # Clicking chrome outside the entry closes the floating completion list
+        # so an orphaned -topmost popup cannot block buttons.
+        if self._suggest_win is None:
+            return
+        w = event.widget
+        if w is self.entry or w is self._suggest_list or w is self._suggest_win:
+            return
+        try:
+            if self._suggest_list is not None and str(w).startswith(str(self._suggest_win)):
+                return
+        except tk.TclError:
+            pass
+        self._hide_suggestions()
 
     def _stabilize_initial_interaction(self) -> None:
         try:
             self.root.update_idletasks()
         except tk.TclError:
             return
+        # Avoid repeated focus_force — on Aqua it can leave hit-testing stale
+        # until the user manually moves the window (the symptom we are fixing).
         try:
             self.root.lift()
-            self.root.focus_force()
         except tk.TclError:
             pass
-        if self.btn_connect.instate(("disabled",)):
-            self.btn_connect.state(("!disabled",))
-        if not self._chan or self._chan.closed:
-            self.entry.focus_set()
+        try:
+            # Tiny geometry re-assert refreshes macOS window server click targets.
+            geom = self.root.winfo_geometry()
+            self.root.geometry(geom)
+        except tk.TclError:
+            pass
+        try:
+            if self.btn_connect.instate(("disabled",)):
+                self.btn_connect.state(("!disabled",))
+        except tk.TclError:
+            pass
+        try:
+            if not self._chan or self._chan.closed:
+                self.entry.focus_set()
+        except tk.TclError:
+            pass
 
     def _format_time(self, ts: datetime) -> str:
         return ts.strftime("%H:%M:%S")
@@ -1836,6 +1890,16 @@ class SSHChatGUI:
         win.transient(self.root)
         win.grab_set()
 
+        def _close_picker() -> None:
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
         items: list[tuple[str, str, str]] = []
         items.append((f"当前房间 #{self._active_room}", "room", ""))
 
@@ -1871,7 +1935,7 @@ class SSHChatGUI:
                 return
             _, kind, value = items[sel[0]]
             self._set_send_target(kind, value)
-            win.destroy()
+            _close_picker()
 
         def pick_named_user() -> None:
             r = simpledialog.askstring(
@@ -1883,7 +1947,7 @@ class SSHChatGUI:
                 nick = r.strip()
                 if nick:
                     self._set_send_target("user", nick)
-                    win.destroy()
+                    _close_picker()
 
         def pick_named_room() -> None:
             r = simpledialog.askstring("发送到房间", "房间名（不含 #）:", parent=win)
@@ -1891,18 +1955,19 @@ class SSHChatGUI:
                 room = r.strip().lstrip("#")
                 if room:
                     self._set_send_target("named_room", room)
-                    win.destroy()
+                    _close_picker()
 
         def refresh_online() -> None:
             self._refresh_online_users()
             self._set_status("正在刷新在线用户…")
-            win.destroy()
+            _close_picker()
 
         ttk.Button(btn_row, text="确定", command=apply_choice).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_row, text="刷新在线", command=refresh_online).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btn_row, text="取消", command=_close_picker).pack(side=tk.RIGHT)
+        win.protocol("WM_DELETE_WINDOW", _close_picker)
         lb.bind("<Double-Button-1>", lambda _e: apply_choice())
         if items:
             lb.selection_set(0)
@@ -2793,6 +2858,12 @@ class SSHChatGUI:
         return "break"
 
     def _hide_suggestions(self) -> None:
+        if self._suggest_geom_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_geom_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_geom_job = None
         if self._suggest_win is not None:
             try:
                 self._suggest_win.destroy()
@@ -2802,14 +2873,43 @@ class SSHChatGUI:
         self._suggest_list = None
         self._suggest_items = []
 
+    def _suggestion_geometry(self) -> str:
+        self.entry.update_idletasks()
+        x = self.entry.winfo_rootx()
+        height = min(160, 20 * max(1, len(self._suggest_items)) + 4)
+        y = self.entry.winfo_rooty() - height - 4
+        if y < 0:
+            y = self.entry.winfo_rooty() + self.entry.winfo_height() + 2
+        width = max(self.entry.winfo_width(), 220)
+        return f"{width}x{height}+{x}+{y}"
+
+    def _reposition_or_hide_suggestions(self) -> None:
+        self._suggest_geom_job = None
+        if self._suggest_win is None:
+            return
+        try:
+            if not self._suggest_win.winfo_exists():
+                self._hide_suggestions()
+                return
+            self._suggest_win.geometry(self._suggestion_geometry())
+        except tk.TclError:
+            self._hide_suggestions()
+
     def _show_suggestions(self, items: list[str]) -> None:
         self._hide_suggestions()
         if not items:
             return
         self._suggest_items = items
         win = tk.Toplevel(self.root)
+        win.transient(self.root)
         win.overrideredirect(True)
-        win.attributes("-topmost", True)
+        # Do NOT set global -topmost: a leftover popup then sits on top of the
+        # whole desktop and keeps eating button clicks until the main window is
+        # moved out from under it.
+        try:
+            win.attributes("-topmost", False)
+        except tk.TclError:
+            pass
         lst = tk.Listbox(win, height=min(8, len(items)), exportselection=False)
         lst.pack(fill=tk.BOTH, expand=True)
         for item in items:
@@ -2817,12 +2917,11 @@ class SSHChatGUI:
         lst.selection_set(0)
         lst.activate(0)
         lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
-        self.entry.update_idletasks()
-        x = self.entry.winfo_rootx()
-        y = self.entry.winfo_rooty() - min(160, 20 * len(items) + 8)
-        if y < 0:
-            y = self.entry.winfo_rooty() + self.entry.winfo_height()
-        win.geometry(f"{max(self.entry.winfo_width(), 220)}x{min(160, 20 * len(items) + 4)}+{x}+{y}")
+        win.geometry(self._suggestion_geometry())
+        try:
+            win.lift(self.root)
+        except tk.TclError:
+            pass
         self._suggest_win = win
         self._suggest_list = lst
 

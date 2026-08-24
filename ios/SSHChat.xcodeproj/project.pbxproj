@@ -236,7 +236,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
+				DEVELOPMENT_TEAM = JVKAWTMQZ4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
@@ -247,7 +247,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -261,7 +261,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
+				DEVELOPMENT_TEAM = JVKAWTMQZ4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
@@ -272,7 +272,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qq.267267275.SSHChat;
+				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";

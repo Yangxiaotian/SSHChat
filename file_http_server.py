@@ -19,6 +19,7 @@ import cgi
 import html
 import ipaddress
 import json
+import re
 import ssl
 import subprocess
 import threading
@@ -85,6 +86,33 @@ def _detect_lan_ip() -> str:
     except Exception:
         pass
     return "127.0.0.1"
+
+
+# Written by sshchat-cloudflared on each Quick Tunnel start (boot/deploy/restart).
+DEFAULT_CLOUDFLARED_URL_FILE = "/var/lib/sshchat/cloudflared/public_url"
+
+
+def live_cloudflare_base_url(
+    path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the live Quick Tunnel base URL if the helper has published one.
+
+    Prefer this over process env: after reboot the tunnel hostname changes, but
+    a long-lived server may still hold the previous SSHCHAT_FILE_PUBLIC_HOST.
+    """
+    url_path = (
+        (path or "").strip()
+        or os.environ.get("SSHCHAT_CLOUDFLARED_URL_FILE", "").strip()
+        or DEFAULT_CLOUDFLARED_URL_FILE
+    )
+    try:
+        with open(url_path, "r", encoding="utf-8") as f:
+            raw = (f.read() or "").strip()
+    except OSError:
+        return None
+    if re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+        return raw
+    return None
 
 
 def is_externally_reachable_host(host: str) -> bool:
@@ -1640,7 +1668,13 @@ class FileHTTPServer:
 
         When public_port is 443/80 (e.g. Cloudflare Tunnel terminating TLS), the
         link scheme follows that public port even if the local listener is plain HTTP.
+
+        Live Cloudflare Quick Tunnel URLs (public_url file) win over env, so a
+        boot-time tunnel refresh is visible without waiting for a process restart.
         """
+        live = live_cloudflare_base_url()
+        if live:
+            return live
         port = self.port if self.public_port is None else self.public_port
         if self.public_port == 443:
             protocol = "https"
@@ -1656,6 +1690,11 @@ class FileHTTPServer:
     
     def get_public_host(self) -> str:
         """Resolve the hostname users should see in their links."""
+        live = live_cloudflare_base_url()
+        if live:
+            host = (urlparse(live).hostname or "").strip()
+            if host:
+                return host
         for candidate in (self.domain, self.public_host):
             if candidate and candidate.strip():
                 return candidate.strip()

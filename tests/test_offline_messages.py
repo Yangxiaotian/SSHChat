@@ -388,6 +388,56 @@ class OfflineLeaveFederationCatchUpTests(unittest.TestCase):
         self.assertGreaterEqual(removed, 1)
         self.assertEqual(server.offline_messages.count("bob"), 1)
 
+    def test_recall_tombstone_blocks_federation_reseed(self) -> None:
+        """/leave nick n must not be undone by peer catch-up re-seed."""
+        server.offline_messages.leave(
+            "bob", "alice", "bye", leave_id="leave-recall-1", ts=10.0
+        )
+        removed = server.offline_messages.recall("alice", "bob", 1)
+        self.assertIsNotNone(removed)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+        # Peer still had a copy and catch-up re-seeds the same leave_id.
+        restored = server.offline_messages.leave(
+            "bob", "alice", "bye", leave_id="leave-recall-1", ts=10.0
+        )
+        self.assertIsNone(restored)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+        server._fed_on_offline_pm("bob", "alice", "bye", "leave-recall-1", 10.0)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+
+    def test_file_clear_tombstone_blocks_fleave_reseed(self) -> None:
+        server.offline_messages.leave(
+            "bob",
+            "alice",
+            "[文件] a.bin",
+            kind="file",
+            meta={"transfer_id": "tid-z", "filename": "a.bin"},
+            leave_id="file-1",
+        )
+        server.offline_messages.remove_file_by_transfer("bob", "tid-z")
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+        restored = server.offline_messages.leave(
+            "bob",
+            "alice",
+            "[文件] a.bin",
+            kind="file",
+            meta={"transfer_id": "tid-z", "filename": "a.bin"},
+            leave_id="file-1",
+        )
+        self.assertIsNone(restored)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+
+    def test_clear_before_seed_tombstones_missing_row(self) -> None:
+        # Clear can arrive before the original seed (or after local recall).
+        self.assertIsNone(
+            server.offline_messages.remove_by_id("bob", "late-clear-id")
+        )
+        restored = server.offline_messages.leave(
+            "bob", "alice", "late", leave_id="late-clear-id", ts=1.0
+        )
+        self.assertIsNone(restored)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
