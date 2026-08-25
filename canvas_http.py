@@ -273,6 +273,51 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     <button id="unlockBtn" type="button">{html.escape(S['unlock'])}</button>
                 </div>
             </div>
+            <script>
+            // Fill key ASAP (before Excalidraw CDN module resolves). Tk/Electron
+            // pass #k=XXXXXX; native WebViews may set window.__SSHCHAT_KEY.
+            (function () {{
+                function takeKey() {{
+                    try {{
+                        var inj = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
+                        if (/^[A-Z0-9]{{6}}$/.test(inj)) {{
+                            try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
+                            return inj;
+                        }}
+                    }} catch (_) {{}}
+                    var hash = location.hash || '';
+                    var hm = hash.match(/(?:^|[&#])k=([A-Za-z0-9]{{6}})/);
+                    if (hm) {{
+                        try {{
+                            history.replaceState(null, '', location.pathname + location.search);
+                        }} catch (_) {{}}
+                        return hm[1].toUpperCase();
+                    }}
+                    // Rare fallback if a launcher dropped the fragment but kept ?k=
+                    try {{
+                        var q = new URLSearchParams(location.search || '');
+                        var qk = (q.get('k') || '').trim().toUpperCase();
+                        if (/^[A-Z0-9]{{6}}$/.test(qk)) {{
+                            q.delete('k');
+                            var qs = q.toString();
+                            try {{
+                                history.replaceState(
+                                    null, '',
+                                    location.pathname + (qs ? '?' + qs : '') + (location.hash || '')
+                                );
+                            }} catch (_) {{}}
+                            return qk;
+                        }}
+                    }} catch (_) {{}}
+                    return '';
+                }}
+                var k = takeKey();
+                if (!k) return;
+                window.__SSHCHAT_KEY = k;
+                var el = document.getElementById('key');
+                if (el) el.value = k;
+            }})();
+            </script>
             <div class="board" id="board">
                 <div class="meta" id="meta"></div>
                 <div class="toolbar">
@@ -344,7 +389,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function hashFragmentKey() {{
-        // Client-only autofill for Electron/Tk (#k=XXXXXX); never sent to server.
+        // Prefer early classic-script fill; keep as fallback if module loads first.
+        const existing = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
+        if (/^[A-Z0-9]{{6}}$/.test(existing)) {{
+            try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
+            return existing;
+        }}
         const m = (location.hash || '').match(/(?:^|[&#])k=([A-Za-z0-9]{{6}})/);
         if (!m) return '';
         try {{

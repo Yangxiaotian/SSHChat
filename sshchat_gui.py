@@ -913,10 +913,29 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
     target = (url or "").strip()
     if not target:
         return False
+    # Chromium --app= often drops #fragments. Launch via a tiny file:// trampoline
+    # that location.replace()'s to the real URL so #k=XXXXXX survives.
+    launch = target
+    trampoline_path: str | None = None
+    if "#" in target:
+        try:
+            fd, trampoline_path = tempfile.mkstemp(
+                prefix="sshchat-canvas-", suffix=".html"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "<!DOCTYPE html><meta charset=utf-8>"
+                    f"<script>location.replace({json.dumps(target)});</script>"
+                    "<p>Opening SSHChat canvas…</p>\n"
+                )
+            launch = Path(trampoline_path).resolve().as_uri()
+        except OSError:
+            trampoline_path = None
+            launch = target
     for binary in _chromium_app_binaries():
         if not binary or not os.path.isfile(binary):
             continue
-        args = [binary, f"--app={target}"]
+        args = [binary, f"--app={launch}"]
         if maximized:
             # Prefer true fullscreen fill; fall back still works if unsupported.
             args.extend(["--start-fullscreen", "--start-maximized"])
@@ -930,11 +949,11 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
             return True
         except OSError:
             continue
-    if sys.platform == "darwin" and maximized:
-        # Safari fallback: open URL (no reliable stdlib fullscreen without Accessibility).
+    if sys.platform == "darwin":
+        # Safari / default handler — pass the real URL (with hash), not file://.
         try:
             subprocess.Popen(
-                ["open", "-a", "Safari", target],
+                ["open", target],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

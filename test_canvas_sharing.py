@@ -261,6 +261,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("&ticket=", page)
         self.assertIn("cache: 'no-store'", page)
         self.assertIn("hashFragmentKey", page)
+        self.assertIn("takeKey", page)
         self.assertIn("excalidraw-root", page)
 
 
