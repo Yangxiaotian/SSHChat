@@ -2514,6 +2514,48 @@ def _fed_on_file_host_request(
         except Exception as e:
             print(f"federation: reply_file_host (canvas_close) failed: {e!r}")
         return
+    if mode == "canvas_join":
+        reply = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas_join",
+        }
+        try:
+            session_id = str(payload.get("session_id") or "").strip()
+            nick = str(payload.get("nick") or "").strip()
+            if not session_id or not nick:
+                reply["error"] = "invalid session_id/nick"
+            else:
+                token, key, err = canvas_sharing.canvas_store.add_participant(
+                    session_id, nick
+                )
+                if err or not token:
+                    reply["error"] = err or "join failed"
+                else:
+                    reply = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "mode": "canvas_join",
+                        "token": token,
+                        "key": key,
+                        "session_id": session_id,
+                        "nick": nick,
+                    }
+        except Exception as e:
+            print(f"[Canvas] federated join error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_join",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_join) failed: {e!r}")
+        return
 
     reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
     try:
@@ -2618,6 +2660,25 @@ def _federation_request_canvas_close(
     )
 
 
+def _federation_request_canvas_join(
+    host_node: str,
+    session_id: str,
+    nick: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        "",
+        [],
+        None,
+        timeout=timeout,
+        mode="canvas_join",
+        session_id=session_id,
+        nick=nick,
+    )
+
+
 def _federation_request_file_host(
     host_node: str,
     sender: str,
@@ -2629,6 +2690,7 @@ def _federation_request_file_host(
     title: str = "",
     session_id: str = "",
     by_user: str = "",
+    nick: str = "",
 ) -> dict:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -2658,8 +2720,15 @@ def _federation_request_file_host(
             "session_id": session_id,
             "by_user": by_user,
         }
+    elif mode == "canvas_join":
+        payload = {
+            "mode": "canvas_join",
+            "session_id": session_id,
+            "nick": nick,
+        }
     else:
         payload = {
+            "mode": "file",
             "sender": sender,
             "recipients": recipients,
             "room": room,
@@ -3634,8 +3703,15 @@ def _canvas_invite_message(
     )
 
 
-def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
-    """Privately deliver each participant their canvas URL + key."""
+def _deliver_canvas_invites(
+    session: canvas_sharing.CanvasSession,
+    *,
+    only: Optional[str] = None,
+) -> None:
+    """Privately deliver each participant their canvas URL + key.
+
+    If *only* is set, deliver solely to that nick (case-insensitive).
+    """
     base_url = (session.host_base_url or "").strip()
     if not base_url:
         if file_http is None:
@@ -3643,7 +3719,10 @@ def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
         base_url = file_http.get_base_url()
     base_url = base_url.rstrip("/")
     hub = federation.get_hub()
+    only_key = (only or "").strip().lower()
     for participant, token in session.tokens.items():
+        if only_key and participant.lower() != only_key:
+            continue
         key = session.keys.get(participant) or ""
         url = f"{base_url}/canvas/{token}"
         message = _canvas_invite_message(
@@ -3674,6 +3753,48 @@ def _deliver_canvas_invites(session: canvas_sharing.CanvasSession) -> None:
                 hub.send_pm(participant, session.creator, message)
             except Exception as e:
                 print(f"[Canvas] Federated invite failed for {participant}: {e}")
+
+
+def _ensure_canvas_participant(
+    session: canvas_sharing.CanvasSession, nick: str
+) -> Tuple[bool, str]:
+    """Mint URL+key for *nick* on *session* (local or federated host)."""
+    nick = (nick or "").strip()
+    if not nick:
+        return False, "无效昵称"
+    # Already present?
+    for existing in session.tokens:
+        if existing.lower() == nick.lower():
+            return True, ""
+    if session.host_node:
+        hosted = _federation_request_canvas_join(
+            session.host_node, session.session_id, nick
+        )
+        if not hosted.get("ok"):
+            return False, str(hosted.get("error") or "联邦加入失败")
+        token = str(hosted.get("token") or "").strip()
+        key = str(hosted.get("key") or "").strip()
+        if not token or not key:
+            return False, "联邦加入返回无效"
+        # Update local mirror so invites use the new credentials.
+        with canvas_sharing.canvas_store.lock:
+            live = canvas_sharing.canvas_store.sessions.get(session.session_id)
+            if live is None:
+                return False, "画布不存在"
+            live.tokens[nick] = token
+            live.keys[nick] = key
+            canvas_sharing.canvas_store._save()
+            session.tokens[nick] = token
+            session.keys[nick] = key
+        return True, ""
+    token, key, err = canvas_sharing.canvas_store.add_participant(
+        session.session_id, nick
+    )
+    if err or not token:
+        return False, err or "加入失败"
+    session.tokens[nick] = token
+    session.keys[nick] = key or ""
+    return True, ""
 
 
 def _create_canvas_via_federation_proxy(
@@ -3792,6 +3913,10 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
             )
             send_line(
                 conn,
+                "[*] If the room already has a board, /canvas joins it and re-sends your invite.\n",
+            )
+            send_line(
+                conn,
                 "[*] Open the URL in a browser, enter the key, then draw; strokes sync live.\n",
             )
         else:
@@ -3804,6 +3929,10 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
             send_line(
                 conn,
                 "[*] 别名 /board。每人收到独立网址和密钥（密钥不在网址里）；解锁后共同绘画。\n",
+            )
+            send_line(
+                conn,
+                "[*] 房间已有画板时，再发 /canvas（或点画板）会加入已有画板并给你发邀请。\n",
             )
             send_line(
                 conn,
@@ -3878,12 +4007,16 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         if not force_new:
             existing = canvas_sharing.canvas_store.find_open_for_room(room_name)
             if existing is not None:
+                ok, err = _ensure_canvas_participant(existing, sender)
+                if not ok:
+                    send_line(conn, f"[*] 加入已有画布失败：{err}\n")
+                    return
                 send_line(
                     conn,
-                    f"[*] 房间 #{room_name} 已有共享画布；正在重新发送邀请。"
+                    f"[*] 房间 #{room_name} 已有共享画布；正在把你加入并发送邀请。"
                     f"（强制新开用 /canvas new）\n",
                 )
-                _deliver_canvas_invites(existing)
+                _deliver_canvas_invites(existing, only=sender)
                 return
     else:
         target_lower = target.lower()

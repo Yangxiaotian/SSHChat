@@ -954,7 +954,15 @@ class CanvasWebShell:
         self.win.title("SSHChat 共享画布")
         self.win.geometry("460x130")
         self.win.minsize(360, 110)
+        try:
+            self.win.transient(master)
+        except tk.TclError:
+            pass
         self.win.protocol("WM_DELETE_WINDOW", self.close)
+        # Chrome/Safari steal focus when launched; Aqua then leaves this Toplevel's
+        # buttons unclickable until the window is dragged. Refresh hit maps on map/focus.
+        self.win.bind("<Map>", lambda _e: self._stabilize(delay_ms=0), add="+")
+        self.win.bind("<FocusIn>", lambda _e: self._stabilize(delay_ms=0), add="+")
 
         bar = ttk.Frame(self.win)
         bar.pack(fill=tk.X, padx=8, pady=6)
@@ -972,7 +980,40 @@ class CanvasWebShell:
         ttk.Label(body, textvariable=self.var_status, justify=tk.LEFT, wraplength=420).pack(
             anchor=tk.NW
         )
-        self.win.after(60, lambda: self._reopen(True))
+        # Open browser after this shell is mapped so controls get a real hit region first.
+        self.win.after(80, lambda: self._reopen(True))
+
+    def _stabilize(self, delay_ms: int = 0) -> None:
+        def _do() -> None:
+            try:
+                if not self.win.winfo_exists():
+                    return
+                self.win.update_idletasks()
+                geom = self.win.winfo_geometry()
+                self.win.geometry(geom)
+                self.win.lift()
+                # Brief topmost pulse refreshes macOS window-server click targets
+                # without leaving the dialog permanently above everything.
+                try:
+                    self.win.attributes("-topmost", True)
+                    self.win.after(
+                        80,
+                        lambda: self.win.attributes("-topmost", False)
+                        if self.win.winfo_exists()
+                        else None,
+                    )
+                except tk.TclError:
+                    pass
+            except tk.TclError:
+                pass
+
+        if delay_ms <= 0:
+            _do()
+        else:
+            try:
+                self.win.after(delay_ms, _do)
+            except tk.TclError:
+                pass
 
     def toggle_maximize(self) -> None:
         self._maximized = not self._maximized
@@ -989,7 +1030,8 @@ class CanvasWebShell:
             self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
         except tk.TclError:
             pass
-        if _open_canvas_app_window(self.url, maximized=self._maximized):
+        opened = _open_canvas_app_window(self.url, maximized=self._maximized)
+        if opened:
             if self._maximized:
                 self.var_status.set(
                     "画板已在独立窗口最大化打开。\n"
@@ -1007,8 +1049,16 @@ class CanvasWebShell:
                 )
             except Exception as e:
                 self.var_status.set(f"打开画板失败: {e}")
+        # Browser launch steals focus; re-assert this dialog so buttons stay clickable.
+        self._stabilize(delay_ms=50)
+        self._stabilize(delay_ms=250)
+        self._stabilize(delay_ms=700)
 
     def close(self) -> None:
+        try:
+            self.win.attributes("-topmost", False)
+        except tk.TclError:
+            pass
         try:
             self.win.destroy()
         except tk.TclError:
@@ -1668,11 +1718,12 @@ class SSHChatGUI:
         self._paste_pending: dict[str, Any] | None = None
         self._pending_file_meta: dict[str, str] = {}
         self._paste_timer: str | int | None = None
-        self._suggest_win: tk.Toplevel | None = None
+        self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
         self._suggest_geom_job: str | int | None = None
-        self._canvas_win: NativeCanvasWindow | None = None
+        self._suggest_focus_job: str | int | None = None
+        self._canvas_win: CanvasWebShell | None = None
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
@@ -1689,7 +1740,9 @@ class SSHChatGUI:
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
         self.root.bind("<Configure>", self._on_root_configure, add="+")
-        self.root.bind("<ButtonPress-1>", self._on_root_button_press, add="+")
+        # bind_all: root-only ButtonPress never fires for ttk.Button children, so
+        # orphaned suggestion chrome would keep eating clicks until the window moves.
+        self.root.bind_all("<ButtonPress-1>", self._on_any_button_press, add="+")
         self.root.bind("<<Paste>>", self._on_paste_file, add="+")
         self.root.bind("<Command-v>", self._on_paste_file, add="+")
         self.root.bind("<Control-v>", self._on_paste_file, add="+")
@@ -1818,6 +1871,7 @@ class SSHChatGUI:
         self.entry.bind("<Up>", self._on_entry_up)
         self.entry.bind("<Escape>", self._on_entry_escape)
         self.entry.bind("<KeyRelease>", self._on_entry_keyrelease, add="+")
+        self.entry.bind("<FocusOut>", self._on_entry_focus_out, add="+")
         self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
         self.entry.bind("<Command-v>", self._on_paste_file, add="+")
         self.entry.bind("<Control-v>", self._on_paste_file, add="+")
@@ -1869,8 +1923,6 @@ class SSHChatGUI:
         if geom == self._last_root_geom:
             return
         self._last_root_geom = geom
-        # Absolute-positioned completion popup does not move with the parent;
-        # leave it up and it keeps eating clicks at the old screen coords.
         if self._suggest_win is not None:
             if self._suggest_geom_job is not None:
                 try:
@@ -1879,20 +1931,60 @@ class SSHChatGUI:
                     pass
             self._suggest_geom_job = self.root.after(40, self._reposition_or_hide_suggestions)
 
-    def _on_root_button_press(self, event) -> None:
-        # Clicking chrome outside the entry closes the floating completion list
-        # so an orphaned -topmost popup cannot block buttons.
+    def _widget_in_suggestions(self, w) -> bool:
+        if w is self.entry or w is self._suggest_list or w is self._suggest_win:
+            return True
+        if self._suggest_win is None:
+            return False
+        try:
+            return str(w).startswith(str(self._suggest_win))
+        except tk.TclError:
+            return False
+
+    def _on_any_button_press(self, event) -> None:
+        # Dismiss in-window completion when clicking elsewhere in the main window.
+        # Ignore other Toplevels (canvas shell, pickers) so we don't steal their clicks.
         if self._suggest_win is None:
             return
         w = event.widget
-        if w is self.entry or w is self._suggest_list or w is self._suggest_win:
-            return
         try:
-            if self._suggest_list is not None and str(w).startswith(str(self._suggest_win)):
+            if w.winfo_toplevel() is not self.root:
                 return
         except tk.TclError:
-            pass
+            return
+        if self._widget_in_suggestions(w):
+            return
         self._hide_suggestions()
+
+    def _on_entry_focus_out(self, _event=None) -> None:
+        # Delay so a click on the suggestion list can land first.
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+        self._suggest_focus_job = self.root.after(120, self._hide_suggestions_if_focus_left)
+
+    def _hide_suggestions_if_focus_left(self) -> None:
+        self._suggest_focus_job = None
+        if self._suggest_win is None:
+            return
+        try:
+            focus = self.root.focus_get()
+        except tk.TclError:
+            focus = None
+        if focus is not None and self._widget_in_suggestions(focus):
+            return
+        self._hide_suggestions()
+
+    def _nudge_hit_testing(self) -> None:
+        """Aqua sometimes keeps stale click targets until geometry changes."""
+        try:
+            self.root.update_idletasks()
+            geom = self.root.winfo_geometry()
+            self.root.geometry(geom)
+        except tk.TclError:
+            pass
 
     def _stabilize_initial_interaction(self) -> None:
         try:
@@ -1905,12 +1997,7 @@ class SSHChatGUI:
             self.root.lift()
         except tk.TclError:
             pass
-        try:
-            # Tiny geometry re-assert refreshes macOS window server click targets.
-            geom = self.root.winfo_geometry()
-            self.root.geometry(geom)
-        except tk.TclError:
-            pass
+        self._nudge_hit_testing()
         try:
             if self.btn_connect.instate(("disabled",)):
                 self.btn_connect.state(("!disabled",))
@@ -3025,6 +3112,13 @@ class SSHChatGUI:
             except (tk.TclError, ValueError):
                 pass
             self._suggest_geom_job = None
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_focus_job = None
+        had = self._suggest_win is not None
         if self._suggest_win is not None:
             try:
                 self._suggest_win.destroy()
@@ -3033,16 +3127,24 @@ class SSHChatGUI:
         self._suggest_win = None
         self._suggest_list = None
         self._suggest_items = []
+        if had:
+            # Destroying an overlay can leave Aqua click maps stale.
+            self.root.after_idle(self._nudge_hit_testing)
 
-    def _suggestion_geometry(self) -> str:
+    def _suggestion_place_box(self) -> tuple[int, int, int, int]:
         self.entry.update_idletasks()
-        x = self.entry.winfo_rootx()
+        self.root.update_idletasks()
         height = min(160, 20 * max(1, len(self._suggest_items)) + 4)
-        y = self.entry.winfo_rooty() - height - 4
-        if y < 0:
-            y = self.entry.winfo_rooty() + self.entry.winfo_height() + 2
         width = max(self.entry.winfo_width(), 220)
-        return f"{width}x{height}+{x}+{y}"
+        # Coordinates relative to root content (place), not screen — so the
+        # panel moves with the window and cannot orphan over the desktop.
+        x = self.entry.winfo_rootx() - self.root.winfo_rootx()
+        y_above = self.entry.winfo_rooty() - self.root.winfo_rooty() - height - 4
+        if y_above < 0:
+            y = self.entry.winfo_rooty() - self.root.winfo_rooty() + self.entry.winfo_height() + 2
+        else:
+            y = y_above
+        return x, y, width, height
 
     def _reposition_or_hide_suggestions(self) -> None:
         self._suggest_geom_job = None
@@ -3052,7 +3154,9 @@ class SSHChatGUI:
             if not self._suggest_win.winfo_exists():
                 self._hide_suggestions()
                 return
-            self._suggest_win.geometry(self._suggestion_geometry())
+            x, y, width, height = self._suggestion_place_box()
+            self._suggest_win.place(x=x, y=y, width=width, height=height)
+            self._suggest_win.lift()
         except tk.TclError:
             self._hide_suggestions()
 
@@ -3061,29 +3165,23 @@ class SSHChatGUI:
         if not items:
             return
         self._suggest_items = items
-        win = tk.Toplevel(self.root)
-        win.transient(self.root)
-        win.overrideredirect(True)
-        # Do NOT set global -topmost: a leftover popup then sits on top of the
-        # whole desktop and keeps eating button clicks until the main window is
-        # moved out from under it.
-        try:
-            win.attributes("-topmost", False)
-        except tk.TclError:
-            pass
-        lst = tk.Listbox(win, height=min(8, len(items)), exportselection=False)
+        # In-window Frame (not overrideredirect Toplevel): floating popups on
+        # Aqua keep eating button clicks when their screen rect goes stale.
+        frame = ttk.Frame(self.root, relief=tk.SOLID, borderwidth=1)
+        lst = tk.Listbox(frame, height=min(8, len(items)), exportselection=False)
         lst.pack(fill=tk.BOTH, expand=True)
         for item in items:
             lst.insert(tk.END, item)
         lst.selection_set(0)
         lst.activate(0)
         lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
-        win.geometry(self._suggestion_geometry())
+        x, y, width, height = self._suggestion_place_box()
+        frame.place(x=x, y=y, width=width, height=height)
         try:
-            win.lift(self.root)
+            frame.lift()
         except tk.TclError:
             pass
-        self._suggest_win = win
+        self._suggest_win = frame
         self._suggest_list = lst
 
     def _apply_selected_suggestion(self) -> None:
@@ -3274,6 +3372,7 @@ class SSHChatGUI:
         self._refresh_send_target_button()
 
     def _on_close(self) -> None:
+        self._hide_suggestions()
         self._disconnect(clear_log=False)
         self.root.destroy()
 

@@ -129,6 +129,27 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(len(payload["elements"]), 1)
         self.assertTrue(payload["elements"][0]["isDeleted"])
 
+    def test_add_participant_joins_existing_session(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="lab"
+        )
+        tok, key, err = self.store.add_participant(session.session_id, "Carol")
+        self.assertEqual(err, "")
+        self.assertTrue(tok)
+        self.assertEqual(len(key), 6)
+        self.assertIn("Carol", session.tokens)
+        # Idempotent
+        tok2, key2, err2 = self.store.add_participant(session.session_id, "carol")
+        self.assertEqual(err2, "")
+        self.assertEqual(tok2, tok)
+        self.assertEqual(key2, key)
+        # Carol can auth and sync
+        _, _, ticket, err = self.store.issue_access_ticket(tok, key)
+        self.assertEqual(err, "")
+        payload, err = self.store.sync_since(tok, ticket, 0)
+        self.assertEqual(err, "")
+        self.assertIsNotNone(payload)
+
     def test_clear_and_close(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="art"

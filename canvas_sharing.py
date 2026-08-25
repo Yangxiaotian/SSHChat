@@ -190,6 +190,37 @@ class CanvasStore:
             self._save()
         return session
 
+    def add_participant(
+        self, session_id: str, name: str
+    ) -> Tuple[Optional[str], Optional[str], str]:
+        """Ensure *name* has a URL token + key on an open local session.
+
+        Returns (token, key, error). Idempotent: existing participants get their
+        current credentials back.
+        """
+        name = (name or "").strip()
+        if not name:
+            return None, None, "无效昵称"
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None, None, "画布不存在"
+            ok, err = self._alive(session)
+            if not ok:
+                return None, None, err
+            for existing, tok in session.tokens.items():
+                if existing.lower() == name.lower():
+                    return tok, session.keys.get(existing, ""), ""
+            token = _generate_token()
+            key = _generate_key()
+            session.tokens[name] = token
+            session.keys[name] = key
+            # Only index locally hosted boards; remote mirrors resolve via host_base_url.
+            if not session.host_node:
+                self.token_to_session[token] = session_id
+            self._save()
+            return token, key, ""
+
     def register_remote_session(
         self,
         *,
