@@ -34,6 +34,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
         # stdlib@foxmail.com Personal Team
@@ -58,6 +59,10 @@ targets:
         UIRequiredDeviceCapabilities: [armv7]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         NSCameraUsageDescription: SSHChat 需要相机以拍照或录像发送到聊天。
         NSMicrophoneUsageDescription: SSHChat 需要麦克风以录制语音消息。
         NSPhotoLibraryUsageDescription: SSHChat 需要访问相册以选择图片发送。

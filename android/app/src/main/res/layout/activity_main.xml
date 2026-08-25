@@ -164,7 +164,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
-            android:text="棋盘可左右滑；顶栏 A- / A+ 调字号"
+            android:text="气泡聊天；棋盘可左右滑 · 顶栏 A- / A+ 调字号"
             android:textSize="11sp"
             android:textColor="#888888" />
 
@@ -174,7 +174,7 @@
             android:layout_height="0dp"
             android:layout_weight="1"
             android:layout_marginTop="4dp"
-            android:background="#FAFAFA"
+            android:background="#EDEDED"
             android:fillViewport="true"
             android:scrollbars="horizontal">
 
@@ -187,7 +187,7 @@
 
                 <LinearLayout
                     android:id="@+id/chatLog"
-                    android:layout_width="wrap_content"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:minWidth="360dp"
                     android:orientation="vertical"

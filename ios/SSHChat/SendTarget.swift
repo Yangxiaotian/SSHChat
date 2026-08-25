@@ -283,4 +283,146 @@ enum ChatLineParsers {
         }
         return true
     }
+
+    /// UI classification for bubble / system / board cards.
+    enum DisplayKind {
+        case bubble(mine: Bool, room: String?, sender: String, body: String, time: String)
+        case system(String)
+        case boardLine(String)
+    }
+
+    private static let clockCapture = try! NSRegularExpression(
+        pattern: #"^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+"#
+    )
+
+    /// Prefer line clock (`[HH:MM:SS]`); else local now.
+    static func extractDisplayTime(_ line: String) -> String {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(t.startIndex..., in: t)
+        if let m = clockCapture.firstMatch(in: t, range: range),
+           let r = Range(m.range(at: 1), in: t)
+        {
+            return String(t[r])
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date())
+    }
+
+    /// `[#room] [*] body` (server) or `[*] body` (client.py SSH display).
+    private static let gameStarRoom = try! NSRegularExpression(
+        pattern: #"^\[#[^\]]+\]\s+\[\*\](?: (.*))?$"#
+    )
+    private static let gameStarBare = try! NSRegularExpression(
+        pattern: #"^\[\*\](?: (.*))?$"#
+    )
+
+    /// Body only (leading spaces kept). Nil if not a game/system-star wire line.
+    /// Mobile SSH sessions run client.py, which rewrites `[#room] [*]` → `[*]`.
+    static func parseGameStarBody(_ line: String) -> String? {
+        let t = normalizeForParse(line)
+        let range = NSRange(t.startIndex..., in: t)
+        if let m = gameStarRoom.firstMatch(in: t, range: range) {
+            if m.range(at: 1).location == NSNotFound { return "" }
+            guard let bodyR = Range(m.range(at: 1), in: t) else { return "" }
+            return String(t[bodyR])
+        }
+        if let m = gameStarBare.firstMatch(in: t, range: range) {
+            if m.range(at: 1).location == NSNotFound { return "" }
+            guard let bodyR = Range(m.range(at: 1), in: t) else { return "" }
+            return String(t[bodyR])
+        }
+        return nil
+    }
+
+    static func shouldContinueBoard(_ line: String) -> Bool {
+        if parseGameStarBody(line) != nil { return true }
+        if let chat = parseChat(line), systemSenders.contains(chat.sender) { return true }
+        if looksLikeGameBoardContent(line) { return true }
+        if let chat = parseChat(line), looksLikeGameBoardContent(chat.body) { return true }
+        return false
+    }
+
+    /// Board / game ASCII — must never become a WeChat bubble or centered system tip.
+    static func looksLikeGameBoardContent(_ payload: String) -> Bool {
+        let t = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return false }
+        let chessPieces = CharacterSet(charactersIn: "♔♕♖♗♘♙♚♛♜♝♞♟")
+        if t.unicodeScalars.contains(where: { chessPieces.contains($0) }) { return true }
+        if t.contains("楚河汉界") || t.contains("图例：") || t.contains("请用等宽") || t.contains("己方在下方") {
+            return true
+        }
+        if t.contains("←") && (t.contains("纵线") || t.contains("红方") || t.contains("黑方") || t.contains("白方")) {
+            return true
+        }
+        if t.contains("-车") || t.contains("+车") || t.contains("-将") || t.contains("+帅")
+            || t.contains("-马") || t.contains("+马")
+        {
+            return true
+        }
+        if t.range(of: #"^[+\-!·]"#, options: .regularExpression) != nil, t.count > 6 { return true }
+        if t.range(of: #"^\d{1,2}\s+(?:[.#o●○·]\s*){4,}"#, options: .regularExpression) != nil {
+            return true
+        }
+        if t.range(of: #"^[a-h](?:\s+[a-h]){7}\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        if t.range(of: #"^(?:\d{1,2}\s+){7,}\d{1,2}\s*$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if t.range(of: #"^[一二三四五六七八九](?:\s+[一二三四五六七八九]){3,}"#, options: .regularExpression) != nil {
+            return true
+        }
+        let keys = [
+            "轮到", "上一步", "对局", "gomoku", "chess", "xiangqi", "围棋",
+            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "积分=", "rating=", "W/L/D",
+            "将军", "停一手", "落子", "走子", "行棋", "空席",
+        ]
+        let lower = t.lowercased()
+        if keys.contains(where: { t.contains($0) || lower.contains($0.lowercased()) }) { return true }
+        let dots = t.filter { $0 == "·" || $0 == "." }.count
+        if dots >= 8 && t.count < 140 { return true }
+        let goish = t.filter { $0 == "#" || $0 == "o" || $0 == "O" }.count
+        if goish >= 5 && dots >= 5 { return true }
+        return false
+    }
+
+    static func classifyForDisplay(_ line: String, myName: String) -> DisplayKind {
+        if let body = parseGameStarBody(line) {
+            return .boardLine(body)
+        }
+        if let chat = parseChat(line) {
+            var sender = chat.sender
+            var body = chat.body
+            var room = chat.room
+            if sender.range(of: #"^\d{1,2}:\d{2}"#, options: .regularExpression) != nil,
+               let nested = parseChat(body)
+            {
+                sender = nested.sender
+                body = nested.body
+                room = nested.room ?? room
+            }
+            if sender.hasPrefix("#"), let nested = parseChat(body) {
+                sender = nested.sender
+                body = nested.body
+                room = nested.room ?? room
+            }
+            // Game boards arrive as [*]; join/leave [+]/[!]/[-] stay gray system (not bubbles).
+            if sender == "*" {
+                return .boardLine(body)
+            }
+            if systemSenders.contains(sender) || ignoredSenders.contains(sender.uppercased()) {
+                return .system(body.isEmpty ? line : "[\(sender)] \(body)")
+            }
+            // Real user chat → always bubble (never board heuristics).
+            let me = myName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mine = !me.isEmpty && sender.caseInsensitiveCompare(me) == .orderedSame
+            return .bubble(mine: mine, room: room, sender: sender, body: body, time: extractDisplayTime(line))
+        }
+        if looksLikeGameBoardContent(line) {
+            return .boardLine(line.trimmingCharacters(in: .newlines))
+        }
+        return .system(line)
+    }
 }

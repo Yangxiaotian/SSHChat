@@ -35,9 +35,12 @@ object ChatLineParsers {
     }
 
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
-    private val roomChat = Regex("""^\[#([^\]]+)]\s+\[([^\]]+)] (.*)$""")
-    private val plainChat = Regex("""^\[([^\]]+)] (.*)$""")
-    private val timePrefix = Regex("""^>?\[\d{1,2}:\d{2}(?::\d{2})?]\s*""")
+    private val roomChat = Regex("""^\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
+    private val plainChat = Regex("""^\[([^\]]+)]\s+(.*)$""")
+    /** PTY junk before the real `[#room] [nick] body` — take last match. */
+    private val roomChatLoose = Regex("""\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
+    private val timePrefix = Regex("""^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+""")
+    private val leadingGarbage = Regex("""^[\uFFFD\u25A1\uFEFF\u00A0\s]+""")
     private val systemSenders = setOf("+", "-", "*", "!")
     private val ignoredSenders = setOf("OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT")
 
@@ -46,6 +49,7 @@ object ChatLineParsers {
     /** Strip local clock / prompt prefixes before parsing chat. */
     fun normalizeForParse(line: String): String {
         var t = line.trim()
+        t = leadingGarbage.replace(t, "")
         while (true) {
             val nxt = timePrefix.replaceFirst(t, "").trimStart()
             if (nxt == t) break
@@ -57,6 +61,28 @@ object ChatLineParsers {
         return t
     }
 
+    /** Resolve nested clock / [#room] quirks (same as iOS). */
+    private fun unwrapChat(chat: ChatLine): ChatLine {
+        var sender = chat.sender
+        var body = chat.body
+        var room = chat.room
+        if (sender.matches(Regex("""^\d{1,2}:\d{2}.*"""))) {
+            parseChat(body)?.let { nested ->
+                sender = nested.sender
+                body = nested.body
+                room = nested.room ?: room
+            }
+        }
+        if (sender.startsWith("#")) {
+            parseChat(body)?.let { nested ->
+                sender = nested.sender
+                body = nested.body
+                room = nested.room ?: room
+            }
+        }
+        return ChatLine(room, sender, body)
+    }
+
     fun parseChat(line: String): ChatLine? {
         val t = normalizeForParse(line)
         roomChat.matchEntire(t)?.let { m ->
@@ -66,6 +92,9 @@ object ChatLineParsers {
             val sender = m.groupValues[1]
             if (sender.lowercase().startsWith("pm from ")) return null
             return ChatLine(null, sender, m.groupValues[2])
+        }
+        roomChatLoose.find(t)?.let { m ->
+            return ChatLine(m.groupValues[1], m.groupValues[2], m.groupValues[3])
         }
         return null
     }
@@ -86,20 +115,9 @@ object ChatLineParsers {
             val lower = t.lowercase()
             return " joined " in lower || " left " in lower
         }
-        var sender = chat.sender
-        var body = chat.body
-        // Leftover clock parsed as sender → real chat is in the body.
-        if (sender.matches(Regex("""^\\d{1,2}:\\d{2}.*"""))) {
-            val nested = parseChat(body) ?: return false
-            sender = nested.sender
-            body = nested.body
-        }
-        // `[#room]` eaten as plain sender → body is `[nick] text`.
-        if (sender.startsWith("#")) {
-            val nested = parseChat(body) ?: return false
-            sender = nested.sender
-            body = nested.body
-        }
+        val unwrapped = unwrapChat(chat)
+        var sender = unwrapped.sender
+        var body = unwrapped.body
         if (sender.uppercase() in ignoredSenders) return false
         if (sender in systemSenders) {
             if (sender == "+" || sender == "-") return true
@@ -120,5 +138,107 @@ object ChatLineParsers {
             return false
         }
         return true
+    }
+
+    /** UI classification for bubble / system / board cards. */
+    sealed class DisplayKind {
+        data class Bubble(
+            val mine: Boolean,
+            val room: String?,
+            val sender: String,
+            val body: String,
+            val time: String,
+        ) : DisplayKind()
+        data class System(val text: String) : DisplayKind()
+        data class BoardLine(val text: String) : DisplayKind()
+    }
+
+    private val clockCapture = Regex("""^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+""")
+
+    /** Prefer line clock (`[HH:MM:SS]`); else local now. */
+    fun extractDisplayTime(line: String): String {
+        clockCapture.find(line.trim())?.groupValues?.getOrNull(1)?.let { return it }
+        val cal = java.util.Calendar.getInstance()
+        return "%02d:%02d:%02d".format(
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+            cal.get(java.util.Calendar.SECOND),
+        )
+    }
+
+    /** `[#room] [*] body` (server) or `[*] body` (client.py SSH display). */
+    private val gameStarRoom = Regex("""^\[#[^\]]+\]\s+\[\*\](?: (.*))?$""")
+    private val gameStarBare = Regex("""^\[\*\](?: (.*))?$""")
+
+    /**
+     * Body only (leading spaces kept). Null if not a game/system-star wire line.
+     * Mobile SSH sessions run client.py, which rewrites `[#room] [*]` → `[*]`.
+     */
+    fun parseGameStarBody(line: String): String? {
+        val t = normalizeForParse(line)
+        gameStarRoom.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
+        gameStarBare.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
+        return null
+    }
+
+    fun shouldContinueBoard(line: String): Boolean {
+        if (parseGameStarBody(line) != null) return true
+        val chat = parseChat(line)
+        if (chat != null && chat.sender in systemSenders) return true
+        if (looksLikeGameBoardContent(line)) return true
+        if (chat != null && looksLikeGameBoardContent(chat.body)) return true
+        return false
+    }
+
+    /** Board / game ASCII — must never become a WeChat bubble or centered system tip. */
+    fun looksLikeGameBoardContent(payload: String): Boolean {
+        val t = payload.trim()
+        if (t.isEmpty()) return false
+        if (t.any { it in "♔♕♖♗♘♙♚♛♜♝♞♟" }) return true
+        if ("楚河汉界" in t || "图例：" in t || "请用等宽" in t || "己方在下方" in t) return true
+        if ("←" in t && ("纵线" in t || "红方" in t || "黑方" in t || "白方" in t)) return true
+        if (("-车" in t || "+车" in t || "-将" in t || "+帅" in t || "-马" in t || "+马" in t)) return true
+        if (Regex("""^[+\-!·]""").containsMatchIn(t) && t.length > 6) return true
+        if (Regex("""^\d{1,2}\s+(?:[.#o●○·]\s*){4,}""").containsMatchIn(t)) return true
+        if (Regex("""^[a-h](?:\s+[a-h]){7}\s*$""", RegexOption.IGNORE_CASE).matches(t)) return true
+        if (Regex("""^(?:\d{1,2}\s+){7,}\d{1,2}\s*$""").matches(t)) return true
+        if (Regex("""^[一二三四五六七八九](?:\s+[一二三四五六七八九]){3,}""").containsMatchIn(t)) return true
+        val keys = listOf(
+            "轮到", "上一步", "对局", "gomoku", "chess", "xiangqi", "go ", "围棋",
+            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "积分=", "rating=", "W/L/D",
+            "将军", "停一手", "落子", "走子", "行棋", "空席",
+        )
+        if (keys.any { it in t || it.lowercase() in t.lowercase() }) return true
+        val dots = t.count { it == '·' || it == '.' }
+        if (dots >= 8 && t.length < 140) return true
+        val goish = t.count { it == '#' || it == 'o' || it == 'O' }
+        if (goish >= 5 && dots >= 5) return true
+        return false
+    }
+
+    fun classifyForDisplay(line: String, myName: String): DisplayKind {
+        parseGameStarBody(line)?.let { return DisplayKind.BoardLine(it) }
+
+        val chat = parseChat(line) ?: run {
+            if (looksLikeGameBoardContent(line)) {
+                return DisplayKind.BoardLine(line.trimEnd())
+            }
+            return DisplayKind.System(line)
+        }
+        val unwrapped = unwrapChat(chat)
+        val sender = unwrapped.sender
+        val body = unwrapped.body
+        val room = unwrapped.room
+        if (sender == "*") {
+            return DisplayKind.BoardLine(body)
+        }
+        if (sender in systemSenders || sender.uppercase() in ignoredSenders) {
+            return DisplayKind.System(
+                if (body.isNotEmpty()) "[$sender] $body" else line,
+            )
+        }
+        val me = myName.trim()
+        val mine = me.isNotEmpty() && sender.equals(me, ignoreCase = true)
+        return DisplayKind.Bubble(mine, room, sender, body, extractDisplayTime(line))
     }
 }

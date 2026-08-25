@@ -184,7 +184,8 @@ class SshChatClient(
             s = CSI.replace(s, "")
             s = OSC.replace(s, "")
             s = s.replace("\u001B", "")
-            return s.trim()
+            // Keep leading spaces — board padding / 楚河汉界 centering depends on them.
+            return s.trimEnd()
         }
     }
 }

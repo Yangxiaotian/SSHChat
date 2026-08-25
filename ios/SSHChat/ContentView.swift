@@ -5,14 +5,18 @@ import UIKit
 import UniformTypeIdentifiers
 
 enum ChatEntry: Identifiable, Equatable {
-    case text(id: UUID, String)
-    case pm(id: UUID, from: String, body: String)
+    case bubble(id: UUID, mine: Bool, room: String?, sender: String, body: String, time: String)
+    case pm(id: UUID, from: String, body: String, time: String)
+    case system(id: UUID, String)
+    case board(id: UUID, text: String)
     case media(DownloadedMedia)
 
     var id: UUID {
         switch self {
-        case .text(let id, _): return id
-        case .pm(let id, _, _): return id
+        case .bubble(let id, _, _, _, _, _): return id
+        case .pm(let id, _, _, _): return id
+        case .system(let id, _): return id
+        case .board(let id, _): return id
         case .media(let m): return m.id
         }
     }
@@ -713,18 +717,31 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func appendPm(from: String, body: String) {
-        if entries.count > 2000 {
-            entries.removeFirst(entries.count - 1500)
-        }
-        entries.append(.pm(id: UUID(), from: from, body: body))
+        trimEntriesIfNeeded()
+        entries.append(.pm(id: UUID(), from: from, body: body, time: ChatLineParsers.extractDisplayTime("")))
     }
 
     private func appendText(_ line: String) {
-        // Cap history so SwiftUI stays responsive on long sessions.
+        trimEntriesIfNeeded()
+        let kind = ChatLineParsers.classifyForDisplay(line, myName: username)
+        if case .boardLine(let t) = kind, case .board(_, let existing) = entries.last {
+            entries[entries.count - 1] = .board(id: UUID(), text: existing + "\n" + t)
+            return
+        }
+        switch kind {
+        case .bubble(let mine, let room, let sender, let body, let time):
+            entries.append(.bubble(id: UUID(), mine: mine, room: room, sender: sender, body: body, time: time))
+        case .boardLine(let t):
+            entries.append(.board(id: UUID(), text: t))
+        case .system(let t):
+            entries.append(.system(id: UUID(), t))
+        }
+    }
+
+    private func trimEntriesIfNeeded() {
         if entries.count > 2000 {
             entries.removeFirst(entries.count - 1500)
         }
-        entries.append(.text(id: UUID(), line))
     }
 
     private func appendMedia(_ media: DownloadedMedia, autoOpen: Bool) {
@@ -767,7 +784,7 @@ struct ContentView: View {
                     .foregroundStyle(Color(white: 0.4))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 4)
-                Text("棋盘可左右滑；顶栏 A- / A+ 调字号")
+                Text("气泡聊天；棋盘卡片可左右滑 · 顶栏 A- / A+ 调字号")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(white: 0.53))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -964,13 +981,20 @@ struct ContentView: View {
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color(white: 0.98))
+            .background(Color(red: 0.929, green: 0.929, blue: 0.929))
             .onChange(of: model.entries.count) { _, _ in
-                if let last = model.entries.last?.id {
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(last, anchor: .bottom)
-                    }
-                }
+                scrollToEnd(proxy)
+            }
+            .onChange(of: model.entries.last?.id) { _, _ in
+                scrollToEnd(proxy)
+            }
+        }
+    }
+
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        if let last = model.entries.last?.id {
+            DispatchQueue.main.async {
+                proxy.scrollTo(last, anchor: .bottom)
             }
         }
     }
@@ -978,38 +1002,106 @@ struct ContentView: View {
     @ViewBuilder
     private func chatRow(_ entry: ChatEntry) -> some View {
         switch entry {
-        case .text(_, let line):
-            Text(line)
-                .font(.system(size: model.chatFont, design: .monospaced))
-                .foregroundStyle(Color(white: 0.13))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        case .pm(_, let from, let body):
-            Button {
-                model.replyToPm(from)
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("私聊 · \(from)")
-                        .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
-                        .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
-                    Text(body)
-                        .font(.system(size: model.chatFont, design: .monospaced))
-                        .foregroundStyle(Color(white: 0.13))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("点按回复")
-                        .font(.system(size: max(10, model.chatFont - 1)))
-                        .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
-                        .underline()
+        case .bubble(_, let mine, let room, let sender, let body, let time):
+            bubbleRow(
+                mine: mine,
+                caption: bubbleCaption(room: room, sender: sender, mine: mine),
+                body: body,
+                time: time
+            )
+        case .pm(_, let from, let body, let time):
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .top, spacing: 0) {
+                    Button {
+                        model.replyToPm(from)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("私聊 · \(from)")
+                                .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
+                                .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
+                            Text(body)
+                                .font(.system(size: model.chatFont))
+                                .foregroundStyle(Color(white: 0.13))
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("点按回复")
+                                .font(.system(size: max(10, model.chatFont - 1)))
+                                .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
+                                .underline()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(red: 0.89, green: 0.95, blue: 0.99))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: .leading)
+                    Spacer(minLength: 36)
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(red: 0.89, green: 0.95, blue: 0.99))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                Text(time)
+                    .font(.system(size: max(9, model.chatFont - 3)))
+                    .foregroundStyle(Color(white: 0.55))
+                    .padding(.leading, 4)
             }
-            .buttonStyle(.plain)
+            .padding(.vertical, 3)
+        case .system(_, let line):
+            Text(line)
+                .font(.system(size: max(10, model.chatFont - 1)))
+                .foregroundStyle(Color(white: 0.45))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 4)
+        case .board(_, let text):
+            // Plain monospace like pre-bubble terminal — no rounded "bubble" chrome.
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(text)
+                    .font(.system(size: model.chatFont, design: .monospaced))
+                    .foregroundStyle(Color(white: 0.15))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
         case .media(let media):
             mediaCard(media)
         }
+    }
+
+    private func bubbleCaption(room: String?, sender: String, mine: Bool) -> String? {
+        if mine { return nil }
+        if let room, !room.isEmpty { return "#\(room) · \(sender)" }
+        return sender
+    }
+
+    private func bubbleRow(mine: Bool, caption: String?, body: String, time: String) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            if mine { Spacer(minLength: 36) }
+            VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
+                if let caption {
+                    Text(caption)
+                        .font(.system(size: max(10, model.chatFont - 2)))
+                        .foregroundStyle(Color(white: 0.45))
+                }
+                Text(body)
+                    .font(.system(size: model.chatFont))
+                    .foregroundStyle(Color(white: 0.12))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(mine ? Color(red: 0.584, green: 0.925, blue: 0.412) : Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                Text(time)
+                    .font(.system(size: max(9, model.chatFont - 3)))
+                    .foregroundStyle(Color(white: 0.55))
+                    .padding(.horizontal, 4)
+            }
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: mine ? .trailing : .leading)
+            if !mine { Spacer(minLength: 36) }
+        }
+        .padding(.vertical, 3)
     }
 
     private func mediaCard(_ media: DownloadedMedia) -> some View {
@@ -1048,8 +1140,12 @@ struct ContentView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(red: 0.91, green: 0.96, blue: 0.91))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 3)
     }
 
     private var suggestRow: some View {

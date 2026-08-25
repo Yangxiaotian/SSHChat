@@ -153,7 +153,14 @@ actor SSHSession {
             s = re.stringByReplacingMatches(in: s, range: range, withTemplate: "")
         }
         s = s.replacingOccurrences(of: "\u{001B}", with: "")
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Keep leading spaces — board padding / 楚河汉界 centering depends on them.
+        while let last = s.last, last == "\n" || last == "\r" || last == " " || last == "\t" {
+            s.removeLast()
+        }
+        while let first = s.first, first == "\n" || first == "\r" {
+            s.removeFirst()
+        }
+        return s
     }
 }
 

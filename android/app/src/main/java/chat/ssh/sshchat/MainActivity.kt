@@ -16,6 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -885,7 +886,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleIncoming(line: String) {
         if (PtyNoise.shouldDrop(line)) return
-        val stripped = ansiClear.replace(line, "").trim()
+        val stripped = ansiClear.replace(line, "").trimEnd()
         if (stripped.isEmpty()) return
         if (screenCleared.matches(stripped) ||
             stripped.equals("Screen cleared.", ignoreCase = true) ||
@@ -1019,11 +1020,15 @@ class MainActivity : AppCompatActivity() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(8), dp(10), dp(8))
-            setBackgroundColor(0xFFE8F5E9.toInt())
+            background = bubbleDrawable(0xFFE8F5E9.toInt())
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).also { it.topMargin = dp(4); it.bottomMargin = dp(4) }
+            ).also {
+                it.topMargin = dp(4)
+                it.bottomMargin = dp(4)
+                it.marginEnd = dp(36)
+            }
             isClickable = true
             isFocusable = true
             setOnClickListener {
@@ -1094,14 +1099,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendPmLine(from: String, body: String) {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            setBackgroundColor(0xFFE3F2FD.toInt())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).also { it.topMargin = dp(4); it.bottomMargin = dp(4) }
+            ).also { it.topMargin = dp(3); it.bottomMargin = dp(3) }
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = bubbleDrawable(0xFFE3F2FD.toInt())
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
+                it.marginEnd = dp(36)
+            }
             isClickable = true
             isFocusable = true
             setOnClickListener {
@@ -1119,8 +1130,6 @@ class MainActivity : AppCompatActivity() {
             text = body
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
         }
         val hint = TextView(this).apply {
             text = "点按回复"
@@ -1132,25 +1141,133 @@ class MainActivity : AppCompatActivity() {
         card.addView(tag)
         card.addView(bodyTv)
         card.addView(hint)
-        binding.chatLog.addView(card)
+        card.addView(TextView(this).apply {
+            text = ChatLineParsers.extractDisplayTime("")
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 3f).coerceAtLeast(9f))
+            setTextColor(0xFF999999.toInt())
+            setPadding(0, dp(2), 0, 0)
+        })
+        row.addView(card)
+        row.tag = "pm"
+        binding.chatLog.addView(row)
         scrollChatToBottom()
     }
 
     private fun appendLine(line: String) {
+        val me = binding.etUsername.text?.toString().orEmpty()
+        when (val kind = ChatLineParsers.classifyForDisplay(line, me)) {
+            is ChatLineParsers.DisplayKind.Bubble -> appendBubble(kind)
+            is ChatLineParsers.DisplayKind.BoardLine -> appendBoardLine(kind.text)
+            is ChatLineParsers.DisplayKind.System -> appendSystem(kind.text)
+        }
+    }
+
+    private fun appendBubble(kind: ChatLineParsers.DisplayKind.Bubble) {
+        val maxBubble = (resources.displayMetrics.widthPixels * 0.72f).toInt()
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "bubble"
+        }
+        if (!kind.mine) {
+            inner.addView(TextView(this).apply {
+                text = buildString {
+                    if (!kind.room.isNullOrBlank()) append("#${kind.room} · ")
+                    append(kind.sender)
+                }
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 2f).coerceAtLeast(9f))
+                setTextColor(0xFF737373.toInt())
+                setPadding(dp(4), 0, dp(4), dp(2))
+            })
+        }
+        inner.addView(TextView(this).apply {
+            text = kind.body
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+            setTextColor(0xFF1F1F1F.toInt())
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = bubbleDrawable(
+                fill = if (kind.mine) 0xFF95EC69.toInt() else 0xFFFFFFFF.toInt(),
+                stroke = if (kind.mine) null else 0xFFD9D9D9.toInt(),
+            )
+            maxWidth = maxBubble
+            setTextIsSelectable(true)
+        })
+        inner.addView(TextView(this).apply {
+            text = kind.time
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 3f).coerceAtLeast(9f))
+            setTextColor(0xFF999999.toInt())
+            setPadding(dp(4), dp(2), dp(4), 0)
+            gravity = if (kind.mine) Gravity.END else Gravity.START
+        })
+        val wrapper = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).also {
+                it.topMargin = dp(3)
+                it.bottomMargin = dp(3)
+            }
+        }
+        wrapper.addView(
+            inner,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                if (kind.mine) Gravity.END else Gravity.START,
+            ).also {
+                val pad = dp(6)
+                if (kind.mine) it.marginStart = pad else it.marginEnd = pad
+            },
+        )
+        binding.chatLog.addView(wrapper)
+        scrollChatToBottom()
+    }
+
+    private fun appendSystem(text: String) {
         val tv = TextView(this).apply {
-            text = line
+            this.text = text
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, (chatSp - 1f).coerceAtLeast(10f))
+            setTextColor(0xFF737373.toInt())
+            gravity = Gravity.START
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            setPadding(dp(4), dp(3), dp(4), dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            tag = "system"
+        }
+        binding.chatLog.addView(tv)
+        scrollChatToBottom()
+    }
+
+    /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
+    private fun appendBoardLine(text: String) {
+        val tv = TextView(this).apply {
+            this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
             typeface = Typeface.MONOSPACE
+            gravity = Gravity.START
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
             setTextIsSelectable(true)
+            tag = "board"
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
         }
         binding.chatLog.addView(tv)
         scrollChatToBottom()
     }
+
+    private fun bubbleDrawable(fill: Int, stroke: Int? = null): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = dp(10).toFloat()
+            if (stroke != null) {
+                setStroke(dp(1), stroke)
+            }
+        }
 
     private fun scrollChatToBottom() {
         binding.scrollChat.post {
