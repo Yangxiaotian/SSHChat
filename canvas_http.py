@@ -1,4 +1,8 @@
-"""HTML page and request helpers for the shared canvas (served by FileHTTP)."""
+"""HTML page and request helpers for the shared canvas (served by FileHTTP).
+
+UI: Excalidraw (CDN). Sync: Excalidraw elements JSON over the existing
+URL+key → ticket gate (no Excalidraw room server).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,25 @@ import canvas_sharing
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
+
+
+# Pin CDN build so self-hosted servers stay reproducible.
+# Must use ?external=react,react-dom so importmap React is shared (else useEffect on null).
+# ponytail: CDN fonts/JS; vendor under /canvas-assets/ if offline/China breaks.
+EXCALIDRAW_VER = "0.18.0"
+REACT_VER = "18.3.1"
+EXCALIDRAW_CSS = (
+    f"https://esm.sh/@excalidraw/excalidraw@{EXCALIDRAW_VER}/dist/prod/index.css"
+)
+EXCALIDRAW_ASSET = (
+    f"https://esm.sh/@excalidraw/excalidraw@{EXCALIDRAW_VER}/dist/prod/"
+)
+EXCALIDRAW_PKG = (
+    f"https://esm.sh/@excalidraw/excalidraw@{EXCALIDRAW_VER}"
+    f"?external=react,react-dom"
+)
+REACT_PKG = f"https://esm.sh/react@{REACT_VER}"
+REACT_DOM_PKG = f"https://esm.sh/react-dom@{REACT_VER}?deps=react@{REACT_VER}"
 
 
 CANVAS_TEXTS = {
@@ -27,15 +50,14 @@ CANVAS_TEXTS = {
         "you": "You",
         "room": "Room",
         "expires": "Expires",
-        "color": "Color",
-        "width": "Width",
         "clear": "Clear board",
         "clear_confirm": "Clear the shared board for everyone?",
-        "hint": "Draw with mouse or finger. Changes sync to other participants.",
+        "hint": "Powered by Excalidraw. Edits sync to other participants.",
         "status_ready": "Connected",
         "status_sync": "Syncing…",
         "status_err": "Sync error — will retry",
         "closed": "This canvas is closed or expired",
+        "loading": "Loading whiteboard…",
     },
     "zh": {
         "title": "SSHChat 共享画布",
@@ -50,15 +72,14 @@ CANVAS_TEXTS = {
         "you": "你",
         "room": "房间",
         "expires": "过期",
-        "color": "颜色",
-        "width": "粗细",
         "clear": "清空画布",
         "clear_confirm": "确定清空共享画布？（所有人都会清空）",
-        "hint": "用鼠标或手指绘画，笔画会同步给其他参与者。",
+        "hint": "基于 Excalidraw。图形/文字会同步给其他参与者。",
         "status_ready": "已连接",
         "status_sync": "同步中…",
         "status_err": "同步出错，将自动重试",
         "closed": "画布已关闭或过期",
+        "loading": "正在加载画板…",
     },
 }
 
@@ -80,6 +101,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         "room": S["room"],
         "expires": S["expires"],
         "closed": S["closed"],
+        "loading": S["loading"],
     }
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
@@ -87,6 +109,18 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>{html.escape(S['title'])}</title>
+    <link rel="stylesheet" href="{EXCALIDRAW_CSS}" />
+    <script>window.EXCALIDRAW_ASSET_PATH = {json.dumps(EXCALIDRAW_ASSET)};</script>
+    <script type="importmap">
+    {{
+      "imports": {{
+        "react": "{REACT_PKG}",
+        "react/jsx-runtime": "{REACT_PKG}/jsx-runtime",
+        "react-dom": "{REACT_DOM_PKG}",
+        "react-dom/client": "https://esm.sh/react-dom@{REACT_VER}/client?deps=react@{REACT_VER}"
+      }}
+    }}
+    </script>
     <style>
         :root {{
             --ink: #1a1f2e;
@@ -96,19 +130,26 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             --accent-2: #2f6f6a;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        html, body {{ height: 100%; }}
         body {{
             font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
             background:
                 radial-gradient(circle at 12% 18%, rgba(196,92,38,0.14), transparent 42%),
                 radial-gradient(circle at 88% 8%, rgba(47,111,106,0.16), transparent 40%),
                 linear-gradient(160deg, #ebe4d6 0%, #dfe8e4 55%, #efe8dc 100%);
-            min-height: 100vh;
             color: var(--ink);
         }}
         .wrap {{
-            max-width: 1100px;
+            max-width: 1200px;
             margin: 0 auto;
-            padding: 20px 16px 40px;
+            padding: 16px;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+        }}
+        .wrap.board-on {{
+            max-width: none;
+            padding: 0;
         }}
         .card {{
             background: rgba(247, 243, 234, 0.94);
@@ -116,21 +157,32 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             border-radius: 18px;
             box-shadow: 0 18px 50px rgba(40, 30, 20, 0.12);
             overflow: hidden;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }}
+        .wrap.board-on .card {{
+            border-radius: 0;
+            border: 0;
+            box-shadow: none;
         }}
         .header {{
-            padding: 22px 24px 16px;
+            padding: 18px 20px 12px;
             border-bottom: 1px solid var(--line);
             background: linear-gradient(120deg, rgba(196,92,38,0.08), rgba(47,111,106,0.08));
+            flex-shrink: 0;
         }}
+        .wrap.board-on .header {{ display: none; }}
         h1 {{
             font-family: "Fraunces", "Songti SC", Georgia, serif;
-            font-size: 28px;
+            font-size: 26px;
             font-weight: 600;
-            letter-spacing: 0.01em;
         }}
         .sub {{ opacity: 0.75; margin-top: 6px; font-size: 14px; }}
-        .gate, .board {{ padding: 22px 24px 28px; }}
-        .board {{ display: none; }}
+        .gate, .board {{ padding: 20px; }}
+        .board {{ display: none; flex: 1; flex-direction: column; min-height: 0; padding-bottom: 12px; }}
+        .wrap.board-on .board {{ padding: 8px 10px 10px; }}
         label {{ display: block; font-size: 13px; margin-bottom: 8px; opacity: 0.8; }}
         input[type=text] {{
             width: 100%;
@@ -163,37 +215,33 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             flex-wrap: wrap;
             gap: 12px;
             align-items: center;
-            margin-bottom: 14px;
+            margin-bottom: 8px;
+            flex-shrink: 0;
         }}
-        .toolbar label {{ margin: 0; display: flex; align-items: center; gap: 8px; }}
         .meta {{
             font-size: 13px;
             opacity: 0.7;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
             display: flex;
             flex-wrap: wrap;
             gap: 12px;
+            flex-shrink: 0;
         }}
         .stage {{
+            flex: 1;
+            min-height: 420px;
             position: relative;
-            width: 100%;
-            background: #fffdf8;
+            background: #fff;
             border: 1px solid var(--line);
-            border-radius: 14px;
+            border-radius: 12px;
             overflow: hidden;
-            touch-action: none;
         }}
-        canvas {{
-            display: block;
-            width: 100%;
-            height: auto;
-            cursor: crosshair;
-            background:
-                linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px),
-                linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px);
-            background-size: 24px 24px;
+        .wrap.board-on .stage {{
+            border-radius: 8px;
+            min-height: 0;
         }}
-        .hint {{ margin-top: 12px; font-size: 13px; opacity: 0.65; }}
+        #excalidraw-root {{ width: 100%; height: 100%; }}
+        .hint {{ margin-top: 8px; font-size: 13px; opacity: 0.65; flex-shrink: 0; }}
         .status {{
             margin-left: auto;
             font-size: 12px;
@@ -203,10 +251,15 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             color: var(--accent-2);
         }}
         .status.err {{ background: rgba(196,92,38,0.15); color: var(--accent); }}
+        .loading {{
+            position: absolute; inset: 0; display: flex; align-items: center;
+            justify-content: center; background: rgba(255,253,248,0.9); z-index: 2;
+            font-size: 14px; opacity: 0.8;
+        }}
     </style>
 </head>
 <body>
-    <div class="wrap">
+    <div class="wrap" id="wrap">
         <div class="card">
             <div class="header">
                 <h1>{html.escape(S['title'])}</h1>
@@ -223,405 +276,258 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             <div class="board" id="board">
                 <div class="meta" id="meta"></div>
                 <div class="toolbar">
-                    <label>{html.escape(S['color'])}
-                        <input id="color" type="color" value="#1a1f2e" />
-                    </label>
-                    <label>{html.escape(S['width'])}
-                        <input id="width" type="range" min="1" max="24" value="4" />
-                    </label>
                     <button class="secondary" id="clearBtn" type="button">{html.escape(S['clear'])}</button>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="stage">
-                    <canvas id="cv" width="{canvas_sharing.LOGICAL_WIDTH}" height="{canvas_sharing.LOGICAL_HEIGHT}"></canvas>
+                    <div class="loading" id="loading">{html.escape(S['loading'])}</div>
+                    <div id="excalidraw-root"></div>
                 </div>
                 <p class="hint">{html.escape(S['hint'])}</p>
             </div>
         </div>
     </div>
-    <script>
-    (function () {{
-        const token = {json.dumps(token)};
-        const i18n = {json.dumps(i18n, ensure_ascii=False)};
-        const keyInput = document.getElementById('key');
-        const unlockBtn = document.getElementById('unlockBtn');
-        const gate = document.getElementById('gate');
-        const board = document.getElementById('board');
-        const canvas = document.getElementById('cv');
-        const ctx = canvas.getContext('2d');
-        const colorEl = document.getElementById('color');
-        const widthEl = document.getElementById('width');
-        const clearBtn = document.getElementById('clearBtn');
-        const statusEl = document.getElementById('status');
-        const metaEl = document.getElementById('meta');
-        const subtitle = document.getElementById('subtitle');
+    <script type="module">
+    import React from "react";
+    import {{ createRoot }} from "react-dom/client";
+    import * as ExcalidrawLib from "{EXCALIDRAW_PKG}";
 
-        let ticket = '';
-        let since = 0;
-        let drawing = false;
-        let current = null;
-        let pollTimer = null;
-        let guardTimer = null;
-        let syncing = false;
-        let pollCount = 0;
-        /** Strokes since last clear — used to rebuild if the bitmap is wiped. */
-        let history = [];
+    const {{ Excalidraw, CaptureUpdateAction }} = ExcalidrawLib;
+    // 0.18+: NEVER; older builds fall back to commitToHistory:false
+    const remoteUpdateOpts = CaptureUpdateAction
+        ? {{ captureUpdate: CaptureUpdateAction.NEVER }}
+        : {{ commitToHistory: false }};
 
-        // Offscreen layer is the source of truth; visible canvas is a blit target.
-        // Android WebView often discards the on-screen bitmap between paints.
-        const layer = document.createElement('canvas');
-        layer.width = canvas.width;
-        layer.height = canvas.height;
-        const lctx = layer.getContext('2d');
+    const token = {json.dumps(token)};
+    const i18n = {json.dumps(i18n, ensure_ascii=False)};
+    const keyInput = document.getElementById('key');
+    const unlockBtn = document.getElementById('unlockBtn');
+    const gate = document.getElementById('gate');
+    const board = document.getElementById('board');
+    const wrap = document.getElementById('wrap');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+    const metaEl = document.getElementById('meta');
+    const loadingEl = document.getElementById('loading');
 
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        lctx.lineCap = 'round';
-        lctx.lineJoin = 'round';
+    let ticket = '';
+    let rev = 0;
+    let pollTimer = null;
+    let syncing = false;
+    let applyingRemote = false;
+    let pushTimer = null;
+    let api = null;
+    let lastLocalSig = '';
 
-        keyInput.addEventListener('input', function () {{
-            this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-        }});
+    function setStatus(text, err) {{
+        statusEl.textContent = text;
+        statusEl.classList.toggle('err', !!err);
+    }}
 
-        function setStatus(text, err) {{
-            statusEl.textContent = text;
-            statusEl.classList.toggle('err', !!err);
+    function showLoadError(msg) {{
+        if (loadingEl) {{
+            loadingEl.style.display = 'flex';
+            loadingEl.textContent = msg;
+            loadingEl.style.color = '#a33';
         }}
+        setStatus(msg, true);
+    }}
 
-        function logicalPos(evt) {{
-            const rect = canvas.getBoundingClientRect();
-            const src = (evt.touches && evt.touches[0]) ? evt.touches[0] : evt;
-            const x = (src.clientX - rect.left) * (canvas.width / rect.width);
-            const y = (src.clientY - rect.top) * (canvas.height / rect.height);
-            return [
-                Math.max(0, Math.min(canvas.width, x)),
-                Math.max(0, Math.min(canvas.height, y))
-            ];
+    function fmtExpires(ts) {{
+        try {{
+            return new Date(ts * 1000).toLocaleString();
+        }} catch (_) {{
+            return '';
         }}
+    }}
 
-        function strokeOn(target, stroke) {{
-            const pts = stroke.points || [];
-            if (pts.length < 1) return;
-            target.strokeStyle = stroke.color || '#222';
-            target.lineWidth = stroke.width || 3;
-            target.beginPath();
-            target.moveTo(pts[0][0], pts[0][1]);
-            for (let i = 1; i < pts.length; i++) target.lineTo(pts[i][0], pts[i][1]);
-            if (pts.length === 1) {{
-                target.lineTo(pts[0][0] + 0.01, pts[0][1]);
-            }}
-            target.stroke();
+    function hashFragmentKey() {{
+        // Client-only autofill for Electron/Tk (#k=XXXXXX); never sent to server.
+        const m = (location.hash || '').match(/(?:^|[&#])k=([A-Za-z0-9]{{6}})/);
+        if (!m) return '';
+        try {{
+            history.replaceState(null, '', location.pathname + location.search);
+        }} catch (_) {{}}
+        return m[1].toUpperCase();
+    }}
+
+    function sceneSig(elements, files) {{
+        // Cheap change detector — enough to skip no-op pushes.
+        const n = (elements || []).length;
+        let v = 0;
+        for (const el of elements || []) v += (el.version || 0);
+        const fk = files ? Object.keys(files).length : 0;
+        return n + ':' + v + ':' + fk;
+    }}
+
+    async function auth() {{
+        const key = (keyInput.value || '').trim().toUpperCase();
+        if (key.length !== 6) {{
+            alert(i18n.alertKey);
+            return;
         }}
-
-        function present() {{
-            // One-shot replace — avoids clear-then-draw flash.
-            ctx.save();
-            ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.globalCompositeOperation = 'copy';
-            ctx.drawImage(layer, 0, 0);
-            ctx.restore();
-        }}
-
-        function drawStroke(stroke) {{
-            strokeOn(lctx, stroke);
-            present();
-        }}
-
-        function clearLocal() {{
-            lctx.clearRect(0, 0, layer.width, layer.height);
-            present();
-        }}
-
-        function layerLooksEmpty() {{
-            try {{
-                const w = Math.min(layer.width, 48);
-                const h = Math.min(layer.height, 48);
-                const data = lctx.getImageData(0, 0, w, h).data;
-                for (let i = 3; i < data.length; i += 16) {{
-                    if (data[i] !== 0) return false;
-                }}
-                return true;
-            }} catch (e) {{
-                return false;
-            }}
-        }}
-
-        function rememberStroke(ev) {{
-            if (!ev || ev.kind !== 'stroke') return false;
-            const seq = Number(ev.seq || 0);
-            if (seq && history.some(h => Number(h.seq || 0) === seq)) return false;
-            history.push(ev);
-            return true;
-        }}
-
-        function bindStrokeSeq(ev) {{
-            const seq = Number(ev && ev.seq || 0);
-            if (!seq) {{
-                rememberStroke(ev);
-                return;
-            }}
-            for (let i = history.length - 1; i >= 0; i--) {{
-                if (!Number(history[i].seq || 0)) {{
-                    history[i].seq = seq;
-                    if (ev.color) history[i].color = ev.color;
-                    if (ev.width != null) history[i].width = ev.width;
-                    return;
-                }}
-            }}
-            rememberStroke(ev);
-        }}
-
-        function paintAll() {{
-            lctx.clearRect(0, 0, layer.width, layer.height);
-            for (const ev of history) strokeOn(lctx, ev);
-            if (drawing && current && current.length) {{
-                strokeOn(lctx, {{
-                    color: colorEl.value,
-                    width: Number(widthEl.value),
-                    points: current
-                }});
-            }}
-            present();
-        }}
-
-        function ensureBitmap() {{
-            if (history.length && layerLooksEmpty()) paintAll();
-            else present();
-        }}
-        // Android WebView onResume can call this after the bitmap was discarded.
-        window.paintAll = paintAll;
-
-        function applyEvent(ev) {{
-            if (!ev) return;
-            if (ev.kind === 'clear') {{
-                history = [];
-                clearLocal();
-                return;
-            }}
-            if (ev.kind === 'stroke' && rememberStroke(ev)) drawStroke(ev);
-        }}
-
-        async function auth() {{
-            const key = keyInput.value.trim();
-            if (!key || key.length !== 6) {{
-                alert(i18n.alertKey);
-                return;
-            }}
-            unlockBtn.disabled = true;
-            unlockBtn.textContent = i18n.verifying;
-            try {{
-                const res = await fetch('/canvas/' + token + '/auth', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ key: key }})
-                }});
-                const data = await res.json().catch(() => ({{}}));
-                if (!res.ok) throw new Error(data.error || 'auth failed');
-                ticket = data.ticket;
-                gate.style.display = 'none';
-                board.style.display = 'block';
-                subtitle.textContent = data.title || '';
-                renderMeta(data);
-                await syncOnce(true);
-                if (pollTimer) clearInterval(pollTimer);
-                pollTimer = setInterval(() => syncOnce(false), 900);
-                if (guardTimer) clearInterval(guardTimer);
-                // Re-blit often: WebView may wipe the visible canvas between syncs.
-                guardTimer = setInterval(() => {{ if (ticket) ensureBitmap(); }}, 320);
-            }} catch (e) {{
-                alert(e.message || String(e));
-                unlockBtn.disabled = false;
-                unlockBtn.textContent = i18n.retry;
-            }}
-        }}
-
-        function renderMeta(data) {{
-            const bits = [];
-            if (data.participant) bits.push(i18n.you + ': ' + data.participant);
-            if (data.room) bits.push(i18n.room + ': #' + data.room);
-            if (data.expires) {{
-                const d = new Date(data.expires * 1000);
-                bits.push(i18n.expires + ': ' + d.toLocaleString());
-            }}
-            metaEl.textContent = bits.join(' · ');
-        }}
-
-        async function syncOnce(initial) {{
-            if (!ticket || syncing) return;
-            syncing = true;
-            try {{
-                // Periodic / visibility full rebuild: canvas bitmaps can be wiped by
-                // the browser while `since` stays high, leaving only new strokes.
-                pollCount += 1;
-                const rebuild = !!initial || (pollCount % 40 === 0);
-                if (rebuild) since = 0;
-                if (!initial && !rebuild) setStatus(i18n.statusSync, false);
-                const res = await fetch(
-                    '/canvas/' + token + '/sync?since=' + since
-                    + '&ticket=' + encodeURIComponent(ticket),
-                    {{
-                        headers: {{ 'X-Canvas-Ticket': ticket }},
-                        cache: 'no-store'
-                    }}
-                );
-                const data = await res.json().catch(() => ({{}}));
-                if (!res.ok) {{
-                    const msg = data.error || ('HTTP ' + res.status);
-                    if (res.status === 403) {{
-                        ticket = '';
-                        if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
-                        if (guardTimer) {{ clearInterval(guardTimer); guardTimer = null; }}
-                        board.style.display = 'none';
-                        gate.style.display = 'block';
-                        unlockBtn.disabled = false;
-                        unlockBtn.textContent = i18n.retry;
-                        setStatus(i18n.statusErr, true);
-                        throw new Error(msg);
-                    }}
-                    throw new Error(msg);
-                }}
-                renderMeta(data);
-                const events = data.events || [];
-                if (rebuild) {{
-                    const pending = history.filter(h => !Number(h.seq || 0));
-                    history = [];
-                    for (const ev of events) {{
-                        if (!ev) continue;
-                        if (ev.kind === 'clear') history = [];
-                        else if (ev.kind === 'stroke') rememberStroke(ev);
-                        since = Math.max(since, Number(ev.seq || 0));
-                    }}
-                    for (const p of pending) history.push(p);
-                    paintAll();
-                }} else {{
-                    for (const ev of events) {{
-                        applyEvent(ev);
-                        since = Math.max(since, Number(ev.seq || 0));
-                    }}
-                    ensureBitmap();
-                }}
-                setStatus(i18n.statusReady, false);
-            }} catch (e) {{
-                setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
-            }} finally {{
-                syncing = false;
-            }}
-        }}
-
-        async function postStroke(points) {{
-            if (!ticket || points.length < 1) return;
-            try {{
-                const res = await fetch('/canvas/' + token + '/stroke', {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json',
-                        'X-Canvas-Ticket': ticket
-                    }},
-                    body: JSON.stringify({{
-                        color: colorEl.value,
-                        width: Number(widthEl.value),
-                        points: points
-                    }}),
-                    cache: 'no-store'
-                }});
-                const data = await res.json().catch(() => ({{}}));
-                if (!res.ok) throw new Error(data.error || 'stroke failed');
-                const ev = data.event || {{
-                    kind: 'stroke',
-                    color: colorEl.value,
-                    width: Number(widthEl.value),
-                    points: points,
-                    seq: 0
-                }};
-                if (!ev.kind) ev.kind = 'stroke';
-                bindStrokeSeq(ev);
-                if (ev.seq) since = Math.max(since, Number(ev.seq));
-            }} catch (e) {{
-                setStatus((e && e.message) ? (i18n.statusErr + ': ' + e.message) : i18n.statusErr, true);
-            }}
-        }}
-
-        function startDraw(evt) {{
-            // Ignore the synthetic mouse event that follows touch.
-            if (evt.pointerType === 'mouse' && evt.sourceCapabilities
-                && evt.sourceCapabilities.firesTouchEvents) return;
-            if (evt.cancelable) evt.preventDefault();
-            drawing = true;
-            current = [logicalPos(evt)];
-            drawStroke({{
-                color: colorEl.value,
-                width: Number(widthEl.value),
-                points: current
+        unlockBtn.disabled = true;
+        unlockBtn.textContent = i18n.verifying;
+        try {{
+            const res = await fetch('/canvas/' + token + '/auth', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                cache: 'no-store',
+                body: JSON.stringify({{ key }}),
             }});
+            const data = await res.json().catch(() => ({{}}));
+            if (!res.ok) throw new Error(data.error || 'auth failed');
+            ticket = data.ticket;
+            gate.style.display = 'none';
+            board.style.display = 'flex';
+            wrap.classList.add('board-on');
+            metaEl.innerHTML =
+                '<span>' + i18n.you + ': ' + (data.participant || '') + '</span>' +
+                (data.room ? '<span>' + i18n.room + ': ' + data.room + '</span>' : '') +
+                (data.expires ? '<span>' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
+            await mountExcalidraw();
+            await syncOnce(true);
+            pollTimer = setInterval(() => syncOnce(false), 1200);
+        }} catch (e) {{
+            alert((e && e.message) || i18n.statusErr);
+            unlockBtn.disabled = false;
+            unlockBtn.textContent = i18n.unlock;
         }}
-        function moveDraw(evt) {{
-            if (!drawing || !current) return;
-            if (evt.cancelable) evt.preventDefault();
-            const p = logicalPos(evt);
-            const last = current[current.length - 1];
-            if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 1.5) return;
-            current.push(p);
-            drawStroke({{
-                color: colorEl.value,
-                width: Number(widthEl.value),
-                points: current.slice(-2)
+    }}
+
+    async function mountExcalidraw() {{
+        if (!Excalidraw) {{
+            showLoadError('Excalidraw load failed');
+            throw new Error('Excalidraw missing');
+        }}
+        const el = document.getElementById('excalidraw-root');
+        const root = createRoot(el);
+        root.render(React.createElement(Excalidraw, {{
+            langCode: {json.dumps("zh-CN" if lang == "zh" else "en")},
+            UIOptions: {{ canvasActions: {{ loadScene: false, saveToActiveFile: false }} }},
+            excalidrawAPI: (a) => {{ api = a; }},
+            onChange: (elements, _appState, files) => {{
+                if (applyingRemote || !ticket) return;
+                const sig = sceneSig(elements, files);
+                if (sig === lastLocalSig) return;
+                lastLocalSig = sig;
+                schedulePush(elements, files);
+            }},
+        }}));
+        loadingEl.style.display = 'none';
+    }}
+
+    function schedulePush(elements, files) {{
+        if (pushTimer) clearTimeout(pushTimer);
+        pushTimer = setTimeout(() => {{ void pushScene(elements, files); }}, 450);
+    }}
+
+    async function pushScene(elements, files) {{
+        if (!ticket || applyingRemote) return;
+        setStatus(i18n.statusSync, false);
+        try {{
+            const res = await fetch('/canvas/' + token + '/scene', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'X-Canvas-Ticket': ticket,
+                }},
+                cache: 'no-store',
+                body: JSON.stringify({{
+                    elements: elements || [],
+                    files: files || {{}},
+                }}),
             }});
+            const data = await res.json().catch(() => ({{}}));
+            if (!res.ok) throw new Error(data.error || 'scene failed');
+            if (typeof data.rev === 'number') rev = data.rev;
+            setStatus(i18n.statusReady, false);
+        }} catch (_) {{
+            setStatus(i18n.statusErr, true);
         }}
-        async function endDraw(evt) {{
-            if (!drawing) return;
-            if (evt && evt.cancelable) evt.preventDefault();
-            drawing = false;
-            const pts = current || [];
-            current = null;
-            // Keep stroke in history before sync can rebuild, so it does not flash away.
-            rememberStroke({{
-                kind: 'stroke',
-                color: colorEl.value,
-                width: Number(widthEl.value),
-                points: pts,
-                seq: 0
+    }}
+
+    async function syncOnce(initial) {{
+        if (!ticket || syncing) return;
+        syncing = true;
+        if (!initial) setStatus(i18n.statusSync, false);
+        try {{
+            const res = await fetch(
+                '/canvas/' + token + '/sync?since=' + rev + '&ticket=' + encodeURIComponent(ticket),
+                {{
+                    headers: {{ 'X-Canvas-Ticket': ticket }},
+                    cache: 'no-store',
+                }}
+            );
+            const data = await res.json().catch(() => ({{}}));
+            if (!res.ok) throw new Error(data.error || 'sync failed');
+            const remoteRev = Number(data.rev || 0);
+            if (data.changed && remoteRev >= rev && api) {{
+                applyingRemote = true;
+                try {{
+                    api.updateScene({{
+                        elements: data.elements || [],
+                        ...remoteUpdateOpts,
+                    }});
+                    if (data.files && Object.keys(data.files).length && api.addFiles) {{
+                        try {{ api.addFiles(data.files); }} catch (_) {{}}
+                    }}
+                    lastLocalSig = sceneSig(data.elements || [], data.files || {{}});
+                    rev = remoteRev;
+                }} finally {{
+                    applyingRemote = false;
+                }}
+            }} else if (remoteRev > rev) {{
+                rev = remoteRev;
+            }}
+            setStatus(i18n.statusReady, false);
+        }} catch (_) {{
+            setStatus(i18n.statusErr, true);
+        }} finally {{
+            syncing = false;
+        }}
+    }}
+
+    clearBtn.addEventListener('click', async () => {{
+        if (!ticket) return;
+        if (!confirm(i18n.clearConfirm)) return;
+        try {{
+            const res = await fetch('/canvas/' + token + '/clear', {{
+                method: 'POST',
+                headers: {{ 'X-Canvas-Ticket': ticket }},
+                cache: 'no-store',
             }});
-            await postStroke(pts);
+            const data = await res.json().catch(() => ({{}}));
+            if (!res.ok) throw new Error(data.error || 'clear failed');
+            rev = Number(data.rev || rev + 1);
+            if (api) {{
+                applyingRemote = true;
+                try {{
+                    api.resetScene();
+                    lastLocalSig = sceneSig([], {{}});
+                }} finally {{
+                    applyingRemote = false;
+                }}
+            }}
+        }} catch (_) {{
+            setStatus(i18n.statusErr, true);
         }}
+    }});
 
-        canvas.addEventListener('mousedown', startDraw);
-        canvas.addEventListener('mousemove', moveDraw);
-        window.addEventListener('mouseup', endDraw);
-        canvas.addEventListener('touchstart', startDraw, {{ passive: false }});
-        canvas.addEventListener('touchmove', moveDraw, {{ passive: false }});
-        canvas.addEventListener('touchend', endDraw);
-        document.addEventListener('visibilitychange', () => {{
-            if (document.visibilityState === 'visible' && ticket) {{
-                ensureBitmap();
-                syncOnce(true);
-            }}
-        }});
-        window.addEventListener('pageshow', () => {{
-            if (ticket) ensureBitmap();
-        }});
+    unlockBtn.addEventListener('click', auth);
+    keyInput.addEventListener('keydown', (e) => {{
+        if (e.key === 'Enter') auth();
+    }});
 
-        clearBtn.addEventListener('click', async () => {{
-            if (!confirm(i18n.clearConfirm)) return;
-            try {{
-                const res = await fetch('/canvas/' + token + '/clear', {{
-                    method: 'POST',
-                    headers: {{ 'X-Canvas-Ticket': ticket }}
-                }});
-                const data = await res.json().catch(() => ({{}}));
-                if (!res.ok) throw new Error(data.error || 'clear failed');
-                clearLocal();
-                history = [];
-                if (data.event && data.event.seq) since = Math.max(since, Number(data.event.seq));
-            }} catch (e) {{
-                alert(e.message || String(e));
-            }}
-        }});
+    const autofill = hashFragmentKey();
+    if (autofill) {{
+        keyInput.value = autofill;
+        // Same path mobile inject uses: fill then unlock.
+        setTimeout(() => {{ void auth(); }}, 50);
+    }}
 
-        unlockBtn.addEventListener('click', auth);
-        keyInput.addEventListener('keydown', (e) => {{
-            if (e.key === 'Enter') auth();
-        }});
-    }})();
+    // Mobile WebView may call paintAll() on resume — no-op for Excalidraw.
+    window.paintAll = function () {{}};
     </script>
 </body>
 </html>"""
@@ -637,7 +543,6 @@ def handle_canvas_get(handler: "BaseHTTPRequestHandler") -> bool:
     store = canvas_sharing.canvas_store
     lang = "en"
     try:
-        # reuse file server locale helper if present
         from file_http_server import _page_locale
 
         lang = _page_locale(handler)
@@ -711,27 +616,30 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
                 "expires": session.expires,
                 "width": canvas_sharing.LOGICAL_WIDTH,
                 "height": canvas_sharing.LOGICAL_HEIGHT,
+                "rev": session.rev,
             },
         )
         return True
 
-    if action == "stroke":
-        body = handler._read_json_body(limit=512 * 1024)  # type: ignore[attr-defined]
-        event, err = store.add_stroke(
+    if action == "scene":
+        body = handler._read_json_body(limit=canvas_sharing.MAX_SCENE_BYTES + 65536)  # type: ignore[attr-defined]
+        result, err = store.apply_scene(
             token,
             ticket,
-            color=str(body.get("color") or "#222222"),
-            width=body.get("width", 3),
-            points=body.get("points"),
+            elements=body.get("elements"),
+            files=body.get("files"),
         )
-        if event is None:
+        if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
-        handler._send_json_response(200, {"event": event})  # type: ignore[attr-defined]
+        handler._send_json_response(200, result)  # type: ignore[attr-defined]
+        return True
+
+    if action == "stroke":
+        handler._send_error_json(410, "请使用网页画板（Excalidraw）")  # type: ignore[attr-defined]
         return True
 
     if action == "clear":
-        # clear has empty/optional body
         try:
             length = int(handler.headers.get("Content-Length") or 0)
         except ValueError:
@@ -742,7 +650,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
         if event is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
-        handler._send_json_response(200, {"event": event})  # type: ignore[attr-defined]
+        handler._send_json_response(200, event)  # type: ignore[attr-defined]
         return True
 
     handler._send_error_json(404, "网址无效")  # type: ignore[attr-defined]

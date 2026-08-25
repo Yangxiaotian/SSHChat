@@ -459,6 +459,21 @@ html, body, #root {
   touch-action: none;
 }
 
+.canvas-panel-stage-iframe {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+}
+
+.canvas-panel-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 480px;
+  border: 0;
+  background: #1e1e1e;
+}
+
 .game-pane-dnd {
   height: auto;
   min-height: 0;

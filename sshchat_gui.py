@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -2823,21 +2824,11 @@ class SSHChatGUI:
             )
 
     def _open_native_canvas(self, url: str, key: str) -> None:
+        # Excalidraw board is the web page; #k= autofills client-side only.
         try:
-            if self._canvas_win is not None:
-                try:
-                    self._canvas_win.close()
-                except Exception:
-                    pass
-            reach = ""
-            if self._bundle:
-                reach = str(self._bundle.get("host") or "").strip()
-            else:
-                reach = self.var_host.get().strip()
-            self._canvas_win = NativeCanvasWindow(
-                self.root, url, key, reachability_host=reach
-            )
-            self._append_chat_line("[*] 已在客户端打开共享画布", local_sent=True)
+            target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
+            webbrowser.open(target)
+            self._append_chat_line("[*] 已在浏览器打开共享画布（Excalidraw）", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 

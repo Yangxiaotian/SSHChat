@@ -2059,6 +2059,26 @@ class FilePublicReachabilityTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_stale_trycloudflare_env_ignored_without_live_file(self) -> None:
+        """Tunnel restart deletes public_url; do not keep serving the dead hostname."""
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        os.unlink(path)  # missing latch
+        with mock.patch.dict(os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}):
+            with mock.patch.object(fhs, "_detect_lan_ip", return_value="10.0.0.9"):
+                srv = fhs.FileHTTPServer(
+                    host="127.0.0.1",
+                    port=8443,
+                    use_https=False,
+                    public_host="dead-old-host.trycloudflare.com",
+                    public_port=443,
+                )
+                self.assertEqual(srv.get_public_host(), "10.0.0.9")
+                self.assertEqual(srv.get_base_url(), "http://10.0.0.9:8443")
+
 
 if __name__ == "__main__":
     unittest.main()

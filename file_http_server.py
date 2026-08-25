@@ -1682,7 +1682,13 @@ class FileHTTPServer:
             protocol = "http"
         else:
             protocol = "https" if self.use_https else "http"
-        host = self.get_public_host()
+        host = self._configured_public_host()
+        # Quick Tunnel hostnames die when the helper restarts; without a live
+        # public_url latch, never keep handing out the stale env hostname.
+        if host.endswith(".trycloudflare.com"):
+            host = _detect_lan_ip()
+            port = self.port
+            protocol = "https" if self.use_https else "http"
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"
@@ -1695,6 +1701,12 @@ class FileHTTPServer:
             host = (urlparse(live).hostname or "").strip()
             if host:
                 return host
+        host = self._configured_public_host()
+        if host.endswith(".trycloudflare.com"):
+            return _detect_lan_ip()
+        return host
+
+    def _configured_public_host(self) -> str:
         for candidate in (self.domain, self.public_host):
             if candidate and candidate.strip():
                 return candidate.strip()

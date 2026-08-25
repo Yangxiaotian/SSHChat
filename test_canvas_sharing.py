@@ -1,4 +1,4 @@
-"""Tests for shared canvas URL+key sessions and stroke sync."""
+"""Tests for shared canvas URL+key sessions and Excalidraw scene sync."""
 
 from __future__ import annotations
 
@@ -8,6 +8,22 @@ import time
 import unittest
 
 import canvas_sharing
+
+
+def _el(eid: str, version: int, **extra):
+    d = {
+        "id": eid,
+        "type": "rectangle",
+        "x": 0,
+        "y": 0,
+        "width": 10,
+        "height": 10,
+        "version": version,
+        "versionNonce": version * 10,
+        "isDeleted": False,
+    }
+    d.update(extra)
+    return d
 
 
 class CanvasStoreTests(unittest.TestCase):
@@ -31,7 +47,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertNotEqual(session.keys["Alice"], session.keys["Bob"])
         self.assertEqual(len(session.keys["Alice"]), 6)
 
-    def test_key_never_needed_in_url_and_ticket_gates_strokes(self) -> None:
+    def test_key_never_needed_in_url_and_ticket_gates_scene(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="lab"
         )
@@ -39,48 +55,59 @@ class CanvasStoreTests(unittest.TestCase):
         bob_token = session.tokens["Bob"]
         alice_key = session.keys["Alice"]
 
-        # Wrong key rejected
         s, p, t, err = self.store.issue_access_ticket(alice_token, "ZZZZZZ")
         self.assertIsNone(t)
         self.assertIn("密钥", err)
 
-        # Correct key mints multi-use ticket
         s, p, ticket, err = self.store.issue_access_ticket(alice_token, alice_key)
         self.assertEqual(err, "")
         self.assertEqual(p, "Alice")
         self.assertTrue(ticket)
 
-        stroke, err = self.store.add_stroke(
+        result, err = self.store.apply_scene(
             alice_token,
             ticket,
-            color="#112233",
-            width=5,
-            points=[[10, 10], [20, 30], [40, 40]],
+            elements=[_el("a1", 1)],
         )
         self.assertEqual(err, "")
-        self.assertEqual(stroke["seq"], 1)
-        self.assertEqual(stroke["author"], "Alice")
+        self.assertEqual(result["rev"], 1)
+        self.assertEqual(len(result["elements"]), 1)
 
         # Bob cannot use Alice's ticket on Bob's token
-        bad, err = self.store.add_stroke(
+        bad, err = self.store.apply_scene(
             bob_token,
             ticket,
-            color="#000000",
-            width=2,
-            points=[[1, 1], [2, 2]],
+            elements=[_el("b1", 1)],
         )
         self.assertIsNone(bad)
         self.assertTrue(err)
 
-        # Bob auths and syncs Alice's stroke
         _, _, bob_ticket, err = self.store.issue_access_ticket(
             bob_token, session.keys["Bob"]
         )
         self.assertEqual(err, "")
         payload, err = self.store.sync_since(bob_token, bob_ticket, 0)
         self.assertEqual(err, "")
-        self.assertEqual(len(payload["events"]), 1)
-        self.assertEqual(payload["events"][0]["seq"], 1)
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["rev"], 1)
+        self.assertEqual(payload["elements"][0]["id"], "a1")
+
+    def test_element_version_merge(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="merge"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        self.store.apply_scene(at, a_ticket, elements=[_el("x", 1, width=10)])
+        self.store.apply_scene(bt, b_ticket, elements=[_el("x", 2, width=99)])
+        # Stale lower version must not win
+        self.store.apply_scene(at, a_ticket, elements=[_el("x", 1, width=10)])
+        payload, _ = self.store.sync_since(at, a_ticket, 0)
+        self.assertEqual(payload["elements"][0]["width"], 99)
+        self.assertEqual(payload["elements"][0]["version"], 2)
 
     def test_clear_and_close(self) -> None:
         session = self.store.create_session(
@@ -88,15 +115,13 @@ class CanvasStoreTests(unittest.TestCase):
         )
         token = session.tokens["Alice"]
         _, _, ticket, _ = self.store.issue_access_ticket(token, session.keys["Alice"])
-        self.store.add_stroke(
-            token, ticket, color="#000", width=2, points=[[1, 1], [2, 2]]
-        )
+        self.store.apply_scene(token, ticket, elements=[_el("z", 1)])
         event, err = self.store.clear_board(token, ticket)
         self.assertEqual(err, "")
         self.assertEqual(event["kind"], "clear")
         payload, _ = self.store.sync_since(token, ticket, 0)
-        self.assertEqual(len(payload["events"]), 1)
-        self.assertEqual(payload["events"][0]["kind"], "clear")
+        self.assertEqual(payload["elements"], [])
+        self.assertTrue(payload["rev"] >= 2)
 
         ok, err = self.store.close_session(session.session_id, "Bob")
         self.assertFalse(ok)
@@ -134,7 +159,6 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(err, "")
         _, _, t2, err = self.store.issue_access_ticket(token, key)
         self.assertEqual(err, "")
-        # Both tickets must remain usable so a sync poller is not killed by re-auth.
         _, _, err1 = self.store.resolve_ticket(token, t1)
         _, _, err2 = self.store.resolve_ticket(token, t2)
         self.assertEqual(err1, "")
@@ -154,6 +178,7 @@ class CanvasStoreTests(unittest.TestCase):
         token = session.tokens["Alice"]
         key = session.keys["Alice"]
         _, _, ticket, _ = self.store.issue_access_ticket(token, key)
+        self.store.apply_scene(token, ticket, elements=[_el("q1", 1)])
 
         class Fake:
             def __init__(self) -> None:
@@ -175,24 +200,25 @@ class CanvasStoreTests(unittest.TestCase):
             self.assertTrue(canvas_http.handle_canvas_get(fake))  # type: ignore
             self.assertEqual(fake.code, 200)
             self.assertIsNotNone(fake.data)
-            self.assertIn("events", fake.data)
+            self.assertTrue(fake.data["changed"])
+            self.assertEqual(fake.data["rev"], 1)
         finally:
             cs.canvas_store = old
 
-    def test_generate_canvas_page_contains_gate(self) -> None:
+    def test_generate_canvas_page_contains_gate_and_excalidraw(self) -> None:
         import canvas_http
 
         page = canvas_http.generate_canvas_page("tok123", lang="zh")
         self.assertIn("访问密钥", page)
         self.assertIn("'/canvas/' + token + '/auth'", page)
-        self.assertIn("ensureBitmap", page)
-        self.assertIn("globalCompositeOperation = 'copy'", page)
-        self.assertIn("paintAll", page)
-        self.assertIn("bindStrokeSeq", page)
-        self.assertIn("history = []", page)
+        self.assertIn("@excalidraw/excalidraw", page)
+        self.assertIn("external=react,react-dom", page)
+        self.assertIn("/scene", page)
         self.assertIn("X-Canvas-Ticket", page)
         self.assertIn("&ticket=", page)
         self.assertIn("cache: 'no-store'", page)
+        self.assertIn("hashFragmentKey", page)
+        self.assertIn("excalidraw-root", page)
 
 
 if __name__ == "__main__":

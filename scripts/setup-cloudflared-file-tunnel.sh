@@ -398,6 +398,86 @@ if [[ "$INSTALL_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
+dns_a_record() {
+  local host="$1"
+  local ip=""
+  if command -v dig >/dev/null 2>&1; then
+    for ns in 1.1.1.1 8.8.8.8 114.114.114.114; do
+      ip=$(dig +short "$host" A @"$ns" +time=2 +tries=1 2>/dev/null | awk '/^[0-9]+\./{print; exit}')
+      [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+    done
+  fi
+  return 1
+}
+
+probe_public_url() {
+  # Verify Quick Tunnel hostname has public DNS *and* answers HTTP.
+  # cloudflared may print a URL whose DNS is NXDOMAIN (clients cannot open it)
+  # while the connector still looks "Registered" — reject those.
+  local url="$1"
+  local host code ip
+  host="${url#https://}"
+  host="${host%%/*}"
+
+  ip=$(dns_a_record "$host" || true)
+  if [[ -z "$ip" ]]; then
+    echo "error: PUBLIC_URL has no DNS A record (NXDOMAIN?): $host" >&2
+    echo "hint: Cloudflare Quick Tunnel sometimes mint a name that never resolves; restart tunnel for a new URL" >&2
+    return 2
+  fi
+
+  code=$(curl --noproxy '*' -sS -o /dev/null -w "%{http_code}" --max-time 20 "$url/" 2>/dev/null || echo "000")
+  if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
+    echo "info: probe ok http=$code dns=$ip $url/"
+    return 0
+  fi
+
+  # System resolver may differ from dig; try forced IP.
+  code=$(curl --noproxy '*' --resolve "$host:443:$ip" -sS -o /dev/null -w "%{http_code}" --max-time 20 "$url/" 2>/dev/null || echo "000")
+  if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
+    echo "warning: tunnel answers via $ip (http=$code) but system DNS may still be flaky for $host" >&2
+    echo "hint: local DNS=$(scutil --dns 2>/dev/null | awk '/nameserver\[0\]/{print $3; exit}') — Clash/114 often breaks new trycloudflare names" >&2
+    echo "info: PUBLIC_URL=$url (tunnel ok)"
+    return 0
+  fi
+
+  echo "error: tunnel probe failed for $url (dns=$ip http=$code)" >&2
+  return 1
+}
+
+refresh_tunnel_for_resolvable_url() {
+  # If the first URL is NXDOMAIN, bounce cloudflared once more for a new name.
+  local attempts="${1:-2}"
+  local n public wait_rc
+  for n in $(seq 1 "$attempts"); do
+    if [[ -f "$STATE_DIR/public_url" ]]; then
+      public=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+      if probe_public_url "$public"; then
+        ensure_env_matches_public_url || return 1
+        return 0
+      fi
+    fi
+    echo "warning: tunnel URL not usable (attempt $n/$attempts); forcing fresh Quick Tunnel..." >&2
+    stop_existing
+    start_service
+    LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
+    rm -f "$STATE_DIR/public_url" 2>/dev/null || true
+    wait_rc=0
+    wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
+    if [[ "$wait_rc" -eq 2 ]]; then
+      return 2
+    fi
+    if [[ ! -f "$STATE_DIR/public_url" ]]; then
+      continue
+    fi
+  done
+  if [[ -f "$STATE_DIR/public_url" ]] && probe_public_url "$(tr -d '[:space:]' <"$STATE_DIR/public_url")"; then
+    ensure_env_matches_public_url || return 1
+    return 0
+  fi
+  return 1
+}
+
 start_service
 # Capture log offset AFTER start so we never treat a pre-start URL as "new".
 LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
@@ -406,11 +486,18 @@ rm -f "$STATE_DIR/public_url" 2>/dev/null || true
 wait_rc=0
 wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
 
-if [[ -f "$STATE_DIR/public_url" ]]; then
-  ensure_env_matches_public_url || wait_rc=1
-  PUBLIC=$(cat "$STATE_DIR/public_url")
-  sleep 2
-  curl --noproxy '*' -sS -o /dev/null -w "info: probe %{http_code} $PUBLIC/\n" --max-time 20 "$PUBLIC/" || true
+if [[ "$wait_rc" -eq 2 ]]; then
+  echo "error: Cloudflare rate-limited quick tunnels" >&2
+elif [[ -f "$STATE_DIR/public_url" ]]; then
+  if ! refresh_tunnel_for_resolvable_url 2; then
+    echo "error: could not obtain a DNS-resolvable Cloudflare PUBLIC_URL" >&2
+    echo "hint: sudo $SCRIPT_DIR/start-cloudflared-once.sh   # after cooldown if rate-limited" >&2
+    wait_rc=1
+  else
+    wait_rc=0
+    PUBLIC=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+    echo "info: /sendfile + /canvas public URL: $PUBLIC"
+  fi
 else
   echo "error: deploy did not obtain a Cloudflare public URL; /sendfile links will break" >&2
   wait_rc=1

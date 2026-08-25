@@ -6672,6 +6672,34 @@ def run_server() -> int:
             file_http.start()
             print(f"[FileTransfer] HTTP server started at {file_http.get_base_url()}")
             _federation_sync_file_public()
+
+            # Quick Tunnel hostname can change while this process stays up.
+            # Re-advertise to federation (iSH / LAN peers) whenever the live
+            # public_url latch moves — do not wait for peer-up or restart.
+            def _file_public_watch_task():
+                try:
+                    last = _fed_local_file_public()
+                except Exception:
+                    last = ""
+                while not _shutdown_requested:
+                    time.sleep(30)
+                    if _shutdown_requested:
+                        break
+                    try:
+                        cur = _fed_local_file_public()
+                        if cur != last:
+                            last = cur
+                            _federation_sync_file_public()
+                            if cur:
+                                print(f"[FileTransfer] federation file public -> {cur}")
+                            else:
+                                print("[FileTransfer] federation file public cleared (no live CF URL)")
+                    except Exception as e:
+                        print(f"[FileTransfer] file public watch error: {e}")
+
+            threading.Thread(
+                target=_file_public_watch_task, daemon=True, name="file-public-watch"
+            ).start()
             
             # Start cleanup task for expired transfers
             def _cleanup_task():

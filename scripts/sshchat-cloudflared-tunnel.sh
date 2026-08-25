@@ -155,9 +155,12 @@ run_tunnel() {
 run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
   echo "$line"
   if [[ "$line" =~ https://[a-zA-Z0-9-]+\.trycloudflare\.com ]]; then
-    # URL_FILE is the latch for this helper run (rm'd before tunnel start).
-    if [[ ! -f "$URL_FILE" ]]; then
-      update_public_host "${BASH_REMATCH[0]}"
+    new_url="${BASH_REMATCH[0]}"
+    old_url=""
+    [[ -f "$URL_FILE" ]] && old_url=$(tr -d '[:space:]' <"$URL_FILE" || true)
+    # Update on first sight *or* if cloudflared ever prints a different hostname.
+    if [[ "$old_url" != "$new_url" ]]; then
+      update_public_host "$new_url"
     fi
   fi
 done
