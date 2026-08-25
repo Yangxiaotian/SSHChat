@@ -80,6 +80,8 @@ final class ChatViewModel: ObservableObject {
         let title: String
         let url: String
         let key: String
+        /// Canvas opens full-screen; upload stays as a sheet.
+        var isCanvas: Bool = false
     }
 
     private static let chatFontKey = "chat_font_sp"
@@ -634,7 +636,12 @@ final class ChatViewModel: ObservableObject {
                 startDownload(url: open.url, key: open.key, sender: from)
             case .canvas:
                 appendText("[*] 打开共享画布…")
-                webInvite = WebInvitePayload(title: "共享画布", url: open.url, key: open.key)
+                webInvite = WebInvitePayload(
+                    title: "共享画布",
+                    url: open.url,
+                    key: open.key,
+                    isCanvas: true
+                )
             case .upload:
                 if let pending = pendingUpload {
                     cancelUploadWait()
@@ -801,6 +808,9 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color.white)
+        // Chat chrome is light WeChat-style; without this, Dark Mode makes
+        // TextField text and plus-panel SF Symbols render white-on-white.
+        .preferredColorScheme(.light)
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.handleBecameActive()
@@ -853,7 +863,21 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(item: $model.webInvite) { invite in
+        .fullScreenCover(item: Binding(
+            get: { model.webInvite.flatMap { $0.isCanvas ? $0 : nil } },
+            set: { model.webInvite = $0 }
+        )) { invite in
+            WebInviteView(
+                title: invite.title,
+                url: invite.url,
+                key: invite.key,
+                startsMaximized: true
+            )
+        }
+        .sheet(item: Binding(
+            get: { model.webInvite.flatMap { $0.isCanvas ? nil : $0 } },
+            set: { model.webInvite = $0 }
+        )) { invite in
             WebInviteView(title: invite.title, url: invite.url, key: invite.key)
         }
         .sheet(item: $model.previewMedia) { media in
@@ -931,7 +955,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(model.keyHint)
                 .font(.system(size: 12))
-                .foregroundStyle(.primary)
+                .foregroundStyle(Color(white: 0.25))
             Text(model.keys.publicOpenSshLine)
                 .font(.system(size: 11, design: .monospaced))
                 .padding(8)
@@ -947,13 +971,16 @@ struct ContentView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
+                .foregroundStyle(Color(white: 0.12))
                 .textFieldStyle(.roundedBorder)
             TextField("SSH 端口", text: $model.sshPort)
                 .keyboardType(.numberPad)
+                .foregroundStyle(Color(white: 0.12))
                 .textFieldStyle(.roundedBorder)
             TextField("Linux 用户名", text: $model.username)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .foregroundStyle(Color(white: 0.12))
                 .textFieldStyle(.roundedBorder)
             Button {
                 model.connect()
@@ -1196,7 +1223,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: showPlusPanel ? "xmark" : "plus")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color.primary)
+                        .foregroundStyle(Color(white: 0.2))
                         .frame(width: 40, height: 40)
                         .background(Color(white: 0.92))
                         .clipShape(Circle())
@@ -1208,6 +1235,8 @@ struct ContentView: View {
                 TextField("消息或 /命令", text: $model.draft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .foregroundStyle(Color(white: 0.12))
+                    .tint(Color(red: 0.106, green: 0.369, blue: 0.125))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(Color(white: 0.95))
@@ -1222,11 +1251,13 @@ struct ContentView: View {
 
                 Button("/") { model.insertSlash() }
                     .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(Color(white: 0.2))
                     .frame(width: 36, height: 40)
                     .disabled(!model.connected)
 
                 Button("Tab") { model.applyTab() }
                     .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color(white: 0.2))
                     .frame(width: 40, height: 40)
                     .disabled(!model.connected)
 
@@ -1268,11 +1299,11 @@ struct ContentView: View {
                 showPlusPanel = false
                 model.pickAndSendFile()
             }
-            plusCell(title: "画板", system: "paintbrush.pointed.fill") {
+            plusCell(title: "画板", system: "paintbrush.fill") {
                 showPlusPanel = false
                 model.startCanvas()
             }
-            plusCell(title: "清屏", system: "trash", alwaysEnabled: true) {
+            plusCell(title: "清屏", system: "trash.fill", alwaysEnabled: true) {
                 showPlusPanel = false
                 model.clearScreen(announce: true)
             }
@@ -1298,10 +1329,15 @@ struct ContentView: View {
         return VStack(spacing: 6) {
             Button(action: action) {
                 Image(systemName: system)
-                    .font(.system(size: 22))
-                    .foregroundStyle(Color.primary)
+                    .font(.system(size: 22, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color(white: 0.18))
                     .frame(width: 56, height: 56)
-                    .background(Color.white)
+                    .background(Color(white: 0.97))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color(white: 0.86), lineWidth: 1)
+                    )
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             }
             .buttonStyle(.plain)

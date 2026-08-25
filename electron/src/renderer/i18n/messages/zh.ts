@@ -346,6 +346,8 @@ export const zhMessages = {
     color: '颜色',
     width: '粗细',
     clear: '清空',
+    maximize: '最大化',
+    restore: '还原',
     close: '关闭',
     ready: '已连接',
     unlocking: '正在进入画布…',

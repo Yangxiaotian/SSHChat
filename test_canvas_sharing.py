@@ -213,6 +213,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("'/canvas/' + token + '/auth'", page)
         self.assertIn("@excalidraw/excalidraw", page)
         self.assertIn("external=react,react-dom", page)
+        self.assertIn("__SSHCHAT_KEY", page)
         self.assertIn("/scene", page)
         self.assertIn("X-Canvas-Ticket", page)
         self.assertIn("&ticket=", page)

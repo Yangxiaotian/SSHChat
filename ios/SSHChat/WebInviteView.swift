@@ -5,19 +5,54 @@ struct WebInviteView: View {
     let title: String
     let url: String
     let key: String
+    /// When true (canvas), start edge-to-edge; upload pages keep a normal chrome bar.
+    var startsMaximized: Bool = false
     @Environment(\.dismiss) private var dismiss
+    @State private var maximized = false
 
     var body: some View {
         NavigationStack {
             KeyInjectingWebView(url: url, key: key.uppercased())
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle(title)
+                .ignoresSafeArea(edges: maximized ? .all : .bottom)
+                .navigationTitle(maximized ? "" : title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(maximized ? "还原" : "最大化") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                maximized.toggle()
+                            }
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("关闭") { dismiss() }
                     }
                 }
+                .toolbar(maximized ? .hidden : .automatic, for: .navigationBar)
+                .statusBarHidden(maximized)
+                .overlay(alignment: .topTrailing) {
+                    if maximized {
+                        HStack(spacing: 12) {
+                            Button("还原") {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    maximized = false
+                                }
+                            }
+                            Button("关闭") { dismiss() }
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 8)
+                        .padding(.trailing, 12)
+                    }
+                }
+        }
+        .onAppear {
+            if startsMaximized {
+                maximized = true
+            }
         }
     }
 }
@@ -32,6 +67,15 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        // Set before page JS (incl. deferred ES modules) so canvas can auth
+        // after Excalidraw finishes loading from CDN — not on a premature click.
+        let safe = Self.jsStringLiteral(key)
+        let boot = WKUserScript(
+            source: "window.__SSHCHAT_KEY='\(safe)';",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        config.userContentController.addUserScript(boot)
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
@@ -44,9 +88,15 @@ private struct KeyInjectingWebView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
+    private static func jsStringLiteral(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let key: String
-        private var injected = false
+        private var unlockDone = false
         weak var webView: WKWebView?
 
         init(key: String) {
@@ -72,28 +122,41 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard !injected else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak webView] in
-                guard let self, let webView, !self.injected else { return }
-                self.injected = true
-                let safe = self.key
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "'", with: "\\'")
-                let js = """
-                (function(){
-                  if (document.getElementById('board')
-                      && document.getElementById('board').style.display === 'block')
-                    return 'already';
-                  var el = document.getElementById('key');
-                  if (!el) return 'no-key';
-                  el.value = '\(safe)';
-                  el.dispatchEvent(new Event('input', {bubbles:true}));
-                  var btn = document.getElementById('unlockBtn');
-                  if (btn && !btn.disabled) btn.click();
-                  return 'ok';
-                })();
-                """
-                webView.evaluateJavaScript(js, completionHandler: nil)
+            // Fallback for upload pages / older canvas HTML: retry until gate opens
+            // or Excalidraw module binds unlock listeners (CDN can take seconds).
+            attemptUnlock(webView, attempt: 0)
+        }
+
+        private func attemptUnlock(_ webView: WKWebView, attempt: Int) {
+            guard !unlockDone, attempt < 40 else { return }
+            let safe = KeyInjectingWebView.jsStringLiteral(key)
+            let js = """
+            (function(){
+              window.__SSHCHAT_KEY = '\(safe)';
+              var board = document.getElementById('board');
+              if (board) {
+                var d = board.style.display;
+                if (d === 'flex' || d === 'block') return 'done';
+              }
+              var el = document.getElementById('key');
+              if (!el) return 'wait';
+              el.value = '\(safe)';
+              el.dispatchEvent(new Event('input', {bubbles:true}));
+              var btn = document.getElementById('unlockBtn');
+              if (btn && !btn.disabled) btn.click();
+              return 'pending';
+            })();
+            """
+            webView.evaluateJavaScript(js) { [weak self, weak webView] result, _ in
+                guard let self, let webView else { return }
+                if (result as? String) == "done" {
+                    self.unlockDone = true
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak webView] in
+                    guard let self, let webView else { return }
+                    self.attemptUnlock(webView, attempt: attempt + 1)
+                }
             }
         }
 

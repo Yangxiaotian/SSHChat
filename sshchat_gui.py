@@ -873,6 +873,148 @@ class ImagePreviewWindow:
         self.var_zoom.set(f"{int(round(self._scale * 100))}%")
 
 
+def _chromium_app_binaries() -> list[str]:
+    """Candidate Chromium-based browsers that support --app= and --start-maximized."""
+    if sys.platform == "darwin":
+        return [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Arc.app/Contents/MacOS/Arc",
+        ]
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        return [
+            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+            shutil.which("chrome") or "",
+            shutil.which("msedge") or "",
+            shutil.which("chromium") or "",
+        ]
+    # Linux / other
+    return [
+        shutil.which("google-chrome") or "",
+        shutil.which("google-chrome-stable") or "",
+        shutil.which("chromium") or "",
+        shutil.which("chromium-browser") or "",
+        shutil.which("microsoft-edge") or "",
+        shutil.which("brave-browser") or "",
+    ]
+
+
+def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
+    """Open Excalidraw in a dedicated Chromium app window (optionally maximized)."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    for binary in _chromium_app_binaries():
+        if not binary or not os.path.isfile(binary):
+            continue
+        args = [binary, f"--app={target}"]
+        if maximized:
+            # Prefer true fullscreen fill; fall back still works if unsupported.
+            args.extend(["--start-fullscreen", "--start-maximized"])
+        try:
+            subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            continue
+    if sys.platform == "darwin" and maximized:
+        # Safari fallback: open URL (no reliable stdlib fullscreen without Accessibility).
+        try:
+            subprocess.Popen(
+                ["open", "-a", "Safari", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            pass
+    return False
+
+
+class CanvasWebShell:
+    """Compact controller for the Excalidraw app window (maximize / reopen / close)."""
+
+    def __init__(self, master: tk.Misc, url: str) -> None:
+        self.url = url
+        self._maximized = True
+        self.win = tk.Toplevel(master)
+        self.win.title("SSHChat 共享画布")
+        self.win.geometry("460x130")
+        self.win.minsize(360, 110)
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+        bar = ttk.Frame(self.win)
+        bar.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(bar, text="共享画布").pack(side=tk.LEFT)
+        self._btn_max = ttk.Button(bar, text="还原窗口", command=self.toggle_maximize)
+        self._btn_max.pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(bar, text="关闭", command=self.close).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="重新打开", command=lambda: self._reopen(None)).pack(
+            side=tk.RIGHT, padx=(6, 0)
+        )
+
+        body = ttk.Frame(self.win, padding=(12, 4, 12, 12))
+        body.pack(fill=tk.BOTH, expand=True)
+        self.var_status = tk.StringVar(value="正在最大化打开画板…")
+        ttk.Label(body, textvariable=self.var_status, justify=tk.LEFT, wraplength=420).pack(
+            anchor=tk.NW
+        )
+        self.win.after(60, lambda: self._reopen(True))
+
+    def toggle_maximize(self) -> None:
+        self._maximized = not self._maximized
+        try:
+            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
+        except tk.TclError:
+            pass
+        self._reopen(self._maximized)
+
+    def _reopen(self, maximized: bool | None) -> None:
+        if maximized is not None:
+            self._maximized = bool(maximized)
+        try:
+            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
+        except tk.TclError:
+            pass
+        if _open_canvas_app_window(self.url, maximized=self._maximized):
+            if self._maximized:
+                self.var_status.set(
+                    "画板已在独立窗口最大化打开。\n"
+                    "点「还原窗口」以普通大小重新打开；「重新打开」可再拉起画板。"
+                )
+            else:
+                self.var_status.set(
+                    "画板已以普通窗口打开。\n点「最大化」可铺满屏幕重新打开。"
+                )
+        else:
+            try:
+                webbrowser.open(self.url)
+                self.var_status.set(
+                    "已在系统浏览器打开画板（当前环境没有可用的 Chrome/Edge 应用窗口模式）。"
+                )
+            except Exception as e:
+                self.var_status.set(f"打开画板失败: {e}")
+
+    def close(self) -> None:
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 class NativeCanvasWindow:
     """Tk canvas client talking to the same /canvas HTTP API as the web page."""
 
@@ -918,6 +1060,9 @@ class NativeCanvasWindow:
         bar.pack(fill=tk.X, padx=8, pady=6)
         self.var_status = tk.StringVar(value="正在进入画布…")
         ttk.Label(bar, textvariable=self.var_status).pack(side=tk.LEFT)
+        self._maximized = False
+        self._btn_max = ttk.Button(bar, text="最大化", command=self._toggle_maximize)
+        self._btn_max.pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(bar, text="清空", command=self._clear).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(bar, text="关闭", command=self.close).pack(side=tk.RIGHT)
 
@@ -937,6 +1082,25 @@ class NativeCanvasWindow:
         self.canvas.bind("<ButtonRelease-1>", self._on_up)
 
         threading.Thread(target=self._auth_worker, daemon=True).start()
+
+    def _toggle_maximize(self) -> None:
+        self._maximized = not self._maximized
+        try:
+            self.win.attributes("-fullscreen", self._maximized)
+        except tk.TclError:
+            try:
+                self.win.state("zoomed" if self._maximized else "normal")
+            except tk.TclError:
+                if self._maximized:
+                    sw = self.win.winfo_screenwidth()
+                    sh = self.win.winfo_screenheight()
+                    self.win.geometry(f"{sw}x{sh}+0+0")
+                else:
+                    self.win.geometry("900x640")
+        try:
+            self._btn_max.configure(text="还原" if self._maximized else "最大化")
+        except tk.TclError:
+            pass
 
     def close(self) -> None:
         self._closed = True
@@ -2827,8 +2991,14 @@ class SSHChatGUI:
         # Excalidraw board is the web page; #k= autofills client-side only.
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            webbrowser.open(target)
-            self._append_chat_line("[*] 已在浏览器打开共享画布（Excalidraw）", local_sent=True)
+            if self._canvas_win is not None:
+                try:
+                    self._canvas_win.close()
+                except Exception:
+                    pass
+                self._canvas_win = None
+            self._canvas_win = CanvasWebShell(self.root, target)  # type: ignore[assignment]
+            self._append_chat_line("[*] 已打开共享画布（可最大化）", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 

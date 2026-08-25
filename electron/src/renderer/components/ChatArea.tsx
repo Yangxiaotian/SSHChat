@@ -103,7 +103,7 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession } = useChatStore();
+  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession, canvasMaximized } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
@@ -232,7 +232,7 @@ export default function ChatArea() {
 
       <div ref={splitRootRef} className="chat-main-split">
         {canvasSession ? (
-          <div className="canvas-pane">
+          <div className={`canvas-pane${canvasMaximized ? ' maximized' : ''}`}>
             <CanvasPanel />
           </div>
         ) : (
@@ -253,13 +253,13 @@ export default function ChatArea() {
           <span className="chat-splitter-grip">...</span>
         </div>
         )}
-        {canvasSession ? (
+        {canvasSession && !canvasMaximized ? (
           <div className="chat-splitter canvas-splitter" aria-hidden>
             <span className="chat-splitter-grip">...</span>
           </div>
         ) : null}
 
-        <div className="chat-messages-surface">
+        <div className={`chat-messages-surface${canvasSession && canvasMaximized ? ' canvas-hidden' : ''}`}>
           <div
             ref={chatScrollRef}
             className={`chat-messages${dragOver ? ' drag-over' : ''}`}

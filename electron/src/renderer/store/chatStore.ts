@@ -114,6 +114,7 @@ interface ChatState {
   composerText: string;
   libraryView: LibraryViewState;
   canvasSession: { url: string; key: string } | null;
+  canvasMaximized: boolean;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -151,6 +152,7 @@ interface ChatState {
   clearMessages: (room?: string) => void;
   openCanvas: (session: { url: string; key: string }) => void;
   closeCanvas: () => void;
+  setCanvasMaximized: (value: boolean) => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -178,6 +180,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   composerText: '',
   libraryView: emptyLibraryViewState(),
   canvasSession: null,
+  canvasMaximized: false,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -343,6 +346,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     activeRoom: 'default',
     users: [],
     canvasSession: null,
+    canvasMaximized: false,
   }),
 
   setUsers: (users) => set({ users }),
@@ -382,8 +386,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
-  openCanvas: (session) => set({ canvasSession: session }),
-  closeCanvas: () => set({ canvasSession: null }),
+  openCanvas: (session) => set({ canvasSession: session, canvasMaximized: true }),
+  closeCanvas: () => set({ canvasSession: null, canvasMaximized: false }),
+  setCanvasMaximized: (value) => set({ canvasMaximized: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

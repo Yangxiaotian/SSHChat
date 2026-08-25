@@ -398,6 +398,13 @@ html, body, #root {
   background: #1e1e1e;
 }
 
+.canvas-pane.maximized {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  border-bottom: 0;
+}
+
 .canvas-panel {
   height: 100%;
   display: flex;
@@ -410,8 +417,16 @@ html, body, #root {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  justify-content: space-between;
   padding: 8px 10px;
   border-bottom: 1px solid var(--vscode-border-light);
+}
+
+.canvas-panel-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
 }
 
 .canvas-panel-title {
@@ -472,6 +487,14 @@ html, body, #root {
   min-height: 480px;
   border: 0;
   background: #1e1e1e;
+}
+
+.canvas-pane.maximized .canvas-panel-frame {
+  min-height: 0;
+}
+
+.chat-messages-surface.canvas-hidden {
+  display: none;
 }
 
 .game-pane-dnd {

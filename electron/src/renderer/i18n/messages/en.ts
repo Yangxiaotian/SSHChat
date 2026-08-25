@@ -348,6 +348,8 @@ export const enMessages: MessageTree = {
     color: 'Color',
     width: 'Width',
     clear: 'Clear',
+    maximize: 'Maximize',
+    restore: 'Restore',
     close: 'Close',
     ready: 'Connected',
     unlocking: 'Unlocking canvas…',

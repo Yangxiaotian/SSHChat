@@ -135,8 +135,8 @@ struct PushToTalkButton: UIViewRepresentable {
     private func update(_ button: UIButton) {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .regular))
-        config.baseForegroundColor = active ? .systemRed : .label
-        config.background.backgroundColor = UIColor(white: 0.94, alpha: 1)
+        config.baseForegroundColor = active ? .systemRed : UIColor(white: 0.18, alpha: 1)
+        config.background.backgroundColor = UIColor(white: 0.97, alpha: 1)
         config.background.cornerRadius = 8
         config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
         button.configuration = config

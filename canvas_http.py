@@ -316,6 +316,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let syncing = false;
     let applyingRemote = false;
     let pushTimer = null;
+    let pushInFlight = false;
+    let localDirty = false;
     let api = null;
     let lastLocalSig = '';
 
@@ -358,6 +360,33 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         for (const el of elements || []) v += (el.version || 0);
         const fk = files ? Object.keys(files).length : 0;
         return n + ':' + v + ':' + fk;
+    }}
+
+    function elementRank(el) {{
+        const version = Number(el && el.version) || 0;
+        const nonce = Number(el && el.versionNonce) || 0;
+        return version * 1e13 + nonce;
+    }}
+
+    function mergeElements(base, incoming) {{
+        // Same id/version rule as server: higher version (then nonce) wins.
+        const byId = Object.create(null);
+        for (const el of base || []) {{
+            if (el && typeof el.id === 'string' && el.id) byId[el.id] = el;
+        }}
+        for (const el of incoming || []) {{
+            if (!el || typeof el.id !== 'string' || !el.id) continue;
+            const old = byId[el.id];
+            if (!old || elementRank(el) >= elementRank(old)) byId[el.id] = el;
+        }}
+        return Object.keys(byId).map((k) => byId[k]);
+    }}
+
+    function liveScene() {{
+        if (!api) return {{ elements: [], files: {{}} }};
+        const elements = api.getSceneElements ? api.getSceneElements() : [];
+        const files = api.getFiles ? api.getFiles() : {{}};
+        return {{ elements: elements || [], files: files || {{}} }};
     }}
 
     async function auth() {{
@@ -411,19 +440,27 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 const sig = sceneSig(elements, files);
                 if (sig === lastLocalSig) return;
                 lastLocalSig = sig;
-                schedulePush(elements, files);
+                localDirty = true;
+                schedulePush();
             }},
         }}));
         loadingEl.style.display = 'none';
     }}
 
-    function schedulePush(elements, files) {{
+    function schedulePush() {{
         if (pushTimer) clearTimeout(pushTimer);
-        pushTimer = setTimeout(() => {{ void pushScene(elements, files); }}, 450);
+        // Debounce uploads; always read the live scene when the timer fires so
+        // mid-debounce strokes are not dropped from the POST body.
+        pushTimer = setTimeout(() => {{ void pushScene(); }}, 450);
     }}
 
-    async function pushScene(elements, files) {{
-        if (!ticket || applyingRemote) return;
+    async function pushScene() {{
+        if (!ticket || applyingRemote || !api || pushInFlight) return;
+        const live = liveScene();
+        const elements = live.elements;
+        const files = live.files;
+        const sigAtStart = sceneSig(elements, files);
+        pushInFlight = true;
         setStatus(i18n.statusSync, false);
         try {{
             const res = await fetch('/canvas/' + token + '/scene', {{
@@ -441,9 +478,22 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
+            const liveNow = liveScene();
+            if (sceneSig(liveNow.elements, liveNow.files) === sigAtStart) {{
+                localDirty = false;
+                lastLocalSig = sigAtStart;
+            }} else {{
+                // User kept drawing during the POST — schedule another push.
+                localDirty = true;
+                schedulePush();
+            }}
             setStatus(i18n.statusReady, false);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
+            localDirty = true;
+            schedulePush();
+        }} finally {{
+            pushInFlight = false;
         }}
     }}
 
@@ -463,20 +513,40 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (!res.ok) throw new Error(data.error || 'sync failed');
             const remoteRev = Number(data.rev || 0);
             if (data.changed && remoteRev >= rev && api) {{
-                applyingRemote = true;
-                try {{
-                    api.updateScene({{
-                        elements: data.elements || [],
-                        ...remoteUpdateOpts,
-                    }});
-                    if (data.files && Object.keys(data.files).length && api.addFiles) {{
-                        try {{ api.addFiles(data.files); }} catch (_) {{}}
-                    }}
-                    lastLocalSig = sceneSig(data.elements || [], data.files || {{}});
-                    rev = remoteRev;
-                }} finally {{
-                    applyingRemote = false;
+                const remoteEls = data.elements || [];
+                const live = liveScene();
+                let nextEls;
+                // Empty remote + no local pending ⇒ peer clear / empty board.
+                // Otherwise merge so an older poll cannot wipe unpushed strokes
+                // (the "newest strokes vanish, then come back" race).
+                if (
+                    remoteEls.length === 0 &&
+                    !localDirty &&
+                    !pushInFlight
+                ) {{
+                    nextEls = [];
+                }} else {{
+                    nextEls = mergeElements(remoteEls, live.elements);
                 }}
+                const nextFiles = Object.assign({{}}, live.files || {{}}, data.files || {{}});
+                const nextSig = sceneSig(nextEls, nextFiles);
+                const curSig = sceneSig(live.elements, live.files);
+                if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
+                    applyingRemote = true;
+                    try {{
+                        api.updateScene({{
+                            elements: nextEls,
+                            ...remoteUpdateOpts,
+                        }});
+                        if (data.files && Object.keys(data.files).length && api.addFiles) {{
+                            try {{ api.addFiles(data.files); }} catch (_) {{}}
+                        }}
+                        lastLocalSig = nextSig;
+                    }} finally {{
+                        applyingRemote = false;
+                    }}
+                }}
+                rev = remoteRev;
             }} else if (remoteRev > rev) {{
                 rev = remoteRev;
             }}
@@ -500,6 +570,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'clear failed');
             rev = Number(data.rev || rev + 1);
+            localDirty = false;
+            if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
             if (api) {{
                 applyingRemote = true;
                 try {{
@@ -519,10 +591,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (e.key === 'Enter') auth();
     }});
 
-    const autofill = hashFragmentKey();
+    // Prefer key injected by native WebView (set before this module finishes).
+    // Hash (#k=) remains for Electron/Tk. Do NOT unlock until listeners exist —
+    // early btn.click() from clients is a no-op while esm.sh is still loading.
+    const injected = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
+    try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
+    const autofill = (injected.length === 6 ? injected : '') || hashFragmentKey();
     if (autofill) {{
         keyInput.value = autofill;
-        // Same path mobile inject uses: fill then unlock.
         setTimeout(() => {{ void auth(); }}, 50);
     }}
 

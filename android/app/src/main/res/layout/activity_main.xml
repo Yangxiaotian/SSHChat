@@ -125,6 +125,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="SSH 主机"
+                android:textColor="#212121"
+                android:textColorHint="#9E9E9E"
                 android:inputType="textUri|textNoSuggestions"
                 android:importantForAutofill="no" />
 
@@ -133,6 +135,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="SSH 端口"
+                android:textColor="#212121"
+                android:textColorHint="#9E9E9E"
                 android:inputType="number"
                 android:importantForAutofill="no" />
 
@@ -141,6 +145,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="Linux 用户名"
+                android:textColor="#212121"
+                android:textColorHint="#9E9E9E"
                 android:inputType="textNoSuggestions"
                 android:importantForAutofill="no" />
 
@@ -443,7 +449,8 @@
                 android:contentDescription="更多"
                 android:padding="8dp"
                 android:scaleType="centerInside"
-                android:src="@android:drawable/ic_input_add" />
+                android:src="@android:drawable/ic_input_add"
+                android:tint="#1B5E20" />
 
             <EditText
                 android:id="@+id/etDraft"
@@ -453,6 +460,8 @@
                 android:layout_weight="1"
                 android:background="@drawable/bg_icon_btn"
                 android:hint="消息或 /命令"
+                android:textColor="#212121"
+                android:textColorHint="#9E9E9E"
                 android:imeOptions="actionSend"
                 android:importantForAutofill="no"
                 android:inputType="text"
@@ -469,6 +478,7 @@
                 android:padding="0dp"
                 android:text="/"
                 android:textAllCaps="false"
+                android:textColor="#212121"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -481,6 +491,7 @@
                 android:padding="0dp"
                 android:text="Tab"
                 android:textAllCaps="false"
+                android:textColor="#212121"
                 android:textSize="12sp" />
 
             <Button
