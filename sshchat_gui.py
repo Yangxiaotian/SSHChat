@@ -3097,6 +3097,21 @@ class SSHChatGUI:
         # Excalidraw board is the web page; #k= autofills client-side only.
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
+            new_tok = ""
+            try:
+                new_tok = _canvas_token_from_url(url)[1]
+            except ValueError:
+                new_tok = ""
+            # Same room board: other clients joining re-send gui-open. Do not
+            # tear down an already-open window for the same token.
+            if self._canvas_win is not None and new_tok:
+                try:
+                    if self._canvas_win.win.winfo_exists():
+                        cur = _canvas_token_from_url(self._canvas_win.url)[1]
+                        if cur == new_tok:
+                            return
+                except (tk.TclError, ValueError):
+                    self._canvas_win = None
             if self._canvas_win is not None:
                 try:
                     self._canvas_win.close()
