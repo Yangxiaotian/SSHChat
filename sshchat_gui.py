@@ -940,12 +940,15 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
             # Prefer true fullscreen fill; fall back still works if unsupported.
             args.extend(["--start-fullscreen", "--start-maximized"])
         try:
-            subprocess.Popen(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            popen_kwargs: dict[str, Any] = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                popen_kwargs.update(_windows_hidden_subprocess_kwargs())
+            else:
+                popen_kwargs["start_new_session"] = True
+            subprocess.Popen(args, **popen_kwargs)
             return True
         except OSError:
             continue
@@ -957,6 +960,13 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            return True
+        except OSError:
+            pass
+    if sys.platform == "win32":
+        # Last resort: default browser via os.startfile (no console).
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
             return True
         except OSError:
             pass
@@ -1571,10 +1581,54 @@ def _mac_clipboard_image_file() -> Path | None:
     return None
 
 
+def _windows_hidden_subprocess_kwargs() -> dict[str, Any]:
+    """Avoid flashing a console window when spawning helpers on Windows."""
+    if sys.platform != "win32":
+        return {}
+    kwargs: dict[str, Any] = {}
+    # CREATE_NO_WINDOW = 0x08000000 (Python 3.7+)
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    kwargs["creationflags"] = create_no_window
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = si
+    except (AttributeError, OSError):
+        pass
+    return kwargs
+
+
 def _windows_clipboard_image_file() -> Path | None:
     """Write PNG from Windows clipboard (screenshot / copied image) to a temp file."""
     if sys.platform != "win32":
         return None
+    # Prefer Pillow: no child process, no console flash on Ctrl+V.
+    try:
+        from PIL import ImageGrab
+
+        grabbed = ImageGrab.grabclipboard()
+        if grabbed is not None:
+            out = _temp_clip_png()
+            try:
+                # ImageGrab may return a list of file paths for copied files.
+                if isinstance(grabbed, list):
+                    for item in grabbed:
+                        candidate = Path(str(item))
+                        if candidate.is_file():
+                            return candidate.resolve()
+                    return None
+                grabbed.save(out, format="PNG")
+                if out.is_file() and out.stat().st_size > 0:
+                    return out
+            except OSError:
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
     out = _temp_clip_png()
     # Escape for PowerShell single-quoted string ('' = literal ')
     ps_path = str(out).replace("'", "''")
@@ -1591,6 +1645,8 @@ def _windows_clipboard_image_file() -> Path | None:
                 "powershell.exe",
                 "-NoProfile",
                 "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
@@ -1599,6 +1655,7 @@ def _windows_clipboard_image_file() -> Path | None:
             capture_output=True,
             timeout=15,
             check=False,
+            **_windows_hidden_subprocess_kwargs(),
         )
         if r.returncode == 0 and out.is_file() and out.stat().st_size > 0:
             return out
@@ -3133,6 +3190,15 @@ class SSHChatGUI:
             return None
         path = _clipboard_existing_path(self.root)
         if path is None:
+            # Plain text (not a file path): let the Entry paste normally.
+            # Do NOT probe image clipboard here — on Windows that used to spawn
+            # PowerShell and flash a console on every Ctrl+V.
+            try:
+                clip_text = str(self.root.clipboard_get() or "").strip()
+            except tk.TclError:
+                clip_text = ""
+            if clip_text:
+                return None
             path = _clipboard_image_file()
         if path is None:
             return None
