@@ -132,6 +132,7 @@ _PREVIEW_ZOOM_MAX = 8.0
 _MAX_ROOM_HISTORY = 4000
 _DRAIN_BATCH_ITEMS = 200
 _PASTE_UPLOAD_TIMEOUT_S = 45.0
+_LAST_PIL_ERROR = ""
 
 try:
     from PIL import Image
@@ -140,6 +141,34 @@ try:
 except ImportError:
     Image = None  # type: ignore[assignment, misc]
     _HAS_PIL = False
+
+
+def _sniff_raster_image(data: bytes) -> bool:
+    """True if bytes look like PNG/JPEG/GIF/WEBP/BMP (not HTML error pages)."""
+    if not data or len(data) < 12:
+        return False
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if data.startswith(b"\xff\xd8\xff"):
+        return True
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return True
+    if data.startswith(b"BM"):
+        return True
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return True
+    head = data.lstrip()[:64].lower()
+    if head.startswith((b"<!", b"<html", b"<!doctype", b"{")):
+        return False
+    return False
+
+
+def _path_looks_like_image(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return _sniff_raster_image(f.read(64))
+    except OSError:
+        return False
 _TOP_COMMANDS = (
     "/help",
     "/lang",
@@ -470,13 +499,14 @@ def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
     os.close(fd)
     path = Path(tmp_name)
     path.write_bytes(data)
+    # Prefer magic bytes over ticket mime — CF/HTML error pages often keep .jpg names.
     return {
         "_kind": "media",
         "name": filename,
         "mime": mime,
         "path": str(path),
         "size": len(data),
-        "is_image": bool(_IMAGE_MIME_RE.match(mime)),
+        "is_image": _sniff_raster_image(data),
     }
 
 
@@ -504,7 +534,7 @@ def _media_from_local_path(
         "mime": mime,
         "path": str(dest),
         "size": dest.stat().st_size,
-        "is_image": bool(_IMAGE_MIME_RE.match(mime)),
+        "is_image": _path_looks_like_image(dest),
         "sender": (sender or "").strip() or None,
     }
 
@@ -527,6 +557,7 @@ def _prepare_tk_preview_png(path: Path, max_px: int = _MAX_INLINE_IMAGE_PX) -> P
             im.load()
             if getattr(im, "n_frames", 1) > 1:
                 im.seek(0)
+            im.info.pop("icc_profile", None)
             if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
                 bg = Image.new("RGB", im.size, (255, 255, 255))
                 rgba = im.convert("RGBA")
@@ -648,13 +679,31 @@ def _canvas_token_from_url(url: str) -> tuple[str, str]:
 
 def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
     """Load image as RGB PIL.Image, capped on longest side. None if unavailable."""
-    if not _HAS_PIL or Image is None or not path.is_file():
+    global _LAST_PIL_ERROR
+    _LAST_PIL_ERROR = ""
+    if not _HAS_PIL or Image is None:
+        _LAST_PIL_ERROR = "未包含 Pillow"
+        return None
+    if not path.is_file():
+        _LAST_PIL_ERROR = "本地文件不存在"
         return None
     try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+        if not _sniff_raster_image(head):
+            if head.lstrip()[:1] in (b"<", b"{") or head.lstrip().lower().startswith(
+                (b"<!doctype", b"<html")
+            ):
+                _LAST_PIL_ERROR = "内容不是图片（可能是网页/错误页）"
+            else:
+                _LAST_PIL_ERROR = "无法识别的图片格式"
+            return None
         with Image.open(path) as im:
             im.load()
             if getattr(im, "n_frames", 1) > 1:
                 im.seek(0)
+            # Drop ICC — broken imagingcms in some frozen builds aborts convert.
+            im.info.pop("icc_profile", None)
             if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
                 bg = Image.new("RGB", im.size, (255, 255, 255))
                 rgba = im.convert("RGBA")
@@ -668,7 +717,8 @@ def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | No
             else:
                 rgb = rgb.copy()
             return rgb
-    except Exception:
+    except Exception as e:
+        _LAST_PIL_ERROR = str(e).strip() or type(e).__name__
         return None
 
 
@@ -701,7 +751,7 @@ class ImagePreviewWindow:
         self.on_save = on_save
         self._pil = _pil_rgb_image(path)
         if self._pil is None:
-            raise RuntimeError("无法解码图片")
+            raise RuntimeError(_LAST_PIL_ERROR or "无法解码图片")
         self._scale = 1.0
         self._photo: tk.PhotoImage | None = None
         self._photo_refs: list[Any] = []
@@ -2421,16 +2471,23 @@ class SSHChatGUI:
                 self._save_media_as(Path(save[0]), save[1])
                 return
 
-    def _open_media_preview(self, path: Path, name: str) -> None:
+    def _open_media_preview(
+        self, path: Path, name: str, *, quiet: bool = False
+    ) -> None:
         """Show zoomable image preview in a Toplevel — never embed into chat Text."""
         if not path.is_file():
-            messagebox.showwarning("SSHChat", "本地文件已失效，请重新接收")
+            msg = "本地文件已失效，请重新接收"
+            if quiet:
+                self._set_status(msg)
+            else:
+                messagebox.showwarning("SSHChat", msg)
             return
         if not _HAS_PIL:
-            messagebox.showinfo(
-                "SSHChat",
-                f"当前客户端未包含 Pillow，无法预览: {name}\n可点「另存为」后用系统查看器打开",
-            )
+            msg = f"当前客户端未包含 Pillow，无法预览: {name}（可另存为后打开）"
+            if quiet:
+                self._set_status(msg)
+            else:
+                messagebox.showinfo("SSHChat", msg)
             return
         try:
             if self._preview_win is not None:
@@ -2445,7 +2502,11 @@ class SSHChatGUI:
                 on_save=self._save_media_as,
             )
         except Exception as e:
-            messagebox.showerror("SSHChat", f"预览失败: {e}")
+            # Auto-open after send/receive must not look like "发送失败".
+            if quiet:
+                self._set_status(f"预览跳过: {e}")
+            else:
+                messagebox.showerror("SSHChat", f"预览失败: {e}")
 
     def _insert_media_entry(self, media: dict[str, Any]) -> None:
         """
@@ -2497,7 +2558,9 @@ class SSHChatGUI:
                     path = Path(str(media["path"]))
                     self.root.after(
                         80,
-                        lambda p=path, n=name: self._open_media_preview(p, n),
+                        lambda p=path, n=name: self._open_media_preview(
+                            p, n, quiet=True
+                        ),
                     )
             except Exception as e:
                 self._set_status(f"预览失败: {e}")
