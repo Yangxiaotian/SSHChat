@@ -7,6 +7,10 @@ Flow:
 2. Opening the page and posting the key mints a short-lived access ticket.
 3. Excalidraw scene sync uses that ticket in a header — not the key, not the URL.
 
+Room boards keep scene data until the creator closes them. Participant keys may
+rotate on an interval; already-minted access tickets keep working so open tabs
+are undisturbed, while re-entry requires the latest key from a fresh invite.
+
 Unlike file download tickets, canvas access tickets are multi-use for the TTL
 so collaborators can keep drawing and polling.
 """
@@ -23,7 +27,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+# Private (non-room) boards still expire; room boards persist until /canvas close.
 CANVAS_TTL_SECONDS = int(os.environ.get("SSHCHAT_CANVAS_TTL_SECONDS", str(4 * 3600)))
+# Rotate URL keys on this interval (0 = never). Existing access tickets stay valid.
+KEY_ROTATE_SECONDS = int(
+    os.environ.get("SSHCHAT_CANVAS_KEY_ROTATE_SECONDS", str(4 * 3600))
+)
 ACCESS_TICKET_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_CANVAS_TICKET_TTL_SECONDS", "1800")
 )
@@ -70,13 +79,18 @@ class CanvasSession:
     strokes: List[dict] = field(default_factory=list)
     next_seq: int = 1
     created_at: float = 0.0
+    # 0 = never expire (room boards). Private boards use a wall-clock deadline.
     expires: float = 0.0
+    keys_rotated_at: float = 0.0
     closed: bool = False
+    # Federation merge: inactive local fork kept until link drops / promote.
+    parked: bool = False
+    # Deterministic dual-board winner (like room_game_tokens).
+    conflict_token: str = ""
     title: str = ""
     # When set, scene lives on host_node; this node only mirrors invites/lookup.
     host_node: Optional[str] = None
     host_base_url: Optional[str] = None
-
 
 class CanvasStore:
     """In-memory (+ optional disk) store for shared canvas sessions."""
@@ -95,11 +109,19 @@ class CanvasStore:
         try:
             with open(self.store_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            migrated = False
+            now = time.time()
             for sid, raw in data.get("sessions", {}).items():
+                room = raw.get("room") or None
+                expires = float(raw.get("expires") or 0)
+                # Room boards persist across restarts and TTL; normalize on load.
+                if room and expires != 0.0:
+                    expires = 0.0
+                    migrated = True
                 session = CanvasSession(
                     session_id=raw["session_id"],
                     creator=raw["creator"],
-                    room=raw.get("room"),
+                    room=room,
                     tokens=dict(raw.get("tokens") or {}),
                     keys=dict(raw.get("keys") or {}),
                     elements=list(raw.get("elements") or []),
@@ -108,17 +130,51 @@ class CanvasStore:
                     strokes=list(raw.get("strokes") or []),
                     next_seq=int(raw.get("next_seq") or 1),
                     created_at=float(raw.get("created_at") or 0),
-                    expires=float(raw.get("expires") or 0),
+                    expires=expires,
+                    keys_rotated_at=float(
+                        raw.get("keys_rotated_at")
+                        or raw.get("created_at")
+                        or 0
+                    ),
                     closed=bool(raw.get("closed")),
+                    parked=bool(raw.get("parked")),
+                    conflict_token=str(raw.get("conflict_token") or ""),
                     title=str(raw.get("title") or ""),
                     host_node=raw.get("host_node") or None,
                     host_base_url=raw.get("host_base_url") or None,
                 )
+                if session.room and not session.conflict_token:
+                    session.conflict_token = secrets.token_hex(16)
+                    migrated = True
                 self.sessions[sid] = session
-                for token in session.tokens.values():
-                    self.token_to_session[token] = sid
+                # Only index locally hosted boards (same as register_remote_session).
+                if not session.host_node and not session.parked:
+                    for token in session.tokens.values():
+                        self.token_to_session[token] = sid
             for ticket, raw in data.get("tickets", {}).items():
-                self.tickets[ticket] = CanvasAccessTicket(**raw)
+                try:
+                    entry = CanvasAccessTicket(**raw)
+                except (TypeError, ValueError):
+                    continue
+                # Drop stale tickets; sessions/scene stay. Users re-auth with key.
+                if entry.expires <= now:
+                    migrated = True
+                    continue
+                if entry.session_id not in self.sessions:
+                    migrated = True
+                    continue
+                self.tickets[ticket] = entry
+            if migrated:
+                self._save()
+            open_rooms = sum(
+                1
+                for s in self.sessions.values()
+                if s.room and not s.closed and not s.host_node
+            )
+            print(
+                f"[Canvas] Loaded {len(self.sessions)} session(s) "
+                f"({open_rooms} open room board(s)) from {self.store_path}"
+            )
         except Exception as e:
             print(f"[Canvas] Failed to load: {e}")
 
@@ -137,10 +193,14 @@ class CanvasStore:
             tmp = f"{self.store_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
             os.replace(tmp, self.store_path)
         except Exception as e:
             print(f"[Canvas] Failed to save: {e}")
-
     def create_session(
         self,
         creator: str,
@@ -167,6 +227,11 @@ class CanvasStore:
             tokens[name] = _generate_token()
             keys[name] = _generate_key()
 
+        # Room boards keep scene forever (until creator closes). Private boards TTL.
+        if room:
+            expires = 0.0
+        else:
+            expires = now + max(60, int(ttl_seconds))
         session = CanvasSession(
             session_id=session_id,
             creator=creator,
@@ -179,8 +244,11 @@ class CanvasStore:
             strokes=[],
             next_seq=1,
             created_at=now,
-            expires=now + max(60, int(ttl_seconds)),
+            expires=expires,
+            keys_rotated_at=now,
             closed=False,
+            parked=False,
+            conflict_token=secrets.token_hex(16),
             title=(title or "").strip()[:80],
         )
         with self.lock:
@@ -234,6 +302,8 @@ class CanvasStore:
         host_base_url: str,
         title: str = "",
         expires: float = 0.0,
+        conflict_token: str = "",
+        rev: int = 0,
     ) -> CanvasSession:
         """Mirror a canvas hosted on a federation peer (no local stroke storage)."""
         now = time.time()
@@ -245,38 +315,146 @@ class CanvasStore:
             keys=dict(keys),
             elements=[],
             files={},
-            rev=0,
+            rev=max(0, int(rev or 0)),
             strokes=[],
             next_seq=1,
             created_at=now,
-            expires=float(expires) if expires > 0 else now + CANVAS_TTL_SECONDS,
+            expires=float(expires) if expires > 0 else (0.0 if room else now + CANVAS_TTL_SECONDS),
+            keys_rotated_at=now,
             closed=False,
+            parked=False,
+            conflict_token=str(conflict_token or "").strip() or secrets.token_hex(16),
             title=(title or "").strip()[:80],
             host_node=str(host_node or "").strip() or None,
             host_base_url=str(host_base_url or "").strip().rstrip("/") or None,
         )
         with self.lock:
-            # Drop any prior open canvas for the same room on this node.
+            # Close other *active* boards for the room; park local forks (keep scene).
             if room:
                 for sid, existing in list(self.sessions.items()):
                     if (
                         existing.room == room
                         and not existing.closed
+                        and not existing.parked
                         and sid != session_id
                     ):
-                        existing.closed = True
+                        if existing.host_node:
+                            existing.closed = True
+                        else:
+                            existing.parked = True
+                            for token in existing.tokens.values():
+                                if self.token_to_session.get(token) == sid:
+                                    self.token_to_session.pop(token, None)
             self.sessions[session_id] = session
             # Do NOT index tokens here: stroke/auth must hit host_base_url.
-            # Local token→session maps would mint empty local boards by mistake.
             self._save()
         return session
+
+    def announce_dict(self, session: CanvasSession) -> dict:
+        """Metadata peers need to join / conflict-resolve a room board."""
+        host = (session.host_node or "").strip()
+        base = (session.host_base_url or "").strip().rstrip("/")
+        return {
+            "session_id": session.session_id,
+            "room": session.room,
+            "creator": session.creator,
+            "host_node": host,
+            "base_url": base,
+            "conflict_token": session.conflict_token
+            or session.session_id,
+            "rev": int(session.rev or 0),
+            "title": session.title,
+            "tokens": dict(session.tokens),
+            "keys": dict(session.keys),
+            "expires": float(session.expires or 0),
+        }
+
+    def list_open_room_announces(self, *, local_node_id: str = "") -> List[dict]:
+        """Active room boards this node should advertise (local host only)."""
+        out: List[dict] = []
+        with self.lock:
+            for session in self.sessions.values():
+                if (
+                    not session.room
+                    or session.closed
+                    or session.parked
+                    or session.host_node
+                ):
+                    continue
+                ann = self.announce_dict(session)
+                if local_node_id and not ann["host_node"]:
+                    ann["host_node"] = local_node_id
+                out.append(ann)
+        return out
+
+    def park_session(self, session_id: str) -> bool:
+        """Mark a local room board inactive without deleting its scene."""
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or session.host_node:
+                return False
+            if session.parked:
+                return True
+            session.parked = True
+            for token in session.tokens.values():
+                if self.token_to_session.get(token) == session_id:
+                    self.token_to_session.pop(token, None)
+            # Drop tickets so open tabs must re-auth after promote.
+            dead = [
+                t
+                for t, entry in self.tickets.items()
+                if entry.session_id == session_id
+            ]
+            for t in dead:
+                self.tickets.pop(t, None)
+            self._save()
+            return True
+
+    def promote_parked_for_room(self, room: str) -> Optional[CanvasSession]:
+        """Restore a parked local board; close active remote mirrors for the room."""
+        room = (room or "").strip()
+        if not room:
+            return None
+        with self.lock:
+            parked: Optional[CanvasSession] = None
+            for session in self.sessions.values():
+                if (
+                    session.room == room
+                    and session.parked
+                    and not session.closed
+                    and not session.host_node
+                ):
+                    parked = session
+                    break
+            if parked is None:
+                return None
+            for session in list(self.sessions.values()):
+                if (
+                    session.session_id == parked.session_id
+                    or session.room != room
+                    or session.closed
+                ):
+                    continue
+                if session.host_node and not session.parked:
+                    session.closed = True
+                elif not session.host_node and not session.parked:
+                    # Another active local — prefer parked restore only if idle.
+                    return None
+            parked.parked = False
+            for token in parked.tokens.values():
+                self.token_to_session[token] = parked.session_id
+            self._save()
+            return parked
 
     def get_by_token(self, token: str) -> Optional[CanvasSession]:
         with self.lock:
             sid = self.token_to_session.get(token)
             if not sid:
                 return None
-            return self.sessions.get(sid)
+            session = self.sessions.get(sid)
+            if session is None or session.parked or session.closed:
+                return None
+            return session
 
     def participant_for_token(self, session: CanvasSession, token: str) -> Optional[str]:
         for name, t in session.tokens.items():
@@ -287,9 +465,41 @@ class CanvasStore:
     def _alive(self, session: CanvasSession) -> Tuple[bool, str]:
         if session.closed:
             return False, "画布已关闭"
-        if time.time() > session.expires:
+        if session.parked:
+            return False, "画布已暂存（联邦合并中）"
+        # Room boards persist until explicitly closed (ignore legacy expires).
+        if session.room:
+            return True, ""
+        if session.expires > 0 and time.time() > session.expires:
             return False, "画布已过期"
         return True, ""
+
+    def rotate_keys_if_due(self, session_id: str) -> bool:
+        """Rotate all participant keys when the interval elapses.
+
+        Access tickets are unchanged — already-open boards keep syncing. Only a
+        fresh /auth with the new key can mint tickets after rotation.
+        Federated mirrors must not rotate; the host owns the keys.
+        """
+        if KEY_ROTATE_SECONDS <= 0:
+            return False
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed:
+                return False
+            if session.host_node:
+                return False
+            if session.parked:
+                return False
+            now = time.time()
+            rotated_at = float(session.keys_rotated_at or session.created_at or 0)
+            if rotated_at and (now - rotated_at) < KEY_ROTATE_SECONDS:
+                return False
+            for name in list(session.tokens.keys()):
+                session.keys[name] = _generate_key()
+            session.keys_rotated_at = now
+            self._save()
+            return True
 
     def issue_access_ticket(
         self, token: str, key: str
@@ -603,14 +813,27 @@ class CanvasStore:
             return True, ""
 
     def find_open_for_room(self, room: str) -> Optional[CanvasSession]:
-        now = time.time()
         with self.lock:
             for session in self.sessions.values():
                 if (
-                    session.room
-                    and session.room == room
+                    not session.room
+                    or session.room != room
+                    or session.closed
+                    or session.parked
+                ):
+                    continue
+                # Room boards never expire by wall clock; only /canvas close ends them.
+                return session
+        return None
+
+    def find_parked_for_room(self, room: str) -> Optional[CanvasSession]:
+        with self.lock:
+            for session in self.sessions.values():
+                if (
+                    session.room == room
+                    and session.parked
                     and not session.closed
-                    and session.expires > now
+                    and not session.host_node
                 ):
                     return session
         return None
@@ -622,7 +845,12 @@ class CanvasStore:
             dead_ids = [
                 sid
                 for sid, s in self.sessions.items()
-                if s.closed or s.expires <= now
+                if s.closed
+                or (
+                    not s.room
+                    and s.expires > 0
+                    and s.expires <= now
+                )
             ]
             for sid in dead_ids:
                 session = self.sessions.pop(sid, None)
