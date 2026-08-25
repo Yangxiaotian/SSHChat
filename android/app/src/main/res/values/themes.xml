@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SSHChat" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">#1B5E20</item>
+        <item name="colorPrimaryVariant">#003300</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#546E7A</item>
+        <item name="android:statusBarColor">#1B5E20</item>
+        <item name="android:navigationBarColor">#FAFAFA</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <!-- Light WeChat-style chrome; avoid Dark Mode white text on #FFFFFF panels. -->
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:textColorPrimary">#212121</item>
+        <item name="android:textColorSecondary">#666666</item>
+        <item name="android:editTextColor">#212121</item>
+        <item name="android:textColorHint">#9E9E9E</item>
+    </style>
+</resources>

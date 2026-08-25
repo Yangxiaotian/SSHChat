@@ -20,3 +20,24 @@ electron/**/user-data/
 
 # Local game engines are not committed.
 electron/engines/
+
+# iOS tryout: vendored Citadel clone + Xcode local junk
+ios/Packages/Citadel/
+ios/build/
+ios/**/xcuserdata/
+ios/**/DerivedData/
+ios/*.xcworkspace/xcuserdata/
+
+# Runtime user preference / session data (local)
+user_locales.json
+game_sessions.json
+offline_messages.json
+game_ratings.json
+
+# Android local SDK path / build
+android/local.properties
+android/.gradle/
+android/**/build/
+android/**/.cxx/
+*.apk
+*.aab

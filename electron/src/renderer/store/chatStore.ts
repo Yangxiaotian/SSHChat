@@ -66,6 +66,24 @@ declare global {
       analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest) => Promise<GoKataGoAnalyzeResponse>;
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
       analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
+      openSecureWebSession: (payload: {
+        kind: 'canvas' | 'upload' | 'download';
+        url: string;
+        key: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      uploadSecureFile: (payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      }) => Promise<{ ok: boolean; filename?: string; error?: string }>;
+      canvasHttp: (payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      }) => Promise<{ ok: boolean; status: number; json?: any; error?: string }>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;
@@ -95,6 +113,8 @@ interface ChatState {
   doNotDisturb: boolean;
   composerText: string;
   libraryView: LibraryViewState;
+  canvasSession: { url: string; key: string } | null;
+  canvasMaximized: boolean;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -130,6 +150,9 @@ interface ChatState {
   toggleDoNotDisturb: () => void;
   setComposerText: (value: string) => void;
   clearMessages: (room?: string) => void;
+  openCanvas: (session: { url: string; key: string }) => void;
+  closeCanvas: () => void;
+  setCanvasMaximized: (value: boolean) => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -156,6 +179,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   doNotDisturb: initDndFromStorage(),
   composerText: '',
   libraryView: emptyLibraryViewState(),
+  canvasSession: null,
+  canvasMaximized: false,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -320,6 +345,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     rooms: [{ name: 'default', isDefault: true, unreadCount: 0, lastActivity: Date.now() }],
     activeRoom: 'default',
     users: [],
+    canvasSession: null,
+    canvasMaximized: false,
   }),
 
   setUsers: (users) => set({ users }),
@@ -330,11 +357,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setLocale: (locale) => {
     persistLocale(locale);
     set({ locale });
+    void window.api?.sendMessage?.(`/lang ${locale}`);
   },
   toggleLocale: () =>
     set((state) => {
       const next: Locale = state.locale === 'zh' ? 'en' : 'zh';
       persistLocale(next);
+      void window.api?.sendMessage?.(`/lang ${next}`);
       return { locale: next };
     }),
   setPrivacyMode: (value) => set({ privacyMode: value }),
@@ -357,6 +386,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
+  openCanvas: (session) => set({ canvasSession: session, canvasMaximized: true }),
+  closeCanvas: () => set({ canvasSession: null, canvasMaximized: false }),
+  setCanvasMaximized: (value) => set({ canvasMaximized: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

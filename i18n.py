@@ -1,0 +1,242 @@
+"""Lightweight zh/en message catalogs for SSHChat server text.
+
+Default locale is English. Users switch with ``/lang zh`` (persisted per nick).
+Game line localization for non-sanguo titles uses phrase maps in ``locales``.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator, Mapping, Optional
+
+Locale = str  # "en" | "zh"
+
+DEFAULT_LOCALE: Locale = "en"
+SUPPORTED_LOCALES = ("en", "zh")
+
+_locale_ctx: ContextVar[Locale] = ContextVar("sshchat_locale", default=DEFAULT_LOCALE)
+
+_CATALOGS: dict[Locale, dict[str, Any]] = {}
+_GAME_EXACT: dict[str, str] = {}  # zh -> en
+_GAME_PATTERNS: list[tuple[re.Pattern[str], str]] = []
+_loaded = False
+_load_lock = threading.Lock()
+
+
+def normalize_locale(raw: Optional[str]) -> Locale:
+    if not raw:
+        return default_locale()
+    key = raw.strip().lower().replace("_", "-")
+    if key in ("zh", "zh-cn", "zh-hans", "cn", "chinese", "中文"):
+        return "zh"
+    if key in ("en", "en-us", "en-gb", "english", "英文"):
+        return "en"
+    return default_locale()
+
+
+def default_locale() -> Locale:
+    env = os.environ.get("SSHCHAT_DEFAULT_LOCALE", "").strip()
+    if env:
+        key = env.lower().replace("_", "-")
+        if key in ("zh", "zh-cn", "zh-hans", "cn"):
+            return "zh"
+        if key in ("en", "en-us", "en-gb"):
+            return "en"
+    return DEFAULT_LOCALE
+
+
+def current_locale() -> Locale:
+    return _locale_ctx.get()
+
+
+def set_current_locale(locale: Locale) -> None:
+    _locale_ctx.set(normalize_locale(locale))
+
+
+@contextmanager
+def use_locale(locale: Locale) -> Iterator[Locale]:
+    token = _locale_ctx.set(normalize_locale(locale))
+    try:
+        yield _locale_ctx.get()
+    finally:
+        _locale_ctx.reset(token)
+
+
+def _deep_get(tree: Mapping[str, Any], path: str) -> Optional[str]:
+    cur: Any = tree
+    for part in path.split("."):
+        if not isinstance(cur, Mapping) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur if isinstance(cur, str) else None
+
+
+def _ensure_loaded() -> None:
+    global _loaded, _GAME_EXACT, _GAME_PATTERNS
+    if _loaded:
+        return
+    with _load_lock:
+        if _loaded:
+            return
+        from locales import en as en_mod
+        from locales import zh as zh_mod
+        from locales import game_phrases
+
+        _CATALOGS["en"] = en_mod.MESSAGES
+        _CATALOGS["zh"] = zh_mod.MESSAGES
+        _GAME_EXACT = dict(game_phrases.EXACT_ZH_TO_EN)
+        patterns: list[tuple[re.Pattern[str], str]] = []
+        for zh_pat, en_repl in game_phrases.PATTERNS_ZH_TO_EN:
+            patterns.append((re.compile(zh_pat), en_repl))
+        _GAME_PATTERNS = patterns
+        _loaded = True
+
+
+def t(key: str, locale: Optional[Locale] = None, **vars: Any) -> str:
+    """Lookup dotted key in catalogs; fall back to English then key."""
+    _ensure_loaded()
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    text = _deep_get(_CATALOGS.get(loc) or {}, key)
+    if text is None and loc != "en":
+        text = _deep_get(_CATALOGS.get("en") or {}, key)
+    if text is None:
+        text = key
+    if vars:
+        try:
+            return text.format(**vars)
+        except (KeyError, ValueError, IndexError):
+            return text
+    return text
+
+
+def help_lines(locale: Optional[Locale] = None) -> list[str]:
+    _ensure_loaded()
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    lines = (_CATALOGS.get(loc) or {}).get("help_lines") or (_CATALOGS.get("en") or {}).get(
+        "help_lines"
+    )
+    if isinstance(lines, (list, tuple)):
+        return list(lines)
+    return []
+
+
+def game_help_lines(locale: Optional[Locale] = None) -> list[str]:
+    _ensure_loaded()
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    lines = (_CATALOGS.get(loc) or {}).get("game_help_lines") or (
+        _CATALOGS.get("en") or {}
+    ).get("game_help_lines")
+    if isinstance(lines, (list, tuple)):
+        return list(lines)
+    return []
+
+
+def localize_game_line(line: str, locale: Optional[Locale] = None) -> str:
+    """Translate a fully formatted game status/help line zh→en when needed.
+
+    Leaves board glyphs and unknown phrases unchanged. Sanguosha content is
+    intentionally not covered by the phrase maps.
+    """
+    _ensure_loaded()
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    if loc != "en" or not line:
+        return line
+    if line in _GAME_EXACT:
+        return _polish_en_game_line(_GAME_EXACT[line])
+
+    stripped = line.lstrip(" ")
+    indent = line[: len(line) - len(stripped)]
+    candidates = (line, stripped) if stripped != line else (line,)
+
+    for candidate in candidates:
+        if candidate in _GAME_EXACT:
+            return indent + _polish_en_game_line(_GAME_EXACT[candidate])
+        for pat, repl in _GAME_PATTERNS:
+            m = pat.match(candidate)
+            if not m:
+                continue
+            try:
+                out = m.expand(repl) if "\\" in repl else repl.format(**m.groupdict())
+            except (KeyError, ValueError, IndexError, re.error):
+                try:
+                    out = repl.format(**m.groupdict())
+                except Exception:
+                    continue
+            if candidate is stripped and indent:
+                out = indent + out
+            return _polish_en_game_line(out)
+
+    return _polish_en_game_line(line)
+
+
+def _polish_en_game_line(line: str) -> str:
+    """Fix leftover Chinese labels / level names after pattern translation."""
+    if not line:
+        return line
+    replacements = (
+        ("积分=", "rating="),
+        ("等级=", "level="),
+        ("战绩=", "W/L/D="),
+        ("局数=", "games="),
+        ("体系=", "scheme="),
+        ("白：", "White: "),
+        ("黑：", "Black: "),
+        ("红：", "Red: "),
+        ("空席", "empty"),
+        ("(空席, 可 /game join)", "(empty, /game join)"),
+        ("（空席, 可 /game join）", "(empty, /game join)"),
+    )
+    out = line
+    for zh, en in replacements:
+        if zh in out:
+            out = out.replace(zh, en)
+    # Seat lines like "  白方：name" that missed a pattern.
+    out = re.sub(r"(^|\s)白方：", r"\1White: ", out)
+    out = re.sub(r"(^|\s)黑方：", r"\1Black: ", out)
+    out = re.sub(r"(^|\s)黑方（先手）：", r"\1Black (first): ", out)
+    out = re.sub(r"(^|\s)白方（先手）：", r"\1White (first): ", out)
+    out = re.sub(r"轮到 白方 ", "White ", out)
+    out = re.sub(r"轮到 黑方 ", "Black ", out)
+    out = re.sub(r"轮到 红方 ", "Red ", out)
+    out = re.sub(r" 落子$", " to move", out)
+    out = re.sub(r" 走子$", " to move", out)
+    out = re.sub(r"（第 (\d+) 手）", r"(move \1)", out)
+    out = re.sub(r"（将军）", " (check)", out)
+    out = out.replace("含空 ", "territory ")
+    out = out.replace("含贴目 ", "komi ")
+    out = out.replace("，空 ", ", territory ")
+    out = out.replace("（行 列，1 起算，左上为 1,1）", "(row col, 1-based, top-left is 1,1)")
+    out = out.replace("坐标为 行 列，左上为 1,1。", "Coords are row col, top-left is 1,1.")
+    out = out.replace("（1～15，左上为 1,1）", "(1–15, top-left is 1,1)")
+    out = out.replace("<行> <列>", "<row> <col>")
+    out = out.replace("行 列", "row col")
+    try:
+        from ratings import localize_levels_in_text
+
+        out = localize_levels_in_text(out, "en")
+    except Exception:
+        pass
+    return out
+
+
+def localize_game_lines(lines: list[str], locale: Optional[Locale] = None) -> list[str]:
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    if loc != "en":
+        return list(lines)
+    return [localize_game_line(ln, loc) for ln in lines]
+
+
+def tr(*, en: str, zh: str, locale: Optional[Locale] = None, **vars: Any) -> str:
+    """Inline bilingual pick without a catalog key."""
+    loc = normalize_locale(locale if locale is not None else current_locale())
+    text = en if loc == "en" else zh
+    if vars:
+        try:
+            return text.format(**vars)
+        except (KeyError, ValueError, IndexError):
+            return text
+    return text

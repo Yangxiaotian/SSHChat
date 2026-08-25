@@ -8,11 +8,39 @@ Optional: ``pgn_export()`` for PGN (chess only).
 
 from __future__ import annotations
 
+import itertools
 import random
 import re
-import itertools
+import time
 import unicodedata
 from typing import Optional, TYPE_CHECKING
+
+
+def stamp_new_session(game) -> None:
+    """Mark a freshly created room game (/game new)."""
+    now = time.time()
+    game.session_started_at = now
+    game.session_updated_at = now
+
+
+def touch_session(game) -> None:
+    """Bump session_updated_at after a move or other state change."""
+    now = time.time()
+    started = getattr(game, "session_started_at", None)
+    if not isinstance(started, (int, float)):
+        game.session_started_at = now
+    game.session_updated_at = now
+
+
+def game_session_updated_at(game) -> float:
+    """Best-effort monotonic age key for federation conflict resolution."""
+    if game is None:
+        return 0.0
+    for attr in ("session_updated_at", "session_started_at"):
+        val = getattr(game, attr, None)
+        if isinstance(val, (int, float)):
+            return float(val)
+    return 0.0
 
 from ratings import GameRatingStore, game_scheme_label, is_rated_game
 
@@ -1372,20 +1400,17 @@ def _gomoku_line_five_threat_count(line: str) -> int:
 
 
 def _gomoku_axis_has_four(line: str) -> bool:
-    """One four-threat on an axis through center X (活四/冲四/跳四, not dead four)."""
+    """One four-threat on an axis through center X (活四/冲四/跳四, not dead four).
+
+    Renju 四 = there is an empty cell where placing X makes five. Shapes that only
+    become a 冲四 after one more move (e.g. OXX.X → OXXXX) are 三-level, not 四;
+    counting those caused false 四四 (e.g. zouyu/yxt at 11,5).
+    """
     if line[4] != "X":
         return False
-    if _gomoku_line_max_run(line) >= 4:
-        return _gomoku_line_five_threat_count(line) >= 1
-    for pos in range(len(line)):
-        if line[pos] != ".":
-            continue
-        trial = list(line)
-        trial[pos] = "X"
-        filled = "".join(trial)
-        if _gomoku_line_max_run(filled) >= 4 and _gomoku_line_five_threat_count(filled) >= 1:
-            return True
-    return False
+    if _gomoku_line_max_run(line) >= 5:
+        return False
+    return _gomoku_line_five_threat_count(line) >= 1
 
 
 def _gomoku_axis_open_three(line: str) -> bool:
@@ -10537,46 +10562,49 @@ def create_game(
     if options and game_name not in {"chess", "gomoku", "xiangqi"}:
         raise RuntimeError(f"{game_name} 暂不支持额外开局参数。")
     if game_name == ChessGame.name:
-        return ChessGame(
+        game = ChessGame(
             creator_conn,
             creator_name,
             rating_store=rating_store,
             ai_level=ai_level,
         )
-    if game_name == GomokuGame.name:
-        return GomokuGame(
+    elif game_name == GomokuGame.name:
+        game = GomokuGame(
             creator_conn,
             creator_name,
             rating_store=rating_store,
             ai_level=ai_level,
         )
-    if game_name == GoGame.name:
+    elif game_name == GoGame.name:
         if options:
             raise RuntimeError("go 暂不支持 AI 或额外开局参数。")
-        return GoGame(
+        game = GoGame(
             creator_conn,
             creator_name,
             rating_store=rating_store,
         )
-    if game_name == XiangqiGame.name:
-        return XiangqiGame(
+    elif game_name == XiangqiGame.name:
+        game = XiangqiGame(
             creator_conn,
             creator_name,
             rating_store=rating_store,
             ai_level=ai_level,
         )
-    if game_name == DoushouGame.name:
+    elif game_name == DoushouGame.name:
         if options:
             raise RuntimeError("doushou 暂不支持 AI 或额外开局参数。")
-        return DoushouGame(
+        game = DoushouGame(
             creator_conn,
             creator_name,
             rating_store=rating_store,
         )
-    cls = GAMES.get(game_name)
-    if cls is None:
-        raise RuntimeError(f"未知游戏：{game_name}")
-    return cls(creator_conn, creator_name)
+    else:
+        cls = GAMES.get(game_name)
+        if cls is None:
+            raise RuntimeError(f"未知游戏：{game_name}")
+        game = cls(creator_conn, creator_name)
+    stamp_new_session(game)
+    return game
 
 
 GAMES = {
@@ -10646,6 +10674,8 @@ def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
 
 
 HELP_LINES = (
+    # Canonical Chinese copy kept for imports/tests; runtime /game help uses
+    # i18n.game_help_lines(locale) from locales/{en,zh}.py.
     "[*] /game list             列出本房已上线、可玩的游戏。",
     "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
     "（chess: 白；gomoku/go/xiangqi/doushou: 黑/黑/红/红先手；sanguo: 房主）。",

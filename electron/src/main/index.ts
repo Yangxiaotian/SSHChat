@@ -1,7 +1,10 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import * as os from 'os';
+import { URL } from 'url';
 import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
@@ -22,6 +25,97 @@ import {
   ChatHistoryIdentity,
   ChatHistorySnapshot,
 } from '../shared/protocol';
+
+type SecureWebKind = 'canvas' | 'upload' | 'download';
+
+function buildSecureKeyAutofillScript(kind: SecureWebKind, key: string): string {
+  const safeKey = JSON.stringify(String(key || '').trim().toUpperCase());
+  const safeKind = JSON.stringify(kind);
+  // Fill the page key field. For canvas/download, also trigger unlock/verify.
+  // For upload, only fill the key so the user can still pick a file.
+  // Key never appears in the window URL.
+  return `(() => {
+    const key = ${safeKey};
+    const kind = ${safeKind};
+    const input = document.getElementById('key');
+    if (!input) return { ok: false, error: 'key input missing' };
+    input.focus();
+    input.value = key;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (kind === 'upload') return { ok: true, mode: 'upload-fill-only' };
+    const unlock = document.getElementById('unlockBtn');
+    if (unlock) { unlock.click(); return { ok: true, mode: 'canvas' }; }
+    const submit = document.getElementById('submitBtn');
+    if (submit) { submit.click(); return { ok: true, mode: 'download' }; }
+    const form = document.getElementById('downloadForm');
+    if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return { ok: true, mode: 'form' }; }
+    return { ok: false, error: 'submit control missing' };
+  })()`;
+}
+
+async function openSecureWebSession(payload: {
+  kind: SecureWebKind;
+  url: string;
+  key: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const url = String(payload?.url || '').trim();
+  const key = String(payload?.key || '').trim().toUpperCase();
+  const kind = payload?.kind;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return { ok: false, error: 'Invalid URL' };
+  }
+  if (!key || key.length !== 6) {
+    return { ok: false, error: 'Invalid key' };
+  }
+  if (kind !== 'canvas' && kind !== 'upload' && kind !== 'download') {
+    return { ok: false, error: 'Invalid kind' };
+  }
+
+  const win = new BrowserWindow({
+    width: kind === 'canvas' ? 1100 : 900,
+    height: kind === 'canvas' ? 820 : 720,
+    autoHideMenuBar: true,
+    title: kind === 'canvas' ? 'SSHChat Canvas' : kind === 'upload' ? 'SSHChat Upload' : 'SSHChat File',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  try {
+    await win.loadURL(url);
+  } catch (e) {
+    try {
+      win.close();
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: e instanceof Error ? e.message : 'Failed to open page' };
+  }
+
+  const tryFill = async () => {
+    try {
+      if (win.isDestroyed()) return;
+      await win.webContents.executeJavaScript(buildSecureKeyAutofillScript(kind, key), true);
+    } catch {
+      // Page may still be settling; a later did-finish-load/dom-ready retry helps.
+    }
+  };
+
+  win.webContents.once('dom-ready', () => {
+    void tryFill();
+  });
+  win.webContents.once('did-finish-load', () => {
+    void tryFill();
+  });
+  // One delayed retry for slow Cloudflare/tunnel pages.
+  setTimeout(() => {
+    void tryFill();
+  }, 800);
+
+  return { ok: true };
+}
 
 // ============================================================
 // VSCode Disguise: Process name, app name, user agent
@@ -2352,6 +2446,225 @@ function setupIPC(): void {
 
   ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, _payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
     return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.OPEN_SECURE_WEB_SESSION,
+    async (_event, payload: { kind: SecureWebKind; url: string; key: string }) => {
+      return openSecureWebSession(payload);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.UPLOAD_SECURE_FILE,
+    async (
+      _event,
+      payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      },
+    ): Promise<{ ok: boolean; filename?: string; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      const key = String(payload?.key || '').trim().toUpperCase();
+      const filename = String(payload?.filename || 'file').replace(/[\\/]/g, '_').slice(0, 200) || 'file';
+      const mime = String(payload?.mime || 'application/octet-stream');
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, error: 'Invalid upload URL' };
+      }
+      if (!key || key.length !== 6) {
+        return { ok: false, error: 'Invalid upload key' };
+      }
+      if (!payload?.data) {
+        return { ok: false, error: 'Empty file data' };
+      }
+
+      const bytes = Buffer.from(payload.data);
+      try {
+        return await postSecureUpload(url, key, filename, mime, bytes, false);
+      } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await postSecureUpload(url, key, filename, mime, bytes, true);
+          } catch (e2) {
+            return { ok: false, error: e2 instanceof Error ? e2.message : String(e2) };
+          }
+        }
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CANVAS_HTTP,
+    async (
+      _event,
+      payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      },
+    ): Promise<{ ok: boolean; status: number; json?: any; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, status: 0, error: 'Invalid canvas URL' };
+      }
+      const method = payload?.method === 'POST' ? 'POST' : 'GET';
+      const headers = { ...(payload?.headers || {}) };
+      const body = payload?.body;
+      try {
+        return await httpJsonRequest(url, method, headers, body, false);
+      } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await httpJsonRequest(url, method, headers, body, true);
+          } catch (e2) {
+            return {
+              ok: false,
+              status: 0,
+              error: e2 instanceof Error ? e2.message : String(e2),
+            };
+          }
+        }
+        return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
+}
+
+function isTlsCertError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string } | null;
+  const code = String(err?.code || '');
+  const msg = String(err?.message || e || '');
+  return (
+    code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+    code === 'CERT_HAS_EXPIRED' ||
+    code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+    code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' ||
+    /CERTIFICATE_VERIFY_FAILED|certificate|CERT_|SSL/i.test(msg)
+  );
+}
+
+function postSecureUpload(
+  urlStr: string,
+  key: string,
+  filename: string,
+  mime: string,
+  bytes: Buffer,
+  insecure: boolean,
+): Promise<{ ok: boolean; filename?: string; error?: string }> {
+  const u = new URL(urlStr);
+  const boundary = `----SSHChat${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+      `Content-Type: ${mime}\r\n\r\n`,
+    'utf8',
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const body = Buffer.concat([preamble, bytes, epilogue]);
+  const lib = u.protocol === 'https:' ? https : http;
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method: 'POST',
+    headers: {
+      'X-Upload-Key': key,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': body.length,
+    },
+    rejectUnauthorized: !insecure,
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let result: { error?: string; filename?: string } = {};
+        try {
+          result = raw.trim() ? (JSON.parse(raw) as typeof result) : {};
+        } catch {
+          result = {};
+        }
+        if ((res.statusCode || 500) >= 400) {
+          resolve({ ok: false, error: result.error || `HTTP ${res.statusCode}` });
+          return;
+        }
+        resolve({ ok: true, filename: result.filename || filename });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(120_000, () => {
+      req.destroy(new Error('upload timeout'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+function httpJsonRequest(
+  urlStr: string,
+  method: 'GET' | 'POST',
+  headers: Record<string, string>,
+  body: string | undefined,
+  insecure: boolean,
+): Promise<{ ok: boolean; status: number; json?: any; error?: string }> {
+  const u = new URL(urlStr);
+  const lib = u.protocol === 'https:' ? https : http;
+  const payload = body ? Buffer.from(body, 'utf8') : undefined;
+  const reqHeaders: Record<string, string | number> = { ...headers };
+  if (payload) {
+    reqHeaders['Content-Length'] = payload.length;
+    if (!reqHeaders['Content-Type'] && !reqHeaders['content-type']) {
+      reqHeaders['Content-Type'] = 'application/json';
+    }
+  }
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method,
+    headers: reqHeaders,
+    rejectUnauthorized: !insecure,
+  };
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let json: any = undefined;
+        try {
+          json = raw.trim() ? JSON.parse(raw) : {};
+        } catch {
+          json = { raw };
+        }
+        const status = res.statusCode || 0;
+        if (status >= 400) {
+          resolve({
+            ok: false,
+            status,
+            json,
+            error: (json && json.error) || `HTTP ${status}`,
+          });
+          return;
+        }
+        resolve({ ok: true, status, json });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(60_000, () => req.destroy(new Error('canvas request timeout')));
+    if (payload) req.write(payload);
+    req.end();
   });
 }
 

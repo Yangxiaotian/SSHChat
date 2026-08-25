@@ -154,6 +154,11 @@ export const IPC_CHANNELS = {
 
   // Xiangqi external engine
   XIANGQI_PIKAFISH_ANALYZE: 'xiangqi:pikafish-analyze',
+
+  // Secure web sessions (file upload/download, shared canvas)
+  OPEN_SECURE_WEB_SESSION: 'web:open-secure-session',
+  UPLOAD_SECURE_FILE: 'web:upload-secure-file',
+  CANVAS_HTTP: 'web:canvas-http',
 } as const;
 
 // Special message tokens

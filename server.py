@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import os
 import pickle
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -15,16 +18,22 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from html import unescape
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
+import canvas_sharing
 import dict_lookup
 import federation
 import games
+import i18n
 import library
-from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game
+import file_sharing
+import file_http_server
+from locale_store import LocaleStore
+from offline_messages import OfflineMessageStore
+from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game, localize_level
 from session_store import DisconnectedSeat, FederatedSeat, GameSessionStore
 
 DEFAULT_ROOM = "default"
@@ -52,9 +61,52 @@ def _session_store_path() -> str:
     return os.path.join(os.path.dirname(__file__), "game_sessions.json")
 
 
+def _offline_messages_path() -> str:
+    raw = os.environ.get("SSHCHAT_OFFLINE_MSG_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "offline_messages.json")
+
+
+def _locale_store_path() -> str:
+    raw = os.environ.get("SSHCHAT_LOCALE_STORE", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.dirname(__file__), "user_locales.json")
+
+
 rating_store = GameRatingStore(_rating_store_path())
+
+
+def _federation_sync_ratings(rows: list[dict]) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or not rows:
+        return
+    try:
+        hub.sync_ratings(rows)
+    except Exception as e:
+        print(f"federation: sync_ratings failed: {e!r}")
+
+
+def _on_local_rating_change(game: str, changed: list[tuple[str, dict]]) -> None:
+    """Push host-settled rating rows so federated same-nick views match."""
+    rows: list[dict] = []
+    for user, entry in changed:
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        row["game"] = game
+        row["user"] = str(entry.get("display_name") or user)
+        rows.append(row)
+    _federation_sync_ratings(rows)
+
+
+rating_store.on_change = _on_local_rating_change
 library_bookmarks = library.LibraryBookmarkStore(_library_bookmarks_path())
 session_store = GameSessionStore(_session_store_path())
+offline_messages = OfflineMessageStore(_offline_messages_path())
+locale_store = LocaleStore(_locale_store_path())
+file_http = None  # HTTP server for file transfers, initialized in main()
 
 # conn -> {"name", "rooms", "current_room"}
 clients = {}
@@ -66,16 +118,38 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# room -> parked (inactive) game kept across federation merge/partition
+room_games_parked: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
+# room -> random hex token used to break dual-authority conflicts deterministically
+room_game_tokens: dict[str, str] = {}
+# ended session id -> room (offline peers get this receipt on reconnect)
+room_game_ended_ids: OrderedDict[str, str] = OrderedDict()
+_ENDED_GAME_IDS_MAX = 64
+# rooms where we claimed hostship only because the real host was unreachable
+room_game_provisional: set[str] = set()
+# room -> monotonic deadline: we sent greq and should accept the next gsync/gend
+_greq_until: dict[str, float] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
-# conn -> {"path": str, "page": int (0-based)}
+# conn -> {"path": str, "page": int (0-based)}  (remote: also origin/name/title/total_pages)
 library_reading: dict[object, dict[str, object]] = {}
+# req_id -> {"event": Event, "payload": dict|None, "error": str}
+_library_page_waiters: dict[str, dict[str, object]] = {}
+_library_page_waiters_lock = threading.Lock()
+# req_id -> {"event": Event, "payload": dict|None} for federation file-host proxy
+_file_host_waiters: dict[str, dict[str, object]] = {}
+_file_host_waiters_lock = threading.Lock()
 # resolved path -> (mtime_ns, BookDocument)
 library_doc_cache: dict[str, tuple[int, library.BookDocument]] = {}
+# per-book load locks so concurrent federated page requests share one parse
+_library_load_locks: dict[str, threading.Lock] = {}
+_library_load_locks_guard = threading.Lock()
+# Cap federated page bodies so lpage_ok stays well under the 1 MiB line budget.
+_FED_LIBRARY_PAGE_MAX_CHARS = max(500, int(library.LIBRARY_PAGE_CHARS) * 2)
 lock = threading.Lock()
 _MISSING = object()  # sentinel for "attribute not present"
 _persist_dirty = False
@@ -84,6 +158,9 @@ _shutting_down = False
 _shutdown_requested = False
 _listen_socket: Optional[socket.socket] = None
 _fed_hub: Optional[federation.FederationHub] = None
+_library_watch_thread: Optional[threading.Thread] = None
+_library_watch_stop = threading.Event()
+_library_last_state: Optional[tuple[set[str], float]] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -173,39 +250,7 @@ article_fetch_cache: dict[str, tuple[float, str]] = {}
 article_fetch_lock = threading.Lock()
 _ARTICLE_CACHE_MAX = 200
 
-HELP_LINES = (
-    "[*] ---------- SSHChat 命令说明 ----------\n",
-    "[*] 普通文字（不以 / 开头）发到「当前活跃房间」，房内在线用户都会收到。\n",
-    "[*]\n",
-    "[*] /join <房间>     加入房间并立刻切到该房；若已在房内则只切换当前房。\n",
-    "[*]              房间名：1～32 字符，仅字母、数字、下划线、连字符。\n",
-    "[*] /switch <房间>  只在已加入的房间之间切换；未加入会提示先用 /join。\n",
-    "[*] /part <房间>    退出某房间；至少保留一间，不能退出最后一个。\n",
-    "[*] /rooms         列出你已加入的房间；前面带 * 的是当前活跃房间。\n",
-    "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
-    "[*]\n",
-    "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
-    "[*] /msg <昵称> <文字>   私聊：发给该昵称的在线用户（大小写不敏感）。\n",
-    "[*]              若有多人同昵称，会全部收到；发件人会收到汇总提示。\n",
-    "[*]\n",
-    "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
-    "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
-    "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
-    "[*]\n",
-    "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
-    "[*]              详细用法用 /game help 查看。\n",
-    "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
-    "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
-    "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
-    "[*] /library       列出图书馆书目（epub / txt / pdf；每人自带书签，翻页自动保存）。\n",
-    "[*] /lib             /library 的简写。\n",
-    "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
-    "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
-    "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
-    "[*] /help          显示本说明。\n",
-    "[*]\n",
-    "[*] 发 /file … 会提示不支持：本项目不在 SSH 会话里做文件传输。\n",
-)
+# /help text lives in locales/{en,zh}.py (i18n.help_lines).
 
 
 def _parse_handshake_line(raw: str) -> str:
@@ -214,6 +259,40 @@ def _parse_handshake_line(raw: str) -> str:
     if not line:
         return "Unknown"
     return line.split("\t", 1)[0].strip() or "Unknown"
+
+
+def conn_locale(conn) -> str:
+    info = clients.get(conn)
+    if info:
+        loc = info.get("locale")
+        if loc:
+            return i18n.normalize_locale(str(loc))
+        name = (info.get("name") or "").strip()
+        if name:
+            return locale_store.get(name)
+    return i18n.default_locale()
+
+
+def nick_locale(nickname: str) -> str:
+    return locale_store.get(nickname)
+
+
+def _ts(conn, key: str, **kwargs) -> str:
+    return i18n.t(f"server.{key}", conn_locale(conn), **kwargs)
+
+
+def set_conn_locale(conn, locale: str) -> str:
+    loc = i18n.normalize_locale(locale)
+    with lock:
+        info = clients.get(conn)
+        if info:
+            info["locale"] = loc
+            name = (info.get("name") or "").strip()
+        else:
+            name = ""
+    if name:
+        locale_store.set(name, loc)
+    return loc
 
 
 def normalize_room(name: str) -> Optional[str]:
@@ -240,7 +319,7 @@ def send_room_announcement_preview(conn, room: str) -> None:
         text = (room_announcements.get(room) or "").strip()
     if not text:
         return
-    send_line(conn, f"[#{room}] [*] 公告：{text}\n")
+    send_line(conn, _ts(conn, "announce_preview", room=room, text=text))
 
 
 def _format_game_lines(room: str, lines) -> bytes:
@@ -248,16 +327,80 @@ def _format_game_lines(room: str, lines) -> bytes:
     return "".join(f"[#{room}] [*] {ln}\n" for ln in lines).encode("utf-8")
 
 
+def _should_skip_game_localize(room: str) -> bool:
+    game = room_games.get(room)
+    return getattr(game, "name", "") == "sanguo"
+
+
 def send_game_private(conn, room: str, lines) -> None:
     if not lines:
         return
-    send_line(conn, _format_game_lines(room, lines).decode("utf-8"))
+    if _should_skip_game_localize(room):
+        out = list(lines)
+    else:
+        out = i18n.localize_game_lines(list(lines), conn_locale(conn))
+    send_line(conn, _format_game_lines(room, out).decode("utf-8"))
 
 
-def broadcast_game(room: str, lines) -> None:
+# [#room] [*] <body> — game system lines from broadcast_game / send_game_private
+_GAME_BROADCAST_LINE_RE = re.compile(
+    r"^\[#([a-zA-Z0-9_-]{1,32})\] \[\*\] (.*)$"
+)
+
+
+def _parse_game_broadcast_msg(msg: bytes) -> Optional[tuple[str, list[str]]]:
+    """If msg is only [#room] [*] lines for one room, return (room, bodies)."""
+    try:
+        text = msg.decode("utf-8")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    if not lines:
+        return None
+    room: Optional[str] = None
+    bodies: list[str] = []
+    for ln in lines:
+        m = _GAME_BROADCAST_LINE_RE.match(ln)
+        if not m:
+            return None
+        r, body = m.group(1), m.group(2)
+        if room is None:
+            room = r
+        elif r != room:
+            return None
+        bodies.append(body)
+    if room is None:
+        return None
+    return room, bodies
+
+
+def _deliver_game_lines_localized(room: str, lines: list[str]) -> None:
+    """Send game lines to each local client in that client's UI locale."""
     if not lines:
         return
-    broadcast_room(room, _format_game_lines(room, lines))
+    skip = _should_skip_game_localize(room)
+    with lock:
+        targets = [c for c in list(rooms.get(room, ())) if c in clients]
+    for conn in targets:
+        out = list(lines) if skip else i18n.localize_game_lines(list(lines), conn_locale(conn))
+        send_line(conn, _format_game_lines(room, out).decode("utf-8"))
+
+
+def broadcast_game(room: str, lines, *, locale: str | None = None) -> None:
+    """Broadcast game system text, localized per recipient (not one room language).
+
+    ``locale`` is kept for call-site compatibility but ignored: each connection
+    uses ``conn_locale(conn)``. Federation forwards the source (usually Chinese)
+    lines so peer nodes can localize for their own clients.
+    """
+    if not lines:
+        return
+    _ = locale  # retained for API compatibility; delivery is always per-conn
+    raw = list(lines)
+    _deliver_game_lines_localized(room, raw)
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.broadcast_room(room, _format_game_lines(room, raw))
 
 
 def _viewer_name_for_conn(conn) -> str | None:
@@ -308,32 +451,83 @@ def send_sanguo_hand_views(room: str, game) -> None:
         send_game_private(conn, room, lines)
 
 
-def _rating_profile_line(game_name: str, profile: dict[str, object], rank: int | None = None) -> str:
+def _rating_profile_line(
+    game_name: str,
+    profile: dict[str, object],
+    rank: int | None = None,
+    *,
+    locale: str | None = None,
+) -> str:
     prefix = f"#{rank} " if rank is not None else ""
-    return (
-        f"{prefix}{profile['name']}: 积分={profile['rating']} 等级={profile['level']} "
-        f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
-        f"局数={profile['games']}"
+    loc = locale or i18n.default_locale()
+    level = localize_level(str(profile["level"]), loc)
+    return i18n.tr(
+        en=(
+            f"{prefix}{profile['name']}: rating={profile['rating']} "
+            f"level={level} "
+            f"W/L/D={profile['wins']}/{profile['losses']}/{profile['draws']} "
+            f"games={profile['games']}"
+        ),
+        zh=(
+            f"{prefix}{profile['name']}: 积分={profile['rating']} 等级={profile['level']} "
+            f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+            f"局数={profile['games']}"
+        ),
+        locale=loc,
     )
 
 
-def _rating_summary_lines(target_name: str, game_name: Optional[str] = None) -> list[str]:
+def _rating_summary_lines(
+    target_name: str,
+    game_name: Optional[str] = None,
+    *,
+    locale: str | None = None,
+) -> list[str]:
+    loc = locale or i18n.default_locale()
     if game_name:
         profile = rating_store.profile(game_name, target_name)
-        lines = [f"{game_name} 积分（{profile['scheme']}）"]
-        lines.append(_rating_profile_line(game_name, profile))
+        lines = [
+            i18n.tr(
+                en=f"{game_name} rating ({profile['scheme']})",
+                zh=f"{game_name} 积分（{profile['scheme']}）",
+                locale=loc,
+            )
+        ]
+        lines.append(_rating_profile_line(game_name, profile, locale=loc))
         top = rating_store.top(game_name, limit=5)
         if top:
-            lines.append("榜单 Top 5：")
-            lines.extend(_rating_profile_line(game_name, item, idx) for idx, item in enumerate(top, start=1))
+            lines.append(
+                i18n.tr(en="Leaderboard Top 5:", zh="榜单 Top 5：", locale=loc)
+            )
+            lines.extend(
+                _rating_profile_line(game_name, item, idx, locale=loc)
+                for idx, item in enumerate(top, start=1)
+            )
         return lines
-    lines = [f"{target_name} 的棋类积分总览（跨房间共享）"]
+    lines = [
+        i18n.tr(
+            en=f"{target_name} board-game ratings overview (shared across rooms)",
+            zh=f"{target_name} 的棋类积分总览（跨房间共享）",
+            locale=loc,
+        )
+    ]
     for rated_game in sorted(GAME_CONFIGS):
         profile = rating_store.profile(rated_game, target_name)
+        level = localize_level(str(profile["level"]), loc)
         lines.append(
-            f"{rated_game}: 积分={profile['rating']} 等级={profile['level']} "
-            f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
-            f"局数={profile['games']} 体系={profile['scheme']}"
+            i18n.tr(
+                en=(
+                    f"{rated_game}: rating={profile['rating']} level={level} "
+                    f"W/L/D={profile['wins']}/{profile['losses']}/{profile['draws']} "
+                    f"games={profile['games']} scheme={profile['scheme']}"
+                ),
+                zh=(
+                    f"{rated_game}: 积分={profile['rating']} 等级={profile['level']} "
+                    f"战绩={profile['wins']}/{profile['losses']}/{profile['draws']} "
+                    f"局数={profile['games']} 体系={profile['scheme']}"
+                ),
+                locale=loc,
+            )
         )
     return lines
 
@@ -657,7 +851,7 @@ def _ensure_game_runtime_compat(game) -> None:
 
 
 def _nudge_game_bots_locked(game) -> list[str]:
-    """Advance bot turns when humans are idle; caller holds lock."""
+    """Advance bot turns. Must not run while holding the server lock — AI search blocks all commands."""
     if game is None or getattr(game, "state", "ended") == "ended":
         return []
     nudge = getattr(game, "nudge_bots", None)
@@ -675,8 +869,22 @@ def _build_session_payload_locked() -> dict[str, object]:
     for room, game in room_games.items():
         if game is None or getattr(game, "state", "ended") == "ended":
             continue
-        raw = _pickle_game_for_storage(game)
+        try:
+            raw = _pickle_game_for_storage(game)
+        except Exception as e:
+            print(f"skip persisting room {room!r} game: {e!r}")
+            continue
         games_blob[room] = base64.b64encode(raw).decode("ascii")
+    parked_blob: dict[str, str] = {}
+    for room, game in room_games_parked.items():
+        if game is None or getattr(game, "state", "ended") == "ended":
+            continue
+        try:
+            raw = _pickle_game_for_storage(game)
+        except Exception as e:
+            print(f"skip persisting parked room {room!r} game: {e!r}")
+            continue
+        parked_blob[room] = base64.b64encode(raw).decode("ascii")
     sessions: dict[str, dict[str, object]] = {}
     for key, sess in disconnected_sessions.items():
         rooms_set = sess.get("rooms") or set()
@@ -692,12 +900,28 @@ def _build_session_payload_locked() -> dict[str, object]:
         }
     return {
         "room_games": games_blob,
+        "room_games_parked": parked_blob,
         "disconnected_sessions": sessions,
         "room_enabled_games": {
             room: sorted(enabled)
             for room, enabled in room_enabled_games.items()
         },
         "room_announcements": dict(room_announcements),
+        "room_game_authority": {
+            room: auth
+            for room, auth in room_game_authority.items()
+            if isinstance(room, str) and isinstance(auth, str) and auth.strip()
+        },
+        "room_game_tokens": {
+            room: tok
+            for room, tok in room_game_tokens.items()
+            if isinstance(room, str) and isinstance(tok, str) and tok.strip()
+        },
+        "room_game_ended_ids": {
+            tok: room
+            for tok, room in room_game_ended_ids.items()
+            if isinstance(tok, str) and tok.strip() and isinstance(room, str)
+        },
     }
 
 
@@ -709,11 +933,23 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 continue
             try:
                 game = pickle.loads(base64.b64decode(encoded))
+                _rebind_game_services(game)
             except Exception as e:
                 print(f"skip restoring room {room!r} game: {e!r}")
                 continue
-            _rebind_game_services(game)
             room_games[room] = game
+    parked_blob = payload.get("room_games_parked")
+    if isinstance(parked_blob, dict):
+        for room, encoded in parked_blob.items():
+            if not isinstance(room, str) or not isinstance(encoded, str):
+                continue
+            try:
+                game = pickle.loads(base64.b64decode(encoded))
+                _rebind_game_services(game)
+            except Exception as e:
+                print(f"skip restoring parked room {room!r} game: {e!r}")
+                continue
+            room_games_parked[room] = game
     sessions = payload.get("disconnected_sessions")
     if isinstance(sessions, dict):
         for key, sess in sessions.items():
@@ -746,6 +982,59 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
         for room, text in announcements.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_announcements[room] = text
+    authority = payload.get("room_game_authority")
+    if isinstance(authority, dict):
+        for room, auth in authority.items():
+            # Keep auth even with no active game (ended-tombstone) so greq can
+            # answer gend and gsync cannot revive a stale peer board after restart.
+            if isinstance(room, str) and isinstance(auth, str) and auth.strip():
+                room_game_authority[room] = auth.strip()
+    tokens = payload.get("room_game_tokens")
+    if isinstance(tokens, dict):
+        for room, tok in tokens.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(tok, str)
+                and tok.strip()
+            ):
+                room_game_tokens[room] = tok.strip()
+    ended_blob = payload.get("room_game_ended_ids")
+    if isinstance(ended_blob, dict):
+        for tok, room in ended_blob.items():
+            if (
+                isinstance(tok, str)
+                and tok.strip()
+                and isinstance(room, str)
+                and room.strip()
+            ):
+                _remember_ended_game_locked(room.strip(), tok.strip())
+
+
+def _remember_ended_game_locked(room: str, token: str) -> None:
+    token = (token or "").strip()
+    room = (room or "").strip()
+    if not token or not room:
+        return
+    room_game_ended_ids.pop(token, None)
+    room_game_ended_ids[token] = room
+    while len(room_game_ended_ids) > _ENDED_GAME_IDS_MAX:
+        room_game_ended_ids.popitem(last=False)
+
+
+def _ended_token_for_room_locked(room: str) -> str:
+    room = (room or "").strip()
+    if not room:
+        return ""
+    for tok, r in reversed(list(room_game_ended_ids.items())):
+        if r == room:
+            return tok
+    return ""
+
+
+def _game_id_is_ended_locked(token: str) -> bool:
+    token = (token or "").strip()
+    return bool(token) and token in room_game_ended_ids
 
 
 def _mark_sessions_dirty() -> None:
@@ -805,14 +1094,19 @@ def _load_persisted_sessions() -> None:
         return
     with lock:
         _apply_session_payload_locked(payload)
-        for game in room_games.values():
-            _nudge_game_bots_locked(game)
+        parked_back = _restore_idle_parked_games_locked()
         active = sum(
             1
             for game in room_games.values()
             if game is not None and getattr(game, "state", "ended") != "ended"
         )
         sessions = len(disconnected_sessions)
+    if parked_back:
+        print(
+            "promoted parked game(s) to active: "
+            + ", ".join(f"#{room}" for room, _ in parked_back)
+        )
+        _persist_after_game_change()
     if active or sessions:
         print(
             f"restored {active} active room game(s) and "
@@ -828,17 +1122,414 @@ def send_line(conn, text: str) -> None:
         remove_client(conn)
 
 
+def _format_offline_ts(ts: float) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+    except (OverflowError, OSError, ValueError, TypeError):
+        return "?"
+
+
+def _format_file_size_kb(size: int | float) -> str:
+    try:
+        return f"{float(size) / 1024:.1f} KB"
+    except (TypeError, ValueError):
+        return "? KB"
+
+
+def _format_file_leave_summary(filename: str, file_size: int | float) -> str:
+    name = (filename or "").strip() or "file"
+    return f"[文件] {name} ({_format_file_size_kb(file_size)})"
+
+
+def _build_file_ready_message(
+    *,
+    sender: str,
+    filename: str,
+    file_size: int | float,
+    download_url: str,
+    key: str,
+    room: str | None = None,
+) -> str:
+    message_lines = [
+        "[*] ========== 收到新文件 ==========\n",
+        f"[*] 发件人: {sender}\n",
+        f"[*] 文件名: {filename}\n",
+        f"[*] 大小: {_format_file_size_kb(file_size)}\n",
+    ]
+    if room:
+        message_lines.append(f"[*] 来自房间: #{room}\n")
+    message_lines.extend([
+        "[*]\n",
+        "[*] 下载网址:\n",
+        f"[*] {download_url}\n",
+        "[*]\n",
+        f"[*] 下载密钥: {key}\n",
+        "[*]\n",
+        "[*] 说明:\n",
+        "[*] 1. 打开下载网址，在页面里输入上面的密钥\n",
+        "[*] 2. 图片、视频、PDF 等会直接预览，确认后再点按钮保存\n",
+        "[*] 3. 文件只能下载一次，存好之前别关页面\n",
+        "[*] 4. 每个接收者的网址和密钥都不同\n",
+        "[*] 5. 图形客户端会折叠成按钮，可一键打开\n",
+        "[*] ================================\n",
+        f"[*] gui-open download {download_url} {key}\n",
+    ])
+    return "".join(message_lines)
+
+
+def _file_ready_message_from_leave(item: dict) -> str | None:
+    """Rebuild a full download notice from an offline file leave-message."""
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    token = str(meta.get("download_token") or "").strip()
+    key = str(meta.get("download_key") or "").strip()
+    filename = str(meta.get("filename") or item.get("text") or "file").strip() or "file"
+    try:
+        file_size = int(meta.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    room = meta.get("room")
+    if isinstance(room, str):
+        room = room.strip() or None
+    else:
+        room = None
+    # Federated leaves carry an absolute URL hosted on the origin node.
+    download_url = str(meta.get("download_url") or "").strip()
+    if not download_url:
+        if file_http is None or not token:
+            return None
+        download_url = f"{file_http.get_base_url()}/download/{token}"
+    if not key:
+        return None
+    return _build_file_ready_message(
+        sender=str(item.get("from") or "?"),
+        filename=filename,
+        file_size=file_size,
+        download_url=download_url,
+        key=key,
+        room=room,
+    )
+
+
+def _revoke_recalled_file(removed: dict, recipient: str) -> None:
+    """Drop download access when a pending offline file leave-message is recalled."""
+    if (removed.get("kind") or "pm") != "file":
+        return
+    meta = removed.get("meta") if isinstance(removed.get("meta"), dict) else {}
+    transfer_id = str(meta.get("transfer_id") or "").strip()
+    if not transfer_id:
+        return
+    try:
+        file_sharing.file_transfer_store.revoke_recipient(transfer_id, recipient)
+    except Exception as e:
+        print(f"[FileTransfer] Failed to revoke recalled file for {recipient}: {e}")
+    _federation_clear_file_leave(recipient, transfer_id)
+
+
+def _federation_clear_file_leave(recipient: str, transfer_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        print(f"[FileTransfer] Broadcasting fleave_clear for {recipient} "
+              f"(transfer_id={transfer_id})")
+        hub.clear_file_leave(recipient, transfer_id)
+    except Exception as e:
+        print(f"federation: clear_file_leave failed: {e!r}")
+
+
+def _federation_clear_offline_pm(recipient: str, leave_id: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.clear_offline_pm(recipient, leave_id)
+    except Exception as e:
+        print(f"federation: clear_offline_pm failed: {e!r}")
+
+
+def _federation_seed_file_leave(
+    recipient: str, sender: str, notice: dict
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.broadcast_file_leave(recipient, sender, notice)
+    except Exception as e:
+        print(f"federation: broadcast_file_leave failed: {e!r}")
+
+
+def _federation_push_all_offline_leaves() -> None:
+    """Re-seed every pending leave so a newly linked peer shares the mailbox.
+
+    Same-nick users logging into either node (and /leave on either node) need the
+    full unread set, including leaves created while the peer was offline.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        removed = offline_messages.compact_duplicates()
+        if removed:
+            print(f"federation: compacted {removed} duplicate offline leave(s)")
+        pending = offline_messages.snapshot_pending()
+    except Exception as e:
+        print(f"federation: snapshot offline leaves failed: {e!r}")
+        return
+    pushed_pm = 0
+    pushed_file = 0
+    for item in pending:
+        to_name = str(item.get("to") or "").strip()
+        from_name = str(item.get("from") or "").strip() or "?"
+        text = str(item.get("text") or "")
+        if not to_name or not text:
+            continue
+        kind = str(item.get("kind") or "pm")
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if kind == "file":
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            download_url = str(meta.get("download_url") or "").strip()
+            download_key = str(meta.get("download_key") or "").strip()
+            if not tid or not download_url or not download_key:
+                continue
+            notice = {
+                "filename": str(meta.get("filename") or "").strip() or "file",
+                "file_size": meta.get("file_size") or 0,
+                "download_url": download_url,
+                "download_key": download_key,
+                "download_token": str(meta.get("download_token") or "").strip(),
+                "room": meta.get("room"),
+                "transfer_id": tid,
+                "leave_ts": ts,
+            }
+            try:
+                if hub.broadcast_file_leave(to_name, from_name, notice):
+                    pushed_file += 1
+            except Exception as e:
+                print(f"federation: catch-up fleave failed: {e!r}")
+            continue
+        leave_id = str(item.get("id") or "").strip()
+        # Never re-seed without a stable id — empty ids mint a new one per hop
+        # and explode into duplicate /leave rows across federation reconnects.
+        if not leave_id:
+            continue
+        try:
+            if hub.broadcast_offline_pm(
+                to_name,
+                from_name,
+                text,
+                leave_id=leave_id,
+                ts=ts or None,
+            ):
+                pushed_pm += 1
+        except Exception as e:
+            print(f"federation: catch-up pleave failed: {e!r}")
+    if pushed_pm or pushed_file:
+        print(
+            f"federation: catch-up offline leaves "
+            f"pm={pushed_pm} file={pushed_file}"
+        )
+
+def deliver_offline_messages(conn, recipient_name: str) -> int:
+    """Flush stored leave-messages to this connection. Returns how many were sent."""
+    pending = offline_messages.take_all(recipient_name)
+    if not pending:
+        return 0
+    n = len(pending)
+    send_line(conn, _ts(conn, "offline_header", n=n))
+    for item in pending:
+        when = _format_offline_ts(item.get("ts", 0))
+        sender = item.get("from") or "?"
+        if (item.get("kind") or "pm") == "file":
+            notice = _file_ready_message_from_leave(item)
+            if notice:
+                send_line(conn, _ts(conn, "offline_file_meta", when=when, sender=sender))
+                send_line(conn, notice)
+            else:
+                text = item.get("text") or i18n.tr(en="[file]", zh="[文件]", locale=conn_locale(conn))
+                send_line(
+                    conn,
+                    _ts(conn, "offline_file_pm", sender=sender, when=when, text=text),
+                )
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            if tid:
+                _federation_clear_file_leave(recipient_name, tid)
+            else:
+                # Log missing transfer_id for debugging
+                print(f"[WARNING] deliver_offline_messages: file leave without transfer_id "
+                      f"(from={sender}, to={recipient_name})")
+            continue
+        text = item.get("text") or ""
+        send_line(conn, _ts(conn, "offline_pm", sender=sender, when=when, text=text))
+        lid = str(item.get("id") or "").strip()
+        if lid:
+            _federation_clear_offline_pm(recipient_name, lid)
+    return n
+
+
+def _send_leave_list(conn, sender_name: str, recipient: str | None = None) -> None:
+    try:
+        offline_messages.compact_duplicates()
+    except Exception as e:
+        print(f"offline leave compact failed: {e!r}")
+    items = offline_messages.list_sent_unread(sender_name, recipient)
+    if not items:
+        if recipient:
+            send_line(
+                conn,
+                i18n.tr(
+                    en=(
+                        f"[*] No unread leave-messages or files awaiting {recipient!r}.\n"
+                    ),
+                    zh=(
+                        f"[*] 没有发给 {recipient!r}、对方尚未阅读的留言或文件。\n"
+                    ),
+                    locale=conn_locale(conn),
+                ),
+            )
+        else:
+            send_line(conn, _ts(conn, "leave_none"))
+        return
+    if recipient:
+        send_line(
+            conn,
+            i18n.tr(
+                en=(
+                    f"[*] Unread leave-messages/files to {recipient!r} "
+                    f"({len(items)} total):\n"
+                ),
+                zh=(
+                    f"[*] 发给 {recipient!r}、对方尚未阅读的留言/文件"
+                    f"（共 {len(items)} 条）：\n"
+                ),
+                locale=conn_locale(conn),
+            ),
+        )
+        for item in items:
+            when = _format_offline_ts(item.get("ts", 0))
+            send_line(
+                conn,
+                _ts(conn, "leave_item", index=item["index"], when=when, text=item["text"]),
+            )
+        send_line(conn, _ts(conn, "leave_recall_hint", recipient=recipient))
+        return
+    send_line(conn, _ts(conn, "leave_list_header", n=len(items)))
+    current_to = None
+    for item in items:
+        to_name = item.get("to") or "?"
+        if to_name != current_to:
+            current_to = to_name
+            send_line(conn, _ts(conn, "leave_group", name=to_name))
+        when = _format_offline_ts(item.get("ts", 0))
+        send_line(
+            conn,
+            _ts(conn, "leave_item", index=item["index"], when=when, text=item["text"]),
+        )
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Recall: /leave <nick> <n>\n",
+            zh="[*] 撤回：/leave <昵称> <编号>\n",
+            locale=conn_locale(conn),
+        ),
+    )
+
+
+def handle_leave_command(conn, name: str, parts: list[str]) -> None:
+    """List or recall unread leave-messages sent by this user."""
+    # handle_command uses split(None, 1), so parts[1] is the whole remainder.
+    # /leave | /leave <nick> | /leave <nick> <n>
+    # /leave recall <nick> <n> | /leave 撤回 <nick> <n>
+    rest = parts[1] if len(parts) > 1 else ""
+    args = rest.split()
+    if not args:
+        _send_leave_list(conn, name)
+        return
+    if args[0].lower() in ("recall", "unmsg", "撤回", "撤销"):
+        if len(args) < 3:
+            send_line(conn, _ts(conn, "leave_usage"))
+            return
+        target = args[1].strip()
+        num_raw = args[2].strip()
+    elif len(args) >= 2 and args[1].strip().isdigit():
+        target = args[0].strip()
+        num_raw = args[1].strip()
+    elif len(args) == 1:
+        _send_leave_list(conn, name, args[0].strip())
+        return
+    else:
+        send_line(conn, _ts(conn, "leave_usage"))
+        return
+    try:
+        index = int(num_raw)
+    except ValueError:
+        send_line(conn, _ts(conn, "leave_bad_index"))
+        return
+    removed = offline_messages.recall(name, target, index)
+    if removed is None:
+        send_line(
+            conn,
+            _ts(conn, "leave_recall_fail", recipient=target, index=index),
+        )
+        return
+    _revoke_recalled_file(removed, target)
+    lid = str(removed.get("id") or "").strip()
+    if lid and (removed.get("kind") or "pm") != "file":
+        _federation_clear_offline_pm(target, lid)
+    when = _format_offline_ts(removed.get("ts", 0))
+    kind = i18n.tr(
+        en="file" if (removed.get("kind") or "pm") == "file" else "leave-message",
+        zh="文件" if (removed.get("kind") or "pm") == "file" else "留言",
+        locale=conn_locale(conn),
+    )
+    send_line(
+        conn,
+        _ts(
+            conn,
+            "leave_recalled",
+            kind=kind,
+            index=index,
+            recipient=target,
+            when=when,
+            text=removed.get("text"),
+        ),
+    )
+
+
 def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -> None:
-    """Deliver a private message to all matching nicks; echo status to sender."""
+    """Deliver a private message to all matching nicks; leave a message if offline."""
     targets = find_clients_by_nickname(target_nick)
     hub = federation.get_hub()
     remote_sent = False
     if hub is not None and hub.enabled and hub.has_remote_user(target_nick):
         remote_sent = hub.send_pm(target_nick, sender_name, text)
     if not targets and not remote_sent:
+        stored = offline_messages.leave(target_nick, sender_name, text)
+        if stored is None:
+            send_line(
+                conn,
+                f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
+            )
+            return
+        if hub is not None and hub.enabled:
+            try:
+                hub.broadcast_offline_pm(
+                    target_nick,
+                    sender_name,
+                    text,
+                    leave_id=str(stored.get("id") or ""),
+                    ts=float(stored.get("ts") or 0) or None,
+                )
+            except Exception as e:
+                print(f"federation: broadcast_offline_pm failed: {e!r}")
         send_line(
             conn,
-            f"[*] No one online named {target_nick!r} (match is case-insensitive)\n",
+            f"[*] {target_nick!r} 当前不在线，已留言；对方下次上线时会收到。\n",
         )
         return
     for peer_conn, peer_name in targets:
@@ -1095,7 +1786,35 @@ def _safe_http_url(raw: str) -> Optional[str]:
 
 
 def _decode_html_bytes(data: bytes, charset: Optional[str]) -> str:
-    for enc in (charset, "utf-8", "gb18030", "gbk", "latin-1"):
+    # Try to extract charset from HTML meta tags
+    meta_charset = None
+    try:
+        # Try to decode first 2KB as ASCII-compatible to find meta charset
+        head_sample = data[:2048].decode("ascii", errors="ignore").lower()
+        # Look for <meta charset="...">
+        m = re.search(r'<meta\s+charset=["\']?([\w-]+)', head_sample, re.I)
+        if m:
+            meta_charset = m.group(1)
+        else:
+            # Look for <meta http-equiv="Content-Type" content="...charset=...">
+            m = re.search(
+                r'<meta\s+http-equiv=["\']?content-type["\']?\s+content=["\']?[^"\']*charset=([\w-]+)',
+                head_sample,
+                re.I,
+            )
+            if not m:
+                m = re.search(
+                    r'<meta\s+content=["\']?[^"\']*charset=([\w-]+)[^"\']*["\']?\s+http-equiv=["\']?content-type',
+                    head_sample,
+                    re.I,
+                )
+            if m:
+                meta_charset = m.group(1)
+    except Exception:
+        pass
+    
+    # Try charsets in order: HTTP header, HTML meta, common Chinese encodings
+    for enc in (charset, meta_charset, "utf-8", "gb18030", "gbk", "gb2312", "latin-1"):
         if not enc:
             continue
         try:
@@ -1440,11 +2159,770 @@ def _client_name(conn) -> str:
     return str(info["name"]) if info else "Unknown"
 
 
+def _library_bookmark_key(origin: str, name: str) -> str:
+    """Bookmark id is the bare filename so local and federated opens share progress."""
+    _ = origin  # origin only matters for catalog display / page fetch
+    return library.bookmark_bare_name(name)
+
+
+def _fed_local_library_snapshot() -> list[dict]:
+    lib_dir = _library_dir()
+    if not lib_dir.is_dir():
+        return []
+    return [library.book_entry_to_meta(entry) for entry in library.list_books(lib_dir)]
+
+
+def _union_library_catalog() -> list[library.CatalogItem]:
+    lib_dir = _library_dir()
+    local = library.list_books(lib_dir) if lib_dir.is_dir() else []
+    remote: dict[str, list[dict]] = {}
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        remote = hub.remote_library_catalogs()
+    return library.merge_federated_catalog(local, remote)
+
+
+def _federation_sync_library_catalog() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.sync_library_catalog(_fed_local_library_snapshot())
+    except Exception as e:
+        print(f"federation: library catalog sync failed: {e!r}")
+
+
+def _get_library_state() -> tuple[set[str], float]:
+    """Get current library directory state (file names + mtime)."""
+    lib_dir = _library_dir()
+    if not lib_dir.is_dir():
+        return (set(), 0.0)
+    try:
+        dir_mtime = lib_dir.stat().st_mtime
+        files = {
+            path.name
+            for path in lib_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in library.LIBRARY_EXTENSIONS
+        }
+        return (files, dir_mtime)
+    except OSError:
+        return (set(), 0.0)
+
+
+def _library_watch_loop() -> None:
+    """Background thread that monitors library directory for changes."""
+    global _library_last_state
+    
+    # Get initial state
+    _library_last_state = _get_library_state()
+    
+    # Check interval in seconds
+    watch_interval = float(os.environ.get("SSHCHAT_LIBRARY_WATCH_SECONDS", "5"))
+    watch_interval = max(1.0, watch_interval)
+    
+    print(f"federation: library watch started (interval={watch_interval}s)")
+    
+    while not _library_watch_stop.is_set():
+        time.sleep(watch_interval)
+        
+        if _library_watch_stop.is_set():
+            break
+        
+        hub = federation.get_hub()
+        if hub is None or not hub.enabled:
+            continue
+        
+        try:
+            current_state = _get_library_state()
+            
+            if _library_last_state is None:
+                _library_last_state = current_state
+                continue
+            
+            prev_files, prev_mtime = _library_last_state
+            curr_files, curr_mtime = current_state
+            
+            # Check if there are changes (new/removed files or directory mtime changed)
+            if prev_files != curr_files or abs(curr_mtime - prev_mtime) > 0.01:
+                added = curr_files - prev_files
+                removed = prev_files - curr_files
+                
+                if added or removed:
+                    print(
+                        f"federation: library changed "
+                        f"(+{len(added)} -{len(removed)}), syncing catalog"
+                    )
+                elif curr_mtime != prev_mtime:
+                    print("federation: library directory modified, syncing catalog")
+                
+                # Sync catalog to federation peers
+                _federation_sync_library_catalog()
+                _library_last_state = current_state
+                
+        except Exception as e:
+            print(f"federation: library watch error: {e!r}")
+    
+    print("federation: library watch stopped")
+
+
+def _fed_local_library_bookmarks_snapshot() -> list[dict]:
+    """Bookmarks for locally connected nicks (for peer catch-up)."""
+    with lock:
+        names = {str(info.get("name") or "").strip() for info in clients.values()}
+    rows: list[dict] = []
+    for name in sorted(names, key=lambda n: n.lower()):
+        if not name:
+            continue
+        books = library_bookmarks.export_user(name)
+        if books:
+            rows.append({"name": name, "books": books})
+    return rows
+
+
+def _federation_sync_library_bookmarks(
+    user: str, entries: Optional[dict] = None
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if entries is None:
+        entries = library_bookmarks.export_user(user)
+    if not entries:
+        return
+    try:
+        hub.sync_library_bookmarks(user, entries)
+    except Exception as e:
+        print(f"federation: library bookmark sync failed: {e!r}")
+
+
+def _fed_on_library_bookmarks(_origin: str, nick: str, books: dict) -> None:
+    if not isinstance(books, dict) or not nick:
+        return
+    try:
+        library_bookmarks.merge_from_remote(nick, books)
+    except Exception as e:
+        print(f"federation: merge library bookmarks failed: {e!r}")
+
+
+def _fed_on_library_bookmark_clear(nick: str, book_name: str) -> None:
+    """Owner-node handler: clear a nick's bookmark for a local book."""
+    cleared = library_bookmarks.clear_book(nick, book_name)
+    if cleared:
+        _federation_sync_library_bookmarks(nick, cleared)
+
+
+def _fed_on_library_page_request(
+    _owner: str,
+    req_id: str,
+    book_name: str,
+    page: int,
+    requester: str,
+    nick: str = "",
+    flags: str = "",
+    query: str = "",
+) -> None:
+    """Serve one page from this node's library; bookmarks live on the owner node."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    book_name = Path(str(book_name or "")).name
+    nick = str(nick or "").strip()
+    flags = str(flags or "").lower()
+    resume = "r" in flags
+    save = "s" in flags
+    find = "f" in flags
+    payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
+    try:
+        lib_dir = _library_dir()
+        catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
+        entry = next((e for e in catalog if e.name == book_name), None)
+        if entry is None:
+            payload["error"] = f"book not found: {book_name}"
+        else:
+            doc = _get_cached_book(entry.path)
+            total = doc.total_pages
+            if find:
+                q = str(query or "").strip()[:200]
+                hits = library.search_book(doc, q) if q else []
+                payload = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "name": entry.name,
+                    "title": doc.title,
+                    "total_pages": total,
+                    "query": q,
+                    "results": [{"page": p, "snippet": s} for p, s in hits],
+                }
+            else:
+                bookmark_page = (
+                    library_bookmarks.get_page(nick, book_name) if nick else None
+                )
+                had_bookmark = bookmark_page is not None
+                if resume:
+                    page = bookmark_page if had_bookmark else 0
+                page = max(0, min(int(page), total - 1))
+                if nick and save:
+                    entries = library_bookmarks.set_page(nick, book_name, page)
+                    _federation_sync_library_bookmarks(nick, entries)
+                    bookmark_page = page
+                text = str(doc.pages[page] or "")
+                if len(text) > _FED_LIBRARY_PAGE_MAX_CHARS:
+                    text = (
+                        text[:_FED_LIBRARY_PAGE_MAX_CHARS]
+                        + "\n…（本页过长，联邦传输已截断）"
+                    )
+                payload = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "name": entry.name,
+                    "title": doc.title,
+                    "page": page,
+                    "total_pages": total,
+                    "text": text,
+                    "ext": entry.ext,
+                    "size_bytes": entry.size_bytes,
+                    "bookmark_page": (
+                        bookmark_page if bookmark_page is not None else page
+                    ),
+                    "resumed": bool(resume and had_bookmark),
+                }
+    except Exception as e:
+        payload = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_library_page(requester, req_id, payload)
+    except Exception as e:
+        print(f"federation: reply_library_page failed: {e!r}")
+
+
+def _fed_local_file_public() -> str:
+    """Public file base URL advertised to federation peers (empty if LAN-only)."""
+    if file_http is None:
+        return ""
+    try:
+        base = file_http.get_base_url()
+    except Exception:
+        return ""
+    if not file_http_server.is_externally_reachable_url(base):
+        return ""
+    return base.rstrip("/")
+
+
+def _fed_on_file_host_request(
+    requester: str, req_id: str, payload: dict
+) -> None:
+    """Peer asked us to host a /sendfile or /canvas session on our public URL."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    mode = str(payload.get("mode") or "file").strip().lower()
+    if mode == "canvas":
+        reply: dict = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas",
+        }
+        try:
+            if file_http is None:
+                reply["error"] = "canvas disabled on host"
+            elif not file_http_server.is_externally_reachable_url(
+                file_http.get_base_url()
+            ):
+                reply["error"] = "host has no public file URL"
+            else:
+                creator = str(payload.get("creator") or "").strip()
+                participants = payload.get("participants") or []
+                if not isinstance(participants, list):
+                    participants = []
+                participants = [
+                    str(p).strip() for p in participants if str(p).strip()
+                ]
+                room = payload.get("room")
+                room_name = str(room).strip() if room else None
+                title = str(payload.get("title") or "").strip()
+                if not creator or not participants:
+                    reply["error"] = "invalid creator/participants"
+                else:
+                    session = canvas_sharing.canvas_store.create_session(
+                        creator=creator,
+                        participants=participants,
+                        room=room_name,
+                        title=title,
+                    )
+                    base_url = file_http.get_base_url().rstrip("/")
+                    reply = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "mode": "canvas",
+                        "host_node": hub.node_id,
+                        "base_url": base_url,
+                        "session_id": session.session_id,
+                        "creator": session.creator,
+                        "room": room_name,
+                        "tokens": dict(session.tokens),
+                        "keys": dict(session.keys),
+                        "title": session.title,
+                        "expires": session.expires,
+                    }
+                    print(
+                        f"[Canvas] Hosted federated canvas for {requester}: "
+                        f"creator={creator} participants={len(participants)} "
+                        f"via {base_url}"
+                    )
+        except Exception as e:
+            print(f"[Canvas] federated host error: {e!r}")
+            traceback.print_exc()
+            reply = {"ok": False, "error": str(e), "req_id": req_id, "mode": "canvas"}
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas) failed: {e!r}")
+        return
+    if mode == "canvas_close":
+        reply = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas_close",
+        }
+        try:
+            session_id = str(payload.get("session_id") or "").strip()
+            by_user = str(payload.get("by_user") or "").strip()
+            if not session_id or not by_user:
+                reply["error"] = "invalid session_id/by_user"
+            else:
+                ok, err = canvas_sharing.canvas_store.close_session(
+                    session_id, by_user
+                )
+                reply = {
+                    "ok": ok,
+                    "req_id": req_id,
+                    "mode": "canvas_close",
+                    "error": err if not ok else "",
+                }
+        except Exception as e:
+            print(f"[Canvas] federated close error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_close",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_close) failed: {e!r}")
+        return
+    if mode == "canvas_join":
+        reply = {
+            "ok": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas_join",
+        }
+        try:
+            session_id = str(payload.get("session_id") or "").strip()
+            nick = str(payload.get("nick") or "").strip()
+            if not session_id or not nick:
+                reply["error"] = "invalid session_id/nick"
+            else:
+                token, key, err = canvas_sharing.canvas_store.add_participant(
+                    session_id, nick
+                )
+                if err or not token:
+                    reply["error"] = err or "join failed"
+                else:
+                    reply = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "mode": "canvas_join",
+                        "token": token,
+                        "key": key,
+                        "session_id": session_id,
+                        "nick": nick,
+                    }
+        except Exception as e:
+            print(f"[Canvas] federated join error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_join",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_join) failed: {e!r}")
+        return
+
+    reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
+    try:
+        if file_http is None:
+            reply["error"] = "file transfer disabled on host"
+        elif not file_http_server.is_externally_reachable_url(file_http.get_base_url()):
+            reply["error"] = "host has no public file URL"
+        else:
+            sender = str(payload.get("sender") or "").strip()
+            recipients = payload.get("recipients") or []
+            if not isinstance(recipients, list):
+                recipients = []
+            recipients = [str(r).strip() for r in recipients if str(r).strip()]
+            room = payload.get("room")
+            room_name = str(room).strip() if room else None
+            if not sender or not recipients:
+                reply["error"] = "invalid sender/recipients"
+            else:
+                store = file_sharing.file_transfer_store
+                transfer = store.create_upload_session(
+                    sender=sender,
+                    recipients=recipients,
+                    room=room_name,
+                )
+                base_url = file_http.get_base_url().rstrip("/")
+                reply = {
+                    "ok": True,
+                    "req_id": req_id,
+                    "host_node": hub.node_id,
+                    "base_url": base_url,
+                    "transfer_id": transfer.transfer_id,
+                    "upload_token": transfer.upload_token,
+                    "upload_key": transfer.upload_key,
+                    "upload_url": f"{base_url}/upload/{transfer.upload_token}",
+                    "download_tokens": dict(transfer.download_tokens),
+                    "download_keys": dict(transfer.download_keys),
+                    "room": room_name,
+                    "sender": sender,
+                    "recipients": recipients,
+                }
+                print(
+                    f"[FileTransfer] Hosted federated upload for {requester}: "
+                    f"sender={sender} recipients={len(recipients)} via {base_url}"
+                )
+    except Exception as e:
+        print(f"[FileTransfer] federated host error: {e!r}")
+        traceback.print_exc()
+        reply = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_file_host(requester, req_id, reply)
+    except Exception as e:
+        print(f"federation: reply_file_host failed: {e!r}")
+
+
+def _fed_on_file_host_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _file_host_waiters_lock:
+        waiter = _file_host_waiters.get(req_id)
+        if waiter is None:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _federation_request_canvas_host(
+    host_node: str,
+    creator: str,
+    participants: list[str],
+    room: Optional[str],
+    *,
+    title: str = "",
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        creator,
+        participants,
+        room,
+        timeout=timeout,
+        mode="canvas",
+        title=title,
+    )
+
+
+def _federation_request_canvas_close(
+    host_node: str,
+    session_id: str,
+    by_user: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        "",
+        [],
+        None,
+        timeout=timeout,
+        mode="canvas_close",
+        session_id=session_id,
+        by_user=by_user,
+    )
+
+
+def _federation_request_canvas_join(
+    host_node: str,
+    session_id: str,
+    nick: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
+    return _federation_request_file_host(
+        host_node,
+        "",
+        [],
+        None,
+        timeout=timeout,
+        mode="canvas_join",
+        session_id=session_id,
+        nick=nick,
+    )
+
+
+def _federation_request_file_host(
+    host_node: str,
+    sender: str,
+    recipients: list[str],
+    room: Optional[str],
+    *,
+    timeout: float | None = None,
+    mode: str = "file",
+    title: str = "",
+    session_id: str = "",
+    by_user: str = "",
+    nick: str = "",
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("SSHCHAT_FILE_FED_PROXY_TIMEOUT", "30") or "30")
+        except ValueError:
+            timeout = 30.0
+        timeout = max(5.0, timeout)
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _file_host_waiters_lock:
+        _file_host_waiters[req_id] = {"event": event, "payload": None}
+    payload: dict = {}
+    if mode == "canvas":
+        payload = {
+            "mode": "canvas",
+            "creator": sender,
+            "participants": recipients,
+            "room": room,
+            "title": title,
+        }
+    elif mode == "canvas_close":
+        payload = {
+            "mode": "canvas_close",
+            "session_id": session_id,
+            "by_user": by_user,
+        }
+    elif mode == "canvas_join":
+        payload = {
+            "mode": "canvas_join",
+            "session_id": session_id,
+            "nick": nick,
+        }
+    else:
+        payload = {
+            "mode": "file",
+            "sender": sender,
+            "recipients": recipients,
+            "room": room,
+        }
+    try:
+        if not hub.request_file_host(host_node, req_id, payload):
+            return {"ok": False, "error": f"无法联系文件代理节点 {host_node}"}
+        if not event.wait(timeout):
+            return {
+                "ok": False,
+                "error": f"等待文件代理节点超时（{timeout:.0f}s）",
+            }
+        with _file_host_waiters_lock:
+            payload = _file_host_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _file_host_waiters_lock:
+            _file_host_waiters.pop(req_id, None)
+
+
+def _federation_sync_file_public() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        hub.sync_file_public(_fed_local_file_public())
+    except Exception as e:
+        print(f"federation: file public sync failed: {e!r}")
+
+
+def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _library_page_waiters_lock:
+        waiter = _library_page_waiters.get(req_id)
+        if not waiter:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_library_page_waiters(error: str) -> None:
+    """Unblock pending remote /library opens when a peer link drops."""
+    with _library_page_waiters_lock:
+        waiters = list(_library_page_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_file_host_waiters(error: str) -> None:
+    """Unblock pending federated /sendfile host requests when a peer drops."""
+    with _file_host_waiters_lock:
+        waiters = list(_file_host_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fetch_remote_library_page(
+    owner: str,
+    book_name: str,
+    page: int,
+    *,
+    nick: str = "",
+    flags: str = "",
+    query: str = "",
+    timeout: float = 90.0,
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _library_page_waiters_lock:
+        _library_page_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_library_page(
+            owner, req_id, book_name, page, nick=nick, flags=flags, query=query
+        ):
+            return {"ok": False, "error": f"无法联系图书所在节点 {owner}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待对端图书页超时"}
+        with _library_page_waiters_lock:
+            payload = _library_page_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _library_page_waiters_lock:
+            _library_page_waiters.pop(req_id, None)
+
+
+def _parse_fed_search_hits(raw) -> list[tuple[int, str]]:
+    hits: list[tuple[int, str]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            hits.append((int(item["page"]), str(item.get("snippet") or "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return hits
+
+
+def _emit_library_search_hits(
+    conn, title: str, query: str, results: list[tuple[int, str]]
+) -> None:
+    if not results:
+        send_line(conn, f"[*] 在《{title}》中未找到「{query}」。\n")
+        return
+    send_line(
+        conn,
+        f"[*] 在《{title}》中搜索「{query}」，找到 {len(results)} 处：\n",
+    )
+    for page_idx, snippet in results:
+        send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
+    if len(results) != 1:
+        send_line(conn, "[*] 用 /library page <页码> 跳转到对应页。\n")
+
+
 def _set_library_page(conn, user: str, path: Path, page: int) -> None:
     page = max(0, int(page))
     with lock:
-        library_reading[conn] = {"path": str(path.resolve()), "page": page}
-    library_bookmarks.set_page(user, path.name, page)
+        library_reading[conn] = {"path": str(path.resolve()), "page": page, "origin": ""}
+    book_key = library.bookmark_bare_name(path.name)
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
+    _federation_sync_library_bookmarks(user, entries)
+
+
+def _set_library_session(
+    conn,
+    user: str,
+    *,
+    origin: str,
+    name: str,
+    page: int,
+    path: Optional[Path] = None,
+    title: str = "",
+    total_pages: int = 0,
+    persist_bookmark: bool = True,
+) -> None:
+    page = max(0, int(page))
+    origin = (origin or "").strip()
+    name = Path(str(name or "")).name
+    with lock:
+        library_reading[conn] = {
+            "path": str(path.resolve()) if path is not None else "",
+            "page": page,
+            "origin": origin,
+            "name": name,
+            "title": title,
+            "total_pages": int(total_pages or 0),
+        }
+    if not persist_bookmark:
+        return
+    book_key = _library_bookmark_key(origin, name)
+    if origin:
+        # Remote books: authoritative bookmark is on the owner node (via lpage).
+        # Keep a local mirror for /library list only — do not fan out lmarks.
+        if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+            return
+        library_bookmarks.set_page(user, book_key, page)
+        return
+    if page <= 0 and library_bookmarks.get_page(user, book_key) is None:
+        return
+    entries = library_bookmarks.set_page(user, book_key, page)
+    _federation_sync_library_bookmarks(user, entries)
+
+
+def _send_library_page_payload(
+    conn, title: str, page_idx: int, total: int, text: str
+) -> None:
+    total = max(1, int(total))
+    page_idx = max(0, min(int(page_idx), total - 1))
+    send_line(conn, f"[*] --- 《{title}》 第 {page_idx + 1}/{total} 页 ---\n")
+    for ln in library.wrap_page_lines(text or ""):
+        send_line(conn, f"[*]    {ln}\n")
+    send_line(
+        conn,
+        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | show | info | close\n",
+    )
 
 
 def _get_cached_book(path: Path) -> library.BookDocument:
@@ -1456,76 +2934,117 @@ def _get_cached_book(path: Path) -> library.BookDocument:
     cached = library_doc_cache.get(key)
     if cached and cached[0] == mtime_ns:
         return cached[1]
-    doc = library.load_book(path)
-    library_doc_cache[key] = (mtime_ns, doc)
-    return doc
+    with _library_load_locks_guard:
+        load_lock = _library_load_locks.setdefault(key, threading.Lock())
+    with load_lock:
+        cached = library_doc_cache.get(key)
+        if cached and cached[0] == mtime_ns:
+            return cached[1]
+        doc = library.load_book_isolated(path)
+        library_doc_cache[key] = (mtime_ns, doc)
+        return doc
 
 
 def _send_library_page(conn, doc: library.BookDocument, page_idx: int) -> None:
     total = doc.total_pages
     page_idx = max(0, min(page_idx, total - 1))
-    send_line(conn, f"[*] --- 《{doc.title}》 第 {page_idx + 1}/{total} 页 ---\n")
-    for ln in library.wrap_page_lines(doc.pages[page_idx]):
-        send_line(conn, f"[*]    {ln}\n")
-    send_line(
-        conn,
-        "[*] 翻页：/library next | prev | page <页码> | search <关键词> | info | close\n",
-    )
+    _send_library_page_payload(conn, doc.title, page_idx, total, doc.pages[page_idx])
+
+
+def _library_read_session_page(
+    session: dict, *, user: str = "", save_bookmark: bool = False
+) -> tuple[str, int, int, str]:
+    """Return (title, page, total, text) for a library_reading session."""
+    origin = str(session.get("origin") or "").strip()
+    page = int(session.get("page") or 0)
+    if origin:
+        name = str(session.get("name") or "").strip()
+        flags = "s" if (save_bookmark and user) else ""
+        payload = _fetch_remote_library_page(
+            origin, name, page, nick=user, flags=flags
+        )
+        if not payload.get("ok"):
+            raise RuntimeError(str(payload.get("error") or "remote page failed"))
+        title = str(payload.get("title") or name)
+        total = int(payload.get("total_pages") or 1)
+        page = int(payload.get("page") or page)
+        text = str(payload.get("text") or "")
+        session["title"] = title
+        session["total_pages"] = total
+        session["page"] = page
+        return title, page, total, text
+    path = Path(str(session.get("path") or ""))
+    doc = _get_cached_book(path)
+    page = max(0, min(page, doc.total_pages - 1))
+    return doc.title, page, doc.total_pages, doc.pages[page]
 
 
 def _send_library_catalog(conn, user: str, query: str = "") -> None:
     lib_dir = _library_dir()
     send_line(conn, "[*] --- 图书馆 ---\n")
-    if not lib_dir.is_dir():
-        send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-        send_line(conn, "[*] 请将 epub / txt / pdf 放入该目录后重试。\n")
-        return
-    catalog = library.list_books(lib_dir)
+    catalog = _union_library_catalog()
+    local_count = sum(1 for e in catalog if not e.origin)
+    remote_count = len(catalog) - local_count
     if not catalog:
-        send_line(conn, f"[*] 目录为空：{lib_dir}\n")
-        send_line(conn, "[*] 支持格式：.epub、.txt、.pdf\n")
+        if not lib_dir.is_dir():
+            send_line(conn, f"[*] 本机图书馆目录不存在：{lib_dir}\n")
+        else:
+            send_line(conn, f"[*] 本机目录为空：{lib_dir}\n")
+        if remote_count == 0:
+            send_line(conn, "[*] 联邦暂无共享图书；支持格式：.epub、.txt、.md、.pdf\n")
         return
     query = (query or "").strip()
-    books = library.search_catalog(catalog, query) if query else catalog
+    books = library.search_catalog_items(catalog, query) if query else catalog
     if query:
         send_line(
             conn,
-            f"[*] 查找「{query}」，共 {len(books)} 本（全库 {len(catalog)} 本）。\n",
+            f"[*] 查找「{query}」，共 {len(books)} 本（联邦并集 {len(catalog)} 本："
+            f"本机 {local_count}，对端 {remote_count}）。\n",
         )
         if not books:
             send_line(conn, "[*] 未找到匹配的图书，请换关键词重试。\n")
             send_line(conn, "[*] 用 /library 查看全部书目。\n")
             return
+    else:
+        send_line(
+            conn,
+            f"[*] 联邦并集共 {len(catalog)} 本（本机 {local_count}，对端 {remote_count}）。\n",
+        )
     user_marks = library_bookmarks.list_for_user(user)
     for entry in books:
-        mark = user_marks.get(entry.name)
+        mark = user_marks.get(_library_bookmark_key(entry.origin, entry.name))
         mark_suffix = f" · 书签第 {mark + 1} 页" if mark is not None else ""
         send_line(
             conn,
-            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} ({library.format_size(entry.size_bytes)}){mark_suffix}\n",
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
+            f"({library.format_size(entry.size_bytes)}){entry.display_origin()}{mark_suffix}\n",
         )
-    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名>\n")
+    send_line(conn, "[*] 打开：/library open <序号>  或  /library open <文件名[@节点]>\n")
     if len(catalog) > 10:
         send_line(conn, "[*] 查找：/library find <关键词>\n")
     send_line(conn, "[*] 我的书签：/library bookmarks\n")
 
 
 def _send_library_bookmarks(conn, user: str) -> None:
-    lib_dir = _library_dir()
     marks = library_bookmarks.list_for_user(user)
     send_line(conn, "[*] --- 我的书签 ---\n")
     if not marks:
         send_line(conn, "[*] 暂无书签；打开图书并翻页后会自动保存。\n")
         return
-    catalog = library.list_books(lib_dir) if lib_dir.is_dir() else []
-    name_by_file = {entry.name: entry for entry in catalog}
-    for book_name in sorted(marks, key=lambda n: n.lower()):
-        page = marks[book_name]
-        entry = name_by_file.get(book_name)
+    catalog = _union_library_catalog()
+    by_key = {
+        _library_bookmark_key(entry.origin, entry.name): entry for entry in catalog
+    }
+    for book_key in sorted(marks, key=lambda n: n.lower()):
+        page = marks[book_key]
+        entry = by_key.get(book_key)
         if entry:
-            label = f"{entry.index}. [{entry.ext.upper()}] {book_name}"
+            label = (
+                f"{entry.index}. [{entry.ext.upper()}] {entry.name}"
+                f"{entry.display_origin()}"
+            )
         else:
-            label = book_name
+            label = book_key
         send_line(conn, f"[*] {label} · 第 {page + 1} 页\n")
     send_line(conn, "[*] 打开对应图书会自动从书签继续。\n")
 
@@ -1543,38 +3062,71 @@ def _handle_library(conn, payload: str) -> None:
     if not raw:
         _send_library_catalog(conn, user)
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if session:
-            path = session.get("path")
-            page = int(session.get("page") or 0)
-            if path:
-                try:
-                    doc = _get_cached_book(Path(str(path)))
-                    send_line(
-                        conn,
-                        f"[*] 当前在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页\n",
-                    )
-                except Exception:
-                    library_reading.pop(conn, None)
+            try:
+                title, page, total, _text = _library_read_session_page(
+                    session, user=user
+                )
+                origin = str(session.get("origin") or "")
+                where = f" @{origin}" if origin else ""
+                send_line(
+                    conn,
+                    f"[*] 当前在读：《{title}》第 {page + 1}/{total} 页{where}\n",
+                )
+            except Exception:
+                library_reading.pop(conn, None)
         return
 
     parts = raw.split()
     head = parts[0].lower()
 
     if head in {"help", "?", "帮助"}:
-        send_line(conn, "[*] /library 用法：\n")
-        send_line(conn, "[*]   /library | /lib                 书目列表（含你的书签进度）\n")
-        send_line(conn, "[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n")
-        send_line(conn, "[*]   /library open <序号|文件名>        打开（有书签则从书签继续）\n")
-        send_line(conn, "[*]   /library next | 下一页             下一页（自动存书签）\n")
-        send_line(conn, "[*]   /library prev | 上一页             上一页（自动存书签）\n")
-        send_line(conn, "[*]   /library page <页码> | 页 N        跳到指定页（自动存书签）\n")
-        send_line(conn, "[*]   /library search <关键词> | 搜索    在当前书中关键词检索并跳转\n")
-        send_line(conn, "[*]   /library bookmarks | 书签           列出我的全部书签\n")
-        send_line(conn, "[*]   /library reset <序号|文件名>       清除某本书的书签\n")
-        send_line(conn, "[*]   /library info | 状态               当前阅读进度\n")
-        send_line(conn, "[*]   /library close | 关闭              结束阅读（保留书签）\n")
-        send_line(conn, f"[*] 目录：{lib_dir}\n")
+        loc = conn_locale(conn)
+        for line in (
+            i18n.tr(en="[*] /library usage:\n", zh="[*] /library 用法：\n", locale=loc),
+            i18n.tr(
+                en="[*]   /library | /lib                 Federated catalog (with bookmark progress)\n",
+                zh="[*]   /library | /lib                 联邦并集书目（含书签进度）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library find <keyword>           Find by title (when no book is open)\n",
+                zh="[*]   /library find <关键词> | 查找      按书名查找（未打开书时）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library open <index|file[@node]>  Open (resume from bookmark if any)\n",
+                zh="[*]   /library open <序号|文件名[@节点]>  打开（有书签则从书签继续）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library show                     Show current page\n",
+                zh="[*]   /library show | 显示               显示当前页内容\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library next | prev | page <n>   Turn pages (auto-save bookmark)\n",
+                zh="[*]   /library next|prev|page <页码>     翻页（自动存书签）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library search <keyword>         Search inside the current book (local or federated)\n",
+                zh="[*]   /library search <关键词> | 搜索    当前书内检索（本机与联邦书均可）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /library bookmarks | reset | info | close\n",
+                zh="[*]   /library bookmarks | reset | info | close（书签/清除/状态/关闭）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en=f"[*] Local directory: {lib_dir} (remote books stream page-by-page)\n",
+                zh=f"[*] 本机目录：{lib_dir}（对端图书按页拉取，不复制整本）\n",
+                locale=loc,
+            ),
+        ):
+            send_line(conn, line)
         return
 
     if head in {"bookmarks", "bookmark", "书签"}:
@@ -1583,19 +3135,34 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"reset", "清除"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library reset <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library reset <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
-        book_name = entry.name if entry else Path(token).name
-        if library_bookmarks.clear_book(user, book_name):
-            send_line(conn, f"[*] 已清除《{book_name}》的书签。\n")
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
+        remote_cleared = False
+        if entry:
+            book_key = _library_bookmark_key(entry.origin, entry.name)
+            label = f"{entry.name}{entry.display_origin()}"
+            if entry.is_remote:
+                hub = federation.get_hub()
+                if hub is not None and hub.enabled:
+                    try:
+                        remote_cleared = hub.clear_remote_library_bookmark(
+                            entry.origin, user, entry.name
+                        )
+                    except Exception as e:
+                        print(f"federation: remote bookmark clear failed: {e!r}")
         else:
-            send_line(conn, f"[*] 《{book_name}》没有保存的书签。\n")
+            book_key = library.bookmark_book_key(token) or Path(token).name
+            label = book_key
+        cleared = library_bookmarks.clear_book(user, book_key)
+        if cleared and not (entry and entry.is_remote):
+            _federation_sync_library_bookmarks(user, cleared)
+        if cleared or remote_cleared:
+            send_line(conn, f"[*] 已清除《{label}》的书签。\n")
+        else:
+            send_line(conn, f"[*] 《{label}》没有保存的书签。\n")
         return
 
     if head in {"close", "关闭"}:
@@ -1606,63 +3173,116 @@ def _handle_library(conn, payload: str) -> None:
 
     if head in {"info", "状态"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 当前没有在阅读的图书。\n")
             return
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, _text = _library_read_session_page(session, user=user)
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取当前图书：{exc}\n")
             return
-        page = int(session.get("page") or 0)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        where = f" @{origin}" if origin else ""
         send_line(
             conn,
-            f"[*] 在读：《{doc.title}》第 {page + 1}/{doc.total_pages} 页（{doc.source_path.name}）\n",
+            f"[*] 在读：《{title}》第 {page + 1}/{total} 页（{name}{where}）\n",
         )
+        return
+
+    if head in {"show", "显示"}:
+        with lock:
+            session = dict(library_reading.get(conn) or {})
+        if not session:
+            send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
+            return
+        try:
+            title, page, total, text = _library_read_session_page(session, user=user)
+        except Exception as exc:
+            with lock:
+                library_reading.pop(conn, None)
+            send_line(conn, f"[*] 无法读取图书：{exc}\n")
+            return
+        with lock:
+            if conn in library_reading:
+                library_reading[conn]["page"] = page
+                library_reading[conn]["title"] = title
+                library_reading[conn]["total_pages"] = total
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"next", "n", "下一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        requested = int(session.get("page") or 0) + 1
+        session["page"] = requested
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = int(session.get("page") or 0) + 1
-        if page >= doc.total_pages:
+        if requested > page:
             send_line(conn, "[*] 已是最后一页。\n")
-            page = doc.total_pages - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"prev", "p", "上一页"}:
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        old_page = int(session.get("page") or 0)
+        page = max(0, old_page - 1)
+        if page == old_page:
+            send_line(conn, "[*] 已是第一页。\n")
+        session["page"] = page
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        page = max(0, int(session.get("page") or 0) - 1)
-        if page == int(session.get("page") or 0):
-            send_line(conn, "[*] 已是第一页。\n")
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"page", "页"}:
@@ -1675,26 +3295,40 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 页码须为整数，例如：/library page 3\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             send_line(conn, "[*] 请先用 /library open <序号> 打开图书。\n")
             return
+        session["page"] = max(0, page_1based - 1)
         try:
-            doc = _get_cached_book(Path(str(session["path"])))
+            title, page, total, text = _library_read_session_page(
+                session, user=user, save_bookmark=True
+            )
         except Exception as exc:
             with lock:
                 library_reading.pop(conn, None)
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
-        if page_1based < 1 or page_1based > doc.total_pages:
+        if page_1based < 1 or page_1based > total:
             send_line(
                 conn,
-                f"[*] 无效页码：共 {doc.total_pages} 页，请用 1～{doc.total_pages}。\n",
+                f"[*] 无效页码：共 {total} 页，请用 1～{total}。\n",
             )
             return
-        page = page_1based - 1
-        _set_library_page(conn, user, Path(str(session["path"])), page)
-        _send_library_page(conn, doc, page)
+        origin = str(session.get("origin") or "")
+        name = str(session.get("name") or Path(str(session.get("path") or "")).name)
+        path = Path(str(session["path"])) if session.get("path") else None
+        _set_library_session(
+            conn,
+            user,
+            origin=origin,
+            name=name,
+            page=page,
+            path=path,
+            title=title,
+            total_pages=total,
+        )
+        _send_library_page_payload(conn, title, page, total, text)
         return
 
     if head in {"search", "find", "搜索", "查找", "检索"}:
@@ -1703,9 +3337,53 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, "[*] 用法：/library find <关键词>（查找书目）或打开书后 search <关键词>（书内检索）\n")
             return
         with lock:
-            session = library_reading.get(conn)
+            session = dict(library_reading.get(conn) or {})
         if not session:
             _send_library_catalog(conn, user, query)
+            return
+        origin = str(session.get("origin") or "").strip()
+        if origin:
+            name = str(session.get("name") or "").strip()
+            send_line(conn, f"[*] 正在节点 {origin} 检索「{query}」…\n")
+            payload = _fetch_remote_library_page(
+                origin, name, 0, nick=user, flags="f", query=query
+            )
+            if not payload.get("ok"):
+                send_line(
+                    conn,
+                    f"[*] 检索失败：{payload.get('error') or '对端无响应'}\n",
+                )
+                return
+            if "results" not in payload:
+                send_line(conn, "[*] 对端节点不支持书内检索。\n")
+                return
+            title = str(payload.get("title") or name)
+            results = _parse_fed_search_hits(payload.get("results"))
+            _emit_library_search_hits(conn, title, query, results)
+            if len(results) != 1:
+                return
+            page_idx = results[0][0]
+            send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
+            jump = _fetch_remote_library_page(
+                origin, name, page_idx, nick=user, flags="s"
+            )
+            if not jump.get("ok"):
+                send_line(conn, f"[*] 跳转失败：{jump.get('error') or '对端无响应'}\n")
+                return
+            title = str(jump.get("title") or title)
+            total = int(jump.get("total_pages") or 1)
+            page = int(jump.get("page") or page_idx)
+            text = str(jump.get("text") or "")
+            _set_library_session(
+                conn,
+                user,
+                origin=origin,
+                name=name,
+                page=page,
+                title=title,
+                total_pages=total,
+            )
+            _send_library_page_payload(conn, title, page, total, text)
             return
         try:
             doc = _get_cached_book(Path(str(session["path"])))
@@ -1715,37 +3393,88 @@ def _handle_library(conn, payload: str) -> None:
             send_line(conn, f"[*] 无法读取图书：{exc}\n")
             return
         results = library.search_book(doc, query)
-        if not results:
-            send_line(conn, f"[*] 在《{doc.title}》中未找到「{query}」。\n")
+        _emit_library_search_hits(conn, doc.title, query, results)
+        if len(results) != 1:
             return
-        send_line(
+        page_idx = results[0][0]
+        _set_library_session(
             conn,
-            f"[*] 在《{doc.title}》中搜索「{query}」，找到 {len(results)} 处：\n",
+            user,
+            origin="",
+            name=Path(str(session["path"])).name,
+            page=page_idx,
+            path=Path(str(session["path"])),
+            title=doc.title,
+            total_pages=doc.total_pages,
         )
-        for page_idx, snippet in results:
-            send_line(conn, f"[*]   第 {page_idx + 1} 页：{snippet}\n")
-        if len(results) == 1:
-            page_idx = results[0][0]
-            _set_library_page(conn, user, Path(str(session["path"])), page_idx)
-            send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
-            _send_library_page(conn, doc, page_idx)
-        else:
-            send_line(conn, "[*] 用 /library page <页码> 跳转到对应页。\n")
+        send_line(conn, f"[*] 已自动跳转到第 {page_idx + 1} 页。\n")
+        _send_library_page(conn, doc, page_idx)
         return
 
     if head in {"open", "read", "读", "打开"}:
         if len(parts) < 2:
-            send_line(conn, "[*] Usage: /library open <序号|文件名>\n")
+            send_line(conn, "[*] Usage: /library open <序号|文件名[@节点]>\n")
             return
         token = raw.split(None, 1)[1].strip()
-        if not lib_dir.is_dir():
-            send_line(conn, f"[*] 图书馆目录不存在：{lib_dir}\n")
-            return
-        catalog = library.list_books(lib_dir)
-        entry = library.resolve_book(lib_dir, token, catalog)
+        catalog = _union_library_catalog()
+        entry = library.resolve_catalog_item(token, catalog)
         if not entry:
             send_line(conn, f"[*] 未找到图书：{token}\n")
-            send_line(conn, "[*] 用 /library 查看可用序号与文件名。\n")
+            send_line(conn, "[*] 用 /library 查看可用序号与文件名[@节点]。\n")
+            return
+        bookmark_key = _library_bookmark_key(entry.origin, entry.name)
+        if entry.is_remote:
+            send_line(
+                conn,
+                f"[*] 正在从节点 {entry.origin} 拉取 "
+                f"[{entry.ext.upper()}] {entry.name}…（请稍候）\n",
+            )
+            try:
+                # Resume from the book-owner node's bookmark for this nick.
+                payload = _fetch_remote_library_page(
+                    entry.origin, entry.name, 0, nick=user, flags="r"
+                )
+            except Exception as exc:
+                send_line(conn, f"[*] 打开失败：{exc}\n")
+                return
+            if not payload.get("ok"):
+                send_line(
+                    conn,
+                    f"[*] 打开失败：{payload.get('error') or '对端无响应'}\n",
+                )
+                return
+            title = str(payload.get("title") or entry.name)
+            total = max(1, int(payload.get("total_pages") or 1))
+            page = max(0, min(int(payload.get("page") or 0), total - 1))
+            text = str(payload.get("text") or "")
+            resumed = bool(payload.get("resumed"))
+            _set_library_session(
+                conn,
+                user,
+                origin=entry.origin,
+                name=entry.name,
+                page=page,
+                title=title,
+                total_pages=total,
+            )
+            if resumed and page > 0:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"从书签第 {page + 1}/{total} 页继续。\n",
+                )
+            else:
+                send_line(
+                    conn,
+                    f"[*] 已打开 [{entry.ext.upper()}] {entry.name} @{entry.origin}，"
+                    f"共 {total} 页。\n",
+                )
+            _send_library_page_payload(conn, title, page, total, text)
+            return
+        saved = library_bookmarks.get_page(user, bookmark_key)
+        page = saved if saved is not None else 0
+        if entry.path is None:
+            send_line(conn, f"[*] 本机图书缺少路径：{entry.name}\n")
             return
         if entry.ext == "pdf" or entry.size_bytes >= 2 * 1024 * 1024:
             send_line(
@@ -1758,14 +3487,22 @@ def _handle_library(conn, payload: str) -> None:
         except Exception as exc:
             send_line(conn, f"[*] 打开失败：{exc}\n")
             return
-        saved = library_bookmarks.get_page(user, entry.name)
-        page = saved if saved is not None else 0
         page = min(page, doc.total_pages - 1)
-        _set_library_page(conn, user, entry.path, page)
+        _set_library_session(
+            conn,
+            user,
+            origin="",
+            name=entry.name,
+            page=page,
+            path=entry.path,
+            title=doc.title,
+            total_pages=doc.total_pages,
+        )
         if saved is not None and saved > 0:
             send_line(
                 conn,
-                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
+                f"[*] 已打开 [{entry.ext.upper()}] {entry.name}，"
+                f"从书签第 {page + 1}/{doc.total_pages} 页继续。\n",
             )
         else:
             send_line(
@@ -1829,6 +3566,751 @@ def _handle_dict(conn, payload: str) -> None:
         send_line(conn, "[*] 词典查询失败，请稍后重试（详情见服务端日志）。\n")
 
 
+def _notify_file_ready(transfer: file_sharing.FileTransfer) -> None:
+    """Notify recipients that a file is ready for download.
+
+    Online users get the notice immediately. Offline recipients get a leave-message
+    (kind=file) so they see it on next login, and the sender can list/recall it
+    via /leave just like a text leave-message.
+    """
+    if file_http is None:
+        return
+
+    base_url = file_http.get_base_url()
+
+    for recipient, token in transfer.download_tokens.items():
+        key = transfer.download_keys[recipient]
+        download_url = f"{base_url}/download/{token}"
+        message = _build_file_ready_message(
+            sender=transfer.sender,
+            filename=transfer.filename,
+            file_size=transfer.file_size,
+            download_url=download_url,
+            key=key,
+            room=transfer.room,
+        )
+
+        recipient_lower = recipient.lower()
+        delivered = False
+        with lock:
+            for conn, info in clients.items():
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(conn, message)
+                    delivered = True
+                except Exception as e:
+                    print(f"[FileTransfer] Failed to notify {recipient}: {e}")
+
+        # Also fan out to the same nick on peer nodes (Cloudflare/public file URL).
+        remote_sent = False
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled and hub.has_remote_user(recipient):
+            remote_sent = hub.send_file_notice(
+                recipient,
+                transfer.sender,
+                {
+                    "filename": transfer.filename,
+                    "file_size": transfer.file_size,
+                    "download_url": download_url,
+                    "download_key": key,
+                    "download_token": token,
+                    "room": transfer.room,
+                    "transfer_id": transfer.transfer_id,
+                },
+            )
+
+        if delivered or remote_sent:
+            continue
+
+        # Offline: leave a mailbox entry the sender can also see/recall via /leave.
+        # Also seed every federation peer so login on another node still delivers.
+        summary = _format_file_leave_summary(transfer.filename, transfer.file_size)
+        meta = {
+            "transfer_id": transfer.transfer_id,
+            "filename": transfer.filename,
+            "file_size": transfer.file_size,
+            "download_token": token,
+            "download_key": key,
+            "download_url": download_url,
+            "room": transfer.room,
+        }
+        stored = offline_messages.leave(
+            recipient,
+            transfer.sender,
+            summary,
+            kind="file",
+            meta=meta,
+        )
+        leave_ts = float((stored or {}).get("ts") or time.time())
+        _federation_seed_file_leave(
+            recipient,
+            transfer.sender,
+            {
+                "filename": transfer.filename,
+                "file_size": transfer.file_size,
+                "download_url": download_url,
+                "download_key": key,
+                "download_token": token,
+                "room": transfer.room,
+                "transfer_id": transfer.transfer_id,
+                "leave_ts": leave_ts,
+            },
+        )
+        with lock:
+            sender_lower = transfer.sender.lower()
+            for conn, info in clients.items():
+                if info["name"].lower() != sender_lower:
+                    continue
+                try:
+                    send_line(
+                        conn,
+                        f"[*] {recipient!r} 当前不在线，文件已留言；"
+                        f"对方下次上线时会收到。\n",
+                    )
+                except Exception as e:
+                    print(f"[FileTransfer] Failed to notify sender about offline leave: {e}")
+
+
+def _canvas_invite_message(
+    *,
+    creator: str,
+    url: str,
+    key: str,
+    room: Optional[str],
+    title: str = "",
+) -> str:
+    where = f"房间 #{room}" if room else "私密画布"
+    title_line = f"[*] 标题: {title}\n" if title else ""
+    return (
+        f"[*] ========== 共享画布 ==========\n"
+        f"[*] 发起人: {creator}\n"
+        f"[*] 范围: {where}\n"
+        f"{title_line}"
+        f"[*]\n"
+        f"[*] 画布网址:\n"
+        f"[*] {url}\n"
+        f"[*]\n"
+        f"[*] 访问密钥: {key}\n"
+        f"[*]\n"
+        f"[*] 说明:\n"
+        f"[*] 1. 打开网址，在页面里输入上面的密钥\n"
+        f"[*] 2. 密钥不在网址里；每人的网址和密钥都不同\n"
+        f"[*] 3. 解锁后可共同绘画，笔画会自动同步\n"
+        f"[*] 4. 图形客户端会折叠成按钮，可一键打开\n"
+        f"[*] =====================================\n"
+        f"[*] gui-open canvas {url} {key}\n"
+    )
+
+
+def _deliver_canvas_invites(
+    session: canvas_sharing.CanvasSession,
+    *,
+    only: Optional[str] = None,
+) -> None:
+    """Privately deliver each participant their canvas URL + key.
+
+    If *only* is set, deliver solely to that nick (case-insensitive).
+    """
+    base_url = (session.host_base_url or "").strip()
+    if not base_url:
+        if file_http is None:
+            return
+        base_url = file_http.get_base_url()
+    base_url = base_url.rstrip("/")
+    hub = federation.get_hub()
+    only_key = (only or "").strip().lower()
+    for participant, token in session.tokens.items():
+        if only_key and participant.lower() != only_key:
+            continue
+        key = session.keys.get(participant) or ""
+        url = f"{base_url}/canvas/{token}"
+        message = _canvas_invite_message(
+            creator=session.creator,
+            url=url,
+            key=key,
+            room=session.room,
+            title=session.title,
+        )
+        recipient_lower = participant.lower()
+        delivered = False
+        with lock:
+            for c, info in clients.items():
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(c, message)
+                    delivered = True
+                except Exception as e:
+                    print(f"[Canvas] Failed to notify {participant}: {e}")
+        if (
+            not delivered
+            and hub is not None
+            and hub.enabled
+            and hub.has_remote_user(participant)
+        ):
+            try:
+                hub.send_pm(participant, session.creator, message)
+            except Exception as e:
+                print(f"[Canvas] Federated invite failed for {participant}: {e}")
+
+
+def _ensure_canvas_participant(
+    session: canvas_sharing.CanvasSession, nick: str
+) -> Tuple[bool, str]:
+    """Mint URL+key for *nick* on *session* (local or federated host)."""
+    nick = (nick or "").strip()
+    if not nick:
+        return False, "无效昵称"
+    # Already present?
+    for existing in session.tokens:
+        if existing.lower() == nick.lower():
+            return True, ""
+    if session.host_node:
+        hosted = _federation_request_canvas_join(
+            session.host_node, session.session_id, nick
+        )
+        if not hosted.get("ok"):
+            return False, str(hosted.get("error") or "联邦加入失败")
+        token = str(hosted.get("token") or "").strip()
+        key = str(hosted.get("key") or "").strip()
+        if not token or not key:
+            return False, "联邦加入返回无效"
+        # Update local mirror so invites use the new credentials.
+        with canvas_sharing.canvas_store.lock:
+            live = canvas_sharing.canvas_store.sessions.get(session.session_id)
+            if live is None:
+                return False, "画布不存在"
+            live.tokens[nick] = token
+            live.keys[nick] = key
+            canvas_sharing.canvas_store._save()
+            session.tokens[nick] = token
+            session.keys[nick] = key
+        return True, ""
+    token, key, err = canvas_sharing.canvas_store.add_participant(
+        session.session_id, nick
+    )
+    if err or not token:
+        return False, err or "加入失败"
+    session.tokens[nick] = token
+    session.keys[nick] = key or ""
+    return True, ""
+
+
+def _create_canvas_via_federation_proxy(
+    conn,
+    sender: str,
+    recipients: list[str],
+    room_name: Optional[str],
+) -> Optional[canvas_sharing.CanvasSession]:
+    """Host canvas on a Cloudflare-capable peer when local file URL is LAN-only."""
+    if file_http is None:
+        return None
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return None
+    if not file_http_server.needs_federation_file_proxy(file_http.get_base_url()):
+        return None
+    if not hub.has_remote_file_public():
+        try:
+            _federation_sync_file_public()
+        except Exception:
+            pass
+    proxy_peer = hub.pick_file_public_peer()
+    if proxy_peer is None:
+        send_line(
+            conn,
+            "[*] 联邦中暂无已广告的 Cloudflare/公网文件节点；"
+            "将使用本机地址（对端可能打不开）。\n",
+        )
+        return None
+    host_node, peer_url = proxy_peer
+    send_line(
+        conn,
+        f"[*] 正在向联邦节点 {host_node} 申请公网画布"
+        f"（{peer_url}）…\n",
+    )
+    hosted = _federation_request_canvas_host(
+        host_node, sender, recipients, room_name
+    )
+    if not hosted.get("ok"):
+        err = hosted.get("error") or "unknown"
+        send_line(
+            conn,
+            f"[*] 联邦公网画布代理（{host_node}）失败：{err}；"
+            f"改用本机地址。\n",
+        )
+        return None
+    session_id = str(hosted.get("session_id") or "").strip()
+    base_url = str(hosted.get("base_url") or "").strip().rstrip("/")
+    tokens = hosted.get("tokens") or {}
+    keys = hosted.get("keys") or {}
+    if not session_id or not base_url or not isinstance(tokens, dict) or not isinstance(keys, dict):
+        send_line(conn, "[*] 联邦公网画布代理返回无效；改用本机地址。\n")
+        return None
+    try:
+        expires = float(hosted.get("expires") or 0)
+    except (TypeError, ValueError):
+        expires = 0.0
+    session = canvas_sharing.canvas_store.register_remote_session(
+        session_id=session_id,
+        creator=str(hosted.get("creator") or sender).strip() or sender,
+        participants=recipients,
+        room=room_name,
+        tokens={str(k): str(v) for k, v in tokens.items()},
+        keys={str(k): str(v) for k, v in keys.items()},
+        host_node=host_node,
+        host_base_url=base_url,
+        title=str(hosted.get("title") or ""),
+        expires=expires,
+    )
+    send_line(
+        conn,
+        f"[*] 画布已托管在联邦节点 {host_node} 的公网通道"
+        f"（本机无 Cloudflare）。\n",
+    )
+    return session
+
+
+def _close_canvas_session(
+    session: canvas_sharing.CanvasSession, by_user: str
+) -> Tuple[bool, str]:
+    if session.host_node:
+        hosted = _federation_request_canvas_close(
+            session.host_node, session.session_id, by_user
+        )
+        if not hosted.get("ok"):
+            err = str(hosted.get("error") or "关闭失败")
+            return False, err
+    ok, err = canvas_sharing.canvas_store.close_session(
+        session.session_id, by_user
+    )
+    return ok, err
+
+
+def _handle_canvas(conn, sender: str, payload: str) -> None:
+    """Handle /canvas — shared web drawing board (URL + separate key)."""
+    if file_http is None:
+        send_line(conn, "[*] 画布功能依赖文件网页服务，当前未启用。\n")
+        return
+
+    raw = payload[len("/canvas") :].strip()
+    if payload.lower().startswith("/board"):
+        raw = payload[len("/board") :].strip()
+
+    if raw.lower() in ("help", "?", "帮助"):
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(conn, "[*] Usage:\n")
+            send_line(conn, "[*]   /canvas            - shared drawing board for the current room\n")
+            send_line(conn, "[*]   /canvas #<room>    - board for a specific room\n")
+            send_line(conn, "[*]   /canvas <nick>     - private board with an online user\n")
+            send_line(conn, "[*]   /canvas close      - creator closes the current room board\n")
+            send_line(conn, "[*]   /canvas new        - force a new board even if the room already has one\n")
+            send_line(
+                conn,
+                "[*] Alias: /board. Each person gets a unique URL + key (key is not in the URL).\n",
+            )
+            send_line(
+                conn,
+                "[*] If the room already has a board, /canvas joins it and re-sends your invite.\n",
+            )
+            send_line(
+                conn,
+                "[*] Open the URL in a browser, enter the key, then draw; strokes sync live.\n",
+            )
+        else:
+            send_line(conn, "[*] 用法：\n")
+            send_line(conn, "[*]   /canvas            - 当前房间共享画板\n")
+            send_line(conn, "[*]   /canvas #<房间>    - 指定房间共享画板\n")
+            send_line(conn, "[*]   /canvas <昵称>     - 与某人私密画板\n")
+            send_line(conn, "[*]   /canvas close      - 发起人关闭当前房间画板\n")
+            send_line(conn, "[*]   /canvas new        - 强制新开一局（即使房间已有）\n")
+            send_line(
+                conn,
+                "[*] 别名 /board。每人收到独立网址和密钥（密钥不在网址里）；解锁后共同绘画。\n",
+            )
+            send_line(
+                conn,
+                "[*] 房间已有画板时，再发 /canvas（或点画板）会加入已有画板并给你发邀请。\n",
+            )
+            send_line(
+                conn,
+                "[*] 终端请把网址复制到浏览器；图形客户端会自动打开画板。\n",
+            )
+        return
+
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    force_new = False
+    if target.lower() in ("new", "新建"):
+        force_new = True
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+    if target.lower() in ("close", "关闭", "end"):
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+        session = canvas_sharing.canvas_store.find_open_for_room(room_name)
+        if session is None:
+            send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的画布。\n")
+            return
+        ok, err = _close_canvas_session(session, sender)
+        if not ok:
+            send_line(conn, f"[*] {err}\n")
+            return
+        send_line(conn, f"[*] 已关闭房间 #{room_name} 的共享画布。\n")
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 关闭了共享画布。\n".encode("utf-8"),
+        )
+        return
+
+    recipients: list[str] = []
+    room_name: Optional[str] = None
+
+    if not target:
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+
+    if room_name is not None:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            for c in rooms[room_name]:
+                if c in clients:
+                    recipients.append(clients[c]["name"])
+
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+
+        if len({n.lower() for n in recipients}) < 1:
+            send_line(conn, f"[*] 房间 #{room_name} 里没有人。\n")
+            return
+
+        if not force_new:
+            existing = canvas_sharing.canvas_store.find_open_for_room(room_name)
+            if existing is not None:
+                ok, err = _ensure_canvas_participant(existing, sender)
+                if not ok:
+                    send_line(conn, f"[*] 加入已有画布失败：{err}\n")
+                    return
+                send_line(
+                    conn,
+                    f"[*] 房间 #{room_name} 已有共享画布；正在把你加入并发送邀请。"
+                    f"（强制新开用 /canvas new）\n",
+                )
+                _deliver_canvas_invites(existing, only=sender)
+                return
+    else:
+        target_lower = target.lower()
+        with lock:
+            online = [
+                info["name"]
+                for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        if not online:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled and hub.has_remote_user(target):
+                online = [target]
+        if not online:
+            send_line(conn, f"[*] 用户 {target} 不在线。\n")
+            return
+        if target_lower == sender.lower():
+            send_line(conn, "[*] 私密画布请指定另一位在线用户。\n")
+            return
+        recipients = [sender, online[0]]
+
+    session = _create_canvas_via_federation_proxy(
+        conn, sender, recipients, room_name
+    )
+    if session is None:
+        try:
+            session = canvas_sharing.canvas_store.create_session(
+                creator=sender,
+                participants=recipients,
+                room=room_name,
+            )
+        except Exception as e:
+            print(f"[Canvas] create failed: {e}")
+            traceback.print_exc()
+            send_line(conn, "[*] 创建画布失败，请稍后重试。\n")
+            return
+
+    if room_name:
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 开启了共享画布（请查看私信中的网址与密钥）。\n".encode(
+                "utf-8"
+            ),
+        )
+    else:
+        send_line(conn, f"[*] 已与 {recipients[-1]} 创建私密画布。\n")
+
+    _deliver_canvas_invites(session)
+
+
+def _handle_sendfile(conn, sender: str, payload: str) -> None:
+    """Handle /sendfile command for secure file sharing."""
+    global file_http
+    
+    if file_http is None:
+        send_line(conn, "[*] 文件传输功能未启用。\n")
+        return
+    
+    raw = payload[len("/sendfile"):].strip()
+    if payload.startswith("/file"):
+        raw = payload[len("/file"):].strip()
+    
+    if raw.lower() in ("help", "?", "帮助"):
+        send_line(conn, "[*] 用法：\n")
+        send_line(conn, "[*]   /sendfile          - 发送到当前房间\n")
+        send_line(conn, "[*]   /sendfile <昵称>   - 发送给某个用户\n")
+        send_line(conn, "[*]   /sendfile #<房间>  - 发送到指定房间\n")
+        send_line(conn, "[*] 文件名不用写，以你上传时选的文件为准。\n")
+        return
+    
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    extra_args = len(parts) > 1
+    
+    # Determine if sending to room or user
+    recipients = []
+    room_name = None
+    
+    if not target:
+        # No target: default to the room the sender is currently in
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+    
+    is_room = room_name is not None
+    
+    if is_room:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            
+            # Everyone in the room except the sender (by nick, not just this SSH
+            # session — same user may be logged in on phone + desktop).
+            sender_lower = sender.lower()
+            seen_names = {sender_lower}
+            for c in rooms[room_name]:
+                if c == conn or c not in clients:
+                    continue
+                nick = clients[c]["name"]
+                key = nick.lower()
+                if key in seen_names:
+                    continue
+                recipients.append(nick)
+                seen_names.add(key)
+        
+        # Federated peers in the same room (presence) also get a download slot.
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            seen.add(sender.lower())
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+        
+        if not recipients:
+            send_line(conn, f"[*] 房间 #{room_name} 中没有其他用户。\n")
+            return
+    else:
+        # Sending to specific user(s) — local online, federated online, or offline leave.
+        target_lower = target.lower()
+        with lock:
+            online_recipients = [
+                info["name"] for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        
+        if online_recipients:
+            recipients = online_recipients
+        else:
+            # Offline locally or only present on a peer — open a session either way.
+            recipients = [target]
+    # Create transfer session (prefer a Cloudflare-capable federation peer when
+    # this node only has a LAN / non-public file URL — e.g. iSH --no-cloudflare).
+    try:
+        hub = federation.get_hub()
+        used_proxy = False
+        if (
+            hub is not None
+            and hub.enabled
+            and file_http_server.needs_federation_file_proxy(file_http.get_base_url())
+        ):
+            # Peer may have connected before fpub arrived (catalog-first push on
+            # older builds). Nudge a local re-advertise from us; peers push on
+            # link-up — if pubs are still empty, tell the user clearly.
+            if not hub.has_remote_file_public():
+                try:
+                    _federation_sync_file_public()
+                except Exception:
+                    pass
+            proxy_peer = hub.pick_file_public_peer()
+            if proxy_peer is None:
+                send_line(
+                    conn,
+                    "[*] 联邦中暂无已广告的 Cloudflare/公网文件节点；"
+                    "使用本机地址（对端可能打不开）。\n",
+                )
+            else:
+                host_node, peer_url = proxy_peer
+                send_line(
+                    conn,
+                    f"[*] 正在向联邦节点 {host_node} 申请公网通道"
+                    f"（{peer_url}）…\n",
+                )
+                hosted = _federation_request_file_host(
+                    host_node, sender, recipients, room_name
+                )
+                if hosted.get("ok"):
+                    upload_url = str(hosted.get("upload_url") or "").strip()
+                    upload_key = str(hosted.get("upload_key") or "").strip()
+                    if upload_url and upload_key:
+                        used_proxy = True
+                        if extra_args:
+                            send_line(
+                                conn,
+                                "[*] 提示: 现在不用再写文件名，直接 /sendfile 即可。\n",
+                            )
+                        send_line(conn, "[*] ========== 文件上传信息 ==========\n")
+                        if is_room:
+                            send_line(
+                                conn,
+                                f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n",
+                            )
+                        else:
+                            send_line(
+                                conn, f"[*] 接收者: {', '.join(recipients)}\n"
+                            )
+                        send_line(
+                            conn,
+                            f"[*] 经联邦节点 {host_node} 的公网通道"
+                            f"（本机无 Cloudflare）\n",
+                        )
+                        send_line(conn, "[*]\n")
+                        send_line(conn, "[*] 上传网址:\n")
+                        send_line(conn, f"[*] {upload_url}\n")
+                        send_line(conn, "[*]\n")
+                        send_line(conn, f"[*] 上传密钥: {upload_key}\n")
+                        send_line(conn, "[*]\n")
+                        send_line(conn, "[*] 说明:\n")
+                        send_line(
+                            conn, "[*] 1. 打开上传网址，在页面里输入上面的密钥\n"
+                        )
+                        send_line(
+                            conn,
+                            "[*] 2. 选择要发的文件并上传，文件名以所选文件为准\n",
+                        )
+                        send_line(
+                            conn, "[*] 3. 上传成功即完成，此网址随后作废\n"
+                        )
+                        send_line(
+                            conn,
+                            "[*] 4. 接收者将收到各自的下载网址和密钥，"
+                            "各自只能下载一次\n",
+                        )
+                        send_line(
+                            conn, "[*] 5. 图形客户端会折叠成按钮，可一键打开\n"
+                        )
+                        send_line(
+                            conn, "[*] =====================================\n"
+                        )
+                        send_line(
+                            conn,
+                            f"[*] gui-open upload {upload_url} {upload_key}\n",
+                        )
+                    else:
+                        send_line(
+                            conn,
+                            "[*] 联邦公网文件代理返回无效；改用本机地址。\n",
+                        )
+                else:
+                    err = hosted.get("error") or "unknown"
+                    send_line(
+                        conn,
+                        f"[*] 联邦公网文件代理（{host_node}）失败：{err}；"
+                        f"改用本机地址。\n",
+                    )
+
+        if used_proxy:
+            return
+
+        store = file_sharing.file_transfer_store
+        transfer = store.create_upload_session(
+            sender=sender,
+            recipients=recipients,
+            room=room_name
+        )
+
+        # Send upload URL and key to sender
+        base_url = file_http.get_base_url()
+        upload_url = f"{base_url}/upload/{transfer.upload_token}"
+
+        if extra_args:
+            send_line(conn, "[*] 提示: 现在不用再写文件名，直接 /sendfile 即可。\n")
+
+        send_line(conn, "[*] ========== 文件上传信息 ==========\n")
+        if is_room:
+            send_line(conn, f"[*] 接收者: 房间 #{room_name} ({len(recipients)} 人)\n")
+        else:
+            send_line(conn, f"[*] 接收者: {', '.join(recipients)}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, "[*] 上传网址:\n")
+        send_line(conn, f"[*] {upload_url}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, f"[*] 上传密钥: {transfer.upload_key}\n")
+        send_line(conn, "[*]\n")
+        send_line(conn, "[*] 说明:\n")
+        send_line(conn, "[*] 1. 打开上传网址，在页面里输入上面的密钥\n")
+        send_line(conn, "[*] 2. 选择要发的文件并上传，文件名以所选文件为准\n")
+        send_line(conn, "[*] 3. 上传成功即完成，此网址随后作废\n")
+        send_line(conn, "[*] 4. 接收者将收到各自的下载网址和密钥，各自只能下载一次\n")
+        send_line(conn, "[*] 5. 图形客户端会折叠成按钮，可一键打开\n")
+        send_line(conn, "[*] =====================================\n")
+        send_line(
+            conn,
+            f"[*] gui-open upload {upload_url} {transfer.upload_key}\n",
+        )
+
+    except Exception as e:
+        print(f"[FileTransfer] Error creating transfer: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建文件传输失败，请稍后重试。\n")
+
+
 def _fed_snapshot_clients() -> list[dict[str, object]]:
     with lock:
         return [
@@ -1887,6 +4369,30 @@ def _route_game_private(room: str, conn, lines) -> None:
             hub.send_game_private_to(conn.node_id, room, conn.nickname, lines)
 
 
+def _note_greq(room: str, ttl: float = 5.0) -> None:
+    """Mark that we asked peers for this room; the reply may replace our board."""
+    room = (room or "").strip()
+    if room:
+        _greq_until[room] = time.monotonic() + max(0.5, float(ttl))
+
+
+def _greq_outstanding(room: str) -> bool:
+    until = _greq_until.get(room) or 0.0
+    return time.monotonic() < until
+
+
+def _clear_greq(room: str) -> None:
+    _greq_until.pop(room, None)
+
+
+def _federation_ask_peers_for_game(room: str) -> None:
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    _note_greq(room)
+    hub.request_game(room)
+
+
 def _federation_sync_game(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -1899,22 +4405,519 @@ def _federation_sync_game(room: str) -> None:
         if auth != hub.node_id:
             return
         room_game_authority[room] = hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
         raw = _pickle_game_for_storage(game)
-    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"))
+    hub.sync_game(room, hub.node_id, base64.b64encode(raw).decode("ascii"), token)
 
+
+def _federation_push_game_snapshot(room: str) -> None:
+    """Re-fanout a room's game (owned or replica) so late-joining peers catch up."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return
+        auth = room_game_authority.get(room) or hub.node_id
+        token = room_game_tokens.get(room) or secrets.token_hex(16)
+        room_game_tokens[room] = token
+        raw = _pickle_game_for_storage(game)
+    hub.sync_game(room, auth, base64.b64encode(raw).decode("ascii"), token)
+
+
+def _federation_push_all_game_snapshots() -> None:
+    """After a peer connects, push every active game this node is authority for."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            room
+            for room, game in room_games.items()
+            if game is not None
+            and getattr(game, "state", "ended") != "ended"
+            # Strict: empty authority after restart must NOT claim host and push
+            # a possibly stale replica that races the real host.
+            and (room_game_authority.get(room) or "").strip() == local
+        ]
+    for room in rooms:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: catch-up gsync failed for room {room!r}: {e!r}")
+
+
+def _federation_reconcile_restored_games() -> None:
+    """After restart, pull newer boards for games whose authority is unknown/remote.
+
+    Session restore used to omit authority, so both nodes treated empty auth as
+    local and kept a one-ply-stale replica forever.
+
+    Restores a parked local fork if the authority peer is already gone.
+    In-progress replica boards stay visible across restart.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if hub.peer_count < 1:
+        # Restart always has a zero-peer window. Parking here hid in-progress
+        # boards until (or unless) the host re-pushed. Keep them; peer-up greq
+        # will refresh, and a real partition still restores parked local forks.
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            room
+            for room, game in list(room_games.items())
+            if game is not None and getattr(game, "state", "ended") != "ended"
+        ]
+    for room in rooms:
+        with lock:
+            auth = (room_game_authority.get(room) or "").strip()
+            before = _game_progress_score(room_games.get(room))
+        if auth == local:
+            # Partitioned nodes often still believe they are authority with a stale
+            # board. Pull from peers before pushing, or we fan-out an old gsync on
+            # link-up and can overwrite the real host (e.g. WSL reconnect).
+            try:
+                _federation_ask_peers_for_game(room)
+            except Exception as e:
+                print(f"federation: reconcile greq failed room={room!r}: {e!r}")
+            _federation_wait_after_greq(
+                room, min_progress=before + 1, prior_auth=auth, timeout=2.0
+            )
+            with lock:
+                auth_now = (room_game_authority.get(room) or "").strip()
+                after = _game_progress_score(room_games.get(room))
+            if auth_now != local:
+                if after > before:
+                    print(
+                        f"federation: reconciled #{room} progress {before}->{after} "
+                        f"auth={auth_now or '?'}"
+                    )
+                continue
+            if after > before:
+                print(
+                    f"federation: reconciled #{room} progress {before}->{after} "
+                    f"auth={local}"
+                )
+            with lock:
+                game_now = room_games.get(room)
+                still_active = (
+                    game_now is not None
+                    and getattr(game_now, "state", "ended") != "ended"
+                )
+            if still_active:
+                try:
+                    _federation_push_game_snapshot(room)
+                except Exception as e:
+                    print(f"federation: reconcile push failed room={room!r}: {e!r}")
+            continue
+        # Unknown or remote authority: ask peers and keep the newer board.
+        try:
+            _federation_ask_peers_for_game(room)
+        except Exception as e:
+            print(f"federation: reconcile greq failed room={room!r}: {e!r}")
+            continue
+        _federation_wait_after_greq(
+            room, min_progress=before + 1, prior_auth=auth, timeout=2.0
+        )
+        with lock:
+            after = _game_progress_score(room_games.get(room))
+            auth_now = (room_game_authority.get(room) or "").strip()
+        if after > before:
+            print(
+                f"federation: reconciled #{room} progress {before}->{after} "
+                f"auth={auth_now or '?'}"
+            )
+        elif not auth_now:
+            # No peer answered with a newer board — claim local hostship so
+            # subsequent moves/syncs have a deterministic authority.
+            with lock:
+                game_now = room_games.get(room)
+                still_active = (
+                    game_now is not None
+                    and getattr(game_now, "state", "ended") != "ended"
+                )
+                if still_active and not (room_game_authority.get(room) or "").strip():
+                    room_game_authority[room] = local
+                    if not (room_game_tokens.get(room) or "").strip():
+                        room_game_tokens[room] = secrets.token_hex(16)
+            if still_active:
+                try:
+                    _federation_push_game_snapshot(room)
+                except Exception as e:
+                    print(
+                        f"federation: reconcile claim push failed room={room!r}: {e!r}"
+                    )
+    # greq may have timed out while the real host is still partitioned away.
+    _fed_handle_unreachable_game_authority()
+
+
+def _fed_on_game_request(_from_peer: str, room: str) -> None:
+    """Peer is missing this room's game; only the authority may re-push.
+
+    Replicas answering greq with a stale board can regress peers that already
+    received a newer authority snapshot.
+    """
+    room = (room or "").strip()
+    if not room:
+        return
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    with lock:
+        game = room_games.get(room)
+        auth = (room_game_authority.get(room) or "").strip()
+        if game is None or getattr(game, "state", "ended") == "ended":
+            # Authority with no active game (ended while partitioned) must gend
+            # so stale replicas clear instead of fan-out after a silent greq.
+            if auth == local:
+                hub.end_game(room, local, _ended_token_for_room_locked(room))
+            return
+        # Empty auth after restart must not answer — a stale replica would claim
+        # hostship via push_game_snapshot's `auth or node_id` fallback.
+        if auth != local:
+            return
+    _federation_push_game_snapshot(room)
+
+
+def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
+    """Ask peers for a missing room game and wait briefly for gsync."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    with lock:
+        if room_games.get(room) is not None:
+            return True
+        # Local authority with no board = ended tombstone. greq would only
+        # fetch a stale peer replica (WSL) and revive the finished game on
+        # /game show / join.
+        auth = (room_game_authority.get(room) or "").strip()
+        local = hub.node_id
+        if auth == local:
+            try:
+                hub.end_game(room, local, _ended_token_for_room_locked(room))
+            except Exception as e:
+                print(f"federation: tombstone gend failed room={room!r}: {e!r}")
+            return False
+    try:
+        _federation_ask_peers_for_game(room)
+    except Exception as e:
+        print(f"federation: greq failed for room {room!r}: {e!r}")
+        return False
+    deadline = time.time() + max(0.2, float(timeout))
+    while time.time() < deadline:
+        with lock:
+            game = room_games.get(room)
+            if game is not None and getattr(game, "state", "ended") != "ended":
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def _federation_broadcast_ended_tombstones() -> None:
+    """Tell peers to drop boards for rooms we already ended (auth-only)."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return
+    local = hub.node_id
+    with lock:
+        rooms = [
+            (room, _ended_token_for_room_locked(room))
+            for room, auth in list(room_game_authority.items())
+            if (auth or "").strip() == local
+            and (
+                room not in room_games
+                or getattr(room_games.get(room), "state", "ended") == "ended"
+            )
+        ]
+    for room, token in rooms:
+        try:
+            hub.end_game(room, local, token)
+        except Exception as e:
+            print(f"federation: tombstone gend failed room={room!r}: {e!r}")
+
+
+def _federation_wait_game_progress(
+    room: str, min_progress: int, timeout: float = 1.5
+) -> bool:
+    """Poll until local replica progress reaches min_progress (no greq)."""
+    deadline = time.time() + max(0.2, float(timeout))
+    target = int(min_progress)
+    while time.time() < deadline:
+        with lock:
+            if _game_progress_score(room_games.get(room)) >= target:
+                return True
+        time.sleep(0.05)
+    with lock:
+        return _game_progress_score(room_games.get(room)) >= target
+
+
+def _federation_wait_after_greq(
+    room: str,
+    *,
+    min_progress: int,
+    prior_auth: str = "",
+    timeout: float = 2.0,
+) -> bool:
+    """Wait for a greq reply: newer ply, gend clear, or authority change."""
+    deadline = time.time() + max(0.2, float(timeout))
+    target = int(min_progress)
+    prior_auth = (prior_auth or "").strip()
+
+    def _settled() -> bool:
+        game = room_games.get(room)
+        auth = (room_game_authority.get(room) or "").strip()
+        if game is None:
+            return True
+        if getattr(game, "state", "ended") == "ended":
+            return True
+        if prior_auth and auth != prior_auth:
+            return True
+        return _game_progress_score(game) >= target
+
+    while time.time() < deadline:
+        with lock:
+            if _settled():
+                return True
+        time.sleep(0.05)
+    with lock:
+        return _settled()
+
+
+def _federation_refresh_replica_and_wait(
+    room: str,
+    *,
+    min_progress: int | None = None,
+    timeout: float = 2.0,
+) -> bool:
+    """Ask authority for a fresh gsync and wait until local progress catches up.
+
+    Used before /game show on a non-authority node so a delayed/lost gsync after a
+    forwarded move does not leave /game show on the previous ply.
+    """
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return False
+    local = hub.node_id
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if auth and auth == local:
+            return True
+        before = _game_progress_score(game)
+    try:
+        _federation_ask_peers_for_game(room)
+    except Exception as e:
+        print(f"federation: refresh greq failed for room {room!r}: {e!r}")
+        return False
+    if min_progress is None:
+        # Prefer a strictly newer board when one is available; otherwise time out
+        # and show whatever we already have.
+        target = before + 1
+    else:
+        target = max(before + 1, int(min_progress))
+    return _federation_wait_game_progress(room, target, timeout=timeout)
 
 def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return
-    auth = room_game_authority.pop(room, None) or hub.node_id
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip() or hub.node_id
+        token = (room_game_tokens.pop(room, None) or "").strip()
+        if token:
+            _remember_ended_game_locked(room, token)
+        # Keep authority so greq can answer gend after partition (WSL missed gend).
+        room_game_authority[room] = auth
+        room_game_provisional.discard(room)
+        room_games_parked.pop(room, None)
+    _persist_after_game_change()
     if auth == hub.node_id:
-        hub.end_game(room, hub.node_id)
+        hub.end_game(room, hub.node_id, token)
 
 
-def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> None:
+def _game_progress_score(game) -> int:
+    """Best-effort ply/move count for waiting until a replica catches a move."""
+    if game is None:
+        return 0
+    hist = getattr(game, "_history", None)
+    if isinstance(hist, list):
+        return len(hist)
+    ply = getattr(game, "_xq_ply_log", None)
+    if isinstance(ply, list):
+        return len(ply)
+    board = getattr(game, "board", None)
+    if board is not None:
+        stack = getattr(board, "move_stack", None)
+        if stack is not None:
+            try:
+                return len(stack)
+            except Exception:
+                pass
+    return 0
+
+
+def _game_conflict_winner(
+    auth_a: str, token_a: str, auth_b: str, token_b: str
+) -> tuple[str, str]:
+    """Pick one of two conflicting games. Tokens are random; compare is deterministic."""
+    a_auth = (auth_a or "").strip()
+    b_auth = (auth_b or "").strip()
+    a_tok = (token_a or "").strip() or a_auth
+    b_tok = (token_b or "").strip() or b_auth
+    if a_tok > b_tok:
+        return a_auth, a_tok
+    if b_tok > a_tok:
+        return b_auth, b_tok
+    if a_auth >= b_auth:
+        return a_auth, a_tok
+    return b_auth, b_tok
+
+
+def _game_sync_should_keep_local(
+    *,
+    local_game,
+    remote_game,
+    local_auth: str,
+    authority: str,
+    local_id: str,
+    local_token: str,
+    conflict_token: str,
+    greq: bool,
+) -> bool | None:
+    """Return True/False to pick a side, or None to fall through to token tiebreak."""
+    local_active = (
+        local_game is not None
+        and getattr(local_game, "state", "ended") != "ended"
+    )
+    remote_active = getattr(remote_game, "state", "ended") != "ended"
+    if not local_active or not remote_active:
+        return None
+    we_host = local_auth == local_id
+    if we_host and not greq:
+        return True
+    local_ts = games.game_session_updated_at(local_game)
+    remote_ts = games.game_session_updated_at(remote_game)
+    if local_ts > 0 or remote_ts > 0:
+        if remote_ts > local_ts:
+            return False
+        if local_ts > remote_ts:
+            return True
+    return None
+
+
+def _park_room_game_locked(room: str, game) -> None:
+    """Stash a displaced game so a later partition can restore it."""
+    if game is None or getattr(game, "state", "ended") == "ended":
+        return
+    room_games_parked[room] = game
+
+
+def _promote_parked_game_locked(room: str):
+    """Move a parked in-progress game into an idle room. Caller holds lock."""
+    parked = room_games_parked.get(room)
+    if parked is None or getattr(parked, "state", "ended") == "ended":
+        return None
+    active = room_games.get(room)
+    if active is not None and getattr(active, "state", "ended") != "ended":
+        return None
+    room_games_parked.pop(room, None)
+    _remap_local_game_seats_locked(room, parked)
+    _rebind_game_services(parked)
+    room_games[room] = parked
     hub = federation.get_hub()
-    if hub is not None and authority == hub.node_id:
+    local = hub.node_id if hub is not None else _local_node_id()
+    room_game_authority[room] = local
+    if not (room_game_tokens.get(room) or "").strip():
+        room_game_tokens[room] = secrets.token_hex(16)
+    room_game_provisional.add(room)
+    return parked
+
+
+def _restore_idle_parked_games_locked() -> list[tuple[str, object]]:
+    restored: list[tuple[str, object]] = []
+    for room in list(room_games_parked):
+        game = _promote_parked_game_locked(room)
+        if game is not None:
+            restored.append((room, game))
+    return restored
+
+
+def _game_authority_reachable(auth: str) -> bool:
+    auth = (auth or "").strip()
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    if not auth or auth == local:
+        return True
+    if hub is None or not hub.enabled:
+        return False
+    return hub._link_toward(auth) is not None
+
+
+def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
+    """When a game host is unreachable: restore a parked local fork if any.
+
+    In-progress replica boards stay in the room. Parking them on restart or
+    peer-down made half-played games vanish until the host re-pushed.
+    """
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    restored: list[tuple[str, object]] = []
+    with lock:
+        rooms = set(room_games) | set(room_games_parked)
+        for room in list(rooms):
+            auth = (room_game_authority.get(room) or "").strip()
+            game = room_games.get(room)
+            active = game is not None and getattr(game, "state", "ended") != "ended"
+            if not active or not auth or auth == local:
+                continue
+            if _game_authority_reachable(auth):
+                continue
+            parked = room_games_parked.get(room)
+            parked_ok = (
+                parked is not None and getattr(parked, "state", "ended") != "ended"
+            )
+            if not parked_ok:
+                continue
+            room_games_parked.pop(room, None)
+            _remap_local_game_seats_locked(room, parked)
+            _rebind_game_services(parked)
+            room_games[room] = parked
+            room_game_authority[room] = local
+            room_game_tokens[room] = secrets.token_hex(16)
+            room_game_provisional.add(room)
+            restored.append((room, parked))
+
+    for room, game in restored:
+        notice = (
+            f"[*] 联邦断开：#{room} 权威节点不可达，已恢复本节点暂存对局"
+            f"（{getattr(game, 'name', '?')}）。请用 /game show 查看。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+        if getattr(game, "state", "ended") != "ended":
+            send_oriented_boards(room, game)
+            send_sanguo_hand_views(room, game)
+    if restored:
+        _persist_after_game_change()
+
+
+def _fed_on_game_sync(
+    _from_peer: str,
+    room: str,
+    authority: str,
+    b64: str,
+    conflict_token: str = "",
+) -> None:
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    authority = (authority or "").strip()
+    conflict_token = (conflict_token or "").strip() or authority
+    if authority == local_id:
+        # Echo of our own authority snapshot (or stale self-claim).
         return
     try:
         game = pickle.loads(base64.b64decode(b64.encode("ascii")))
@@ -1922,24 +4925,140 @@ def _fed_on_game_sync(_from_peer: str, room: str, authority: str, b64: str) -> N
         print(f"federation game sync skip room {room!r}: {e!r}")
         return
     _rebind_game_services(game)
+
+    lost_local = False
+    loser_auth = ""
+    winner_auth = authority
+    keep_local = False
+    greq = _greq_outstanding(room)
     with lock:
-        _remap_local_game_seats_locked(room, game)
-        room_games[room] = game
-        room_game_authority[room] = authority
-    _mark_sessions_dirty()
+        local_game = room_games.get(room)
+        local_auth = (room_game_authority.get(room) or "").strip()
+        local_token = (room_game_tokens.get(room) or "").strip() or local_auth
+        local_active = (
+            local_game is not None
+            and getattr(local_game, "state", "ended") != "ended"
+        )
+        remote_active = getattr(game, "state", "ended") != "ended"
+        we_host = local_auth == local_id
+        if _game_id_is_ended_locked(conflict_token):
+            # Offline replica of a finished session; never revive by ply count.
+            return
+        if not local_active and remote_active and we_host:
+            # Ended tombstone: ignore even if we greq'd (stale replica answering).
+            return
+        if (
+            local_active
+            and remote_active
+            and local_auth == authority
+            and not greq
+        ):
+            local_ts = games.game_session_updated_at(local_game)
+            remote_ts = games.game_session_updated_at(game)
+            if local_ts > 0 or remote_ts > 0:
+                if remote_ts <= local_ts:
+                    return
+            # Same host: their snapshot is source of truth. Do not compare plies.
+        if local_active and remote_active and local_auth and local_auth != authority:
+            pick = _game_sync_should_keep_local(
+                local_game=local_game,
+                remote_game=game,
+                local_auth=local_auth,
+                authority=authority,
+                local_id=local_id,
+                local_token=local_token,
+                conflict_token=conflict_token,
+                greq=greq,
+            )
+            if pick is True:
+                room_game_tokens[room] = local_token
+                keep_local = True
+            elif pick is False:
+                winner_auth = authority
+            else:
+                win_auth, win_tok = _game_conflict_winner(
+                    local_auth, local_token, authority, conflict_token
+                )
+                winner_auth = win_auth
+                if win_auth == local_auth:
+                    room_game_tokens[room] = win_tok or local_token
+                    keep_local = True
+                else:
+                    lost_local = True
+                    loser_auth = local_auth
+
+        if not keep_local:
+            if (
+                local_active
+                and local_auth
+                and local_auth != authority
+            ):
+                _park_room_game_locked(room, local_game)
+                lost_local = True
+                loser_auth = loser_auth or local_auth
+            _remap_local_game_seats_locked(room, game)
+            room_games[room] = game
+            room_game_authority[room] = authority
+            room_game_tokens[room] = conflict_token
+
+    if keep_local:
+        try:
+            _federation_push_game_snapshot(room)
+        except Exception as e:
+            print(f"federation: re-push after winning conflict: {e!r}")
+        return
+    _clear_greq(room)
+
+    # Immediate persist: debounce alone left replicas one ply behind after restart
+    # when the host had already flushed the newer move.
+    _persist_after_game_change()
+    if lost_local:
+        notice = (
+            f"[*] 联邦对局冲突：#{room} 同时存在多局，已保留节点 "
+            f"{winner_auth} 的对局；节点 {loser_auth} 上的对局已暂存。"
+            f"联邦断开后可恢复暂存局；请用 /game show 查看当前局面。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
     if getattr(game, "state", "ended") != "ended":
         send_oriented_boards(room, game)
         send_sanguo_hand_views(room, game)
 
 
-def _fed_on_game_end(room: str, authority: str) -> None:
+def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
     hub = federation.get_hub()
-    if hub is not None and authority == hub.node_id:
+    local = hub.node_id if hub is not None else _local_node_id()
+    if authority == local:
         return
+    greq = _greq_outstanding(room)
+    token = (token or "").strip()
     with lock:
+        if token:
+            _remember_ended_game_locked(room, token)
+        local_auth = (room_game_authority.get(room) or "").strip()
+        local_token = (room_game_tokens.get(room) or "").strip()
+        game = room_games.get(room)
+        local_active = (
+            game is not None and getattr(game, "state", "ended") != "ended"
+        )
+        same_game = bool(token) and local_token == token
+        provisional = room in room_game_provisional
+        # A replica must not gend-wipe a live game we host. Honor the real
+        # host's receipt for this session id, a provisional claim, or greq.
+        if (
+            local_auth == local
+            and local_active
+            and not greq
+            and not same_game
+            and not provisional
+        ):
+            return
         room_games.pop(room, None)
         room_game_authority.pop(room, None)
-    _mark_sessions_dirty()
+        room_game_tokens.pop(room, None)
+        room_games_parked.pop(room, None)
+        room_game_provisional.discard(room)
+    _clear_greq(room)
+    _persist_after_game_change()
 
 
 def _fed_on_game_priv(room: str, to_name: str, lines: list[str]) -> None:
@@ -1955,12 +5074,29 @@ def _fed_resolve_actor(room: str, game, player_node: str, name: str, sub: str):
         if conn is not None and sub != "join":
             _resume_same_account_seat_locked(room, game, conn, name)
         return conn
-    if sub == "join":
-        return FederatedSeat(player_node, name)
-    seat = _game_seat_conn_by_name(game, name)
-    if isinstance(seat, FederatedSeat) and seat.node_id == player_node:
-        return seat
+    # Remote player: always act as FederatedSeat for *this* peer node.
+    # Returning a stale DisconnectedSeat / old-node FederatedSeat / local socket
+    # skips resume and drops private replies (not a FederatedSeat → no gpriv).
+    seat = FederatedSeat(player_node, name)
+    _resume_same_account_seat_locked(room, game, seat, name)
     return seat
+
+
+def _fed_send_player_notice(
+    player_node: str, room: str, name: str, lines: list[str]
+) -> None:
+    """Best-effort private notice to a federation player (or local conn)."""
+    if not lines:
+        return
+    local = _local_node_id()
+    if player_node == local:
+        conn = _local_conn_for_name_in_room_locked(name, room)
+        if conn is not None:
+            send_game_private(conn, room, lines)
+        return
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.send_game_private_to(player_node, room, name, lines)
 
 
 def _finish_game_action(
@@ -1985,6 +5121,8 @@ def _finish_game_action(
     if send_boards and (ended or getattr(game, "send_view_on_move", True)):
         send_oriented_boards(room, game)
     send_sanguo_hand_views(room, game)
+    if not ended:
+        games.touch_session(game)
     _persist_after_game_change()
     if ended:
         with lock:
@@ -2012,10 +5150,21 @@ def _fed_execute_game_cmd(
         with lock:
             game = room_games.get(room)
             if game is None:
+                _fed_send_player_notice(
+                    player_node,
+                    room,
+                    name,
+                    ["本房没有进行中的对局；用 /game new … 开局。"],
+                )
                 return
             actor = _fed_resolve_actor(room, game, player_node, name, sub)
             if isinstance(actor, FederatedSeat):
-                priv, bcast, _ = game.try_join(actor, name)
+                # Resume may have already seated this FederatedSeat (same nick).
+                if getattr(game, "is_seated", lambda _c: False)(actor):
+                    priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
+                    bcast = [f"{name} 从另一终端接管了本局操作。"]
+                else:
+                    priv, bcast, _ = game.try_join(actor, name)
             else:
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 if resumed:
@@ -2032,20 +5181,33 @@ def _fed_execute_game_cmd(
 
     if sub == "move":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩；可试 /game show。"],
+            )
             return
         try:
             with lock:
+                # Resolve already attempted resume; call again is cheap/no-op if seated.
                 resumed = _resume_same_account_seat_locked(room, game, actor, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(actor, rest)
-                if not ended:
-                    extra = _nudge_game_bots_locked(game)
-                    if extra:
-                        bcast = list(bcast) + extra
-                        ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"fed /game move failed: {e!r}")
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                [f"/game move 执行失败：{e}"],
+            )
             return
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
         _finish_game_action(room, game, actor, priv, bcast, ended)
@@ -2053,15 +5215,21 @@ def _fed_execute_game_cmd(
 
     if sub == "resign":
         if game is None or actor is None:
+            _fed_send_player_notice(
+                player_node,
+                room,
+                name,
+                ["本房没有进行中的对局，或席位无法续玩。"],
+            )
             return
         with lock:
             resumed = _resume_same_account_seat_locked(room, game, actor, name)
             priv, bcast, ended = game.resign(actor, name)
-            if not ended:
-                extra = _nudge_game_bots_locked(game)
-                if extra:
-                    bcast = list(bcast) + extra
-                    ended = getattr(game, "state", "ended") == "ended"
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
         _finish_game_action(room, game, actor, priv, bcast, ended)
@@ -2112,39 +5280,320 @@ def _fed_execute_game_cmd(
         _persist_after_game_change()
 
 
+def _game_all_seat_nicks_present_locally_locked(
+    room: str, game, local_node: str
+) -> bool:
+    """True only when every seat owner is currently online in this room.
+
+    DisconnectedSeat / missing opponents must NOT look "local-only", or a peer
+    that only has the resuming player will wrongly reclaim authority and push a
+    divergent board back to the real host.
+    """
+    has_seat = False
+    for conn, name in _iter_game_conn_seats(game):
+        has_seat = True
+        if isinstance(conn, FederatedSeat) and conn.node_id != local_node:
+            return False
+        if _local_conn_for_name_in_room_locked(name, room) is None:
+            return False
+    return has_seat
+
+
+def _reclaim_game_authority_for_local_seats(room: str) -> bool:
+    """Take authority when a remote claim remains but every seat nick is here.
+
+    Common after gsync: both players reconnect to the same SSHChat host while
+    ``room_game_authority`` still points at a peer. Forwarding ``/game move`` then
+    black-holes when the federation link is flaky. Returns True when authority is
+    local afterwards (including already-local / empty-then-claimed).
+    """
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    push = False
+    with lock:
+        auth = (room_game_authority.get(room) or "").strip()
+        game = room_games.get(room)
+        if game is None or getattr(game, "state", "ended") == "ended":
+            return (not auth) or auth == local
+        if not auth or auth == local:
+            if not auth:
+                room_game_authority[room] = local
+                if not (room_game_tokens.get(room) or "").strip():
+                    room_game_tokens[room] = secrets.token_hex(16)
+            return True
+        if not _game_all_seat_nicks_present_locally_locked(room, game, local):
+            return False
+        room_game_authority[room] = local
+        room_game_tokens[room] = secrets.token_hex(16)
+        push = True
+    if push:
+        print(
+            f"federation: reclaimed game authority for #{room} "
+            f"(all seat nicks local on {local})"
+        )
+        try:
+            _federation_sync_game(room)
+        except Exception as e:
+            print(f"federation: reclaim sync failed room={room!r}: {e!r}")
+    return True
+
+
 def _should_forward_game(room: str, sub: str) -> bool:
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
         return False
-    auth = room_game_authority.get(room)
-    if not auth:
-        return False
-    return auth != hub.node_id and sub in (
+    if sub not in (
         "join",
         "move",
         "resign",
         "undo",
         "abort",
         "end",
-    )
+    ):
+        return False
+    auth = (room_game_authority.get(room) or "").strip()
+    if not auth or auth == hub.node_id:
+        return False
+    # Stale remote authority with only local players → play here, don't black-hole.
+    if _reclaim_game_authority_for_local_seats(room):
+        return False
+    return True
 
 
 def _fed_on_room_msg(room: str, msg: bytes, from_peer: str) -> None:
-    broadcast_room(room, msg, via_federation_from=from_peer)
+    # Hub already fanouts the original msg line; only deliver locally.
+    # Join/leave presence uses dedicated join/leave frames — ignore chat-shaped
+    # duplicates from older peers that still federated those via msg.
+    if _is_presence_chat_notice(msg):
+        return
+    parsed = _parse_game_broadcast_msg(msg)
+    if parsed is not None:
+        parsed_room, bodies = parsed
+        deliver_room = room or parsed_room
+        if not _should_skip_game_localize(deliver_room):
+            _deliver_game_lines_localized(deliver_room, bodies)
+            return
+    broadcast_room(room, msg, via_federation_from=from_peer, skip_federation=True)
+
+
+def _is_presence_chat_notice(msg: bytes) -> bool:
+    """True for `[+] nick joined #room` / `[!] nick left #room` system lines."""
+    try:
+        text = msg.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return False
+    if text.startswith("[+] ") and " joined #" in text:
+        return True
+    if text.startswith("[!] ") and " left #" in text:
+        return True
+    return False
 
 
 def _fed_on_join_notice(room: str, msg: bytes) -> None:
     broadcast_room(room, msg, skip_federation=True)
 
 
+def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
+    """Tell all local chat users when a federation node comes or goes."""
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    peer_node = (peer_node or "").strip() or "?"
+    reporter = (reporter or "").strip() or "?"
+    if event == "up":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
+            # Pull before push on link-up so a partitioned replica (common on
+            # WSL) does not fan-out a stale board before seeing the real host.
+            try:
+                _federation_reconcile_restored_games()
+            except Exception as e:
+                print(f"federation: peer-up game reconcile error: {e!r}")
+            try:
+                _federation_broadcast_ended_tombstones()
+            except Exception as e:
+                print(f"federation: peer-up ended-tombstone gend error: {e!r}")
+            try:
+                _federation_push_all_game_snapshots()
+            except Exception as e:
+                print(f"federation: peer-up game catch-up error: {e!r}")
+            try:
+                _federation_sync_library_catalog()
+            except Exception as e:
+                print(f"federation: peer-up library catalog sync error: {e!r}")
+            try:
+                _federation_sync_file_public()
+            except Exception as e:
+                print(f"federation: peer-up file public sync error: {e!r}")
+            try:
+                _federation_push_all_offline_leaves()
+            except Exception as e:
+                print(f"federation: peer-up offline leave sync error: {e!r}")
+            try:
+                _federation_sync_ratings(rating_store.export_entries())
+            except Exception as e:
+                print(f"federation: peer-up ratings sync error: {e!r}")
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
+    elif event == "down":
+        if reporter == local_id:
+            text = f"[*] 联邦节点 {peer_node} 已退出（与本机断开）\n"
+        else:
+            text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
+        _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
+        _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
+        try:
+            _fed_handle_unreachable_game_authority(peer_node)
+        except Exception as e:
+            print(f"federation: peer-down game park/restore error: {e!r}")
+    else:
+        return
+    broadcast_local_notice(text)
+
+
+def broadcast_local_notice(text: str) -> None:
+    """Send a system line to every locally connected client (no federation fan-out)."""
+    with lock:
+        targets = list(clients.keys())
+    dead = []
+    for c in targets:
+        try:
+            send_line(c, text)
+        except Exception:
+            dead.append(c)
+    for c in dead:
+        remove_client(c)
+
+
 def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     targets = find_clients_by_nickname(to_name, local_only=True)
+    # Canvas invites are system blocks (gui-open canvas); keep them unwrapped
+    # so GUI clients can auto-open. Regular PMs still get the PM prefix.
+    canvas_invite = "gui-open canvas " in (text or "")
     for peer_conn, _ in targets:
-        send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+        if canvas_invite:
+            payload = text if text.endswith("\n") else f"{text}\n"
+            send_line(peer_conn, payload)
+        else:
+            send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+
+
+def _fed_on_file_notice(to_name: str, from_name: str, notice: dict) -> None:
+    """Deliver a federated /sendfile download notice to a local user (or leave offline)."""
+    if not isinstance(notice, dict):
+        return
+    download_url = str(notice.get("download_url") or "").strip()
+    key = str(notice.get("download_key") or "").strip()
+    if not download_url or not key:
+        return
+    filename = str(notice.get("filename") or "").strip() or "file"
+    try:
+        file_size = int(notice.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    room = notice.get("room")
+    room_name = str(room).strip() if room else None
+    message = _build_file_ready_message(
+        sender=from_name,
+        filename=filename,
+        file_size=file_size,
+        download_url=download_url,
+        key=key,
+        room=room_name or None,
+    )
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            try:
+                send_line(peer_conn, message)
+            except Exception as e:
+                print(f"[FileTransfer] Federated notify failed for {to_name}: {e}")
+        # Live delivery — drop any seeded offline copies (including origin).
+        tid = str(notice.get("transfer_id") or "").strip()
+        if tid:
+            offline_messages.remove_file_by_transfer(to_name, tid)
+            _federation_clear_file_leave(to_name, tid)
+        return
+
+    # Recipient is offline on this node — store absolute origin URL for later login.
+    summary = _format_file_leave_summary(filename, file_size)
+    try:
+        leave_ts = float(notice.get("leave_ts") or 0) or None
+    except (TypeError, ValueError):
+        leave_ts = None
+    offline_messages.leave(
+        to_name,
+        from_name,
+        summary,
+        kind="file",
+        meta={
+            "transfer_id": str(notice.get("transfer_id") or "").strip(),
+            "filename": filename,
+            "file_size": file_size,
+            "download_token": str(notice.get("download_token") or "").strip(),
+            "download_key": key,
+            "download_url": download_url,
+            "room": room_name,
+            "federated": True,
+        },
+        ts=leave_ts,
+    )
+
+
+def _fed_on_file_leave_clear(to_name: str, transfer_id: str) -> None:
+    removed = offline_messages.remove_file_by_transfer(to_name, transfer_id)
+    if removed:
+        print(f"[FileTransfer] Federation clear: removed {len(removed)} file leave(s) "
+              f"for {to_name} (transfer_id={transfer_id})")
+    else:
+        print(f"[FileTransfer] Federation clear: no file leave found for {to_name} "
+              f"(transfer_id={transfer_id})")
+
+
+def _fed_on_offline_pm(
+    to_name: str, from_name: str, text: str, leave_id: str = "", leave_ts: float = 0.0
+) -> None:
+    """Seed or deliver an offline text leave that originated on another node."""
+    targets = find_clients_by_nickname(to_name, local_only=True)
+    if targets:
+        for peer_conn, _ in targets:
+            send_line(peer_conn, f"[PM from {from_name}] {text}\n")
+        if leave_id:
+            offline_messages.remove_by_id(to_name, leave_id)
+            _federation_clear_offline_pm(to_name, leave_id)
+        return
+    try:
+        ts = float(leave_ts) if leave_ts else None
+    except (TypeError, ValueError):
+        ts = None
+    offline_messages.leave(
+        to_name, from_name, text, leave_id=leave_id or None, ts=ts
+    )
+
+
+def _fed_on_offline_pm_clear(to_name: str, leave_id: str) -> None:
+    offline_messages.remove_by_id(to_name, leave_id)
+
+
+def _fed_on_ratings(origin: str, rows: list) -> None:
+    """Merge peer rating ledger; newer host settlements win for same nick."""
+    if not isinstance(rows, list):
+        return
+    applied = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        game = str(row.get("game") or "").strip()
+        user = str(row.get("user") or row.get("display_name") or "").strip()
+        if not game or not user or not is_rated_game(game):
+            continue
+        if rating_store.apply_remote_entry(game, user, row, source_node=origin):
+            applied += 1
+    if applied:
+        print(f"federation: applied {applied} rating row(s) from {origin}")
 
 
 def _ensure_federation_hub() -> None:
-    global _fed_hub
+    global _fed_hub, _library_watch_thread
     if _fed_hub is not None:
         return
     _fed_hub = federation.init_hub(
@@ -2158,8 +5607,56 @@ def _ensure_federation_hub() -> None:
         _fed_on_game_end,
         _fed_execute_game_cmd,
         _fed_on_game_priv,
+        _fed_on_file_notice,
+        _fed_on_peer_event,
+        _fed_on_game_request,
+        _fed_local_library_snapshot,
+        _fed_on_library_page_request,
+        _fed_on_library_page_result,
+        _fed_local_library_bookmarks_snapshot,
+        _fed_on_library_bookmarks,
+        _fed_on_file_host_request,
+        _fed_on_file_host_result,
+        _fed_local_file_public,
     )
     _fed_hub.start()
+    _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
+    _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
+    _fed_hub.on_offline_pm = _fed_on_offline_pm
+    _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
+    _fed_hub.on_ratings = _fed_on_ratings
+    _fed_hub.get_local_ratings = rating_store.export_entries
+    _federation_sync_library_catalog()
+    # Push bookmarks for currently connected users once hub is up.
+    for row in _fed_local_library_bookmarks_snapshot():
+        _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    try:
+        _federation_push_all_offline_leaves()
+    except Exception as e:
+        print(f"federation: initial offline leave sync error: {e!r}")
+    try:
+        _federation_sync_ratings(rating_store.export_entries())
+    except Exception as e:
+        print(f"federation: initial ratings sync error: {e!r}")
+    try:
+        # Peers may already be up; otherwise peer-up handler reconciles again.
+        _federation_reconcile_restored_games()
+    except Exception as e:
+        print(f"federation: initial game reconcile error: {e!r}")
+    try:
+        _federation_broadcast_ended_tombstones()
+    except Exception as e:
+        print(f"federation: initial ended-tombstone gend error: {e!r}")
+
+    # Start library directory watch thread
+    if _library_watch_thread is None:
+        _library_watch_stop.clear()
+        _library_watch_thread = threading.Thread(
+            target=_library_watch_loop,
+            name="library-watch",
+            daemon=True
+        )
+        _library_watch_thread.start()
 
 
 def broadcast_room(
@@ -2301,7 +5798,9 @@ def remove_client(conn) -> None:
         if same_local or remote_same:
             continue
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
-        broadcast_room(room, leave_msg)
+        # Local delivery only: federation uses notify_leave (presence), not msg,
+        # otherwise peers see the leave line twice.
+        broadcast_room(room, leave_msg, skip_federation=True)
         if hub is not None and hub.enabled:
             hub.notify_leave(name, room)
     for room, lines in game_notices:
@@ -2359,6 +5858,7 @@ def handle_command(conn, payload: str) -> None:
                 new_room,
                 f"[+] {name} joined #{new_room}\n".encode("utf-8"),
                 exclude_conn=conn,
+                skip_federation=True,
             )
             hub = federation.get_hub()
             if hub is not None and hub.enabled:
@@ -2448,6 +5948,10 @@ def handle_command(conn, payload: str) -> None:
         send_private_messages(conn, name, target, text)
         return
 
+    if cmd in ("/leave", "/留言", "/unmsg"):
+        handle_leave_command(conn, name, parts)
+        return
+
     if cmd == "/part":
         if len(parts) < 2 or not parts[1].strip():
             send_line(conn, "[*] Usage: /part <room>\n")
@@ -2512,6 +6016,7 @@ def handle_command(conn, payload: str) -> None:
             broadcast_room(
                 target_room,
                 f"[!] {name} left #{target_room}\n".encode("utf-8"),
+                skip_federation=True,
             )
             if hub is not None and hub.enabled:
                 hub.notify_leave(name, target_room)
@@ -2553,8 +6058,31 @@ def handle_command(conn, payload: str) -> None:
         return
 
     if cmd == "/help":
-        for hline in HELP_LINES:
-            send_line(conn, hline)
+        for hline in i18n.help_lines(conn_locale(conn)):
+            for part in library.wrap_output_lines(hline):
+                send_line(conn, part)
+        return
+
+    if cmd in ("/lang", "/language", "/locale"):
+        rest = payload.split(None, 1)
+        if len(rest) < 2 or not rest[1].strip():
+            send_line(conn, _ts(conn, "lang_current", lang=conn_locale(conn)))
+            send_line(conn, _ts(conn, "lang_usage"))
+            return
+        arg = rest[1].strip().split()[0]
+        if arg.lower() not in (
+            "en",
+            "zh",
+            "cn",
+            "english",
+            "chinese",
+            "中文",
+            "英文",
+        ):
+            send_line(conn, _ts(conn, "lang_usage"))
+            return
+        loc = set_conn_locale(conn, arg)
+        send_line(conn, _ts(conn, "lang_set", lang=loc))
         return
 
     if cmd == "/announce":
@@ -2575,36 +6103,36 @@ def handle_command(conn, payload: str) -> None:
             with lock:
                 cur = (room_announcements.get(room) or "").strip()
             if cur:
-                send_line(conn, f"[*] #{room} 当前公告：{cur}\n")
+                send_line(conn, _ts(conn, "announce_current", room=room, text=cur))
             else:
-                send_line(conn, f"[*] #{room} 暂无公告。\n")
+                send_line(conn, _ts(conn, "announce_none", room=room))
             return
         if not is_owner:
-            send_line(conn, "[*] 只有房主可以修改公告（查看无需权限）。\n")
+            send_line(conn, _ts(conn, "announce_owner_only"))
             return
         if tail.lower() == "clear":
             with lock:
                 room_announcements.pop(room, None)
             broadcast_room(
                 room,
-                f"[#{room}] [*] 公告已清除。\n".encode("utf-8"),
+                _ts(conn, "announce_cleared_bcast", room=room).encode("utf-8"),
             )
-            send_line(conn, f"[*] 已清除 #{room} 的公告。\n")
+            send_line(conn, _ts(conn, "announce_cleared", room=room))
             return
         one_line = " ".join(tail.split())
         if len(one_line) > MAX_ANNOUNCE_LEN:
             send_line(
                 conn,
-                f"[*] 公告过长（最多 {MAX_ANNOUNCE_LEN} 字符）。\n",
+                _ts(conn, "announce_too_long", max_len=MAX_ANNOUNCE_LEN),
             )
             return
         with lock:
             room_announcements[room] = one_line
         broadcast_room(
             room,
-            f"[#{room}] [*] 公告：{one_line}\n".encode("utf-8"),
+            _ts(conn, "announce_set_bcast", room=room, text=one_line).encode("utf-8"),
         )
-        send_line(conn, f"[*] 已更新 #{room} 的公告。\n")
+        send_line(conn, _ts(conn, "announce_updated", room=room))
         return
 
     if cmd == "/game":
@@ -2613,7 +6141,7 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/game error: room={current_room} user={name} payload={payload!r} err={e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] /game 命令执行失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "game_cmd_fail"))
         return
 
     if cmd == "/news":
@@ -2622,7 +6150,7 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/news error: {e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] 新闻命令处理失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "news_cmd_fail"))
         return
 
     if cmd in {"/library", "/lib"}:
@@ -2631,11 +6159,19 @@ def handle_command(conn, payload: str) -> None:
         except Exception as e:
             print(f"/library error: {e!r}")
             traceback.print_exc()
-            send_line(conn, "[*] 图书馆命令处理失败，请稍后重试（详情见服务端日志）。\n")
+            send_line(conn, _ts(conn, "library_cmd_fail"))
         return
 
     if cmd == "/dict":
         _handle_dict(conn, payload)
+        return
+
+    if cmd == "/sendfile" or cmd == "/file":
+        _handle_sendfile(conn, name, payload)
+        return
+
+    if cmd == "/canvas" or cmd == "/board":
+        _handle_canvas(conn, name, payload)
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -2645,14 +6181,19 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     """All /game subcommands. Mutates room_games under the global lock."""
     raw = payload[len("/game") :].strip()
     if not raw or raw.lower() == "help":
-        send_line(conn, "[*] /game 用法：\n")
-        for ln in games.HELP_LINES:
-            send_line(conn, ln + "\n")
+        send_line(conn, _ts(conn, "game_usage_header"))
+        for ln in i18n.game_help_lines(conn_locale(conn)):
+            for part in library.wrap_output_lines(ln + "\n"):
+                send_line(conn, part)
         with lock:
             enabled = _enabled_games_for_room_locked(room)
         send_line(
             conn,
-            "[*] 本房可玩：" + ", ".join(games.list_game_names(enabled)) + "\n",
+            _ts(
+                conn,
+                "game_room_playable",
+                games=", ".join(games.list_game_names(enabled)),
+            ),
         )
         return
 
@@ -2663,22 +6204,32 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if _should_forward_game(room, sub):
         hub = federation.get_hub()
         auth = room_game_authority.get(room, "")
+        with lock:
+            progress_before = _game_progress_score(room_games.get(room))
         if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
+            # Authority applies then gsyncs; wait so replica board catches up.
+            if sub == "move":
+                _federation_wait_game_progress(
+                    room, progress_before + 1, timeout=1.5
+                )
+            else:
+                _federation_refresh_replica_and_wait(room, timeout=1.5)
             return
-        send_line(conn, "[*] 无法连接对局所在节点，请稍后重试。\n")
-        return
+        # Peer unreachable: if seats are all local, reclaim and handle here.
+        if _reclaim_game_authority_for_local_seats(room):
+            pass
+        else:
+            send_line(conn, _ts(conn, "game_forward_fail"))
+            return
 
     if sub == "list":
         with lock:
             enabled = _enabled_games_for_room_locked(room)
             names = games.list_game_names(enabled)
         if names:
-            line = "[*] 可玩游戏：" + ", ".join(names)
-            line += "（xiangqi 别名 cchess；sanguo 别名 sgs/三国杀）\n"
+            line = _ts(conn, "game_list_line", games=", ".join(names))
         else:
-            line = (
-                "[*] 本房暂无已上线游戏；房主可用 /game on <名称> 上线。\n"
-            )
+            line = _ts(conn, "game_list_empty")
         send_line(conn, line)
         return
 
@@ -2699,9 +6250,13 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     if is_rated_game(maybe_game):
                         game_name = maybe_game
         if game_name is not None and not is_rated_game(game_name):
-            send_line(conn, f"[*] {game_name} 当前没有持久化棋类积分。\n")
+            send_line(conn, _ts(conn, "rating_no_persist", game=game_name))
             return
-        send_game_private(conn, room, _rating_summary_lines(target_name, game_name))
+        send_game_private(
+            conn,
+            room,
+            _rating_summary_lines(target_name, game_name, locale=conn_locale(conn)),
+        )
         return
 
     if sub in ("on", "off", "上线", "下线"):
@@ -2802,6 +6357,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             hub = federation.get_hub()
             if hub is not None:
                 room_game_authority[room] = hub.node_id
+                room_game_tokens[room] = secrets.token_hex(16)
+                room_game_provisional.discard(room)
+            else:
+                room_game_authority.pop(room, None)
+                room_game_tokens.pop(room, None)
         seat = getattr(new_game, "first_seat_desc", "第一席")
         join_hint = getattr(
             new_game,
@@ -2820,9 +6380,14 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "join":
         with lock:
             game = room_games.get(room)
-            if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
-                return
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        if game is None:
+            send_line(conn, "[*] 本房没有进行中的对局；用 /game new chess 开局。\n")
+            return
+        with lock:
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
             if resumed:
                 priv = ["检测到你在其他终端已有席位，已自动续玩接管。"]
@@ -2835,14 +6400,32 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "seats":
         with lock:
             game = room_games.get(room)
+        if game is None:
+            _federation_request_game_and_wait(room)
+            with lock:
+                game = room_games.get(room)
+        with lock:
             lines = game.seats() if game else ["本房没有进行中的对局。"]
         send_game_private(conn, room, lines)
         return
 
     if sub == "show":
-        bot_lines: list[str] = []
         with lock:
             game = room_games.get(room)
+            auth = (room_game_authority.get(room) or "").strip()
+        hub = federation.get_hub()
+        if game is None:
+            _federation_request_game_and_wait(room)
+        elif (
+            hub is not None
+            and hub.enabled
+            and (not auth or auth != hub.node_id)
+        ):
+            # Replica or unknown authority after restart: pull before showing.
+            _federation_refresh_replica_and_wait(room, timeout=2.0)
+        with lock:
+            game = room_games.get(room)
+        with lock:
             if game is None:
                 lines = ["本房没有进行中的对局。"]
             else:
@@ -2855,33 +6438,33 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     lines = _game_show_for_conn(game, conn)
                 if resumed:
                     lines = ["已检测到同账号旧终端席位，已自动续玩接管。"] + lines
-                nudge = getattr(game, "nudge_bots", None)
-                if callable(nudge):
-                    bot_lines = nudge()
         send_game_private(conn, room, lines)
-        if bot_lines:
-            broadcast_game(room, bot_lines)
         return
 
     if sub == "move":
         try:
             with lock:
                 game = room_games.get(room)
+            if game is None:
+                _federation_request_game_and_wait(room)
+                with lock:
+                    game = room_games.get(room)
+            with lock:
                 if game is None:
                     send_line(conn, "[*] 本房没有进行中的对局。\n")
                     return
                 resumed = _resume_same_account_seat_locked(room, game, conn, name)
                 _ensure_game_runtime_compat(game)
                 priv, bcast, ended = game.try_move(conn, rest)
-                if not ended:
-                    extra = _nudge_game_bots_locked(game)
-                    if extra:
-                        bcast = list(bcast) + extra
-                        ended = getattr(game, "state", "ended") == "ended"
         except Exception as e:
             print(f"/game move failed: room={room} user={name} cmd={rest!r} err={e!r}")
             send_line(conn, f"[*] /game move 执行失败：{e}\n")
             return
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         _finish_game_action(room, game, conn, priv, bcast, ended)
@@ -2895,11 +6478,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 return
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
             priv, bcast, ended = game.resign(conn, name)
-            if not ended:
-                extra = _nudge_game_bots_locked(game)
-                if extra:
-                    bcast = list(bcast) + extra
-                    ended = getattr(game, "state", "ended") == "ended"
+        if not ended:
+            extra = _nudge_game_bots_locked(game)
+            if extra:
+                bcast = list(bcast) + extra
+                ended = getattr(game, "state", "ended") == "ended"
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
         _finish_game_action(room, game, conn, priv, bcast, ended)
@@ -2976,6 +6559,49 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
         _federation_notify_game_end(room)
         _persist_after_game_change()
+        return
+
+    if sub in {"restore", "恢复"}:
+        with lock:
+            restored = _restore_idle_parked_games_locked()
+            busy = [
+                r
+                for r, g in room_games_parked.items()
+                if g is not None and getattr(g, "state", "ended") != "ended"
+            ]
+        if not restored:
+            if busy:
+                send_line(
+                    conn,
+                    "[*] 暂存对局所在房间仍有进行中的棋局，未覆盖。"
+                    "可先 /game end 再 /game restore。\n",
+                )
+            else:
+                send_line(conn, "[*] 没有可恢复的暂存对局。\n")
+            return
+        for room_name, game in restored:
+            broadcast_game(
+                room_name,
+                [
+                    f"{name} 恢复了暂存对局（{getattr(game, 'name', '?')}）。"
+                    "请用 /game show 查看。"
+                ],
+            )
+            send_oriented_boards(room_name, game)
+            send_sanguo_hand_views(room_name, game)
+            try:
+                _federation_push_game_snapshot(room_name)
+            except Exception as e:
+                print(f"federation: restore push failed room={room_name!r}: {e!r}")
+        _persist_after_game_change()
+        msg = "[*] 已恢复暂存对局：" + "、".join(f"#{r}" for r, _ in restored) + "。"
+        if busy:
+            msg += (
+                " 这些房间仍有进行中的对局，暂存未动："
+                + "、".join(f"#{r}" for r in busy)
+                + "。"
+            )
+        send_line(conn, msg + "\n")
         return
 
     send_line(conn, f"[*] 未知子命令 /game {sub}；用 /game help 查看。\n")
@@ -3069,6 +6695,7 @@ def handle_client(conn, addr) -> None:
                 "name": name,
                 "rooms": set(inherited_rooms),
                 "current_room": active_room,
+                "locale": locale_store.get(name),
             }
             for room in inherited_rooms:
                 was_empty = len(rooms[room]) == 0
@@ -3083,7 +6710,9 @@ def handle_client(conn, addr) -> None:
             if active_game is not None and getattr(active_game, "state", "ended") != "ended":
                 active_game_lines = _game_show_for_conn(active_game, conn)
                 if active_room in resumed_game_rooms:
-                    active_game_lines = ["已自动续玩接管旧终端席位。"] + active_game_lines
+                    active_game_lines = [
+                        _ts(conn, "game_resume_takeover")
+                    ] + active_game_lines
             room_labels = [
                 f"*#{r}" if r == active_room else f"#{r}"
                 for r in sorted(inherited_rooms)
@@ -3092,27 +6721,32 @@ def handle_client(conn, addr) -> None:
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
         join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
-        broadcast_room(active_room, join_msg, exclude_conn=conn)
+        broadcast_room(active_room, join_msg, exclude_conn=conn, skip_federation=True)
         if hub is not None and hub.enabled:
             for room in inherited_rooms:
                 hub.notify_join(name, room)
+            _federation_sync_library_bookmarks(name)
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /part /announce /game /news /dict /clear /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /leave /part /announce /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
             send_line(
                 conn,
-                f"[*] 联邦网络已连接 {hub.peer_count} 个节点（同名用户/房间跨服合并）。\n",
+                _ts(conn, "fed_connected", n=hub.peer_count),
             )
         if same_name_peers:
-            send_line(conn, "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n")
+            send_line(conn, _ts(conn, "multi_terminal"))
         elif restored_from_session:
-            send_line(conn, "[*] 已恢复上次客户端会话，回到原房间；如有未结束对局可继续操作。\n")
+            send_line(conn, _ts(conn, "session_restored"))
         if resumed_game_rooms:
-            send_line(conn, "[*] 已接管旧连接保留的游戏席位。\n")
+            send_line(conn, _ts(conn, "game_seat_resumed"))
+        # Deliver leave-messages only on the first local session for this nick,
+        # so multi-device reconnect does not drain the mailbox twice.
+        if not same_name_peers:
+            deliver_offline_messages(conn, name)
         _mark_sessions_dirty()
         send_room_announcement_preview(conn, active_room)
         if active_game_lines:
@@ -3120,10 +6754,14 @@ def handle_client(conn, addr) -> None:
             if resumed_game_rooms:
                 with lock:
                     g = room_games.get(active_room)
-                    nudge = getattr(g, "nudge_bots", None) if g is not None else None
-                    bot_lines = nudge() if callable(nudge) else []
-                if bot_lines:
-                    broadcast_game(active_room, bot_lines)
+                extra = _nudge_game_bots_locked(g) if g is not None else []
+                if extra:
+                    broadcast_game(active_room, extra)
+                    _persist_after_game_change()
+                    try:
+                        _federation_sync_game(active_room)
+                    except Exception as e:
+                        print(f"federation: reconnect bot sync failed: {e!r}")
 
         while True:
             if not buffer:
@@ -3152,9 +6790,70 @@ def handle_client(conn, addr) -> None:
 
 
 def run_server() -> int:
-    global _listen_socket, _shutdown_requested, _shutting_down
+    global _listen_socket, _shutdown_requested, _shutting_down, file_http
     _load_persisted_sessions()
     _ensure_federation_hub()
+    
+    # Start file HTTP server
+    file_enabled = os.environ.get("SSHCHAT_FILE_TRANSFER_ENABLED", "1") != "0"
+    if file_enabled:
+        try:
+            # Set up upload complete callback
+            file_sharing.file_transfer_store.upload_complete_callback = _notify_file_ready
+            
+            file_http = file_http_server.create_file_server()
+            file_http.start()
+            print(f"[FileTransfer] HTTP server started at {file_http.get_base_url()}")
+            _federation_sync_file_public()
+
+            # Quick Tunnel hostname can change while this process stays up.
+            # Re-advertise to federation (iSH / LAN peers) whenever the live
+            # public_url latch moves — do not wait for peer-up or restart.
+            def _file_public_watch_task():
+                try:
+                    last = _fed_local_file_public()
+                except Exception:
+                    last = ""
+                while not _shutdown_requested:
+                    time.sleep(30)
+                    if _shutdown_requested:
+                        break
+                    try:
+                        cur = _fed_local_file_public()
+                        if cur != last:
+                            last = cur
+                            _federation_sync_file_public()
+                            if cur:
+                                print(f"[FileTransfer] federation file public -> {cur}")
+                            else:
+                                print("[FileTransfer] federation file public cleared (no live CF URL)")
+                    except Exception as e:
+                        print(f"[FileTransfer] file public watch error: {e}")
+
+            threading.Thread(
+                target=_file_public_watch_task, daemon=True, name="file-public-watch"
+            ).start()
+            
+            # Start cleanup task for expired transfers
+            def _cleanup_task():
+                while not _shutdown_requested:
+                    time.sleep(3600)  # Run every hour
+                    if not _shutdown_requested:
+                        try:
+                            file_sharing.file_transfer_store.cleanup_expired()
+                            canvas_sharing.canvas_store.cleanup_expired()
+                        except Exception as e:
+                            print(f"[FileTransfer] Cleanup error: {e}")
+            
+            cleanup_thread = threading.Thread(target=_cleanup_task, daemon=True)
+            cleanup_thread.start()
+            
+        except Exception as e:
+            print(f"[FileTransfer] Failed to start file server: {e}")
+            traceback.print_exc()
+            file_http = None
+    else:
+        print("[FileTransfer] File transfer disabled (SSHCHAT_FILE_TRANSFER_ENABLED=0)")
 
     def _handle_shutdown_signal(signum, _frame) -> None:
         global _shutting_down, _shutdown_requested
@@ -3166,6 +6865,15 @@ def run_server() -> int:
         )
         _safe_persist_sessions_now()
         _shutdown_requested = True
+        
+        # Stop library watch thread
+        _library_watch_stop.set()
+        
+        if file_http is not None:
+            try:
+                file_http.stop()
+            except Exception:
+                pass
         sock = _listen_socket
         if sock is not None:
             try:
@@ -3175,6 +6883,23 @@ def run_server() -> int:
 
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
+    def _handle_federation_reload(signum, _frame) -> None:
+        hub = federation.get_hub()
+        if hub is None or not hub.enabled:
+            print(f"federation reload signal {signum}: hub not active")
+            return
+        try:
+            started = hub.reload_peers()
+            print(f"federation reload signal {signum}: {started} new outbound loop(s)")
+        except Exception as e:
+            print(f"federation reload signal {signum} failed: {e!r}")
+
+    if hasattr(signal, "SIGHUP"):
+        try:
+            signal.signal(signal.SIGHUP, _handle_federation_reload)
+        except (ValueError, OSError) as e:
+            print(f"warning: could not install SIGHUP handler for federation reload: {e!r}")
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

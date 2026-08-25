@@ -1,237 +1,107 @@
 # SSHChat
 
-## Update (2026-06 联邦聊天室)
+**Languages:** English (this file) · [中文说明](README.zh.md)
 
-- **多服务器互联（联邦）**：多台独立部署的 SSHChat 可通过 `admin-add-peer.sh` 交换联邦公钥，组成更大的聊天网络。
-- **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同，视为同一人在多端登录（房间同步、不误报离线）。
-- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名跨节点合并；文字聊天、`/names`、`/msg` 私聊互通。
-- **跨服对局**：`/game` 由开局节点同步局面，远端玩家可 `/game join`、`/game move` 等。
-- 详见下方 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**；管理员可选步骤见 **[管理员怎么做 → 4. 联邦扩网](#4-联邦扩网可选)**。
+SSHChat is a multi-user chat server over SSH/TCP with room chat, private messages, offline leave-messages, secure HTTP file transfer, a shared drawing board (`/canvas`), RSS news, a small library reader, dictionary lookup, and room mini-games (chess, gomoku, go, xiangqi, poker variants, werewolf, and more). An optional Electron GUI is included.
 
-## Update (2026-05-21 UI/UX)
-
-- 游戏工作台新增“智能行动提示卡”：
-  - 自动识别：可加入、等待房主、轮到你、对方回合、上一步失败。
-  - 每种状态都有下一步按钮（如“加入对局 / 开始对局 / 刷新局面 / 查看玩法”）。
-- 交互降噪：
-  - 默认收起“高级命令”输入区，优先按钮操作，减少误操作。
-  - “局面原文”支持展开/收起，避免大段文本干扰聊天阅读。
-  - 局面文本增加去噪（过滤命令提示噪声、连续重复行）。
-- 深色主题可读性优化：
-  - 提示卡、提示文字、局面文本提高对比度。
-  - info/warn/error 三类提示增加明显边框与颜色分层。
-- 统一中文文案：
-  - 游戏快捷按钮、工作台动作按钮、输入区文案全部中文化。
-- 房间对局逻辑说明：
-  - 同一房间同一时刻仅允许一场进行中的对局。
-  - 检测到房间已有对局时，工作台优先给出“加入对局”入口。
-
-## Update (2026-05-21)
-
-- Added new room game: `zjh` (炸金花).
-- Quick start:
-  - `/game new zjh`
-  - `/game join`
-  - host: `/game move start`
-- Main actions:
-  - `/game move look`
-  - `/game move follow`
-  - `/game move raise <amount>`
-  - `/game move compare <name>`
-  - `/game move fold`
-  - `compare` when points are insufficient: auto all-in with remaining points
-- Added aliases:
-  - `zjh`
-  - `zhajinhua`
-- Game Workbench now includes a dedicated ZJH panel with buttons for Start/Look/Follow/Raise/Fold/Compare.
-- Portable build command (Windows):
-  - `cd electron && npm run build:portable`
-  - output: `electron/release/VsCodeEn-portable.zip`
-
-## Update (2026-05)
-
-- **Monitor 功能（新增）**：左侧栏新增「M」图标，通过前置摄像头检测画面中的人数。当检测到 2 人及以上时，自动执行预设动作（最小化窗口 / 关闭应用 / 杀指定进程并最小化）。详见下方「Monitor 功能」章节。
-- Electron portable startup stability improved (runtime cache isolation, single-instance focus, preload diagnostics).
-- Room UX improved: join/remove in sidebar, keep room list unless manually removed, preserve per-room history when switching.
-- Game Workbench quick actions now fill command into the chat composer first, then send after manual confirm/edit.
-- Added `werewolf` game:
-  - `/game new werewolf`
-  - `/game join`
-  - host starts with `/game move start`
-  - night/day flow with `kill/check/save/poison/pass/vote`
-- macOS build support:
-  - `cd electron && npm run build:mac`
-  - outputs DMG/ZIP in `electron/release/`
-- GitHub safety:
-  - login/server addresses remain outside repo (user profile/app data)
-  - local sensitive/runtime artifacts ignored: `electron/release/`, `.runtime/`, `client-bundle.json`, build/runtime caches.
-
-**在自己控制的 Linux 服务器上开文字聊天室。**  
-用户这边**只用 SSH 登录**——和平时 `ssh 用户@服务器` 一样，不装微信、不装 Slack，**网络上看就是一条普通的 SSH 连接**。
-
-适合想**少留一条「聊天软件」痕迹**、又愿意自己或朋友有一台服务器的人。聊天走你熟悉的密钥登录，没有单独的聊天账号密码。
-
-多台服务器之间还可通过 **联邦** 合并成更大的聊天网络（同名用户、同名房间跨服互通），见 [联邦网络](#联邦网络多服务器互联)。
+**UI language defaults to English.** Switch with `/lang zh` (preference is saved per nickname). The Electron client defaults to English and syncs `/lang` on connect. **Sanguosha (`sanguo`) move/skill text is still mostly Chinese** in this release; other games localize at send time.
 
 ---
 
-## 用户怎么用（最简单）
+## Quick start (users)
 
-1. 向管理员要：**服务器地址**、**SSH 端口**（常见是 `22`）、以及你在服务器上的 **Linux 用户名**。
-2. 确保本机 `~/.ssh` 里已有对应私钥（或管理员已把你的公钥登记好）。
-3. 连接：
+Ask your admin for host, SSH port, and username, then:
 
-   ```bash
-   ssh -p 端口 你的用户名@服务器地址
-   ```
+```bash
+ssh -p <port> <user>@<host>
+```
 
-   连上后会进入聊天界面，不是平时那种可随便执行命令的 shell（由服务器配置决定）。
+On first connect you will see an active-room tip line. Useful commands:
 
-4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/game`、`/news`、`/library`（简写 `/lib`）、`/dict`、`/clear`。终端客户端输入 `/` 后按 **Tab** 可补全命令（类似 Linux shell）。本项目**不提供文件传输**（避免强制命令 SSH 下路径不可用、服务端明文中继等问题）。
+| Command | Purpose |
+|---------|---------|
+| `/help` | Full command help |
+| `/lang en` / `/lang zh` | UI language (saved per nick) |
+| `/names` | Users in the active room |
+| `/rooms` | Rooms you joined (`*` = active) |
+| `/join <room>` | Join and switch |
+| `/msg <nick> <text>` | PM (or leave-message if offline) |
+| `/sendfile` | File to current room |
+| `/sendfile <nick>` | File to a user |
+| `/canvas` | Shared drawing board (current room) |
+| `/canvas <nick>` | Private board with one user |
+| `/game help` | Mini-game help |
+| `/news` | RSS headlines |
+| `/library` | Browse books |
+| `/dict <word>` | Dictionary |
+| `/dnd on` | Terminal do-not-disturb for game spam |
+
+Beginner phone client (iSH): [docs/en/ish-beginner.md](docs/en/ish-beginner.md) · Chinese: [小白使用说明书-iSH.md](小白使用说明书-iSH.md)
+
+File sharing guide: [docs/en/file-sharing.md](docs/en/file-sharing.md) · Chinese: [USER_GUIDE_FILE_SHARING.md](USER_GUIDE_FILE_SHARING.md)
 
 ---
 
-## 管理员怎么做（三步）
-
-**环境：** 一台 **Linux**（建议有 systemd），能 **SSH 登录**，有 **sudo**。
-
-### 1. 部署
-
-在**本仓库目录**执行（默认装到 `/opt/sshchat`）：
+## Deploy (admins)
 
 ```bash
-sudo ./deploy.sh --client-ssh-host 你的域名或公网IP --client-ssh-port 22
+# Typical Linux VPS
+./deploy.sh
+
+# iSH (Alpine on iPhone/iPad) as a *server*
+# See docs/en/deploy-ish.md and DEPLOY-iSH.md
 ```
 
-- `--client-ssh-host`：**用户 SSH 要连的地址**（域名或 IP），会写进给小白用的配置里。  
-- `--client-ssh-port`：sshd 端口，一般是 `22`。
+Common env vars:
 
-没有域名、只有 IP，就把 IP 写在 `--client-ssh-host` 里。
+| Variable | Meaning |
+|----------|---------|
+| `SSHCHAT_PORT` | Chat TCP port (default `12345`) |
+| `SSHCHAT_DEFAULT_LOCALE` | `en` (default) or `zh` |
+| `SSHCHAT_LOCALE_STORE` | Path for per-nick language prefs (default `user_locales.json`) |
+| `SSHCHAT_RATING_STORE` | Game ratings JSON |
+| `SSHCHAT_SESSION_STORE` | In-progress game sessions |
+| `SSHCHAT_OFFLINE_MSG_STORE` | Offline leave-messages |
 
-### 2. 给聊天的人开账号并登记公钥
+Federation (multi-server), users, firewall, and Cloudflare file HTTPS are documented in detail in [README.zh.md](README.zh.md).
 
-```bash
-sudo /opt/sshchat/admin-add-user.sh 用户名 ssh-ed25519 AAAA... 备注可选
-```
-
-也可把公钥放在文件里，把路径交给脚本（详见脚本 `--help` 或仓库内说明）。
-
-### 3. 防火墙
-
-除 SSH 端口外，若聊天服务监听非本机回环，可能还需放行 **`sshchat.env` 里配置的聊天端口**（默认常见为 `12345`，与 SSH 端口不是同一个）。云厂商安全组里一并放行。
-
-### 4. 联邦扩网（可选）
-
-若你有**两台及以上** SSHChat 服务器，希望用户在不同机器上登录后仍处在**同一套聊天室**（同名房间合并、跨服私聊、跨服对局），在每台机器上各部署完成后，用 `admin-add-peer.sh` 互相登记联邦公钥。完整步骤见 **[联邦网络（多服务器互联）](#联邦网络多服务器互联)**。
-
-**升级：** 在新版本仓库里再执行一次，**`--prefix` 与当初相同**，一般要加 **`--keep-env`** 保留你已改过的端口等配置：
-
-```bash
-sudo ./deploy.sh --prefix /opt/sshchat --keep-env
-```
-
-**重置棋类积分（管理员部署参数）：**
-
-- 重置全部棋类持久化积分：
-
-  ```bash
-  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-all-ratings
-  ```
-
-- 只重置单个游戏（如国际象棋）：
-
-  ```bash
-  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-game-ratings chess
-  ```
-
-- 只重置单个用户的单个游戏积分：
-
-  ```bash
-  sudo ./deploy.sh --prefix /opt/sshchat --keep-env --reset-user-game-rating alice gomoku
-  ```
+iSH server notes: [docs/en/deploy-ish.md](docs/en/deploy-ish.md) · [DEPLOY-iSH.md](DEPLOY-iSH.md)
 
 ---
 
-## 联邦网络（多服务器互联）
+## Mini-games
 
-多台独立部署的 SSHChat 可通过 **SSH 互信** 组成更大的聊天网络。典型场景：服务器 A 上的 `userA`、服务器 B 上的 `userB` 各自用 `deploy.sh` 部署；双方把对方的 **联邦公钥** 登记到本机后，两台机器的聊天室在逻辑上合并。
+Games are **per room** (one active match at a time). Host can `/game on|off <name>`.
 
-**行为约定：**
+| Id | Notes | Aliases |
+|----|-------|---------|
+| `chess` | International chess | — |
+| `gomoku` | 15×15 | — |
+| `go` | 19×19 | `weiqi`, `baduk` |
+| `xiangqi` | Chinese chess | `cchess` |
+| `sanguo` | Sanguosha (UI mostly ZH for now) | `sgs`, `三国杀` |
+| `werewolf` | 5–12 players | `langrensha` |
+| `holdem` | Texas Hold'em | `poker`, `texas` |
+| `zjh` | Zha Jin Hua | `zhajinhua` |
+| `niutou` | Niu Tou Wang | — |
+| `mahjong` | 4 players (+ AI fill) | — |
+| `doushou` | Jungle / Dou Shou Qi | — |
 
-- **同名用户 = 同一账号**：不同服务器上 Linux 用户名相同（如都叫 `alice`），视为同一人在多端登录；会同步房间列表，离开/加入时不会误报「离线」（只要另一端还在线）。
-- **同名房间 = 同一房间**：`#default`、`#dev` 等房间名在全网共享；任一节点发出的房间消息会广播到所有已连接节点上的同名房间。
-- **私聊与 /names**：`/msg alice …` 可投递到联邦网络中的在线 `alice`；`/names` 会列出当前房间内包括远端节点在内的昵称。
+Typical flow:
 
-**互信步骤（两台机器各执行一次，交换公钥）：**
-
-1. 升级部署（会生成 `federation/id_ed25519` 联邦密钥与 `sshchat-federation` 系统用户）：
-
-   ```bash
-   sudo ./deploy.sh --prefix /opt/sshchat --keep-env
-   ```
-
-2. 在 **服务器 A** 上登记 **服务器 B**（把 B 的联邦公钥与地址写入本机）：
-
-   ```bash
-   sudo /opt/sshchat/admin-add-peer.sh server-b b.example.com "$(cat /path/to/b-federation.pub)"
-   ```
-
-3. 在 **服务器 B** 上对称操作，使用 A 的公钥：
-
-   ```bash
-   sudo /opt/sshchat/admin-add-peer.sh server-a a.example.com "$(cat /opt/sshchat/federation/id_ed25519.pub)"
-   ```
-
-4. 重启聊天服务（`systemctl restart sshchat` 或重新运行 `server.sh`）。
-
-5. **防火墙（若节点间无法直连）**：除 SSH 外，确保各节点能访问对端的 **`SSHCHAT_FEDERATION_PORT`**（默认聊天端口 +1，如 `12346`），或仅依赖 SSH 隧道（`ssh -W`，默认走 22 端口，通常无需额外放行联邦端口）。
-
-脚本会：
-
-- 把对方联邦公钥写入本机 `sshchat-federation` 用户的 `authorized_keys`（强制命令走 `federation-bridge.sh` → 本机联邦端口）；
-- 更新 `federation/peers.json`，由本机主动发起 SSH 隧道（`ssh -W`）连到对方联邦端口。
-
-**查看本机联邦公钥：**
-
-```bash
-cat /opt/sshchat/federation/id_ed25519.pub
+```text
+/game new chess
+/game join
+/game move e2e4
+/game show
+/game resign
 ```
 
-**环境变量（`sshchat.env`）：**
-
-| 变量 | 含义 |
-|------|------|
-| `SSHCHAT_NODE_ID` | 本节点唯一名（默认主机名） |
-| `SSHCHAT_FEDERATION_PORT` | 联邦 TCP 端口（默认聊天端口 +1） |
-| `SSHCHAT_FEDERATION_DISABLE=1` | 关闭联邦 |
-| `SSHCHAT_FEDERATION_PEERS` | 可选，覆盖 `federation/peers.json` 路径 |
-
-**说明：** 房间小游戏（`/game`）在联邦网络中由开局节点作为权威主机同步局面；跨服玩家以联邦席位入座，可正常 `/game join`、`/game move` 等。棋类积分仍按用户名在本机持久化。
-
-普通用户若要在多台服务器使用同一身份，请在各台机器上用 `admin-add-user.sh` 创建 **相同用户名** 并登记各自的 SSH 公钥（或同一公钥），再配合上述联邦互信即可。
+Many move verbs accept Chinese or English aliases (e.g. holdem `跟注` / `call`).
 
 ---
 
-## 可选：图形客户端（维护者打包）
-
-部署成功后，服务器上会有 **`client-bundle.json`**（记录用户该连哪个主机、哪个 SSH 端口）。
-
-- 把该文件拷到本机仓库的 **`dist/client-bundle.json`**，或在打包时设置环境变量 **`SSHCHAT_BUNDLE_FILE`** 指向它。
-- **Windows：** `.\scripts\build-gui-packages.ps1`  
-- **Linux / macOS：** `./scripts/build-gui-packages.sh`  
-
-生成物在 **`dist-packages/`**。最终用户仍用本机 SSH 密钥登录，程序只是少记参数。
-
-不打包也可以：用户直接用上面的 **`ssh`** 命令，或在本机用 **`easy_connect.py`** + 简单 JSON 配置（见下文「进阶」）。
-
-### 本次更新：Electron 客户端（VSCode 布局）
-
-- 新增目录：`SSHChat/electron/`（与原 `server.py` 协议兼容，仍走 SSH + 端口转发）。
-- 进程与外观：`name/appId/VsCodeEn.exe`、任务栏分组、深浅色主题、ActivityBar/Sidebar/Tab/StatusBar。
-- 默认开启“保密模式”（Focus）：界面文案偏开发工具风格，避免显眼的“聊天/游戏”提示。
-- 新增游戏工作台：在 VSCode 布局内直接执行 `/game show|seats|move`，并显示当前棋盘/对局文本。
-
-**开发启动（Electron）**
+## Electron GUI
 
 ```bash
 cd electron
@@ -239,258 +109,49 @@ npm ci
 npm run dev
 ```
 
-若 `npm ci` 在安装 `electron` 时报 `TypeError: Invalid URL`，多半是本地的 `electron_mirror` / `ELECTRON_MIRROR` 或项目 `electron/.npmrc` 配成了无效地址；见 **`electron/NPM-ELECTRON-INSTALL.md`** 与 **`electron/.npmrc.example`**。
+Portable Windows build: `npm run build:portable` → `electron/release/`.
 
-**Windows 免安装打包（推荐）**
+The GUI has its own locale toggle (default **English**). On connect it sends `/lang` so server chat text matches.
+
+---
+
+## Shared drawing board
+
+`/canvas` (alias `/board`) opens a shared web whiteboard on the same HTTP(S) file service as `/sendfile`. Each participant gets a **unique URL** and a **separate 6-character key** (the key is never in the URL).
+
+| Command | Purpose |
+|---------|---------|
+| `/canvas` | Board for the current room |
+| `/canvas <nick>` | Private board with an online user |
+| `/canvas #<room>` | Board for a room you are in |
+| `/canvas close` | Creator closes the current room board |
+| `/canvas new` | Force a new board even if the room already has one |
+| `/canvas help` | Short usage reminder |
+
+Open the URL in a browser, enter the key, then draw; strokes sync live. GUI clients (tk / Electron) open the board in-app. Sessions expire after a few hours (default 4). Same Cloudflare / federation-proxy rules as `/sendfile`.
+
+---
+
+## File transfer security (summary)
+
+`/sendfile` opens a one-time HTTP(S) upload/download page. Keys are **not** embedded in URLs; upload and download tokens are single-use. Details: [docs/en/file-sharing.md](docs/en/file-sharing.md).
+
+Upload/download HTML defaults to English; add `?lang=zh` for Chinese pages. The shared canvas uses the same port and key-not-in-URL pattern; canvas access tickets are multi-use until expiry so people can keep drawing.
+
+---
+
+## Development
 
 ```bash
-cd electron
-npm run build:portable
+python3 -m unittest tests.test_i18n
+python3 -m unittest tests.test_client_dnd
+python3 test_file_preview.py
 ```
 
-产物：`electron/release/VsCodeEn-portable.zip`
-解压后双击：`Start-VsCodeEn.cmd`
-
-### Monitor 功能
-
-左侧栏点击「M」图标打开监控面板。
-
-**使用方式：**
-
-1. 点击「Start Monitor」启动摄像头，首次启动会加载本地 AI 检测模型（约 5 秒）。
-2. 摄像头画面实时预览，系统自动检测画面中的人数并显示。
-3. 设置触发动作：
-   - **Minimize Window**：检测到 2 人及以上时，最小化当前窗口。
-   - **Close App**：检测到 2 人及以上时，直接退出应用。
-   - **Kill Processes + Minimize**：检测到 2 人及以上时，杀掉指定进程并最小化窗口。
-4. 如需杀指定进程，点击「↻」加载系统进程列表，点击选择目标进程。
-
-**安全与隐私：**
-
-- AI 模型（COCO-SSD）打包在本地，**不发起任何网络请求**，离线可用。
-- 摄像头画面仅在本地 `<video>` 元素中预览，**不写入磁盘、不上传、不缓存**。
-- 人数检测在内存中完成，仅保留数字结果，**不保存任何图像数据**。
-- 停止监控时，摄像头流、GPU 张量、模型资源全部释放。
-- 进程名经过正则校验（仅允许字母、数字、点、下划线、连字符），**防止命令注入**。
-
-**跨平台支持：**
-
-- Windows / macOS 均支持摄像头访问和进程管理。
-- macOS 首次使用时系统会弹出摄像头权限请求，需用户授权。
+Locale catalogs live under `locales/` (`en.py`, `zh.py`, `game_phrases.py`). Core API: `i18n.py`, persistence: `locale_store.py`.
 
 ---
 
-## 聊天命令（连上以后）
+## License
 
-| 输入 | 作用 |
-|------|------|
-| `/help` | 完整命令说明（多行） |
-| `/names` 或 `/users` | 当前房间昵称列表 |
-| `/rooms` | 查看你已加入的房间（`*` 表示当前活动房间） |
-| `/join 房间名` | 加入房间并切换到该房间 |
-| `/switch 房间名` | 在已加入房间之间切换 |
-| `/msg #房间名 内容` | 不切换当前房间，向指定房间发一行话（`#` 开头表示房间） |
-| `/msg 昵称 内容` | 私聊该昵称（大小写不敏感；同昵称多人则都会收到） |
-| `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
-| `/game help` | 查看房间小游戏用法 |
-| `/library` | 列出图书馆书目（epub / txt / pdf）；每人自带书签，翻页自动保存 |
-| `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
-| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续）；`next` / `prev` / `page` 翻页 |
-| `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
-| `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
-| `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
-| `/news 中文`、`/news 国际`、`/news 科技` | 只看某一类；可加条数，如 `/news 科技 10` |
-| `/news detail 中文 2` 或 `/news 详情 中文 2` | 该分类列表 **第 2 条** 的更长 RSS 提要（非网页全文） |
-| `/news fetch 中文 2` 或 `/news 全文 中文 2` | 按该条 RSS **链接**抓取网页 HTML，抽取正文（较慢；付费墙/反爬/纯 JS 页会失败） |
-| `/dnd on` / `/dnd off` | 终端勿扰模式：过滤游戏刷屏，轮到你时只显示一行提示；状态会持久化 |
-| `/clear` 或 `/cls` | 清屏（终端清空画面；图形客户端清空当前房间记录） |
-| `/part 房间名` | 退出某个房间（至少保留一个） |
-
-普通一行文字 = 发给当前房间里的人。
-
-### 房间小游戏
-
-游戏按**房间**隔离：每个房间同一时间最多一局。开局、走子、局面显示都会广播到当前房间；旁观者可以用 `/game show` 查看。
-
-**可玩游戏一览**（`/game list`；房主可用 `/game on|off <名称>` 在本房上下线）：
-
-| 名称 | 说明 | 常用别名 |
-|------|------|----------|
-| `chess` | 国际象棋 | — |
-| `gomoku` | 15×15 五子棋（连珠规则） | — |
-| `go` | 围棋（19×19） | `weiqi`、`baduk`、`围棋` |
-| `xiangqi` | 中国象棋 | `cchess` |
-| `sanguo` | 三国杀（军争版，2～6 人） | `sgs`、`三国杀` |
-| `werewolf` | 狼人杀（5～12 人） | `langrensha` |
-| `holdem` | 德州扑克 | `poker`、`texas`、`dezhou`、`德州` |
-| `zjh` | 炸金花 | `zhajinhua`、`炸金花` |
-| `niutou` | 牛头王（卡牌计分型） | `niutouwang`、`ntw`、`牛头王` |
-| `mahjong` | 麻将（4 人，可补 AI） | `mj`、`majiang`、`麻将` |
-
-**通用命令：**
-
-- `/game list`：列出本房已上线、可玩的游戏。
-- `/game new <名称>`：在当前房间开一局；发起人坐第一席（棋类：chess 白 / gomoku·go·xiangqi 黑或红先手；sanguo 为房主）。
-- `/game new <名称> ai [easy\|normal\|hard]`：棋类 AI 练习局（仅 `chess` / `gomoku` / `go` / `xiangqi`）；**不计入持久化积分**。
-- `/game join`：加入对局（棋类为第二席；sanguo 可 2～6 人 join 后房主 `/game move 开始`；狼人杀等多人局按提示 join）。
-- `/game seats`：查看席位与对局状态。
-- `/game show`：重新显示棋盘/局面（棋类第二席视角自动翻转，己方在下）。
-- `/game move …`：走子或游戏内操作（各游戏语法不同，见下）。
-- `/game rating [游戏] [昵称]`：查看棋类持久化积分/等级（**跨房间共享**）。
-- `/game undo`：悔棋（`chess` / `gomoku` / `go` / `xiangqi`）；上一步走子方发起，对方 `/game undo accept` 同意。
-- `/game pgn`：导出国际象棋 PGN（仅 `chess`）。
-- `/game resign`：认负。
-- `/game abort`：终止尚未开始的对局。
-- `/game end`：房主强制结束当前房间对局。
-- `/game on <名称>` / `/game off <名称>`：房主在本房上线/下线某游戏（进行中的该局不受影响）。
-
-**棋类走法摘要：**
-
-- **`chess`**：SAN（如 `e4`、`Nf3`、`O-O`）或 UCI（如 `e2e4`）。棋盘用 Unicode 棋子（♔♕♖♗♘♙ / ♚♛♜♝♞♟），空位为 `·`。
-- **`gomoku`**：`/game move 行 列`，如 `/game move 8 8`。黑方禁手（长连、四四、三三）；黑方仅「恰好五连」取胜。
-- **`go`**：`/game move 行 列` 落子；`/game move pass` 停一手。19×19 标准围棋规则。
-- **`xiangqi`**：推荐棋谱记法 `/game move 炮二平五`、`/game move 马2进3`；也可用坐标 `/game move 8 二 8 五`。棋盘 **`+` 红子**、**`-` 黑子**、**`!` 上一步**。
-
-**牌类 / 多人局摘要：**
-
-- **`sanguo`（三国杀）**：房主 `/game move 开始` 开局；`/game move 武将` 查武将池；观星/蛊惑/断粮等技能见 `/game show`。
-- **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
-- **`holdem`（德州扑克）**：`start` 开始 \| `look` 看牌 \| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可 `bot <easy\|hard\|pro>` 加机器人。
-- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
-- **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
-- **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
-
-**棋类积分说明：**
-
-- `chess` 使用 **FIDE Elo** 风格积分与等级线（GM/IM/FM/CM 线等）。
-- `gomoku`、`go`、`xiangqi` 使用统一 Elo 积分并映射到业余级位。
-- 只有**真人对真人**对局会写入持久化积分；AI 练习局、观战不会写入。
-- terminal 端可用 `/dnd on` 开启勿扰模式：读新闻/看书时过滤游戏棋盘与状态刷屏，轮到你时只显示一行 `轮到你操作`；设置写入本地客户端配置，重连后保留。需要完整局面时请手动 `/game show`（仅这类查看命令会短暂放行完整输出）；`/game move` 等走子命令不会把棋盘刷回来。再次 `/dnd on` 会立刻恢复过滤。
-
-`gomoku`、`go`、`xiangqi` 只用 Python 标准库；`chess` 需要服务端安装 `requirements-server.txt` 里的 `chess>=1.10`。Electron 客户端左侧栏有**游戏工作台**，可按钮化执行常用 `/game` 操作。
-
-### 词典查询
-
-通过服务端调用有道 JSON API，在当前用户私屏显示结果（不广播到房间）。
-
-| 命令 | 说明 |
-|------|------|
-| `/dict en <英文>` | **英→中**（中英文词典） |
-| `/dict cn <中文>` | **中→英**（中英文词典） |
-| `/dict hh <词语>` | **汉语词典**（汉→汉释义，来源《现代汉语规范词典》） |
-| `/dict <词语>` | 自动识别：英文查英→中；中文同时返回中→英 + 汉语释义 |
-| `/dict help` | 完整用法与别名 |
-
-**模式别名：** `en`/`英`、`cn`/`中`/`中英`、`hh`/`汉`/`汉语`。
-
-示例：
-
-```text
-/dict en hello
-/dict cn 你好
-/dict hh 学习
-/dict 学习          # 自动：中→英 + 汉语释义
-```
-
-环境变量（可选）：`SSHCHAT_DICT_TIMEOUT`（超时秒数）、`SSHCHAT_DICT_PROXY`（或复用 `SSHCHAT_NEWS_PROXY` 等代理变量）、`SSHCHAT_DICT_TLS_FALLBACK=0` 关闭 TLS 校验回退。
-
-### 图书馆
-
-服务端目录（默认 `/opt/sshchat/library`，可用 `SSHCHAT_LIBRARY_DIR` 覆盖）放置 **epub / txt / pdf** 图书文件。PDF 优先用 PyMuPDF 提取正文，并过滤「逐字空格」类乱序排版，避免章节标题（如 1 → 1.1 → 1.2）顺序颠倒。**首次打开大型 PDF** 服务端需解析并缓存，约需十几秒，期间会提示「正在加载…」；再次打开同一本书会即时显示。
-
-| 命令 | 说明 |
-|------|------|
-| `/library` 或 `/lib` | 书目列表（含你的书签进度） |
-| `/library open <序号\|文件名>` | 打开图书（有书签则从书签继续） |
-| `/library next` / `prev` | 翻页（自动存书签） |
-| `/library page <页码>` | 跳到指定页 |
-| `/library bookmarks` | 列出我的全部书签 |
-| `/library reset <序号\|文件名>` | 清除某本书的书签 |
-| `/library close` | 结束阅读（保留书签） |
-
-Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。
-
-### 命令补全
-
-- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
-- **Electron 图形客户端**：输入框输入 `/` 后出现命令提示，按 **Tab** 补全当前高亮项，**↑/↓** 切换候选项。
-
-### RSS 新闻
-
-`/news` 从服务端抓取 RSS，把 **标题** 和 **提要/正文片段**（来自 `description`、`summary`、`content` 等字段，去掉 HTML 标签）发给当前用户，**不展示链接**，也不会广播到房间。
-
-可用分类：
-
-- 中文新闻：`/news 中文`，别名 `cn`、`zh`
-- 国际新闻：`/news 国际`，别名 `world`、`intl`
-- 科技新闻：`/news 科技`，别名 `tech`
-- 全部分类：`/news all`
-
-**看某一条的「详情」**（更长提要，仍来自 RSS，不是网页全文）：先用 `/news 中文`（或 `国际` / `科技`）看带 **1、2、3…** 的列表，再发 **`/news detail 中文 2`** 或 **`/news 详情 中文 2`** 表示看中文类第 2 条。默认单条详情最多约 4000 字，可用环境变量 `SSHCHAT_NEWS_DETAIL_CHARS` 调整。
-
-**看网页里抽出来的正文（粗抓取）**：同一列表序号下，发 **`/news fetch 中文 2`** 或 **`/news 全文 中文 2`**。服务端用 RSS 里的 `http(s)` 链接下载 HTML，去掉脚本/标签后尽量取 `<article>` / `<main>` / `<body>` 里的文字；**不是**官方接口，**不能保证**与浏览器里全文一致（付费墙、登录、强反爬、仅前端渲染的站点常会失败）。抓取超时、体积与展示长度可通过 `SSHCHAT_NEWS_PAGE_TIMEOUT`、`SSHCHAT_NEWS_PAGE_MAX_BYTES`、`SSHCHAT_NEWS_PAGE_TEXT_CHARS` 调整；同一 URL 有短期缓存（`SSHCHAT_NEWS_PAGE_CACHE_SECONDS`）。
-
-默认 `/news` 每类显示 3 条；查看单类默认 8 条；可以加条数，例如 `/news 国际 10`。服务端最多显示 15 条，并默认缓存 10 分钟，避免频繁请求外部 RSS。
-
-若 **「中文」类几乎空白**（标题都很少），多半是 **跑 `server.py` 的那台机器出不了网**（防火墙、无默认路由）、**访问境外 RSS 被拦**（常见于境内机房直连 BBC/NYT 等），或 **个别源超时**。
-
-**代理说明：** 新闻在 **运行聊天服务的那台机器** 上抓取。代码里 **默认使用 `http://127.0.0.1:7897`** 作为 HTTP(S) 代理（适合本机已开 Clash / sing-box 且 mixed 端口为 7897）。若你的代理端口不同，可设 **`SSHCHAT_NEWS_PROXY_DEFAULT`**（例如 `http://127.0.0.1:7890`）或 **`SSHCHAT_NEWS_PROXY`** 覆盖。不需要代理时，在 `sshchat.env` 里设 **`SSHCHAT_NEWS_NO_PROXY=1`** 后重启服务。若服务在 **远程 Linux** 上，`127.0.0.1` 是 **服务器自己**，不是你笔记本；要让远端走你本机出口，需 **SSH 反向转发**（例如 `ssh -R 7897:127.0.0.1:7897 ...`）再把 `SSHCHAT_NEWS_PROXY` 指到转发端口，或直接在远端填可达的代理地址。也可用 **`SSHCHAT_NEWS_PROXY`**、`HTTPS_PROXY` 等覆盖默认端口（见 `server.py` 中 `_news_proxy_url`）。改环境后需 **重启聊天服务**；新闻有缓存，最多约 10 分钟才刷新。
-
-**`/news fetch` 报 `SSLEOFError` / 握手失败：** 多为 **代理对个别站点 HTTPS 不稳定**（RSS 能读、网页全文失败较常见）。服务端默认会 **自动重试**：放宽 TLS 校验、再 **不经代理直连**（`SSHCHAT_NEWS_PROXY_FALLBACK_DIRECT=1`，可设 `0` 关闭）。仍失败时可 **`SSHCHAT_NEWS_NO_PROXY=1`** 全程直连，或换节点/端口；并加大 **`SSHCHAT_NEWS_PAGE_TIMEOUT`**（默认 15 秒）。
-
-内置来源包括 BBC 中文、纽约时报中文网、美国之音中文、RFI 华语、德国之声中文、BBC World、Al Jazeera、NPR、The Guardian、Ars Technica、The Verge、Wired、Hacker News。可通过环境变量调整：`SSHCHAT_NEWS_TIMEOUT`、`SSHCHAT_NEWS_CACHE_SECONDS`、`SSHCHAT_NEWS_BODY_CHARS`（单条提要最大字符数）、`SSHCHAT_NEWS_WRAP`（自动换行宽度），以及网页抓取相关变量见上一段。
-
----
-
-## 进阶（可选阅读）
-
-**本机快捷连接 JSON**（不写私钥路径，认证仍用默认 `~/.ssh`）：
-
-- Linux / macOS：`~/.config/sshchat/client.json`
-- Windows：`%APPDATA%\SSHChat\client.json`
-
-示例：
-
-```json
-{
-  "host": "chat.example.com",
-  "user": "alice",
-  "ssh_port": 22
-}
-```
-
-然后执行：`python3 easy_connect.py`（在本机根据 JSON 调用 `ssh`，省去重复敲主机与用户名）。
-
-**从源码跑图形界面：** 安装 Python 3、tkinter，再 `pip install -r requirements-gui.txt`，运行 `python3 sshchat_gui.py`。开发调试可用 `python3 sshchat_gui.py --full-ui` 手动填主机信息。
-
-**配置分工（给排错用）：**
-
-- **`sshchat.env`**（服务器安装目录）：只关**聊天服务**在本机怎么连（例如 `127.0.0.1` + 聊天端口），**不是**用户笔记本上要 ssh 的域名。
-- **`client-bundle.json` / 用户侧 `client.json`**：用户 **`ssh 谁@哪台机器 -p 几端口`** 这一类信息。
-
----
-
-## 安全与预期（请读这几句）
-
-- **不是「完全隐身」。** 服务器管理员、机房或云厂商仍能看到 SSH 连接；请用**你信任的人**和**你控制或信任的机器**。
-- **好处在形态：** 流量形态是常见 SSH，不依赖额外聊天协议；在典型单机部署下，聊天内容在服务器本机转发。
-- 只把公钥给**信任的人**，定期检查服务器上的授权密钥。
-
----
-
-## 仓库里主要文件
-
-| 文件 | 用途 |
-|------|------|
-| `deploy.sh` | 一键部署 |
-| `admin-add-user.sh` | 添加用户与公钥 |
-| `admin-add-peer.sh` | 登记联邦互信节点（多服扩网） |
-| `federation.py` / `federation-bridge.sh` | 服务器间联邦协议与 SSH 桥接 |
-| `server.py` / `client.py` | 服务端与终端客户端 |
-| `games.py` | 房间小游戏逻辑 |
-| `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
-| `sshchat_gui.py` | 图形客户端源码 |
-| `easy_connect.py` | 按 JSON 调用 `ssh` |
-| `scripts/build-gui-packages.*` | 打 Windows / Unix 图形包 |
-
-更细的参数（`--prefix`、`--no-systemd`、macOS 说明、密钥迁移等）见 **`deploy.sh` 头部注释**与脚本 **`--help`**。
+See [LICENSE](LICENSE).

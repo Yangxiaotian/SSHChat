@@ -4,7 +4,8 @@ import json
 import os
 import tempfile
 import threading
-from typing import Any, Callable
+import time
+from typing import Any, Callable, Optional
 
 
 def _normalize_user(name: str) -> str:
@@ -31,6 +32,100 @@ def _chess_level(rating: int) -> str:
     if rating >= 1200:
         return "Class D"
     return "Beginner"
+
+
+_LEVEL_LABEL_EN: dict[str, str] = {
+    "GM线": "GM",
+    "IM线": "IM",
+    "FM线": "FM",
+    "CM线": "CM",
+    "业余7段": "Amateur 7 dan",
+    "业余6段": "Amateur 6 dan",
+    "业余5段": "Amateur 5 dan",
+    "业余4段": "Amateur 4 dan",
+    "业余3段": "Amateur 3 dan",
+    "业余2段": "Amateur 2 dan",
+    "业余1段": "Amateur 1 dan",
+    "1级": "1 kyu",
+    "2级": "2 kyu",
+    "4级": "4 kyu",
+    "6级": "6 kyu",
+    "8级": "8 kyu",
+    "10级": "10 kyu",
+    "12级": "12 kyu",
+    "道祖": "Dao Ancestor",
+    "大罗大圆满": "Daluo (Peak)",
+    "大罗后期": "Daluo (Late)",
+    "大罗中期": "Daluo (Mid)",
+    "大罗初期": "Daluo (Early)",
+    "太乙大圆满": "Taiyi (Peak)",
+    "太乙后期": "Taiyi (Late)",
+    "太乙中期": "Taiyi (Mid)",
+    "太乙初期": "Taiyi (Early)",
+    "金仙大圆满": "Golden Immortal (Peak)",
+    "金仙后期": "Golden Immortal (Late)",
+    "金仙中期": "Golden Immortal (Mid)",
+    "金仙初期": "Golden Immortal (Early)",
+    "真仙大圆满": "True Immortal (Peak)",
+    "真仙后期": "True Immortal (Late)",
+    "真仙中期": "True Immortal (Mid)",
+    "真仙初期": "True Immortal (Early)",
+    "渡劫大圆满": "Tribulation (Peak)",
+    "渡劫后期": "Tribulation (Late)",
+    "渡劫中期": "Tribulation (Mid)",
+    "渡劫初期": "Tribulation (Early)",
+    "大乘大圆满": "Mahayana (Peak)",
+    "大乘后期": "Mahayana (Late)",
+    "大乘中期": "Mahayana (Mid)",
+    "大乘初期": "Mahayana (Early)",
+    "合体大圆满": "Body Integration (Peak)",
+    "合体后期": "Body Integration (Late)",
+    "合体中期": "Body Integration (Mid)",
+    "合体初期": "Body Integration (Early)",
+    "炼虚大圆满": "Void Refining (Peak)",
+    "炼虚后期": "Void Refining (Late)",
+    "炼虚中期": "Void Refining (Mid)",
+    "炼虚初期": "Void Refining (Early)",
+    "化神大圆满": "Spirit Transformation (Peak)",
+    "化神后期": "Spirit Transformation (Late)",
+    "化神中期": "Spirit Transformation (Mid)",
+    "化神初期": "Spirit Transformation (Early)",
+    "元婴大圆满": "Nascent Soul (Peak)",
+    "元婴后期": "Nascent Soul (Late)",
+    "元婴中期": "Nascent Soul (Mid)",
+    "元婴初期": "Nascent Soul (Early)",
+    "结丹大圆满": "Core Formation (Peak)",
+    "结丹后期": "Core Formation (Late)",
+    "结丹中期": "Core Formation (Mid)",
+    "结丹初期": "Core Formation (Early)",
+    "筑基大圆满": "Foundation (Peak)",
+    "筑基后期": "Foundation (Late)",
+    "筑基中期": "Foundation (Mid)",
+    "筑基初期": "Foundation (Early)",
+    "炼气大圆满": "Qi Refining (Peak)",
+    "炼气后期": "Qi Refining (Late)",
+    "炼气中期": "Qi Refining (Mid)",
+    "炼气初期": "Qi Refining (Early)",
+    "练气初期": "Qi Refining (Early)",
+}
+
+
+def localize_level(level: str, locale: str = "en") -> str:
+    """Translate stored level labels for English UI; Chinese kept as-is."""
+    if (locale or "en").lower().startswith("zh"):
+        return level
+    return _LEVEL_LABEL_EN.get(level, level)
+
+
+def localize_levels_in_text(text: str, locale: str = "en") -> str:
+    """Replace known Chinese level tokens inside a longer English/mixed line."""
+    if (locale or "en").lower().startswith("zh") or not text:
+        return text
+    # Longer names first so 大罗大圆满 wins over 大罗.
+    for zh, en in sorted(_LEVEL_LABEL_EN.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if zh in text:
+            text = text.replace(zh, en)
+    return text
 
 
 def _dan_level(rating: int) -> str:
@@ -151,7 +246,7 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "k_factor": _fide_k,
     },
     "gomoku": {
-        "scheme": "Elo",
+        "scheme": "Cultivation Elo",
         "initial": 1200,
         "floor": 1000,
         "level_of": _gomoku_cultivation_level,
@@ -197,6 +292,10 @@ class GameRatingStore:
         self.path = path
         self._lock = threading.RLock()
         self._cache: dict[str, Any] | None = None
+        # Optional hook: after local record_result, for federation fan-out.
+        self.on_change: Optional[
+            Callable[[str, list[tuple[str, dict[str, Any]]]], None]
+        ] = None
 
     def _empty_data(self) -> dict[str, Any]:
         return {
@@ -308,6 +407,7 @@ class GameRatingStore:
                 "losses": 0,
                 "draws": 0,
                 "games": 0,
+                "updated_at": 0.0,
             }
             entries[key] = entry
         else:
@@ -323,6 +423,7 @@ class GameRatingStore:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if game not in GAME_CONFIGS:
             raise KeyError(game)
+        changed: list[tuple[str, dict[str, Any]]] = []
         with self._lock:
             self._ensure_loaded_locked()
             assert self._cache is not None
@@ -359,12 +460,105 @@ class GameRatingStore:
             else:
                 entry_a["losses"] = int(entry_a.get("losses", 0)) + 1
                 entry_b["wins"] = int(entry_b.get("wins", 0)) + 1
+            now = time.time()
+            entry_a["updated_at"] = now
+            entry_b["updated_at"] = now
             self._save_locked()
             after_a = self._profile_from_entry(game, player_a, entry_a)
             after_b = self._profile_from_entry(game, player_b, entry_b)
+            changed = [
+                (player_a, dict(entry_a)),
+                (player_b, dict(entry_b)),
+            ]
+        hook = self.on_change
+        if hook is not None:
+            try:
+                hook(game, changed)
+            except Exception:
+                pass
         return (after_a | {"delta": after_a["rating"] - before_a["rating"]}), (
             after_b | {"delta": after_b["rating"] - before_b["rating"]}
         )
+
+    @staticmethod
+    def _entry_rank(entry: dict[str, Any]) -> tuple[float, int, int]:
+        """Higher wins when merging federated copies of the same nick."""
+        try:
+            updated = float(entry.get("updated_at") or 0.0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        try:
+            games = int(entry.get("games") or 0)
+        except (TypeError, ValueError):
+            games = 0
+        try:
+            rating = int(entry.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        return (updated, games, rating)
+
+    def apply_remote_entry(
+        self,
+        game: str,
+        user: str,
+        entry: dict[str, Any],
+        *,
+        source_node: str = "",
+    ) -> bool:
+        """Install a peer rating row when it is at least as fresh as ours.
+
+        Settlement only runs on the game-host (authority) node; peers receive that
+        node's rows so same-nick ``/game rating`` matches the host.
+        """
+        if game not in GAME_CONFIGS or not isinstance(entry, dict):
+            return False
+        key = _normalize_user(user)
+        if not key:
+            return False
+        incoming = {
+            "display_name": str(entry.get("display_name") or user).strip() or user,
+            "rating": int(entry.get("rating") or GAME_CONFIGS[game]["initial"]),
+            "wins": int(entry.get("wins") or 0),
+            "losses": int(entry.get("losses") or 0),
+            "draws": int(entry.get("draws") or 0),
+            "games": int(entry.get("games") or 0),
+            "updated_at": float(entry.get("updated_at") or 0.0),
+        }
+        if source_node:
+            incoming["source_node"] = str(source_node).strip()
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            current = self._cache["games"][game].get(key)
+            if isinstance(current, dict) and self._entry_rank(current) > self._entry_rank(
+                incoming
+            ):
+                return False
+            self._cache["games"][game][key] = incoming
+            self._save_locked()
+            return True
+
+    def export_entries(self) -> list[dict[str, Any]]:
+        """All non-empty rating rows for federation catch-up."""
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            for game, users in self._cache["games"].items():
+                if not isinstance(users, dict):
+                    continue
+                for key, entry in users.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if int(entry.get("games") or 0) <= 0 and float(
+                        entry.get("updated_at") or 0
+                    ) <= 0:
+                        continue
+                    row = dict(entry)
+                    row["game"] = game
+                    row["user"] = str(entry.get("display_name") or key)
+                    out.append(row)
+        return out
 
     def top(self, game: str, limit: int = 10) -> list[dict[str, Any]]:
         if game not in GAME_CONFIGS:

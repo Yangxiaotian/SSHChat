@@ -21,15 +21,23 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${SSHCHAT_PREFIX:-$SCRIPT_DIR}
 FED_USER=${SSHCHAT_FEDERATION_USER:-sshchat-federation}
-PEER_SSH_PORT=${SSHCHAT_PEER_SSH_PORT:-22}
-PEER_MODE=${SSHCHAT_PEER_MODE:-ssh}
+FED_HOME=${SSHCHAT_FEDERATION_HOME:-/var/lib/sshchat-federation}
 FED_DIR="$PREFIX/federation"
 PEERS_JSON="$FED_DIR/peers.json"
 BRIDGE="$PREFIX/federation-bridge.sh"
 KEY_PRIV="$FED_DIR/id_ed25519"
 KEY_PUB="$FED_DIR/id_ed25519.pub"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/ensure-federation-user.sh"
+
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
+
+# Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
+primary_group_of() {
+  local user_name=$1
+  id -gn "$user_name" 2>/dev/null || printf '%s' "$user_name"
+}
 
 usage() {
   cat >&2 <<EOF
@@ -68,11 +76,14 @@ if [[ -f "$PREFIX/sshchat.env" ]]; then
   # shellcheck disable=SC1091
   . "$PREFIX/sshchat.env"
 fi
+# Re-resolve after sourcing sshchat.env so SSHCHAT_PEER_* there take effect.
+PEER_SSH_PORT=${SSHCHAT_PEER_SSH_PORT:-22}
+PEER_MODE=${SSHCHAT_PEER_MODE:-ssh}
 CHAT_PORT=${SSHCHAT_PORT:-12345}
 PEER_FED_PORT=${SSHCHAT_PEER_FED_PORT:-$((CHAT_PORT + 1))}
 
 mkdir -p "$FED_DIR"
-chmod 700 "$FED_DIR"
+chmod 750 "$FED_DIR"
 
 if [[ ! -f "$KEY_PRIV" ]]; then
   ssh-keygen -t ed25519 -f "$KEY_PRIV" -N "" -C "sshchat-federation@$(hostname -f 2>/dev/null || hostname)"
@@ -81,36 +92,87 @@ if [[ ! -f "$KEY_PRIV" ]]; then
   echo "info: generated federation key $KEY_PUB"
 fi
 
-# Ensure federation user exists (Linux).
-if ! is_darwin; then
-  if ! id "$FED_USER" &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d "$FED_DIR" -c "SSHChat federation" "$FED_USER"
-    echo "info: created system user $FED_USER"
+# Ensure federation user exists (Linux + macOS). Home is separate from FED_DIR
+# so sshd accepts ownership (service user owns FED_DIR for peers.json + private key).
+ensure_client_group() {
+  if is_darwin; then
+    if dscl . -read "/Groups/sshchat-clients" &>/dev/null; then
+      return 0
+    fi
+    if command -v dseditgroup &>/dev/null; then
+      dseditgroup -o create sshchat-clients
+      echo "info: created macOS group sshchat-clients"
+    fi
+    return 0
   fi
-  install -d -m 700 -o "$FED_USER" -g "$FED_USER" "/home/$FED_USER/.ssh" 2>/dev/null || \
-    install -d -m 700 -o "$FED_USER" -g "$FED_USER" "$FED_DIR/.ssh"
-  AUTH_DIR=$(getent passwd "$FED_USER" | cut -d: -f6)
-  AUTH_KEYS="$AUTH_DIR/.ssh/authorized_keys"
-  mkdir -p "$(dirname "$AUTH_KEYS")"
-  chown "$FED_USER:$FED_USER" "$(dirname "$AUTH_KEYS")"
-  chmod 700 "$(dirname "$AUTH_KEYS")"
-else
-  AUTH_KEYS="$FED_DIR/authorized_keys_inbound"
-  touch "$AUTH_KEYS"
-  chmod 600 "$AUTH_KEYS"
-fi
+  local g=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
+  if getent group "$g" &>/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v groupadd &>/dev/null; then
+    groupadd -r "$g"
+    echo "info: created system group $g"
+  fi
+}
 
-OPTS="command=\"${BRIDGE}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
+add_fed_user_to_client_group() {
+  local g=${SSHCHAT_CLIENT_GROUP:-sshchat-clients}
+  id "$FED_USER" &>/dev/null || return 0
+  if is_darwin; then
+    if dscl . -read "/Groups/$g" &>/dev/null && ! id -Gn "$FED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+      dseditgroup -o edit -a "$FED_USER" -t user "$g" 2>/dev/null || true
+    fi
+  elif getent group "$g" >/dev/null 2>&1; then
+    usermod -aG "$g" "$FED_USER" 2>/dev/null || true
+  fi
+}
+
+ensure_federation_user "$FED_USER" "$FED_HOME" "$FED_DIR" || true
+ensure_client_group
+add_fed_user_to_client_group
+FED_GROUP=$(primary_group_of "$FED_USER" 2>/dev/null || printf '%s' "$FED_USER")
+AUTH_KEYS=$(federation_auth_keys_path "$FED_USER" "$FED_HOME" "$FED_DIR")
+mkdir -p "$(dirname "$AUTH_KEYS")"
+if [[ ! -f "$AUTH_KEYS" ]]; then
+  touch "$AUTH_KEYS"
+fi
+if id "$FED_USER" &>/dev/null; then
+  chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
+  chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
+fi
+chmod 600 "$AUTH_KEYS" 2>/dev/null || true
+
+# Local federation port the peer will ssh -W into (this machine).
+LOCAL_FED_PORT=${SSHCHAT_FEDERATION_PORT:-$((CHAT_PORT + 1))}
+# Prefer ssh -W + permitopen over forced-command+nc: more reliable under sshd,
+# and avoids no-port-forwarding rejecting the tunnel.
+OPTS="restrict,port-forwarding,permitopen=\"127.0.0.1:${LOCAL_FED_PORT}\",permitopen=\"[::1]:${LOCAL_FED_PORT}\""
 FINAL_LINE="$OPTS $PEER_PUBKEY"
-if [[ -f "$AUTH_KEYS" ]] && grep -qF "${PEER_PUBKEY##* }" "$AUTH_KEYS" 2>/dev/null; then
-  echo "info: peer pubkey already in $AUTH_KEYS"
+KEY_BLOB=$(awk '{print $2}' <<<"$PEER_PUBKEY")
+if [[ -f "$AUTH_KEYS" ]] && grep -qF "$KEY_BLOB" "$AUTH_KEYS" 2>/dev/null; then
+  # Upgrade legacy command=/no-port-forwarding lines to permitopen.
+  if grep -F "$KEY_BLOB" "$AUTH_KEYS" | grep -q 'permitopen='; then
+    echo "info: peer pubkey already in $AUTH_KEYS"
+  else
+    TMP=$(mktemp)
+    grep -vF "$KEY_BLOB" "$AUTH_KEYS" >"$TMP" || true
+    echo "$FINAL_LINE" >>"$TMP"
+    mv "$TMP" "$AUTH_KEYS"
+    chmod 600 "$AUTH_KEYS"
+    if id "$FED_USER" &>/dev/null; then
+      chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS" 2>/dev/null || true
+    fi
+    sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
+    echo "info: updated peer inbound key options in $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
+  fi
 else
   echo "$FINAL_LINE" >>"$AUTH_KEYS"
   chmod 600 "$AUTH_KEYS"
-  if ! is_darwin; then
-    chown "$FED_USER:$FED_USER" "$AUTH_KEYS"
+  if id "$FED_USER" &>/dev/null; then
+    chown "$FED_USER:$FED_GROUP" "$AUTH_KEYS" 2>/dev/null || true
   fi
-  echo "info: added peer inbound key to $AUTH_KEYS"
+  sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
+  echo "info: added peer inbound key to $AUTH_KEYS (permitopen ${LOCAL_FED_PORT})"
 fi
 
 # Merge peers.json
@@ -121,6 +183,7 @@ SSHCHAT__SSH_PORT="$PEER_SSH_PORT" \
 SSHCHAT__FED_PORT="$PEER_FED_PORT" \
 SSHCHAT__MODE="$PEER_MODE" \
 SSHCHAT__KEY="$KEY_PRIV" \
+SSHCHAT__PEER_PUBKEY="$PEER_PUBKEY" \
 python3 - <<'PY'
 import json, os, pathlib
 
@@ -143,6 +206,7 @@ entry = {
     "ssh_user": os.environ.get("SSHCHAT_FEDERATION_USER", "sshchat-federation"),
     "ssh_key": os.environ["SSHCHAT__KEY"],
     "mode": os.environ["SSHCHAT__MODE"],
+    "peer_pubkey": os.environ.get("SSHCHAT__PEER_PUBKEY", "").strip(),
 }
 peers = [p for p in peers if isinstance(p, dict) and p.get("node_id") != node]
 peers.append(entry)
@@ -151,6 +215,59 @@ print(f"info: updated {path}")
 PY
 
 chmod 640 "$PEERS_JSON"
+# Service user (sshchat) must read peers.json; root:root 640 breaks federation reload.
+SVC_USER=${SSHCHAT_RUN_USER:-}
+if [[ -z "$SVC_USER" ]] && [[ -f /etc/systemd/system/sshchat.service ]]; then
+  SVC_USER=$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/sshchat.service 2>/dev/null || true)
+fi
+SVC_USER=${SVC_USER:-sshchat}
+SVC_GROUP=$(primary_group_of "$SVC_USER")
+if id "$SVC_USER" &>/dev/null; then
+  chown "$SVC_USER:$SVC_GROUP" "$PEERS_JSON" 2>/dev/null || true
+  chown "$SVC_USER:$SVC_GROUP" "$FED_DIR" 2>/dev/null || true
+  chmod 750 "$FED_DIR" 2>/dev/null || true
+  if [[ -f "$KEY_PRIV" ]]; then
+    chown "$SVC_USER:$SVC_GROUP" "$KEY_PRIV" "$KEY_PUB" 2>/dev/null || true
+    chmod 600 "$KEY_PRIV" 2>/dev/null || true
+    chmod 644 "$KEY_PUB" 2>/dev/null || true
+  fi
+fi
+if id "$FED_USER" &>/dev/null; then
+  add_fed_user_to_client_group
+  if [[ -n "${AUTH_KEYS:-}" && -f "$AUTH_KEYS" ]]; then
+    chown "$FED_USER:$FED_GROUP" "$(dirname "$AUTH_KEYS")" "$AUTH_KEYS" 2>/dev/null || true
+    chmod 700 "$(dirname "$AUTH_KEYS")" 2>/dev/null || true
+    chmod 600 "$AUTH_KEYS" 2>/dev/null || true
+  fi
+  chown "$FED_USER:$FED_GROUP" "$FED_HOME" 2>/dev/null || true
+  chmod 755 "$FED_HOME" 2>/dev/null || true
+  sync_federation_staging_keys "$AUTH_KEYS" "$FED_DIR/authorized_keys_inbound"
+fi
+# Bridge is forced-command for inbound peers.
+chmod 755 "$BRIDGE" 2>/dev/null || true
+
+# Hot-reload running sshchat so new peers connect without a full restart.
+# authorized_keys is already live for inbound; this picks up peers.json outbound.
+signal_sshchat_reload() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sshchat.service 2>/dev/null; then
+    if systemctl kill -s HUP sshchat.service 2>/dev/null; then
+      echo "info: sent SIGHUP to sshchat.service (reload federation peers)"
+      return 0
+    fi
+  fi
+  # Fallback: signal the python server process for this PREFIX.
+  if command -v pkill >/dev/null 2>&1; then
+    if pkill -HUP -f "$PREFIX/venv/bin/python $PREFIX/server.py" 2>/dev/null \
+      || pkill -HUP -f "$PREFIX/server.py" 2>/dev/null; then
+      echo "info: sent SIGHUP to sshchat server process (reload federation peers)"
+      return 0
+    fi
+  fi
+  echo "info: sshchat not signaled (not running?). New peers load on next start, or within a few seconds if the service is up (peers.json watch)."
+}
+
+signal_sshchat_reload
+
 echo
 echo "=== This server's federation public key (add on peer with their admin-add-peer.sh) ==="
 cat "$KEY_PUB"
@@ -158,4 +275,5 @@ echo
 echo "=== Local node id (set SSHCHAT_NODE_ID in sshchat.env if you want a fixed name) ==="
 echo "${SSHCHAT_NODE_ID:-$(hostname)}"
 echo
-echo "Restart sshchat service to apply peer connections."
+echo "No full restart required: peers.json was updated and sshchat was signaled to reload."
+echo "Remember: the other server must also run admin-add-peer.sh for this node (mutual trust)."

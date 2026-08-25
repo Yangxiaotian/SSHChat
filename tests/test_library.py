@@ -1,7 +1,10 @@
 """Tests for library book listing and pagination."""
+import json
 import os
 import tempfile
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import library
@@ -29,15 +32,67 @@ class TestLibraryBookmarks(unittest.TestCase):
 
     def test_clear_book(self) -> None:
         self.store.set_page("carol", "x.epub", 5)
-        self.assertTrue(self.store.clear_book("Carol", "x.epub"))
+        cleared = self.store.clear_book("Carol", "x.epub")
+        self.assertIsNotNone(cleared)
         self.assertIsNone(self.store.get_page("carol", "x.epub"))
-        self.assertFalse(self.store.clear_book("carol", "x.epub"))
+        self.assertIsNone(self.store.clear_book("carol", "x.epub"))
 
     def test_users_are_isolated(self) -> None:
         self.store.set_page("dave", "book.txt", 7)
         self.store.set_page("erin", "book.txt", 2)
         self.assertEqual(self.store.get_page("dave", "book.txt"), 7)
         self.assertEqual(self.store.get_page("erin", "book.txt"), 2)
+
+
+class TestLibraryBookmarkFederationMerge(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = library.LibraryBookmarkStore(
+            str(Path(self.tmp.name) / "bookmarks.json")
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_merge_lww_keeps_newer_page(self) -> None:
+        self.store.set_page("yxt", "a.epub", 1)
+        older = {"a.epub": {"page": 9, "updated_ts": 1}}
+        newer = {"a.epub": {"page": 3, "updated_ts": int(time.time()) + 10}}
+        self.assertTrue(self.store.merge_from_remote("YXT", newer))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+        self.assertFalse(self.store.merge_from_remote("yxt", older))
+        self.assertEqual(self.store.get_page("yxt", "a.epub"), 3)
+
+    def test_merge_delete_tombstone(self) -> None:
+        self.store.set_page("yxt", "peer::b.txt", 4)
+        self.assertEqual(self.store.get_page("yxt", "b.txt"), 4)
+        ts = int(time.time()) + 5
+        self.assertTrue(
+            self.store.merge_from_remote(
+                "yxt", {"peer::b.txt": {"deleted": True, "updated_ts": ts}}
+            )
+        )
+        self.assertIsNone(self.store.get_page("yxt", "b.txt"))
+        self.assertIsNone(self.store.get_page("yxt", "peer::b.txt"))
+
+    def test_export_includes_federated_keys(self) -> None:
+        self.store.set_page("yxt", "Math::book.epub", 7)
+        exported = self.store.export_user("yxt")
+        self.assertIn("book.epub", exported)
+        self.assertNotIn("Math::book.epub", exported)
+        self.assertEqual(exported["book.epub"]["page"], 7)
+        self.assertEqual(self.store.get_page("yxt", "Math::book.epub"), 7)
+
+    def test_remote_origin_key_merges_into_bare_name(self) -> None:
+        """Owner saved bare name; reader must resume via federated merge."""
+        remote = {
+            "中国近代史.epub": {"page": 41, "updated_ts": int(time.time())}
+        }
+        self.assertTrue(self.store.merge_from_remote("yxt", remote))
+        self.assertEqual(self.store.get_page("yxt", "中国近代史.epub"), 41)
+        self.assertEqual(
+            self.store.get_page("yxt", "Mathematics.local::中国近代史.epub"), 41
+        )
 
 
 class TestLibraryTxt(unittest.TestCase):
@@ -51,11 +106,26 @@ class TestLibraryTxt(unittest.TestCase):
     def test_list_books_filters_extensions(self) -> None:
         (self.lib_dir / "a.txt").write_text("hello", encoding="utf-8")
         (self.lib_dir / "b.pdf").write_bytes(b"%PDF-1.4\n")
-        (self.lib_dir / "skip.md").write_text("no", encoding="utf-8")
+        (self.lib_dir / "c.md").write_text("# title\n", encoding="utf-8")
+        (self.lib_dir / "skip.docx").write_bytes(b"no")
         books = library.list_books(self.lib_dir)
-        self.assertEqual(len(books), 2)
+        self.assertEqual(len(books), 3)
         self.assertEqual(books[0].name, "a.txt")
         self.assertEqual(books[1].name, "b.pdf")
+        self.assertEqual(books[2].name, "c.md")
+
+    def test_load_md_as_plain_text(self) -> None:
+        path = self.lib_dir / "notes.md"
+        path.write_text("# Hello\n\nworld " * 200, encoding="utf-8")
+        old = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 500
+        try:
+            doc = library.load_book(path)
+            self.assertEqual(doc.title, "notes")
+            self.assertGreater(len(doc.pages), 1)
+            self.assertTrue(doc.pages[0].startswith("# Hello"))
+        finally:
+            library.LIBRARY_PAGE_CHARS = old
 
     def test_load_txt_splits_pages(self) -> None:
         path = self.lib_dir / "long.txt"
@@ -99,6 +169,19 @@ class TestLibraryTxt(unittest.TestCase):
         catalog = library.list_books(self.lib_dir)
         self.assertEqual(library.search_catalog(catalog, ""), catalog)
         self.assertEqual(library.search_catalog(catalog, "   "), catalog)
+
+
+class TestLibrarySearchBook(unittest.TestCase):
+    def test_search_book_returns_page_snippets(self) -> None:
+        doc = library.BookDocument(
+            title="demo",
+            pages=["alpha foo bar", "nothing here", "foo again"],
+            source_path=Path("demo.txt"),
+        )
+        hits = library.search_book(doc, "foo")
+        self.assertEqual([h[0] for h in hits], [0, 2])
+        self.assertIn("foo", hits[0][1])
+        self.assertEqual(library.search_book(doc, "missing"), [])
 
 
 class TestLibraryHtml(unittest.TestCase):
@@ -278,6 +361,149 @@ class TestLibraryPdfExtract(unittest.TestCase):
         idx = full.find("直播时没出")
         self.assertGreaterEqual(idx, 0)
         self.assertEqual(full[idx : idx + len(phrase)], phrase)
+
+
+class TestFederatedCatalog(unittest.TestCase):
+    def test_merge_union_sorts_and_indexes(self) -> None:
+        local = [
+            library.BookEntry(1, "zeta.txt", "txt", 10, Path("/z")),
+            library.BookEntry(2, "alpha.txt", "txt", 20, Path("/a")),
+        ]
+        remote = {
+            "node-b": [
+                {"name": "alpha.txt", "ext": "txt", "size_bytes": 99},
+                {"name": "beta.md", "ext": "md", "size_bytes": 5},
+            ],
+            "node-c": [{"name": "gamma.pdf", "ext": "pdf", "size_bytes": 1000}],
+        }
+        catalog = library.merge_federated_catalog(local, remote)
+        names = [(it.name, it.origin) for it in catalog]
+        self.assertEqual(
+            names,
+            [
+                ("alpha.txt", ""),
+                ("alpha.txt", "node-b"),
+                ("beta.md", "node-b"),
+                ("gamma.pdf", "node-c"),
+                ("zeta.txt", ""),
+            ],
+        )
+        self.assertEqual([it.index for it in catalog], [1, 2, 3, 4, 5])
+        self.assertTrue(catalog[1].is_remote)
+        self.assertFalse(catalog[0].is_remote)
+
+    def test_resolve_prefers_local_then_name_at_node(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [library.BookEntry(1, "same.txt", "txt", 1, Path("/s"))],
+            {"peer": [{"name": "same.txt", "ext": "txt", "size_bytes": 2}]},
+        )
+        local = library.resolve_catalog_item("same.txt", catalog)
+        assert local is not None
+        self.assertEqual(local.origin, "")
+        remote = library.resolve_catalog_item("same.txt@peer", catalog)
+        assert remote is not None
+        self.assertEqual(remote.origin, "peer")
+        by_idx = library.resolve_catalog_item("2", catalog)
+        assert by_idx is not None
+        self.assertEqual(by_idx.origin, "peer")
+
+    def test_search_catalog_items_matches_origin(self) -> None:
+        catalog = library.merge_federated_catalog(
+            [],
+            {"math": [{"name": "calc.txt", "ext": "txt", "size_bytes": 3}]},
+        )
+        hits = library.search_catalog_items(catalog, "math")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "calc.txt")
+
+
+class TestLibraryIsolatedLoad(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib_dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_txt_stays_in_process(self) -> None:
+        path = self.lib_dir / "note.txt"
+        path.write_text("hello isolated", encoding="utf-8")
+        doc = library.load_book_isolated(path)
+        self.assertEqual(doc.title, "note")
+        self.assertIn("hello isolated", doc.pages[0])
+
+    def test_epub_uses_subprocess(self) -> None:
+        path = self.lib_dir / "demo.epub"
+        path.write_bytes(b"PK\x03\x04fake")
+        calls: list[list[str]] = []
+
+        class FakeProc:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "title": "demo",
+                        "pages": ["page one", "page two"],
+                        "source_path": str(path),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            doc = library.load_book_isolated(path, timeout=30)
+        self.assertEqual(doc.title, "demo")
+        self.assertEqual(doc.pages, ["page one", "page two"])
+        self.assertTrue(calls)
+        self.assertIn("-c", calls[0])
+
+    def test_subprocess_error_surfaces(self) -> None:
+        path = self.lib_dir / "bad.epub"
+        path.write_bytes(b"nope")
+
+        class FakeProc:
+            returncode = 1
+            stderr = b"boom"
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[-1])
+            out.write_text(
+                json.dumps({"ok": False, "error": "RuntimeError: boom"}),
+                encoding="utf-8",
+            )
+            return FakeProc()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                library.load_book_isolated(path)
+        self.assertIn("boom", str(ctx.exception))
+
+
+class TestWrapOutputLines(unittest.TestCase):
+    def test_splits_before_utf8_byte_budget(self) -> None:
+        # 30 CJK chars = 90 UTF-8 bytes; must split under default 78-byte budget.
+        line = "[*] " + ("测" * 30) + "\n"
+        parts = library.wrap_output_lines(line)
+        self.assertGreater(len(parts), 1)
+        joined = "".join(p.rstrip("\n") for p in parts)
+        self.assertEqual(joined, line.rstrip("\n"))
+        for part in parts:
+            self.assertLessEqual(
+                len(part.rstrip("\n").encode("utf-8")),
+                library.LIBRARY_WRAP_BYTES,
+            )
+
+    def test_short_line_unchanged(self) -> None:
+        line = "[*] short\n"
+        self.assertEqual(library.wrap_output_lines(line), [line])
 
 
 if __name__ == "__main__":

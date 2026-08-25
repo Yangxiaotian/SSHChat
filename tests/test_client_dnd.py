@@ -36,6 +36,45 @@ class ClientDndTest(unittest.TestCase):
         client_mod._prepare_outgoing("/game show")
         self.assertTrue(client_mod._game_bypass_active())
 
+    def test_show_peek_clears_when_opponent_turn_line_arrives(self) -> None:
+        """Black peeks with /game show while red to move; show ends with opponent turn."""
+        client_mod._GAME_BYPASS_UNTIL = 0.0
+        client_mod._prepare_outgoing("/game show")
+        self.assertTrue(client_mod._game_bypass_active())
+        # Oriented board body still visible during peek.
+        self.assertIsNone(
+            client_mod._dnd_system_action(
+                "xiangqi 对局（playing）  红：alice   黑：bob", "bob"
+            )
+        )
+        # Trailing「轮到 红方 …」must end the peek so waiting is quiet again.
+        self.assertEqual(
+            client_mod._dnd_system_action("轮到 红方 alice 走子", "bob"),
+            "",
+        )
+        self.assertFalse(client_mod._game_bypass_active())
+        self.assertEqual(
+            client_mod._dnd_system_action("楚河汉界", "bob"),
+            "",
+        )
+
+    def test_my_turn_reopens_board_after_opponent_move(self) -> None:
+        """After peek bypass is gone, my-turn must reopen so oriented board displays."""
+        client_mod._GAME_BYPASS_UNTIL = 0.0
+        self.assertEqual(
+            client_mod._dnd_system_action("轮到 黑方 bob 走子", "bob"),
+            "turn_hint",
+        )
+        self.assertTrue(client_mod._game_bypass_active())
+        self.assertIsNone(
+            client_mod._dnd_system_action(
+                "xiangqi 对局（playing）  红：alice   黑：bob", "bob"
+            )
+        )
+        self.assertIsNone(
+            client_mod._dnd_system_action("  （己方在下方）", "bob")
+        )
+
     def test_reading_content_not_suppressed(self) -> None:
         self.assertTrue(client_mod._is_reading_content_line("--- 中文 ---"))
         self.assertTrue(client_mod._is_reading_content_line("1. [BBC] Example headline"))
