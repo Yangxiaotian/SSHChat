@@ -405,8 +405,23 @@ class CanvasStore:
             if not isinstance(eid, str) or not eid:
                 continue
             old = by_id.get(eid)
-            if old is None or self._element_rank(el) >= self._element_rank(old):
+            if old is None:
                 by_id[eid] = el
+                continue
+            new_rank = self._element_rank(el)
+            old_rank = self._element_rank(old)
+            if new_rank > old_rank:
+                by_id[eid] = el
+            elif new_rank < old_rank:
+                by_id[eid] = old
+            else:
+                # Tie: prefer deleted tombstone so eraser sync is not undone.
+                if el.get("isDeleted") and not old.get("isDeleted"):
+                    by_id[eid] = el
+                elif old.get("isDeleted") and not el.get("isDeleted"):
+                    by_id[eid] = old
+                else:
+                    by_id[eid] = el
         # Keep deleted markers so peers can tombstone; cap list size.
         merged = list(by_id.values())
         if len(merged) > MAX_ELEMENTS:

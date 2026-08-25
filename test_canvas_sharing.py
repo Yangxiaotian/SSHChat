@@ -109,6 +109,26 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(payload["elements"][0]["width"], 99)
         self.assertEqual(payload["elements"][0]["version"], 2)
 
+    def test_eraser_tombstone_wins_over_live_copy(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="erase"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        self.store.apply_scene(at, a_ticket, elements=[_el("stroke1", 1)])
+        # Alice erases: same or higher version with isDeleted.
+        self.store.apply_scene(
+            at, a_ticket, elements=[_el("stroke1", 2, isDeleted=True)]
+        )
+        # Bob's stale non-deleted copy must not resurrect the stroke.
+        self.store.apply_scene(bt, b_ticket, elements=[_el("stroke1", 2, isDeleted=False)])
+        payload, _ = self.store.sync_since(at, a_ticket, 0)
+        self.assertEqual(len(payload["elements"]), 1)
+        self.assertTrue(payload["elements"][0]["isDeleted"])
+
     def test_clear_and_close(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="art"
@@ -214,6 +234,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("@excalidraw/excalidraw", page)
         self.assertIn("external=react,react-dom", page)
         self.assertIn("__SSHCHAT_KEY", page)
+        self.assertIn("getSceneElementsIncludingDeleted", page)
         self.assertIn("/scene", page)
         self.assertIn("X-Canvas-Ticket", page)
         self.assertIn("&ticket=", page)

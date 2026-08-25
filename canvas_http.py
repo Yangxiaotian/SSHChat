@@ -368,6 +368,25 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         return version * 1e13 + nonce;
     }}
 
+    function liveScene() {{
+        if (!api) return {{ elements: [], files: {{}} }};
+        // Must include deleted tombstones — eraser sets isDeleted; getSceneElements()
+        // omits them, so a push would leave the old non-deleted copy on the server
+        // and the next sync would resurrect erased strokes.
+        const elements = api.getSceneElementsIncludingDeleted
+            ? api.getSceneElementsIncludingDeleted()
+            : (api.getSceneElements ? api.getSceneElements() : []);
+        const files = api.getFiles ? api.getFiles() : {{}};
+        return {{ elements: elements || [], files: files || {{}} }};
+    }}
+
+    function preferDeletedOnTie(a, b) {{
+        // Same version/nonce: keep the deleted copy so an erase is not undone.
+        if (a && a.isDeleted && !(b && b.isDeleted)) return a;
+        if (b && b.isDeleted && !(a && a.isDeleted)) return b;
+        return b || a;
+    }}
+
     function mergeElements(base, incoming) {{
         // Same id/version rule as server: higher version (then nonce) wins.
         const byId = Object.create(null);
@@ -377,16 +396,17 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         for (const el of incoming || []) {{
             if (!el || typeof el.id !== 'string' || !el.id) continue;
             const old = byId[el.id];
-            if (!old || elementRank(el) >= elementRank(old)) byId[el.id] = el;
+            if (!old) {{
+                byId[el.id] = el;
+                continue;
+            }}
+            const ra = elementRank(el);
+            const rb = elementRank(old);
+            if (ra > rb) byId[el.id] = el;
+            else if (ra < rb) byId[el.id] = old;
+            else byId[el.id] = preferDeletedOnTie(old, el);
         }}
         return Object.keys(byId).map((k) => byId[k]);
-    }}
-
-    function liveScene() {{
-        if (!api) return {{ elements: [], files: {{}} }};
-        const elements = api.getSceneElements ? api.getSceneElements() : [];
-        const files = api.getFiles ? api.getFiles() : {{}};
-        return {{ elements: elements || [], files: files || {{}} }};
     }}
 
     async function auth() {{
