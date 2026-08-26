@@ -48,8 +48,6 @@ from sshchat_client_util import (
     save_client_config,
 )
 
-_IS_AQUA = sys.platform == "darwin"
-
 # Strip common ANSI/OSC sequences so Tk Text stays readable (prompt_toolkit may emit CSI).
 _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -1866,6 +1864,8 @@ class SSHChatGUI:
         self._suggest_items: list[str] = []
         self._suggest_focus_job: str | int | None = None
         self._click_refresh_job: str | int | None = None
+        self._room_list_refresh_job: str | int | None = None
+        self._room_select_guard = False
         self._canvas_win: CanvasWebShell | None = None
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
@@ -1978,6 +1978,10 @@ class SSHChatGUI:
         ttk.Label(left, text="频道").pack(anchor="w")
         self.room_list = tk.Listbox(left, width=20, height=18, exportselection=False)
         self.room_list.pack(fill=tk.Y, expand=True)
+        # Aqua: <<ListboxSelect>> alone often needs a focus click first; drive
+        # switches from the pointer y via nearest() so one click always works.
+        self.room_list.bind("<ButtonPress-1>", lambda _e: self.room_list.focus_set(), add="+")
+        self.room_list.bind("<ButtonRelease-1>", self._on_room_list_click, add="+")
         self.room_list.bind("<<ListboxSelect>>", self._on_room_selected)
 
         self.log = scrolledtext.ScrolledText(
@@ -2090,16 +2094,15 @@ class SSHChatGUI:
 
     def _on_root_focus_in(self, event=None) -> None:
         # FocusIn propagates from children; only refresh when the toplevel activates.
+        # Never pulse/lift here — that steals the click that just activated the window.
         if event is not None and event.widget is not self.root:
             return
-        self._schedule_click_target_refresh(delay_ms=50, pulse=_IS_AQUA)
+        self._schedule_click_target_refresh(delay_ms=80)
 
     def _on_aux_window_closed(self) -> None:
-        self._schedule_click_target_refresh(pulse=_IS_AQUA)
+        self._schedule_click_target_refresh(delay_ms=40)
 
-    def _schedule_click_target_refresh(
-        self, delay_ms: int = 0, *, pulse: bool = False
-    ) -> None:
+    def _schedule_click_target_refresh(self, delay_ms: int = 0) -> None:
         if self._click_refresh_job is not None:
             try:
                 self.root.after_cancel(self._click_refresh_job)
@@ -2108,7 +2111,7 @@ class SSHChatGUI:
 
         def _run() -> None:
             self._click_refresh_job = None
-            self._refresh_click_targets(pulse_topmost=pulse)
+            self._refresh_click_targets()
 
         try:
             if delay_ms <= 0:
@@ -2118,21 +2121,16 @@ class SSHChatGUI:
         except tk.TclError:
             pass
 
-    def _refresh_click_targets(self, *, pulse_topmost: bool = False) -> None:
-        """Aqua/Win Tk sometimes keep stale click targets until geometry changes."""
+    def _refresh_click_targets(self) -> None:
+        """Aqua sometimes keeps stale click targets until geometry is reasserted.
+
+        Avoid lift()/topmost here — those disrupt Listbox/button hit testing worse
+        than they help when called after every focus or chat redraw.
+        """
         try:
             self.root.update_idletasks()
             geom = self.root.winfo_geometry()
             self.root.geometry(geom)
-            self.root.lift()
-            if pulse_topmost and _IS_AQUA:
-                self.root.attributes("-topmost", True)
-                self.root.after(
-                    80,
-                    lambda: self.root.attributes("-topmost", False)
-                    if self.root.winfo_exists()
-                    else None,
-                )
         except tk.TclError:
             pass
 
@@ -2162,9 +2160,9 @@ class SSHChatGUI:
             self.root.update_idletasks()
         except tk.TclError:
             return
-        # Avoid repeated focus_force — on Aqua it can leave hit-testing stale
-        # until the user manually moves the window (the symptom we are fixing).
-        self._refresh_click_targets(pulse_topmost=_IS_AQUA)
+        # Avoid focus_force / lift / topmost — on Aqua they leave hit-testing
+        # stale until the user manually moves the window.
+        self._refresh_click_targets()
         try:
             if self.btn_connect.instate(("disabled",)):
                 self.btn_connect.state(("!disabled",))
@@ -2198,14 +2196,46 @@ class SSHChatGUI:
     def _refresh_room_list(self) -> None:
         if not hasattr(self, "room_list"):
             return
-        self.room_list.delete(0, tk.END)
-        for room in self._rooms_order:
-            self.room_list.insert(tk.END, self._room_label(room))
-        if self._active_room in self._rooms_order:
-            idx = self._rooms_order.index(self._active_room)
-            self.room_list.selection_clear(0, tk.END)
-            self.room_list.selection_set(idx)
-            self.room_list.activate(idx)
+        labels = [self._room_label(room) for room in self._rooms_order]
+        self._room_select_guard = True
+        try:
+            size = int(self.room_list.size())
+            # Prefer in-place label updates: full delete/rebuild on Aqua eats
+            # clicks that land while unread badges are changing.
+            if size == len(labels):
+                for i, label in enumerate(labels):
+                    if self.room_list.get(i) != label:
+                        self.room_list.delete(i)
+                        self.room_list.insert(i, label)
+            else:
+                self.room_list.delete(0, tk.END)
+                for label in labels:
+                    self.room_list.insert(tk.END, label)
+            if self._active_room in self._rooms_order:
+                idx = self._rooms_order.index(self._active_room)
+                self.room_list.selection_clear(0, tk.END)
+                self.room_list.selection_set(idx)
+                self.room_list.activate(idx)
+                self.room_list.see(idx)
+        except tk.TclError:
+            pass
+        finally:
+            self._room_select_guard = False
+
+    def _schedule_room_list_refresh(self) -> None:
+        if self._room_list_refresh_job is not None:
+            try:
+                self.root.after_cancel(self._room_list_refresh_job)
+            except (tk.TclError, ValueError):
+                pass
+        try:
+            self._room_list_refresh_job = self.root.after(40, self._flush_room_list_refresh)
+        except tk.TclError:
+            self._room_list_refresh_job = None
+
+    def _flush_room_list_refresh(self) -> None:
+        self._room_list_refresh_job = None
+        self._refresh_room_list()
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2222,7 +2252,6 @@ class SSHChatGUI:
                 self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
-        self._schedule_click_target_refresh()
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
         if (
@@ -2319,7 +2348,7 @@ class SSHChatGUI:
                 win.destroy()
             except tk.TclError:
                 pass
-            self._schedule_click_target_refresh(pulse=_IS_AQUA)
+            self._schedule_click_target_refresh(delay_ms=40)
 
         items: list[tuple[str, str, str]] = []
         items.append((f"当前房间 #{self._active_room}", "room", ""))
@@ -2393,10 +2422,22 @@ class SSHChatGUI:
         if items:
             lb.selection_set(0)
 
+    def _on_room_list_click(self, event) -> None:
+        try:
+            idx = int(self.room_list.nearest(event.y))
+        except (tk.TclError, TypeError, ValueError):
+            return
+        self._activate_room_at(idx)
+
     def _on_room_selected(self, _event=None) -> None:
+        if self._room_select_guard:
+            return
         if not self.room_list.curselection():
             return
         idx = int(self.room_list.curselection()[0])
+        self._activate_room_at(idx)
+
+    def _activate_room_at(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._rooms_order):
             return
         room = self._rooms_order[idx]
@@ -2456,7 +2497,7 @@ class SSHChatGUI:
             self.log.configure(state=tk.DISABLED)
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
-            self._refresh_room_list()
+            self._schedule_room_list_refresh()
 
     def _format_file_size(self, size: int) -> str:
         if size < 1024:
@@ -2621,7 +2662,7 @@ class SSHChatGUI:
                     pass
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
-            self._refresh_room_list()
+            self._schedule_room_list_refresh()
 
     def _save_media_as(self, path: Path, name: str) -> None:
         if not path.is_file():
