@@ -148,6 +148,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        CommandUsage.init(this)
         keys = DeviceKeyStore.getOrCreate(this)
         binding.etHost.setText(ServerSettings.loadHost(this))
         binding.etPort.setText(ServerSettings.loadPort(this).toString())
@@ -213,6 +214,17 @@ class MainActivity : AppCompatActivity() {
                 event.action == android.view.KeyEvent.ACTION_DOWN
             if (fromIme || fromEnter) {
                 send()
+                true
+            } else {
+                false
+            }
+        }
+        binding.etDraft.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_TAB &&
+                event.action == android.view.KeyEvent.ACTION_DOWN &&
+                binding.etDraft.text?.toString().orEmpty().startsWith("/")
+            ) {
+                applyTabComplete()
                 true
             } else {
                 false
@@ -744,6 +756,7 @@ class MainActivity : AppCompatActivity() {
         if (text == lastSendText && now - lastSendAt < 500L) return
         lastSendText = text
         lastSendAt = now
+        if (text.startsWith("/")) CommandUsage.record(text)
         binding.etDraft.setText("")
         val cmd = text.trim().lowercase()
         if (cmd == "/cls" || cmd == "/clear") {

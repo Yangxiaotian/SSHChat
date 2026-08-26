@@ -331,6 +331,7 @@ final class ChatViewModel: ObservableObject {
         if text == lastSendText && now.timeIntervalSince(lastSendAt) < 0.5 { return }
         lastSendText = text
         lastSendAt = now
+        if text.hasPrefix("/") { CommandUsage.record(text) }
         draft = ""
         suggestions = []
         let cmd = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1247,11 +1248,16 @@ struct ContentView: View {
                     .onChange(of: draftFocused) { _, focused in
                         if focused { showPlusPanel = false }
                     }
+                    .onKeyPress(.tab) {
+                        guard model.draft.hasPrefix("/") else { return .ignored }
+                        model.applyTab()
+                        return .handled
+                    }
 
                 Button("/") { model.insertSlash() }
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(Color(white: 0.2))
-                    .frame(width: 36, height: 40)
+                    .frame(width: 48, height: 40)
                     .disabled(!model.connected)
 
                 Button("Tab") { model.applyTab() }

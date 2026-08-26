@@ -1,5 +1,45 @@
 import Foundation
 
+enum CommandUsage {
+    private static let storageKey = "sshchat.command-usage:v1"
+
+    private static var counts: [String: Int] {
+        get { UserDefaults.standard.dictionary(forKey: storageKey) as? [String: Int] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: storageKey) }
+    }
+
+    static func record(_ text: String) {
+        guard text.hasPrefix("/") else { return }
+        let parts = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return }
+        var c = counts
+        var path = ""
+        for (i, part) in parts.enumerated() {
+            path = i == 0 ? part : "\(path) \(part)"
+            c[path, default: 0] += 1
+        }
+        counts = c
+    }
+
+    static func count(for key: String) -> Int {
+        counts[key.lowercased()] ?? 0
+    }
+
+    static func sort(_ items: [String], defaultOrder: [String]) -> [String] {
+        items.sorted { a, b in
+            let ca = count(for: a)
+            let cb = count(for: b)
+            if ca != cb { return ca > cb }
+            let ia = defaultOrder.firstIndex(of: a) ?? Int.max
+            let ib = defaultOrder.firstIndex(of: b) ?? Int.max
+            return ia < ib
+        }
+    }
+}
+
 enum CommandCompletions {
     private static let top = [
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
@@ -32,10 +72,15 @@ enum CommandCompletions {
         "/game undo": ["accept", "reject", "cancel"],
     ]
 
+    private static func sorted(_ items: [String], defaultOrder: [String]) -> [String] {
+        guard !items.isEmpty else { return items }
+        return CommandUsage.sort(items, defaultOrder: defaultOrder)
+    }
+
     static func completions(_ text: String) -> [String] {
         guard text.hasPrefix("/") else { return [] }
         if !text.contains(" ") {
-            return top.filter { $0.hasPrefix(text) }
+            return sorted(top.filter { $0.hasPrefix(text) }, defaultOrder: top)
         }
 
         let trailingSpace = text.hasSuffix(" ")
@@ -47,21 +92,25 @@ enum CommandCompletions {
         let cmd = parts[0].lowercased()
 
         if parts.count == 1 && !trailingSpace {
-            return top.filter { $0.hasPrefix(parts[0]) }
+            return sorted(top.filter { $0.hasPrefix(parts[0]) }, defaultOrder: top)
         }
 
         if parts.count >= 2 {
             let sub = parts[1].lowercased()
             let nestedItems = nested["\(cmd) \(sub)"] ?? []
             if !nestedItems.isEmpty {
+                let nestedFull = nestedItems.map { "\(parts[0]) \(parts[1]) \($0)" }
                 if trailingSpace && parts.count == 2 {
-                    return nestedItems.map { "\(parts[0]) \(parts[1]) \($0)" }
+                    return sorted(nestedFull, defaultOrder: nestedFull)
                 }
                 if parts.count >= 3 && !trailingSpace {
                     let prefix = parts[2]
-                    return nestedItems
-                        .filter { $0.hasPrefix(prefix) }
-                        .map { "\(parts[0]) \(parts[1]) \($0)" }
+                    return sorted(
+                        nestedItems
+                            .filter { $0.hasPrefix(prefix) }
+                            .map { "\(parts[0]) \(parts[1]) \($0)" },
+                        defaultOrder: nestedFull
+                    )
                 }
                 if !(parts.count == 2 && !trailingSpace) {
                     return []
@@ -71,12 +120,16 @@ enum CommandCompletions {
 
         let list = subs[cmd] ?? []
         if list.isEmpty { return [] }
+        let subsFull = list.map { "\(parts[0]) \($0)" }
         if trailingSpace && parts.count == 1 {
-            return list.map { "\(parts[0]) \($0)" }
+            return sorted(subsFull, defaultOrder: subsFull)
         }
         if parts.count >= 2 && !trailingSpace {
             let prefix = parts[1]
-            return list.filter { $0.hasPrefix(prefix) }.map { "\(parts[0]) \($0)" }
+            return sorted(
+                list.filter { $0.hasPrefix(prefix) }.map { "\(parts[0]) \($0)" },
+                defaultOrder: subsFull
+            )
         }
         return []
     }

@@ -33,10 +33,15 @@ object CommandCompletions {
         ("/game" to "undo") to listOf("accept", "reject", "cancel"),
     )
 
+    private fun sorted(items: List<String>, defaultOrder: List<String>): List<String> {
+        if (items.isEmpty()) return items
+        return CommandUsage.sort(items, defaultOrder)
+    }
+
     fun completions(text: String): List<String> {
         if (!text.startsWith("/")) return emptyList()
         if (" " !in text) {
-            return TOP.filter { it.startsWith(text) }
+            return sorted(TOP.filter { it.startsWith(text) }, TOP)
         }
 
         val parts = text.trimEnd().split(Regex("\\s+")).filter { it.isNotEmpty() }
@@ -45,21 +50,23 @@ object CommandCompletions {
         val cmd = parts[0].lowercase()
 
         if (parts.size == 1 && !trailingSpace) {
-            return TOP.filter { it.startsWith(parts[0]) }
+            return sorted(TOP.filter { it.startsWith(parts[0]) }, TOP)
         }
 
         if (parts.size >= 2) {
             val sub = parts[1].lowercase()
             val nestedItems = NESTED[cmd to sub].orEmpty()
             if (nestedItems.isNotEmpty()) {
+                val nestedFull = nestedItems.map { "${parts[0]} ${parts[1]} $it" }
                 if (trailingSpace && parts.size == 2) {
-                    return nestedItems.map { "${parts[0]} ${parts[1]} $it" }
+                    return sorted(nestedFull, nestedFull)
                 }
                 if (parts.size >= 3 && !trailingSpace) {
                     val prefix = parts[2]
-                    return nestedItems
-                        .filter { it.startsWith(prefix) }
-                        .map { "${parts[0]} ${parts[1]} $it" }
+                    return sorted(
+                        nestedItems.filter { it.startsWith(prefix) }.map { "${parts[0]} ${parts[1]} $it" },
+                        nestedFull,
+                    )
                 }
                 if (!(parts.size == 2 && !trailingSpace)) {
                     return emptyList()
@@ -69,12 +76,16 @@ object CommandCompletions {
 
         val subs = SUBS[cmd].orEmpty()
         if (subs.isEmpty()) return emptyList()
+        val subsFull = subs.map { "${parts[0]} $it" }
         if (trailingSpace && parts.size == 1) {
-            return subs.map { "${parts[0]} $it" }
+            return sorted(subsFull, subsFull)
         }
         if (parts.size >= 2 && !trailingSpace) {
             val prefix = parts[1]
-            return subs.filter { it.startsWith(prefix) }.map { "${parts[0]} $it" }
+            return sorted(
+                subs.filter { it.startsWith(prefix) }.map { "${parts[0]} $it" },
+                subsFull,
+            )
         }
         return emptyList()
     }
