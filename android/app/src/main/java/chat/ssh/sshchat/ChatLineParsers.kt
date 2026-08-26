@@ -41,6 +41,11 @@ object ChatLineParsers {
     private val roomChatLoose = Regex("""\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
     private val timePrefix = Regex("""^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+""")
     private val leadingGarbage = Regex("""^[\uFFFD\u25A1\uFEFF\u00A0\s]+""")
+    /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`). */
+    private val ptyCrumbsBeforeTag =
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")
+    private val ptyNoiseOnlyPrefix =
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+$""")
     private val systemSenders = setOf("+", "-", "*", "!")
     private val ignoredSenders = setOf("OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT")
 
@@ -57,6 +62,11 @@ object ChatLineParsers {
         }
         if (t.startsWith(">")) {
             t = t.dropWhile { it == '>' || it == ' ' }
+        }
+        while (true) {
+            val nxt = ptyCrumbsBeforeTag.replaceFirst(t, "")
+            if (nxt == t) break
+            t = nxt
         }
         return t
     }
@@ -176,6 +186,18 @@ object ChatLineParsers {
      */
     fun parseGameStarBody(line: String): String? {
         val t = normalizeForParse(line)
+        matchGameStarBody(t)?.let { return it }
+        val idx = t.indexOf("[*]")
+        if (idx > 0) {
+            val prefix = t.substring(0, idx)
+            if (ptyNoiseOnlyPrefix.matches(prefix)) {
+                return matchGameStarBody(t.substring(idx))
+            }
+        }
+        return null
+    }
+
+    private fun matchGameStarBody(t: String): String? {
         gameStarRoom.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         gameStarBare.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         return null
@@ -222,6 +244,14 @@ object ChatLineParsers {
         val chat = parseChat(line) ?: run {
             if (looksLikeGameBoardContent(line)) {
                 return DisplayKind.BoardLine(line.trimEnd())
+            }
+            // Never leave a raw [*] prefix on a lonely gray system row (/lib show glitch).
+            val t = normalizeForParse(line)
+            if (t.startsWith("[*]")) {
+                val after = t.removePrefix("[*]")
+                return DisplayKind.BoardLine(
+                    if (after.startsWith(" ")) after.substring(1) else after,
+                )
             }
             return DisplayKind.System(line)
         }

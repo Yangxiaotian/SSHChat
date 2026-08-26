@@ -221,9 +221,8 @@ final class ChatViewModel: ObservableObject {
                     username: user,
                     privateSeed: keys.privateSeed,
                     onLine: { [weak self] line, serverBell in
-                        Task { @MainActor in
-                            self?.handleIncoming(line, serverBell: serverBell)
-                        }
+                        // Already hopped to MainActor in SSHSession.emitLine.
+                        self?.handleIncoming(line, serverBell: serverBell)
                     },
                     onStatus: { [weak self] s in
                         Task { @MainActor in

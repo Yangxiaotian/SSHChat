@@ -175,6 +175,15 @@ enum ChatLineParsers {
         "OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT",
     ]
 
+    /// CSI crumbs left when PTY/prompt_toolkit mangles ESC → `?` (e.g. `?[2K`).
+    private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
+    )
+    /// Entire prefix before `[*]` is only CSI crumbs (not a nick like `[alice]`).
+    private static let ptyNoiseOnlyPrefix = try! NSRegularExpression(
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+$"#
+    )
+
     /// Strip local clock / prompt prefixes before parsing chat.
     static func normalizeForParse(_ line: String) -> String {
         var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +199,14 @@ enum ChatLineParsers {
         }
         if t.hasPrefix(">") {
             t = String(t.drop(while: { $0 == ">" || $0 == " " }))
+        }
+        // Drop CSI crumbs stuck before [*] / [#room] so /lib show lines stay board rows.
+        while true {
+            let range = NSRange(t.startIndex..., in: t)
+            guard let m = ptyCrumbsBeforeTag.firstMatch(in: t, range: range),
+                  let r = Range(m.range, in: t)
+            else { break }
+            t = String(t[r.upperBound...])
         }
         return t
     }
@@ -322,6 +339,19 @@ enum ChatLineParsers {
     /// Mobile SSH sessions run client.py, which rewrites `[#room] [*]` → `[*]`.
     static func parseGameStarBody(_ line: String) -> String? {
         let t = normalizeForParse(line)
+        if let body = matchGameStarBody(t) { return body }
+        // Last resort: CSI-crumb prefix before [*] (never a real [nick] chat line).
+        if let star = t.range(of: "[*]"), star.lowerBound > t.startIndex {
+            let prefix = String(t[..<star.lowerBound])
+            let pr = NSRange(prefix.startIndex..., in: prefix)
+            if ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil {
+                return matchGameStarBody(String(t[star.lowerBound...]))
+            }
+        }
+        return nil
+    }
+
+    private static func matchGameStarBody(_ t: String) -> String? {
         let range = NSRange(t.startIndex..., in: t)
         if let m = gameStarRoom.firstMatch(in: t, range: range) {
             if m.range(at: 1).location == NSNotFound { return "" }
@@ -422,6 +452,16 @@ enum ChatLineParsers {
         }
         if looksLikeGameBoardContent(line) {
             return .boardLine(line.trimmingCharacters(in: .newlines))
+        }
+        // Never leave a raw [*] prefix on a lonely gray system row (/lib show glitch).
+        let t = normalizeForParse(line)
+        if t.hasPrefix("[*]") {
+            let after = t.dropFirst(3)
+            if after.isEmpty { return .boardLine("") }
+            if after.first == " " {
+                return .boardLine(String(after.dropFirst()))
+            }
+            return .boardLine(String(after))
         }
         return .system(line)
     }

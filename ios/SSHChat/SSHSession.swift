@@ -57,12 +57,14 @@ actor SSHSession {
                         switch chunk {
                         case .stdout(let bytes), .stderr(let bytes):
                             for line in lines.append(bytes) {
-                                Self.emitLine(line, onLine: onLine)
+                                // Await MainActor so /lib show lines stay in order (unstructured
+                                // Task { @MainActor } can reorder and orphan a [*] system row).
+                                await Self.emitLine(line, onLine: onLine)
                             }
                         }
                     }
                     if let rest = lines.finish() {
-                        Self.emitLine(rest, onLine: onLine)
+                        await Self.emitLine(rest, onLine: onLine)
                     }
                 }
                 onDisconnect(nil)
@@ -107,14 +109,16 @@ actor SSHSession {
     private static func emitLine(
         _ raw: String,
         onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void
-    ) {
+    ) async {
         // OSC / title sequences are BEL-terminated (`ESC ] … BEL`). Strip those first so
         // their BEL is not mistaken for client.py's peer-chat alert bell.
         let withoutOSC = stripOSC(raw)
         let serverBell = withoutOSC.contains("\u{0007}")
         let cleaned = cleanLine(withoutOSC)
         guard hasVisibleContent(cleaned) else { return }
-        onLine(cleaned, serverBell)
+        await MainActor.run {
+            onLine(cleaned, serverBell)
+        }
     }
 
     /// Remove ESC] … BEL (and ESC] … ST) operating-system commands.
