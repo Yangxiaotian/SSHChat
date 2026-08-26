@@ -48,6 +48,8 @@ from sshchat_client_util import (
     save_client_config,
 )
 
+_IS_AQUA = sys.platform == "darwin"
+
 # Strip common ANSI/OSC sequences so Tk Text stays readable (prompt_toolkit may emit CSI).
 _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -745,10 +747,12 @@ class ImagePreviewWindow:
         name: str,
         *,
         on_save: Any,
+        on_close: Any = None,
     ) -> None:
         self.path = path
         self.name = name
         self.on_save = on_save
+        self._on_close = on_close
         self._pil = _pil_rgb_image(path)
         if self._pil is None:
             raise RuntimeError(_LAST_PIL_ERROR or "无法解码图片")
@@ -826,6 +830,12 @@ class ImagePreviewWindow:
             self.win.destroy()
         except tk.TclError:
             pass
+        cb = self._on_close
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _on_configure(self, _event=None) -> None:
         return
@@ -1026,8 +1036,9 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
 class CanvasWebShell:
     """Compact controller for the Excalidraw app window (maximize / reopen / close)."""
 
-    def __init__(self, master: tk.Misc, url: str) -> None:
+    def __init__(self, master: tk.Misc, url: str, *, on_close: Any = None) -> None:
         self.url = url
+        self._on_close = on_close
         self._maximized = True
         self.win = tk.Toplevel(master)
         self.win.title("SSHChat 共享画布")
@@ -1142,6 +1153,12 @@ class CanvasWebShell:
             self.win.destroy()
         except tk.TclError:
             pass
+        cb = self._on_close
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
 
 class NativeCanvasWindow:
@@ -1847,8 +1864,8 @@ class SSHChatGUI:
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
-        self._suggest_geom_job: str | int | None = None
         self._suggest_focus_job: str | int | None = None
+        self._click_refresh_job: str | int | None = None
         self._canvas_win: CanvasWebShell | None = None
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
@@ -1865,7 +1882,7 @@ class SSHChatGUI:
         self._apply_profile(load_client_config(self.config_path))
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
-        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
         # bind_all: root-only ButtonPress never fires for ttk.Button children, so
         # orphaned suggestion chrome would keep eating clicks until the window moves.
         self.root.bind_all("<ButtonPress-1>", self._on_any_button_press, add="+")
@@ -1873,7 +1890,6 @@ class SSHChatGUI:
         self.root.bind("<Command-v>", self._on_paste_file, add="+")
         self.root.bind("<Control-v>", self._on_paste_file, add="+")
         self._is_minimized = False
-        self._last_root_geom = ""
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1988,8 +2004,12 @@ class SSHChatGUI:
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
+        bot.columnconfigure(0, weight=1)
+        self._suggest_slot = ttk.Frame(bot)
+        self._input_row = ttk.Frame(bot)
+        self._input_row.grid(row=1, column=0, sticky="ew")
         self.var_input = tk.StringVar()
-        self.entry = ttk.Entry(bot, textvariable=self.var_input)
+        self.entry = ttk.Entry(self._input_row, textvariable=self.var_input)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.entry.bind("<Return>", self._on_entry_return)
         self.entry.bind("<Tab>", self._on_entry_tab)
@@ -2001,17 +2021,17 @@ class SSHChatGUI:
         self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
         self.entry.bind("<Command-v>", self._on_paste_file, add="+")
         self.entry.bind("<Control-v>", self._on_paste_file, add="+")
-        ttk.Button(bot, text="发送", command=self._send_clicked).pack(
+        ttk.Button(self._input_row, text="发送", command=self._send_clicked).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         self.btn_send_target = ttk.Button(
-            bot, text=self._send_target_label(), command=self._show_send_target_picker
+            self._input_row, text=self._send_target_label(), command=self._show_send_target_picker
         )
         self.btn_send_target.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(bot, text="发文件", command=self._pick_and_send_file).pack(
+        ttk.Button(self._input_row, text="发文件", command=self._pick_and_send_file).pack(
             side=tk.LEFT, padx=(8, 0)
         )
-        ttk.Button(bot, text="清屏", command=self._clear_active_room).pack(
+        ttk.Button(self._input_row, text="清屏", command=self._clear_active_room).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         hint = ttk.Label(
@@ -2038,27 +2058,13 @@ class SSHChatGUI:
             self._is_minimized = False
         self._hide_suggestions()
 
-    def _on_root_configure(self, event=None) -> None:
-        # Only react to the toplevel itself (not child widget configures).
-        if event is not None and event.widget is not self.root:
-            return
-        try:
-            geom = self.root.geometry()
-        except tk.TclError:
-            return
-        if geom == self._last_root_geom:
-            return
-        self._last_root_geom = geom
-        if self._suggest_win is not None:
-            if self._suggest_geom_job is not None:
-                try:
-                    self.root.after_cancel(self._suggest_geom_job)
-                except (tk.TclError, ValueError):
-                    pass
-            self._suggest_geom_job = self.root.after(40, self._reposition_or_hide_suggestions)
-
     def _widget_in_suggestions(self, w) -> bool:
-        if w is self.entry or w is self._suggest_list or w is self._suggest_win:
+        if (
+            w is self.entry
+            or w is self._suggest_list
+            or w is self._suggest_win
+            or w is self._suggest_slot
+        ):
             return True
         if self._suggest_win is None:
             return False
@@ -2082,6 +2088,54 @@ class SSHChatGUI:
             return
         self._hide_suggestions()
 
+    def _on_root_focus_in(self, event=None) -> None:
+        # FocusIn propagates from children; only refresh when the toplevel activates.
+        if event is not None and event.widget is not self.root:
+            return
+        self._schedule_click_target_refresh(delay_ms=50, pulse=_IS_AQUA)
+
+    def _on_aux_window_closed(self) -> None:
+        self._schedule_click_target_refresh(pulse=_IS_AQUA)
+
+    def _schedule_click_target_refresh(
+        self, delay_ms: int = 0, *, pulse: bool = False
+    ) -> None:
+        if self._click_refresh_job is not None:
+            try:
+                self.root.after_cancel(self._click_refresh_job)
+            except (tk.TclError, ValueError):
+                pass
+
+        def _run() -> None:
+            self._click_refresh_job = None
+            self._refresh_click_targets(pulse_topmost=pulse)
+
+        try:
+            if delay_ms <= 0:
+                self._click_refresh_job = self.root.after_idle(_run)
+            else:
+                self._click_refresh_job = self.root.after(delay_ms, _run)
+        except tk.TclError:
+            pass
+
+    def _refresh_click_targets(self, *, pulse_topmost: bool = False) -> None:
+        """Aqua/Win Tk sometimes keep stale click targets until geometry changes."""
+        try:
+            self.root.update_idletasks()
+            geom = self.root.winfo_geometry()
+            self.root.geometry(geom)
+            self.root.lift()
+            if pulse_topmost and _IS_AQUA:
+                self.root.attributes("-topmost", True)
+                self.root.after(
+                    80,
+                    lambda: self.root.attributes("-topmost", False)
+                    if self.root.winfo_exists()
+                    else None,
+                )
+        except tk.TclError:
+            pass
+
     def _on_entry_focus_out(self, _event=None) -> None:
         # Delay so a click on the suggestion list can land first.
         if self._suggest_focus_job is not None:
@@ -2103,15 +2157,6 @@ class SSHChatGUI:
             return
         self._hide_suggestions()
 
-    def _nudge_hit_testing(self) -> None:
-        """Aqua sometimes keeps stale click targets until geometry changes."""
-        try:
-            self.root.update_idletasks()
-            geom = self.root.winfo_geometry()
-            self.root.geometry(geom)
-        except tk.TclError:
-            pass
-
     def _stabilize_initial_interaction(self) -> None:
         try:
             self.root.update_idletasks()
@@ -2119,11 +2164,7 @@ class SSHChatGUI:
             return
         # Avoid repeated focus_force — on Aqua it can leave hit-testing stale
         # until the user manually moves the window (the symptom we are fixing).
-        try:
-            self.root.lift()
-        except tk.TclError:
-            pass
-        self._nudge_hit_testing()
+        self._refresh_click_targets(pulse_topmost=_IS_AQUA)
         try:
             if self.btn_connect.instate(("disabled",)):
                 self.btn_connect.state(("!disabled",))
@@ -2181,6 +2222,7 @@ class SSHChatGUI:
                 self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
+        self._schedule_click_target_refresh()
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
         if (
@@ -2277,6 +2319,7 @@ class SSHChatGUI:
                 win.destroy()
             except tk.TclError:
                 pass
+            self._schedule_click_target_refresh(pulse=_IS_AQUA)
 
         items: list[tuple[str, str, str]] = []
         items.append((f"当前房间 #{self._active_room}", "room", ""))
@@ -2500,6 +2543,7 @@ class SSHChatGUI:
                 path,
                 name,
                 on_save=self._save_media_as,
+                on_close=self._on_aux_window_closed,
             )
         except Exception as e:
             # Auto-open after send/receive must not look like "发送失败".
@@ -3238,7 +3282,9 @@ class SSHChatGUI:
                 except Exception:
                     pass
                 self._canvas_win = None
-            self._canvas_win = CanvasWebShell(self.root, target)  # type: ignore[assignment]
+            self._canvas_win = CanvasWebShell(
+                self.root, target, on_close=self._on_aux_window_closed
+            )  # type: ignore[assignment]
             self._append_chat_line("[*] 已打开共享画布（可最大化）", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
@@ -3269,12 +3315,6 @@ class SSHChatGUI:
         return "break"
 
     def _hide_suggestions(self) -> None:
-        if self._suggest_geom_job is not None:
-            try:
-                self.root.after_cancel(self._suggest_geom_job)
-            except (tk.TclError, ValueError):
-                pass
-            self._suggest_geom_job = None
         if self._suggest_focus_job is not None:
             try:
                 self.root.after_cancel(self._suggest_focus_job)
@@ -3284,6 +3324,10 @@ class SSHChatGUI:
         had = self._suggest_win is not None
         if self._suggest_win is not None:
             try:
+                self._suggest_slot.grid_remove()
+            except tk.TclError:
+                pass
+            try:
                 self._suggest_win.destroy()
             except tk.TclError:
                 pass
@@ -3292,45 +3336,16 @@ class SSHChatGUI:
         self._suggest_items = []
         if had:
             # Destroying an overlay can leave Aqua click maps stale.
-            self.root.after_idle(self._nudge_hit_testing)
-
-    def _suggestion_place_box(self) -> tuple[int, int, int, int]:
-        self.entry.update_idletasks()
-        self.root.update_idletasks()
-        height = min(160, 20 * max(1, len(self._suggest_items)) + 4)
-        width = max(self.entry.winfo_width(), 220)
-        # Coordinates relative to root content (place), not screen — so the
-        # panel moves with the window and cannot orphan over the desktop.
-        x = self.entry.winfo_rootx() - self.root.winfo_rootx()
-        y_above = self.entry.winfo_rooty() - self.root.winfo_rooty() - height - 4
-        if y_above < 0:
-            y = self.entry.winfo_rooty() - self.root.winfo_rooty() + self.entry.winfo_height() + 2
-        else:
-            y = y_above
-        return x, y, width, height
-
-    def _reposition_or_hide_suggestions(self) -> None:
-        self._suggest_geom_job = None
-        if self._suggest_win is None:
-            return
-        try:
-            if not self._suggest_win.winfo_exists():
-                self._hide_suggestions()
-                return
-            x, y, width, height = self._suggestion_place_box()
-            self._suggest_win.place(x=x, y=y, width=width, height=height)
-            self._suggest_win.lift()
-        except tk.TclError:
-            self._hide_suggestions()
+            self._schedule_click_target_refresh()
 
     def _show_suggestions(self, items: list[str]) -> None:
         self._hide_suggestions()
         if not items:
             return
         self._suggest_items = items
-        # In-window Frame (not overrideredirect Toplevel): floating popups on
+        # Grid slot in the input row (not place/overrideredirect): floating layers on
         # Aqua keep eating button clicks when their screen rect goes stale.
-        frame = ttk.Frame(self.root, relief=tk.SOLID, borderwidth=1)
+        frame = ttk.Frame(self._suggest_slot, relief=tk.SOLID, borderwidth=1)
         lst = tk.Listbox(frame, height=min(8, len(items)), exportselection=False)
         lst.pack(fill=tk.BOTH, expand=True)
         for item in items:
@@ -3338,14 +3353,10 @@ class SSHChatGUI:
         lst.selection_set(0)
         lst.activate(0)
         lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
-        x, y, width, height = self._suggestion_place_box()
-        frame.place(x=x, y=y, width=width, height=height)
-        try:
-            frame.lift()
-        except tk.TclError:
-            pass
+        frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
+        self._suggest_slot.grid(row=0, column=0, sticky="ew", pady=(0, 4))
 
     def _apply_selected_suggestion(self) -> None:
         if not self._suggest_list or not self._suggest_items:
