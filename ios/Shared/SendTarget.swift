@@ -175,13 +175,17 @@ enum ChatLineParsers {
         "OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT",
     ]
 
-    /// CSI crumbs left when PTY/prompt_toolkit mangles ESC → `?` (e.g. `?[2K`).
+    /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K`). */
     private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
-        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|(?:\[[0-9;?]+[@-~])|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
     )
     /// Entire prefix before `[*]` is only CSI crumbs (not a nick like `[alice]`).
     private static let ptyNoiseOnlyPrefix = try! NSRegularExpression(
-        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|[?\uFFFD0-9; \t])+$"#
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|(?:\[[0-9;?]+[@-~])|[?\uFFFD0-9; \t])+$"#
+    )
+    /// Bare CSI at line start when ESC/`?` was eaten (e.g. `[2K` before `[*] 9 …`).
+    private static let bareCsiPrefix = try! NSRegularExpression(
+        pattern: #"^(?:\[[0-9;?]+[@-~])+"#
     )
 
     /// Strip local clock / prompt prefixes before parsing chat.
@@ -366,6 +370,28 @@ enum ChatLineParsers {
         return nil
     }
 
+    /// Board row text with `[*]` / PTY crumbs removed (used when heuristics match before star parse).
+    static func boardLineText(from line: String) -> String {
+        if let body = parseGameStarBody(line) { return body }
+        var t = normalizeForParse(line)
+        while true {
+            let range = NSRange(t.startIndex..., in: t)
+            guard let m = bareCsiPrefix.firstMatch(in: t, range: range),
+                  let r = Range(m.range, in: t)
+            else { break }
+            t = String(t[r.upperBound...])
+        }
+        if let star = t.range(of: "[*]") {
+            let prefix = String(t[..<star.lowerBound])
+            let pr = NSRange(prefix.startIndex..., in: prefix)
+            if prefix.isEmpty || ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil {
+                t = String(t[star.upperBound...])
+                if t.first == " " { t = String(t.dropFirst()) }
+            }
+        }
+        return t.trimmingCharacters(in: .newlines)
+    }
+
     static func shouldContinueBoard(_ line: String) -> Bool {
         if parseGameStarBody(line) != nil { return true }
         if let chat = parseChat(line), systemSenders.contains(chat.sender) { return true }
@@ -450,18 +476,12 @@ enum ChatLineParsers {
             let mine = !me.isEmpty && sender.caseInsensitiveCompare(me) == .orderedSame
             return .bubble(mine: mine, room: room, sender: sender, body: body, time: extractDisplayTime(line))
         }
-        if looksLikeGameBoardContent(line) {
-            return .boardLine(line.trimmingCharacters(in: .newlines))
+        let payload = boardLineText(from: line)
+        if looksLikeGameBoardContent(payload) {
+            return .boardLine(payload)
         }
-        // Never leave a raw [*] prefix on a lonely gray system row (/lib show glitch).
-        let t = normalizeForParse(line)
-        if t.hasPrefix("[*]") {
-            let after = t.dropFirst(3)
-            if after.isEmpty { return .boardLine("") }
-            if after.first == " " {
-                return .boardLine(String(after.dropFirst()))
-            }
-            return .boardLine(String(after))
+        if normalizeForParse(line).contains("[*]") {
+            return .boardLine(payload)
         }
         return .system(line)
     }
