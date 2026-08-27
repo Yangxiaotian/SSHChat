@@ -15,7 +15,7 @@ actor SSHSession {
         port: Int,
         username: String,
         privateSeed: Data,
-        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void,
+        onLine: @escaping @MainActor @Sendable (_ line: String, _ serverBell: Bool) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onDisconnect: @escaping @Sendable (String?) -> Void
     ) async throws {
@@ -108,7 +108,7 @@ actor SSHSession {
 
     private static func emitLine(
         _ raw: String,
-        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void
+        onLine: @escaping @MainActor @Sendable (_ line: String, _ serverBell: Bool) -> Void
     ) async {
         // OSC / title sequences are BEL-terminated (`ESC ] … BEL`). Strip those first so
         // their BEL is not mistaken for client.py's peer-chat alert bell.
