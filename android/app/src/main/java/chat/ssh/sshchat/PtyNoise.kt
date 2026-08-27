@@ -8,6 +8,12 @@ object PtyNoise {
     fun shouldDrop(raw: String): Boolean {
         var t = raw.trim()
         if (t.isEmpty()) return true
+        // Real chat/system tags — never drop (incl. CSI crumbs like `[K[*] 9 …`).
+        if ("[#" in t || "[*]" in t || t.startsWith("[OK]") || t.startsWith("[ERROR]")
+            || t.startsWith("[INFO]") || t.startsWith("[+]") || t.startsWith("[-]") || t.startsWith("[!]")
+        ) {
+            return false
+        }
         while (true) {
             val nxt = timePrefix.replaceFirst(t, "").trimStart()
             if (nxt == t) break

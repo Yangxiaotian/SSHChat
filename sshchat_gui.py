@@ -45,6 +45,7 @@ from sshchat_client_util import (
     default_client_config_path,
     load_bundled_site_config,
     load_client_config,
+    name_arg_completions,
     save_client_config,
 )
 
@@ -275,7 +276,12 @@ def _longest_common_prefix(values: list[str]) -> str:
     return prefix
 
 
-def _command_completions(text: str) -> list[str]:
+def _command_completions(
+    text: str,
+    *,
+    rooms: list[str] | None = None,
+    users: list[str] | None = None,
+) -> list[str]:
     """Return full replacement strings for the current input prefix."""
     if not text.startswith("/"):
         return []
@@ -309,14 +315,15 @@ def _command_completions(text: str) -> list[str]:
                 return []
 
     subs = _SUBCOMMANDS_BY_CMD.get(cmd, ())
-    if not subs:
+    if subs:
+        if trailing_space and len(parts) == 1:
+            return [f"{parts[0]} {sub}" for sub in subs]
+        if len(parts) >= 2 and not trailing_space:
+            prefix = parts[1]
+            return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
         return []
-    if trailing_space and len(parts) == 1:
-        return [f"{parts[0]} {sub}" for sub in subs]
-    if len(parts) >= 2 and not trailing_space:
-        prefix = parts[1]
-        return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
-    return []
+
+    return name_arg_completions(text, rooms=rooms or (), users=users or ())
 
 
 def _is_ssl_verify_error(exc: BaseException) -> bool:
@@ -733,6 +740,79 @@ def _pil_to_photoimage(im: Any) -> tk.PhotoImage | None:
         return tk.PhotoImage(data=b64)
     except Exception:
         return None
+
+
+class _HoverTip:
+    """Compact tooltip for icon toolbar buttons."""
+
+    def __init__(self, widget: tk.Misc, text: str = "") -> None:
+        self.widget = widget
+        self.text = text
+        self._tip: tk.Toplevel | None = None
+        self._after: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def set_text(self, text: str) -> None:
+        self.text = text
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        try:
+            self._after = self.widget.after(400, self._show)
+        except tk.TclError:
+            self._after = None
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except (tk.TclError, ValueError):
+                pass
+            self._after = None
+
+    def _show(self) -> None:
+        self._after = None
+        if not self.text or self._tip is not None:
+            return
+        try:
+            if not self.widget.winfo_ismapped():
+                return
+            x = self.widget.winfo_rootx() + 8
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        lbl = tk.Label(
+            tip,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            foreground="#222",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=6,
+            pady=3,
+            font=("TkDefaultFont", 10),
+        )
+        lbl.pack()
+        self._tip = tip
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
 
 
 class ImagePreviewWindow:
@@ -1870,6 +1950,7 @@ class SSHChatGUI:
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
+        self._canvas_open_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
         self._preview_win: ImagePreviewWindow | None = None
         self._send_target_kind = "room"
@@ -2002,6 +2083,7 @@ class SSHChatGUI:
         self.log.tag_configure("xq_black", foreground="#263238")
         self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
         self.log.tag_configure("media_preview", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("canvas_open", foreground="#0b57d0", underline=True)
         self.log.bind("<<Paste>>", self._on_paste_file, add="+")
         # DISABLED Text swallows tag_bind on Aqua/Win; handle clicks at widget level.
         self.log.bind("<Button-1>", self._on_log_click, add="+")
@@ -2025,22 +2107,27 @@ class SSHChatGUI:
         self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
         self.entry.bind("<Command-v>", self._on_paste_file, add="+")
         self.entry.bind("<Control-v>", self._on_paste_file, add="+")
-        ttk.Button(self._input_row, text="发送", command=self._send_clicked).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_send, _ = self._pack_icon_btn(
+            self._input_row, "➤", "发送", self._send_clicked
         )
-        self.btn_send_target = ttk.Button(
-            self._input_row, text=self._send_target_label(), command=self._show_send_target_picker
+        self.btn_send_target, self._send_target_tip = self._pack_icon_btn(
+            self._input_row, "＠", self._send_target_label(), self._show_send_target_picker
         )
-        self.btn_send_target.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(self._input_row, text="发文件", command=self._pick_and_send_file).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_send_file, _ = self._pack_icon_btn(
+            self._input_row, "📎", "发文件", self._pick_and_send_file
         )
-        ttk.Button(self._input_row, text="清屏", command=self._clear_active_room).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_canvas, _ = self._pack_icon_btn(
+            self._input_row, "🎨", "画板", self._start_canvas
+        )
+        self.btn_library, _ = self._pack_icon_btn(
+            self._input_row, "📚", "图书馆", self._start_library
+        )
+        self.btn_clear, _ = self._pack_icon_btn(
+            self._input_row, "⌫", "清屏", self._clear_active_room
         )
         hint = ttk.Label(
             self.root,
-            text="提示: 「发送至」可选私聊/房间；指定用户可对不在线的人留言或发文件",
+            text="提示: 悬停图标看说明；「＠」可选私聊/房间；指定用户可留言或发文件",
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
@@ -2244,6 +2331,7 @@ class SSHChatGUI:
         self._photo_refs.clear()
         self._media_save_targets.clear()
         self._media_preview_targets.clear()
+        self._canvas_open_targets.clear()
         for entry in entries:
             if isinstance(entry, dict) and entry.get("_kind") == "media":
                 self._insert_media_entry(entry)
@@ -2287,6 +2375,18 @@ class SSHChatGUI:
             return f"/sendfile #{self._send_target_value}"
         return "/sendfile"
 
+    def _canvas_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/canvas {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/canvas #{self._send_target_value}"
+        return "/canvas"
+
+    def _pack_icon_btn(self, parent, icon: str, tip: str, command):
+        btn = ttk.Button(parent, text=icon, width=3, command=command)
+        btn.pack(side=tk.LEFT, padx=(4, 0))
+        return btn, _HoverTip(btn, tip)
+
     def _outbound_text(self, draft: str) -> str:
         t = draft.strip()
         if t.startswith("/"):
@@ -2316,8 +2416,29 @@ class SSHChatGUI:
         self._recent_users = self._recent_users[:12]
 
     def _refresh_send_target_button(self) -> None:
-        if hasattr(self, "btn_send_target"):
-            self.btn_send_target.configure(text=self._send_target_label())
+        if hasattr(self, "_send_target_tip"):
+            self._send_target_tip.set_text(self._send_target_label())
+
+    def _start_canvas(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        cmd = self._canvas_command()
+        self._append_chat_line(f"[*] 正在创建共享画板…（{cmd}）", local_sent=True)
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_library(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        self._append_chat_line("[*] 正在打开图书馆…（/library）", local_sent=True)
+        try:
+            self._chan_send_bytes(b"/library\n")
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
 
     def _refresh_online_users(self) -> None:
         if not self._chan or self._chan.closed:
@@ -2550,6 +2671,10 @@ class SSHChatGUI:
             if prev:
                 self._open_media_preview(Path(prev[0]), prev[1])
                 return
+            canvas = self._canvas_open_targets.get(tag)
+            if canvas:
+                self._open_native_canvas(canvas[0], canvas[1])
+                return
             save = self._media_save_targets.get(tag)
             if save:
                 self._save_media_as(Path(save[0]), save[1])
@@ -2638,15 +2763,8 @@ class SSHChatGUI:
                 self._insert_media_entry(media)
                 self.log.see(tk.END)
                 self.log.configure(state=tk.DISABLED)
-                if media.get("is_image") and Path(str(media.get("path") or "")).is_file():
-                    name = str(media.get("name") or "file")
-                    path = Path(str(media["path"]))
-                    self.root.after(
-                        80,
-                        lambda p=path, n=name: self._open_media_preview(
-                            p, n, quiet=True
-                        ),
-                    )
+                # Do not auto-open image windows — privacy (shared screen / shoulder).
+                # User clicks 「预览」 when ready.
             except Exception as e:
                 self._set_status(f"预览失败: {e}")
                 try:
@@ -2683,10 +2801,14 @@ class SSHChatGUI:
 
     def _update_rooms_from_system(self, body: str) -> None:
         # Examples:
+        # "Active room #ops. /names /rooms ..."
         # "Rooms: #default, *#ops"
         # "Joined #ops and switched from #default to #ops"
         # "Switched from #ops to #dev"
         # "Left #dev, switched to #default"
+        m_active = re.search(r"Active room\s+#([a-zA-Z0-9_-]{1,32})", body, re.I)
+        if m_active:
+            self._switch_room_local(m_active.group(1), send_switch=False)
         m = re.search(r"Rooms:\s*(.*)$", body)
         if m:
             rooms_text = m.group(1)
@@ -3232,8 +3354,31 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        self._open_native_canvas(url, key)
+        # Never auto-open canvas (privacy). Offer a clickable link instead.
+        self._offer_canvas_open(url, key)
         return True
+
+    def _offer_canvas_open(self, url: str, key: str) -> None:
+        self._media_tag_seq += 1
+        tag = f"canvas_id_{self._media_tag_seq}"
+        self._canvas_open_targets[tag] = (url, key)
+        try:
+            self.log.configure(state=tk.NORMAL)
+            self.log.insert(tk.END, "[*] 收到共享画布邀请  ", ("notice",))
+            self.log.insert(tk.END, "打开画布", ("canvas_open", tag))
+            self.log.insert(tk.END, "\n")
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            try:
+                self.log.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+            self._append_chat_line(
+                f"[*] 收到共享画布邀请（点消息区「打开画布」）", local_sent=True
+            )
+        self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
+        self._alert_beep()
 
     def _try_handle_download_invite(self, body: str) -> bool:
         m = _GUI_OPEN_DOWNLOAD_RE.match(body.strip())
@@ -3413,9 +3558,27 @@ class SSHChatGUI:
         self._hide_suggestions()
         self.entry.focus_set()
 
+    def _completion_users(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for u in list(self._online_users) + list(self._recent_users):
+            n = (u or "").strip()
+            if not n:
+                continue
+            key = n.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(n)
+        return out
+
     def _refresh_command_suggestions(self) -> list[str]:
         text = self.var_input.get()
-        items = _command_completions(text)[:12]
+        items = _command_completions(
+            text,
+            rooms=list(self._rooms_order),
+            users=self._completion_users(),
+        )[:12]
         if text.startswith("/") and items:
             self._show_suggestions(items)
         else:
@@ -3445,7 +3608,15 @@ class SSHChatGUI:
         text = self.var_input.get()
         if not text.startswith("/"):
             return "break"
-        items = _command_completions(text)
+        # Suggestions already open → Tab cycles the highlight (Enter applies).
+        if self._suggest_list is not None and self._suggest_items:
+            self._on_entry_down()
+            return "break"
+        items = _command_completions(
+            text,
+            rooms=list(self._rooms_order),
+            users=self._completion_users(),
+        )
         if not items:
             self._hide_suggestions()
             return "break"
@@ -3496,6 +3667,11 @@ class SSHChatGUI:
         return None
 
     def _on_entry_return(self, _event=None):
+        # With an open suggestion list, Enter commits the highlighted item into
+        # the entry (do not send the half-typed prefix). Press Enter again to send.
+        if self._suggest_list is not None and self._suggest_items:
+            self._apply_selected_suggestion()
+            return "break"
         self._hide_suggestions()
         self._send_clicked()
         return "break"

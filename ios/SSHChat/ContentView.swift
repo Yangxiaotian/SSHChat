@@ -49,6 +49,7 @@ final class ChatViewModel: ObservableObject {
     @Published var photoItem: PhotosPickerItem?
     @Published var sendTarget: SendTarget = .currentRoom("default")
     @Published var onlineUsers: [String] = []
+    @Published var knownRooms: [String] = SendTargetStore.loadKnownRooms()
     @Published var showSendTargetPicker = false
 
     enum FileImportKind { case media, identity }
@@ -120,7 +121,47 @@ final class ChatViewModel: ObservableObject {
 
     func refreshOnlineUsers() {
         expectingNames = true
-        Task { try? await session.send("/names") }
+        Task {
+            try? await session.send("/names")
+            try? await session.send("/rooms")
+        }
+    }
+
+    private var completionUsers: [String] {
+        let me = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var seen = Set<String>()
+        var out: [String] = []
+        for nick in onlineUsers + SendTargetStore.loadRecentUsers() {
+            let n = nick.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !n.isEmpty, n.lowercased() != me else { continue }
+            guard seen.insert(n.lowercased()).inserted else { continue }
+            out.append(n)
+        }
+        return out
+    }
+
+    func refreshSuggestions() {
+        suggestions = draft.hasPrefix("/")
+            ? Array(CommandCompletions.completions(draft, rooms: knownRooms, users: completionUsers).prefix(12))
+            : []
+    }
+
+    func applySuggestion(_ chosen: String) {
+        let fill = chosen.hasSuffix(" ") ? chosen : "\(chosen) "
+        draft = fill
+        refreshSuggestions()
+    }
+
+    func insertSlash() {
+        draft += "/"
+        refreshSuggestions()
+    }
+
+    func applyTab() {
+        if let next = CommandCompletions.applyTab(draft, rooms: knownRooms, users: completionUsers) {
+            draft = next
+        }
+        refreshSuggestions()
     }
 
     func replyToPm(_ nick: String) {
@@ -158,28 +199,6 @@ final class ChatViewModel: ObservableObject {
         } catch {
             toast = "恢复失败: \(error.localizedDescription)"
         }
-    }
-
-    func refreshSuggestions() {
-        suggestions = draft.hasPrefix("/") ? Array(CommandCompletions.completions(draft).prefix(12)) : []
-    }
-
-    func applySuggestion(_ chosen: String) {
-        let fill = chosen.hasSuffix(" ") ? chosen : "\(chosen) "
-        draft = fill
-        refreshSuggestions()
-    }
-
-    func insertSlash() {
-        draft += "/"
-        refreshSuggestions()
-    }
-
-    func applyTab() {
-        if let next = CommandCompletions.applyTab(draft) {
-            draft = next
-        }
-        refreshSuggestions()
     }
 
     func connect(clearChat: Bool = true) {
@@ -606,6 +625,8 @@ final class ChatViewModel: ObservableObject {
         if expectingNames, let names = ChatLineParsers.parseNames(stripped) {
             onlineUsers = names.members
             expectingNames = false
+            SendTargetStore.rememberRooms([names.room])
+            knownRooms = SendTargetStore.loadKnownRooms()
             if case .currentRoom = sendTarget {
                 sendTarget = .currentRoom(names.room)
                 SendTargetStore.saveCurrentRoom(names.room)
@@ -614,6 +635,7 @@ final class ChatViewModel: ObservableObject {
         }
         if let pm = ChatLineParsers.parsePm(stripped) {
             MessageAlert.playIfNeeded(for: stripped, myName: username, serverBell: serverBell)
+            SendTargetStore.rememberRecent(pm.from)
             appendPm(from: pm.from, body: pm.body)
             return
         }
@@ -709,6 +731,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func applyRoomFromServer(_ line: String) {
+        if let rooms = ChatLineParsers.parseRoomsList(line) {
+            SendTargetStore.rememberRooms(rooms)
+            knownRooms = SendTargetStore.loadKnownRooms()
+        }
         guard let room = ChatLineParsers.parseActiveRoom(line) else { return }
         if pendingUpload != nil {
             cancelUploadWait()
@@ -716,6 +742,7 @@ final class ChatViewModel: ObservableObject {
             status = "已切换房间，取消待发文件"
         }
         SendTargetStore.saveCurrentRoom(room)
+        knownRooms = SendTargetStore.loadKnownRooms()
         if case .currentRoom = sendTarget {
             sendTarget = .currentRoom(room)
             SendTargetStore.saveTarget(sendTarget)

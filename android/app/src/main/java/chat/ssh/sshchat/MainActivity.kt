@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var onConnectedOnce: (() -> Unit)? = null
     private var sendTarget: SendTarget = SendTarget.CurrentRoom("default")
     private var onlineUsers: List<String> = emptyList()
+    private var knownRooms: List<String> = emptyList()
     private var expectingNames = false
 
     private val requestNotifyPermission = registerForActivityResult(
@@ -206,6 +207,7 @@ class MainActivity : AppCompatActivity() {
         }
         setupVoiceButton()
         sendTarget = SendTargetStore.loadTarget(this)
+        knownRooms = SendTargetStore.loadKnownRooms(this)
         refreshSendTargetButton()
         binding.btnSendTarget.setOnClickListener { showSendTargetPicker() }
         binding.btnFontMinus.setOnClickListener { bumpFont(-1f) }
@@ -250,7 +252,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshSuggestions(text: String) {
-        val items = if (text.startsWith("/")) CommandCompletions.completions(text).take(12) else emptyList()
+        val users = completionUsers()
+        val items = if (text.startsWith("/")) {
+            CommandCompletions.completions(text, knownRooms, users).take(12)
+        } else {
+            emptyList()
+        }
         val row = binding.suggestRow
         row.removeAllViews()
         if (items.isEmpty()) {
@@ -269,6 +276,19 @@ class MainActivity : AppCompatActivity() {
             }
             row.addView(b)
         }
+    }
+
+    private fun completionUsers(): List<String> {
+        val me = binding.etUsername.text?.toString()?.trim().orEmpty().lowercase()
+        val seen = linkedSetOf<String>()
+        val out = mutableListOf<String>()
+        for (nick in onlineUsers + SendTargetStore.loadRecentUsers(this)) {
+            val n = nick.trim()
+            if (n.isEmpty() || n.lowercase() == me) continue
+            if (!seen.add(n.lowercase())) continue
+            out.add(n)
+        }
+        return out
     }
 
     private fun applySuggestion(chosen: String) {
@@ -292,7 +312,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyTabComplete() {
         val text = binding.etDraft.text?.toString().orEmpty()
-        val next = CommandCompletions.applyTab(text)
+        val next = CommandCompletions.applyTab(text, knownRooms, completionUsers())
         if (next != null) {
             binding.etDraft.setText(next)
             binding.etDraft.setSelection(next.length)
@@ -800,6 +820,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshOnlineUsers() {
         expectingNames = true
         client?.send("/names")
+        client?.send("/rooms")
     }
 
     private fun showSendTargetPicker() {
@@ -876,6 +897,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyRoomFromServer(line: String) {
+        ChatLineParsers.parseRoomsList(line)?.let { rooms ->
+            SendTargetStore.rememberRooms(this, rooms)
+            knownRooms = SendTargetStore.loadKnownRooms(this)
+        }
         ChatLineParsers.parseActiveRoom(line)?.let { room ->
             if (pendingUpload != null) {
                 cancelUploadWait()
@@ -883,6 +908,7 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.text = "已切换房间，取消待发文件"
             }
             SendTargetStore.saveCurrentRoom(this, room)
+            knownRooms = SendTargetStore.loadKnownRooms(this)
             if (sendTarget is SendTarget.CurrentRoom) {
                 sendTarget = SendTarget.CurrentRoom(room)
                 SendTargetStore.saveTarget(this, sendTarget)
@@ -921,6 +947,8 @@ class MainActivity : AppCompatActivity() {
             ChatLineParsers.parseNames(stripped)?.let { names ->
                 onlineUsers = names.members
                 expectingNames = false
+                SendTargetStore.rememberRooms(this, listOf(names.room))
+                knownRooms = SendTargetStore.loadKnownRooms(this)
                 if (sendTarget is SendTarget.CurrentRoom) {
                     sendTarget = SendTarget.CurrentRoom(names.room)
                     SendTargetStore.saveCurrentRoom(this, names.room)
@@ -931,6 +959,7 @@ class MainActivity : AppCompatActivity() {
         }
         ChatLineParsers.parsePm(stripped)?.let { pm ->
             MessageAlert.playIfNeeded(this, stripped, binding.etUsername.text?.toString().orEmpty())
+            SendTargetStore.rememberRecent(this, pm.from)
             appendPmLine(pm.from, pm.body)
             return
         }

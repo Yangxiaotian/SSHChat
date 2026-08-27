@@ -5,7 +5,7 @@ struct WatchRootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             Group {
                 if vm.connected {
                     WatchChatView(vm: vm)
@@ -14,20 +14,21 @@ struct WatchRootView: View {
                 }
             }
             .navigationTitle("SSHChat")
-            .navigationBarTitleDisplayMode(.inline)
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             if phase == .active {
                 vm.handleBecameActive()
             }
         }
-        .alert("提示", isPresented: Binding(
+        .alert(isPresented: Binding(
             get: { vm.toast != nil },
             set: { if !$0 { vm.toast = nil } }
         )) {
-            Button("好", role: .cancel) { vm.toast = nil }
-        } message: {
-            Text(vm.toast ?? "")
+            Alert(
+                title: Text("提示"),
+                message: Text(vm.toast ?? ""),
+                dismissButton: .cancel(Text("好")) { vm.toast = nil }
+            )
         }
     }
 }
@@ -37,21 +38,16 @@ struct WatchConnectView: View {
 
     var body: some View {
         Form {
-            Section("服务器") {
+            Section(header: Text("服务器")) {
                 TextField("用户名", text: $vm.username)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .disableAutocorrection(true)
                 TextField("主机", text: $vm.sshHost)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .disableAutocorrection(true)
                 TextField("端口", text: $vm.sshPort)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .disableAutocorrection(true)
             }
-            Section {
-                Button {
-                    vm.connect()
-                } label: {
+            Section(footer: Text(vm.status)) {
+                Button(action: { vm.connect() }) {
                     if vm.busy {
                         ProgressView()
                     } else {
@@ -59,18 +55,16 @@ struct WatchConnectView: View {
                     }
                 }
                 .disabled(vm.busy)
-            } footer: {
-                Text(vm.status)
             }
-            Section("本机公钥") {
+            Section(header: Text("本机公钥")) {
                 Button("查看公钥") { vm.showPubkey = true }
                 Text(vm.keys.comment)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
             }
         }
         .sheet(isPresented: $vm.showPubkey) {
-            NavigationStack {
+            NavigationView {
                 ScrollView {
                     Text(vm.keys.publicOpenSshLine)
                         .font(.system(.caption2, design: .monospaced))
@@ -89,6 +83,7 @@ struct WatchConnectView: View {
 
 struct WatchChatView: View {
     @ObservedObject var vm: WatchChatViewModel
+    @State private var showQuick = false
 
     var body: some View {
         VStack(spacing: 4) {
@@ -114,7 +109,7 @@ struct WatchChatView: View {
                         }
                     }
                 }
-                .onChange(of: vm.rows.count) { _, _ in
+                .onChange(of: vm.rows.count) { _ in
                     if let last = vm.rows.last?.id {
                         withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                     }
@@ -122,24 +117,32 @@ struct WatchChatView: View {
             }
 
             TextField("消息 / 听写", text: $vm.draft)
-                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
                 .onSubmit { vm.sendDraft() }
 
             HStack(spacing: 6) {
                 Button("发") { vm.sendDraft() }
-                    .buttonStyle(.borderedProminent)
                     .disabled(vm.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Menu("快") {
-                    ForEach(WatchChatViewModel.quickReplies, id: \.self) { q in
-                        Button(q) { vm.sendQuick(q) }
-                    }
-                }
+                Button("快") { showQuick = true }
                 Button("#") { vm.setRoomTarget() }
                     .font(.caption2)
             }
             .font(.caption)
         }
         .padding(.horizontal, 2)
+        .sheet(isPresented: $showQuick) {
+            NavigationView {
+                List {
+                    ForEach(WatchChatViewModel.quickReplies, id: \.self) { q in
+                        Button(q) {
+                            vm.sendQuick(q)
+                            showQuick = false
+                        }
+                    }
+                }
+                .navigationTitle("快捷回复")
+            }
+        }
     }
 }
 
@@ -153,10 +156,10 @@ private struct WatchRowView: View {
                 HStack(spacing: 2) {
                     if let room {
                         Text("#\(room)")
-                            .foregroundStyle(.secondary)
+                            .foregroundColor(.secondary)
                     }
                     Text(sender)
-                        .foregroundStyle(mine ? .blue : .primary)
+                        .foregroundColor(mine ? .blue : .primary)
                 }
                 .font(.system(size: 10, weight: .semibold))
                 Text(body)
@@ -167,14 +170,14 @@ private struct WatchRowView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("PM \(from)")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundColor(.orange)
                 Text(body)
                     .font(.system(size: 13))
             }
         case .system(_, let text):
             Text(text)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
     }

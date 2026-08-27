@@ -169,7 +169,8 @@ ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 SESSION_RESUME_TTL_SECONDS = int(
-    os.environ.get("SSHCHAT_SESSION_RESUME_TTL_SECONDS", "86400")
+    # 0 = never expire. Default 30d so "last room" survives typical reconnects.
+    os.environ.get("SSHCHAT_SESSION_RESUME_TTL_SECONDS", "2592000")
 )
 
 # VT100: clear display + cursor home; trailing \n so line-oriented clients flush it.
@@ -571,6 +572,19 @@ def _remember_session_locked(name: str, joined_rooms: list[str], current_room: s
         "current_room": active,
         "ts": time.time(),
     }
+
+
+def _sync_live_session_locked(conn) -> None:
+    """Persist last active room while still online (so reconnect hits the last room)."""
+    info = clients.get(conn)
+    if not info:
+        return
+    _remember_session_locked(
+        info["name"],
+        list(info.get("rooms") or ()),
+        info.get("current_room", DEFAULT_ROOM),
+    )
+    _mark_sessions_dirty()
 
 
 def _load_recent_session_locked(name: str) -> dict[str, object] | None:
@@ -6184,6 +6198,7 @@ def handle_command(conn, payload: str) -> None:
                     room_owners[new_room] = conn
                 newly_joined = True
             clients[conn]["current_room"] = new_room
+            _sync_live_session_locked(conn)
 
         if newly_joined:
             broadcast_room(
@@ -6238,6 +6253,7 @@ def handle_command(conn, payload: str) -> None:
                 send_line(conn, f"[*] Already active in #{target_room}\n")
                 return
             clients[conn]["current_room"] = target_room
+            _sync_live_session_locked(conn)
         hub = federation.get_hub()
         if hub is not None and hub.enabled:
             hub.notify_switch(name, target_room)
@@ -6336,6 +6352,7 @@ def handle_command(conn, payload: str) -> None:
             if active == target_room:
                 switched_to = sorted(joined)[0]
                 clients[conn]["current_room"] = switched_to
+            _sync_live_session_locked(conn)
         if game_bcast:
             broadcast_game(target_room, game_bcast)
         hub = federation.get_hub()

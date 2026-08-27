@@ -68,7 +68,7 @@
 		C3F4144E1C8DE0CDD8431E22 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C90E177203159780DB095D76 /* SecureDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDownload.swift; sourceTree = "<group>"; };
 		CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInvite.swift; sourceTree = "<group>"; };
-		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
 		E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		F0CCD510639ECD134A68FF28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -232,6 +232,7 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					739AF9DBED3E5B04161507A4 = {
+						DevelopmentTeam = 6Q9L8CDXSY;
 						ProvisioningStyle = Automatic;
 					};
 					FC5597775EEA761FDD9AE7DC = {
@@ -336,7 +337,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 28;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
@@ -405,7 +406,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 28;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;

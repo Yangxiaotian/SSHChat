@@ -140,6 +140,12 @@ actor SSHSession {
         return false
     }
 
+    /// Bare CSI after ESC/`?` was eaten. Params optional so `[K` (EL default) matches;
+    /// finals restricted so `[*]` / `[#room]` / `[OK]` are never stripped.
+    private static let bareCsiFragment = try! NSRegularExpression(
+        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu]"#
+    )
+
     static func cleanLine(_ raw: String) -> String {
         var s = raw.replacingOccurrences(of: "\r", with: "")
         s = s.replacingOccurrences(of: "\u{0007}", with: "") // bell
@@ -156,6 +162,10 @@ actor SSHSession {
             let range = NSRange(s.startIndex..., in: s)
             s = re.stringByReplacingMatches(in: s, range: range, withTemplate: "")
         }
+        // ESC fully lost: leftover `[2K` / `[K` / `[9;1H` stuck before chat tags.
+        s = bareCsiFragment.stringByReplacingMatches(
+            in: s, range: NSRange(s.startIndex..., in: s), withTemplate: ""
+        )
         s = s.replacingOccurrences(of: "\u{001B}", with: "")
         // Keep leading spaces — board padding / 楚河汉界 centering depends on them.
         while let last = s.last, last == "\n" || last == "\r" || last == " " || last == "\t" {

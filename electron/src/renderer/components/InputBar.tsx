@@ -49,12 +49,85 @@ function longestCommonPrefix(values: string[]): string {
 }
 
 const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
+const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
+const USER_OR_ROOM_ARG_CMDS = new Set(['/msg', '/sendfile', '/file']);
+const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
+
+function uniqKeepOrder(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of items) {
+    const key = raw.trim();
+    if (!key) continue;
+    const low = key.toLowerCase();
+    if (seen.has(low)) continue;
+    seen.add(low);
+    out.push(key);
+  }
+  return out;
+}
+
+function nameArgSuggestions(
+  value: string,
+  rooms: string[],
+  users: string[],
+): SuggestionItem[] {
+  if (!value.startsWith('/')) return [];
+  const trailingSpace = value.endsWith(' ');
+  const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const cmd = parts[0].toLowerCase();
+  const roomNames = uniqKeepOrder(rooms.map((r) => r.replace(/^#/, '')));
+  const userNames = uniqKeepOrder(users);
+
+  let cands: string[] = [];
+  let desc = '';
+  if (ROOM_ARG_CMDS.has(cmd)) {
+    cands = roomNames;
+    desc = 'room';
+  } else if (USER_OR_ROOM_ARG_CMDS.has(cmd)) {
+    cands = [...userNames, ...roomNames.map((r) => `#${r}`)];
+    desc = 'user / #room';
+  } else if (USER_ARG_CMDS.has(cmd)) {
+    cands = userNames;
+    desc = 'user';
+  } else {
+    return [];
+  }
+
+  let matched = cands;
+  if (trailingSpace && parts.length === 1) {
+    // all candidates
+  } else if (parts.length >= 2 && !trailingSpace) {
+    const prefix = parts[1];
+    const pl = prefix.toLowerCase();
+    const bare = pl.replace(/^#/, '');
+    matched = cands.filter((c) => {
+      const cl = c.toLowerCase();
+      if (pl === '#') return c.startsWith('#');
+      if (cl.startsWith(pl)) return true;
+      if (c.startsWith('#') && c.slice(1).toLowerCase().startsWith(bare)) return true;
+      if (!c.startsWith('#') && cl.startsWith(bare) && prefix.startsWith('#')) return true;
+      return false;
+    });
+  } else {
+    return [];
+  }
+
+  return matched.map((c) => ({
+    value: `${parts[0]} ${c}`,
+    desc,
+    source: 'command' as const,
+  }));
+}
 
 function buildSuggestions(
   value: string,
   commands: { name: string; desc: string }[],
   history: string[],
   recentLabel: string,
+  rooms: string[],
+  users: string[],
 ): SuggestionItem[] {
   const gameUndoPrefix = '/game undo';
   if (value.toLowerCase().startsWith(gameUndoPrefix)) {
@@ -78,6 +151,9 @@ function buildSuggestions(
         source: 'command' as const,
       }));
   }
+
+  const nameItems = nameArgSuggestions(value, rooms, users);
+  if (nameItems.length) return nameItems;
 
   const keyword = value.trim().toLowerCase();
   if (!keyword) return [];
@@ -103,7 +179,7 @@ export default function InputBar() {
   }));
   const inputRef = useRef<HTMLInputElement>(null);
   const sendingRef = useRef(false);
-  const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
+  const { status, activeRoom, composerText, setComposerText, clearMessages, rooms, users } = useChatStore();
   const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
 
@@ -129,6 +205,11 @@ export default function InputBar() {
     [t],
   );
 
+  const roomNames = useMemo(
+    () => uniqKeepOrder([activeRoom, ...rooms.map((r) => r.name)].filter(Boolean)),
+    [activeRoom, rooms],
+  );
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(HISTORY_KEY);
@@ -152,13 +233,21 @@ export default function InputBar() {
   };
 
   const refreshSuggestions = (value: string) => {
-    const merged = buildSuggestions(value, commands, history, t('common.recentInput')).slice(0, 10);
+    const merged = buildSuggestions(
+      value,
+      commands,
+      history,
+      t('common.recentInput'),
+      roomNames,
+      users,
+    ).slice(0, 10);
     setSuggestions(merged);
     setActiveSuggestion(0);
     const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
     const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
+    const isNameArgCommand = nameArgSuggestions(value, roomNames, users).length > 0;
     setShowSuggestions(
-      isTopLevelCommand || isGameUndoCommand
+      isTopLevelCommand || isGameUndoCommand || isNameArgCommand
         ? merged.length > 0
         : merged.length > 0 && value.trim().length > 0,
     );
@@ -182,7 +271,8 @@ export default function InputBar() {
 
     const canTabComplete =
       (value.startsWith('/') && !value.includes(' ')) ||
-      value.toLowerCase().startsWith('/game undo');
+      value.toLowerCase().startsWith('/game undo') ||
+      nameArgSuggestions(value, roomNames, users).length > 0;
 
     if (e.key === 'Tab' && canTabComplete) {
       e.preventDefault();
