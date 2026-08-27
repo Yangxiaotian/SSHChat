@@ -1236,10 +1236,28 @@ struct ContentView: View {
                     .autocorrectionDisabled()
                     .foregroundStyle(Color(white: 0.12))
                     .tint(Color(red: 0.106, green: 0.369, blue: 0.125))
-                    .padding(.horizontal, 12)
+                    .padding(.leading, 12)
+                    .padding(.trailing, model.draft.isEmpty ? 12 : 32)
                     .padding(.vertical, 10)
                     .background(Color(white: 0.95))
                     .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .overlay(alignment: .trailing) {
+                        if !model.draft.isEmpty {
+                            Button {
+                                model.draft = ""
+                                model.refreshSuggestions()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Color(white: 0.55))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 4)
+                            .accessibilityLabel("清除输入")
+                        }
+                    }
                     .focused($draftFocused)
                     .disabled(!model.connected)
                     .onChange(of: model.draft) { _, _ in model.refreshSuggestions() }
@@ -1253,11 +1271,20 @@ struct ContentView: View {
                         return .handled
                     }
 
-                Button("/") { model.insertSlash() }
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(Color(white: 0.2))
-                    .frame(width: 48, height: 40)
-                    .disabled(!model.connected)
+                Button {
+                    model.insertSlash()
+                } label: {
+                    Text("/")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Color(white: 0.2))
+                        .frame(width: 40, height: 40)
+                        .background(Color(white: 0.92))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.connected)
+                .opacity(model.connected ? 1 : 0.35)
 
                 Button("Tab") { model.applyTab() }
                     .font(.system(size: 13, weight: .medium))

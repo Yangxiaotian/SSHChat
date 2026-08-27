@@ -197,6 +197,10 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
+        binding.btnClearDraft.setOnClickListener {
+            binding.etDraft.setText("")
+            binding.etDraft.requestFocus()
+        }
         binding.etDraft.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) hidePlusPanel()
         }
@@ -234,7 +238,10 @@ class MainActivity : AppCompatActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                refreshSuggestions(s?.toString().orEmpty())
+                val text = s?.toString().orEmpty()
+                binding.btnClearDraft.visibility =
+                    if (text.isNotEmpty()) View.VISIBLE else View.GONE
+                refreshSuggestions(text)
             }
         })
         chatSp = uiPrefs().getFloat(PREF_CHAT_FONT_SP, 13f).coerceIn(7f, 22f)
@@ -1327,8 +1334,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
+        binding.btnClearDraft.isEnabled = on
         val iconAlpha = if (on) 1f else 0.35f
         binding.btnPlus.alpha = iconAlpha
+        binding.btnSlash.alpha = iconAlpha
         binding.btnPhoto.alpha = iconAlpha
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
