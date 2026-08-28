@@ -295,6 +295,8 @@ enum ChatLineParsers {
             if sender.lowercased().hasPrefix("pm from ") { return nil }
             // CSI crumb + [*] → fake sender like "2K[*" / "K[*"; let board heuristics handle it.
             if sender.contains("*") { return nil }
+            let senderRange = NSRange(sender.startIndex..., in: sender)
+            if clockSender.firstMatch(in: sender, range: senderRange) != nil { return nil }
             return ChatLine(room: nil, sender: sender, body: String(t[bodyR]))
         }
         // PTY sometimes leaves junk before the real chat brackets — take the last pair.
@@ -372,6 +374,17 @@ enum ChatLineParsers {
     private static let clockCapture = try! NSRegularExpression(
         pattern: #"^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+"#
     )
+    private static let clockSender = try! NSRegularExpression(
+        pattern: #"^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$"#
+    )
+
+    /// client.py timestamps on wrapped `[*]` continuations (`[09:03:28] 续行` without `[*]`).
+    static func isClientClockContinuation(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.contains("[*]") || t.contains("[#") { return false }
+        let range = NSRange(t.startIndex..., in: t)
+        return clockCapture.firstMatch(in: t, range: range) != nil
+    }
 
     /// Prefer line clock (`[HH:MM:SS]`); else local now.
     static func extractDisplayTime(_ line: String) -> String {
@@ -548,6 +561,9 @@ enum ChatLineParsers {
         if normalizeForParse(line).contains("[*]") || line.contains("[*]") {
             return .boardLine(payload)
         }
-        return .system(line)
+        if isClientClockContinuation(line) {
+            return .boardLine(boardLineText(from: line))
+        }
+        return .system(normalizeForParse(line))
     }
 }

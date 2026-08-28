@@ -815,6 +815,44 @@ class _HoverTip:
             self._tip = None
 
 
+def _place_toplevel_near_widget(
+    win: tk.Toplevel,
+    anchor: tk.Misc,
+    *,
+    gap: int = 4,
+    align: str = "left",
+) -> None:
+    """Place a Toplevel just below *anchor* in screen coordinates."""
+    try:
+        win.update_idletasks()
+        anchor.update_idletasks()
+        ax = anchor.winfo_rootx()
+        ay = anchor.winfo_rooty()
+        aw = max(anchor.winfo_width(), 1)
+        ah = max(anchor.winfo_height(), 1)
+        ww = max(win.winfo_reqwidth(), 1)
+        wh = max(win.winfo_reqheight(), 1)
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+    except tk.TclError:
+        return
+
+    if align == "right":
+        x = ax + aw - ww
+    elif align == "center":
+        x = ax + (aw - ww) // 2
+    else:
+        x = ax
+
+    y = ay + ah + gap
+    if y + wh > sh:
+        y = max(0, ay - wh - gap)
+
+    x = max(0, min(x, sw - ww))
+    y = max(0, min(y, sh - wh))
+    win.geometry(f"+{x}+{y}")
+
+
 class ImagePreviewWindow:
     """Zoomable image preview in a Toplevel (Canvas + scrollbars, never Text embed)."""
 
@@ -2542,6 +2580,7 @@ class SSHChatGUI:
         lb.bind("<Double-Button-1>", lambda _e: apply_choice())
         if items:
             lb.selection_set(0)
+        _place_toplevel_near_widget(win, self.btn_send_target, align="right")
 
     def _on_room_list_click(self, event) -> None:
         try:

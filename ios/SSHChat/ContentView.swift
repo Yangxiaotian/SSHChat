@@ -397,6 +397,22 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/canvas") }
     }
 
+    func sendSlashCommand(_ command: String) {
+        guard connected else { toast = "请先连接"; return }
+        let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        CommandUsage.record(cmd)
+        Task { try? await session.send(cmd) }
+    }
+
+    func openLibrary() {
+        sendSlashCommand("/library")
+    }
+
+    func openHelp() {
+        sendSlashCommand("/help")
+    }
+
     func beginSendFile(_ url: URL) {
         guard connected || onConnectedOnce != nil else {
             toast = "请先连接"
@@ -1360,6 +1376,14 @@ struct ContentView: View {
             plusCell(title: "画板", system: "paintbrush.fill") {
                 showPlusPanel = false
                 model.startCanvas()
+            }
+            plusCell(title: "图书馆", system: "books.vertical.fill") {
+                showPlusPanel = false
+                model.openLibrary()
+            }
+            plusCell(title: "帮助", system: "questionmark.circle.fill") {
+                showPlusPanel = false
+                model.openHelp()
             }
             plusCell(title: "清屏", system: "trash.fill", alwaysEnabled: true) {
                 showPlusPanel = false

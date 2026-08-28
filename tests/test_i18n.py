@@ -42,8 +42,13 @@ class I18nTests(unittest.TestCase):
             parts = library.wrap_output_lines(line)
             self.assertTrue(parts)
             for part in parts:
-                self.assertLessEqual(len(part.rstrip("\n").encode("utf-8")), budget)
-                joined.append(part)
+                p = part.rstrip("\n")
+                self.assertLessEqual(len(p.encode("utf-8")), budget)
+                if p.startswith("[*] "):
+                    self.assertTrue(p.startswith("[*] "))
+                    joined.append(p[4:])
+                else:
+                    joined.append(p)
         text = "".join(joined)
         self.assertIn("发件人会收到汇总提示", text)
         self.assertIn("按昵称分组编号", text)

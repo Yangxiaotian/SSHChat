@@ -116,6 +116,7 @@ object ChatLineParsers {
             if (sender.lowercase().startsWith("pm from ")) return null
             // CSI crumb + [*] → fake sender like "2K[*" / "K[*"; let board heuristics handle it.
             if ("*" in sender) return null
+            if (clockSender.matches(sender)) return null
             return ChatLine(null, sender, m.groupValues[2])
         }
         roomChatLoose.find(t)?.let { m ->
@@ -179,6 +180,14 @@ object ChatLineParsers {
     }
 
     private val clockCapture = Regex("""^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+""")
+    private val clockSender = Regex("""^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$""")
+
+    /** client.py timestamps on wrapped `[*]` continuations (`[09:03:28] 续行` without `[*]`). */
+    fun isClientClockContinuation(line: String): Boolean {
+        val t = line.trim()
+        if ("[*]" in t || "[#" in t) return false
+        return clockCapture.containsMatchIn(t)
+    }
 
     /** Prefer line clock (`[HH:MM:SS]`); else local now. */
     fun extractDisplayTime(line: String): String {
@@ -289,7 +298,10 @@ object ChatLineParsers {
             if (normalizeForParse(line).contains("[*]") || line.contains("[*]")) {
                 return DisplayKind.BoardLine(payload)
             }
-            return DisplayKind.System(line)
+            if (isClientClockContinuation(line)) {
+                return DisplayKind.BoardLine(boardLineText(line))
+            }
+            return DisplayKind.System(normalizeForParse(line))
         }
         val unwrapped = unwrapChat(chat)
         val sender = unwrapped.sender

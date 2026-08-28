@@ -196,6 +196,14 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             clearScreen(announce = true)
         }
+        binding.btnLibrary.setOnClickListener {
+            hidePlusPanel()
+            sendSlashCommand("/library")
+        }
+        binding.btnHelp.setOnClickListener {
+            hidePlusPanel()
+            sendSlashCommand("/help")
+        }
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
         binding.btnClearDraft.setOnClickListener {
@@ -439,6 +447,17 @@ class MainActivity : AppCompatActivity() {
         }
         appendLine("[*] 正在创建共享画板…（/canvas）")
         client?.send("/canvas")
+    }
+
+    private fun sendSlashCommand(command: String) {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cmd = command.trim()
+        if (cmd.isEmpty()) return
+        if (cmd.startsWith("/")) CommandUsage.record(cmd)
+        client?.send(cmd)
     }
 
     private fun copyUriAndSend(uri: Uri, fallbackName: String) {
@@ -1291,6 +1310,16 @@ class MainActivity : AppCompatActivity() {
 
     /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
     private fun appendBoardLine(text: String) {
+        val log = binding.chatLog
+        val lastIdx = log.childCount - 1
+        if (lastIdx >= 0) {
+            val last = log.getChildAt(lastIdx)
+            if (last is TextView && last.tag == "board") {
+                last.text = "${last.text}\n$text"
+                scrollChatToBottom()
+                return
+            }
+        }
         val tv = TextView(this).apply {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
@@ -1360,6 +1389,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
+        binding.btnLibrary.isEnabled = on
+        binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
@@ -1371,6 +1402,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
+        binding.btnLibrary.alpha = iconAlpha
+        binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {
