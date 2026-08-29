@@ -398,6 +398,50 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("hashFragmentKey", page)
         self.assertIn("takeKey", page)
         self.assertIn("excalidraw-root", page)
+        # Peers need BinaryFileData[]; passing the files map shows image placeholders.
+        self.assertIn("Object.values(remoteFileMap)", page)
+        self.assertIn("api.addFiles(fileList)", page)
+
+    def test_image_file_above_legacy_512kb_is_kept(self) -> None:
+        """Phone-photo dataURLs often exceed the old 512KB per-file cap."""
+        session = self.store.create_session(
+            creator="Alice", participants=[], room="img"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, err = self.store.issue_access_ticket(
+            token, session.keys["Alice"]
+        )
+        self.assertEqual(err, "")
+        # ~600KB payload (was silently dropped at 512KB → peer saw placeholders).
+        data_url = "data:image/png;base64," + ("A" * 600_000)
+        result, err = self.store.apply_scene(
+            token,
+            ticket,
+            elements=[
+                _el(
+                    "img1",
+                    1,
+                    type="image",
+                    fileId="f-big",
+                    width=100,
+                    height=100,
+                )
+            ],
+            files={
+                "f-big": {
+                    "id": "f-big",
+                    "mimeType": "image/png",
+                    "dataURL": data_url,
+                    "created": 1,
+                }
+            },
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        self.assertIn("f-big", result["files"])
+        sync, _ = self.store.sync_since(token, ticket, 0)
+        self.assertIn("f-big", sync["files"])
+        self.assertEqual(sync["files"]["f-big"]["dataURL"], data_url)
 
 
 if __name__ == "__main__":

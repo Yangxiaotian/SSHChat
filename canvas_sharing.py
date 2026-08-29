@@ -37,9 +37,11 @@ ACCESS_TICKET_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_CANVAS_TICKET_TTL_SECONDS", "1800")
 )
 # Excalidraw scene limits (element-id merge, not freehand strokes).
+# Image dataURLs are large (base64); phone photos often exceed 512KB.
 MAX_ELEMENTS = int(os.environ.get("SSHCHAT_CANVAS_MAX_ELEMENTS", "5000"))
-MAX_SCENE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_SCENE_BYTES", str(2 * 1024 * 1024)))
-MAX_FILES_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILES_BYTES", str(1 * 1024 * 1024)))
+MAX_SCENE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_SCENE_BYTES", str(12 * 1024 * 1024)))
+MAX_FILES_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILES_BYTES", str(10 * 1024 * 1024)))
+MAX_FILE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILE_BYTES", str(4 * 1024 * 1024)))
 # Legacy stroke constants — kept so old clients get a clear error path.
 MAX_STROKES = int(os.environ.get("SSHCHAT_CANVAS_MAX_STROKES", "5000"))
 MAX_POINTS_PER_STROKE = int(os.environ.get("SSHCHAT_CANVAS_MAX_POINTS", "800"))
@@ -625,7 +627,7 @@ class CanvasStore:
             except (TypeError, ValueError):
                 continue
             size = len(raw.encode("utf-8"))
-            if size > 512 * 1024:
+            if size > MAX_FILE_BYTES:
                 continue
             if total + size > MAX_FILES_BYTES:
                 break

@@ -84,7 +84,7 @@ case "$MODE" in
   device|ipa)
     DEST="$ARTIFACT_DIR/SSHChat-stdlib.ipa"
     # Automatic signing needs a Development Team set in the project / env.
-    TEAM="${DEVELOPMENT_TEAM:-${IOS_DEVELOPMENT_TEAM:-6Q9L8CDXSY}}"
+    TEAM="${DEVELOPMENT_TEAM:-${IOS_DEVELOPMENT_TEAM:-5NS64773VG}}"
     EXTRA=()
     if [[ -n "$TEAM" ]]; then
       EXTRA+=(DEVELOPMENT_TEAM="$TEAM")

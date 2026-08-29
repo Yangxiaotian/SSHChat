@@ -9,9 +9,9 @@ import UIKit
 enum DeviceKeyStore {
     static let durableName = "SSHChat-ed25519.identity"
     #if os(watchOS)
-    private static let keychainService = "com.stdlib.SSHChat.watch.identity"
+    private static let keychainService = "com.q267267275.SSHChat.watch.identity"
     #else
-    private static let keychainService = "com.stdlib.SSHChat.identity"
+    private static let keychainService = "com.q267267275.SSHChat.identity"
     #endif
     private static let keychainAccount = "ed25519"
 

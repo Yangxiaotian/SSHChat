@@ -2032,47 +2032,34 @@ class SSHChatGUI:
 
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 4}
-        if self._bundle:
-            bh = str(self._bundle["host"]).strip()
-            bp = int(self._bundle.get("ssh_port", 22))
-            top = ttk.Frame(self.root)
-            top.pack(fill=tk.X, **pad)
-            ttk.Label(
-                top,
-                text=f"SSH 服务器: {bh}    端口 {bp}",
-            ).pack(anchor="w")
-            row_u = ttk.Frame(self.root)
-            row_u.pack(fill=tk.X, **pad)
-            ttk.Label(row_u, text="用户名").pack(side=tk.LEFT)
-            self.var_user = tk.StringVar()
-            ttk.Entry(row_u, textvariable=self.var_user, width=28).pack(
-                side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True
-            )
-            self.var_host = tk.StringVar(value=bh)
-            self.var_port = tk.StringVar(value=str(bp))
-        else:
-            top = ttk.Frame(self.root)
-            top.pack(fill=tk.X, **pad)
+        top = ttk.Frame(self.root)
+        top.pack(fill=tk.X, **pad)
 
-            ttk.Label(top, text="主机").grid(row=0, column=0, sticky="w")
-            self.var_host = tk.StringVar()
-            ttk.Entry(top, textvariable=self.var_host, width=22).grid(
-                row=0, column=1, sticky="ew", padx=(4, 8)
-            )
+        bh = str(self._bundle["host"]).strip() if self._bundle else ""
+        try:
+            bp = int(self._bundle.get("ssh_port", 22)) if self._bundle else 22
+        except (TypeError, ValueError):
+            bp = 22
 
-            ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w")
-            self.var_user = tk.StringVar()
-            ttk.Entry(top, textvariable=self.var_user, width=14).grid(
-                row=0, column=3, sticky="ew", padx=(4, 8)
-            )
+        ttk.Label(top, text="主机").grid(row=0, column=0, sticky="w")
+        self.var_host = tk.StringVar(value=bh)
+        ttk.Entry(top, textvariable=self.var_host, width=22).grid(
+            row=0, column=1, sticky="ew", padx=(4, 8)
+        )
 
-            ttk.Label(top, text="SSH 端口").grid(row=0, column=4, sticky="w")
-            self.var_port = tk.StringVar(value="22")
-            ttk.Entry(top, textvariable=self.var_port, width=6).grid(
-                row=0, column=5, sticky="w", padx=(4, 8)
-            )
+        ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w")
+        self.var_user = tk.StringVar()
+        ttk.Entry(top, textvariable=self.var_user, width=14).grid(
+            row=0, column=3, sticky="ew", padx=(4, 8)
+        )
 
-            top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="SSH 端口").grid(row=0, column=4, sticky="w")
+        self.var_port = tk.StringVar(value=str(bp))
+        ttk.Entry(top, textvariable=self.var_port, width=6).grid(
+            row=0, column=5, sticky="w", padx=(4, 8)
+        )
+
+        top.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill=tk.X, padx=6, pady=(0, 4))
@@ -2967,11 +2954,10 @@ class SSHChatGUI:
     def _apply_profile(self, cfg: dict[str, Any] | None) -> None:
         if not cfg:
             return
-        if not self._bundle:
-            if isinstance(cfg.get("host"), str):
-                self.var_host.set(cfg["host"])
-            port = cfg.get("ssh_port", 22)
-            self.var_port.set(str(port))
+        if isinstance(cfg.get("host"), str) and cfg["host"].strip():
+            self.var_host.set(cfg["host"].strip())
+        if cfg.get("ssh_port") is not None:
+            self.var_port.set(str(cfg["ssh_port"]))
         if isinstance(cfg.get("user"), str):
             self.var_user.set(cfg["user"])
         kind = cfg.get("send_target_kind")
@@ -2990,18 +2976,14 @@ class SSHChatGUI:
         user = self.var_user.get().strip()
         if not user:
             raise ValueError("请填写用户名")
-        if self._bundle:
-            host = str(self._bundle["host"]).strip()
-            port_n = int(self._bundle.get("ssh_port", 22))
-        else:
-            port_s = self.var_port.get().strip() or "22"
-            try:
-                port_n = int(port_s)
-            except ValueError:
-                raise ValueError("SSH 端口必须是数字") from None
-            host = self.var_host.get().strip()
-            if not host:
-                raise ValueError("请填写主机")
+        port_s = self.var_port.get().strip() or "22"
+        try:
+            port_n = int(port_s)
+        except ValueError:
+            raise ValueError("SSH 端口必须是数字") from None
+        host = self.var_host.get().strip()
+        if not host:
+            raise ValueError("请填写主机")
         data: dict[str, Any] = {
             "host": host,
             "user": user,
@@ -3063,19 +3045,12 @@ class SSHChatGUI:
     def _connect_clicked(self) -> None:
         if self._connecting.is_set():
             return
-        if self._bundle:
-            try:
-                port = int(self._bundle.get("ssh_port", 22))
-            except (TypeError, ValueError):
-                port = 22
-            host = str(self._bundle["host"]).strip()
-        else:
-            try:
-                port = int(self.var_port.get().strip() or "22")
-            except ValueError:
-                messagebox.showwarning("SSHChat", "SSH 端口必须是数字")
-                return
-            host = self.var_host.get().strip()
+        try:
+            port = int(self.var_port.get().strip() or "22")
+        except ValueError:
+            messagebox.showwarning("SSHChat", "SSH 端口必须是数字")
+            return
+        host = self.var_host.get().strip()
         user = self.var_user.get().strip()
         if not user:
             messagebox.showwarning("SSHChat", "请填写用户名")

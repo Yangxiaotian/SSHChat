@@ -11,6 +11,7 @@ import android.text.TextWatcher
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.util.TypedValue
+import androidx.core.content.res.ResourcesCompat
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private var client: SshChatClient? = null
     private val bg = Executors.newSingleThreadExecutor()
     private var chatSp = 13f
+    /** Bundled mono — OEM system fonts must not replace Typeface.MONOSPACE on board rows. */
+    private var boardMono: Typeface? = null
     private val pendingFileMeta = SecureInvite.FileMeta()
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
@@ -610,21 +613,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun uiPrefs() = getSharedPreferences(PREFS_UI, MODE_PRIVATE)
 
+    private fun boardTypeface(): Typeface {
+        boardMono?.let { return it }
+        val tf = ResourcesCompat.getFont(this, R.font.board_mono) ?: Typeface.MONOSPACE
+        boardMono = tf
+        return tf
+    }
+
+    private fun styleBoardTextView(tv: TextView) {
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+        tv.typeface = boardTypeface()
+        tv.letterSpacing = 0f
+        tv.includeFontPadding = false
+    }
+
     private fun applyFont() {
         for (i in 0 until binding.chatLog.childCount) {
             when (val child = binding.chatLog.getChildAt(i)) {
-                is TextView -> child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+                is TextView -> applyFontToTextView(child)
                 is ViewGroup -> applyFontToGroup(child)
             }
         }
     }
 
+    private fun applyFontToTextView(tv: TextView) {
+        if (tv is Button) return
+        if (tv.tag == "board") {
+            styleBoardTextView(tv)
+            return
+        }
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+    }
+
     private fun applyFontToGroup(group: ViewGroup) {
         for (i in 0 until group.childCount) {
             when (val child = group.getChildAt(i)) {
-                is TextView -> if (child !is Button) {
-                    child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
-                }
+                is TextView -> applyFontToTextView(child)
                 is ViewGroup -> applyFontToGroup(child)
             }
         }
@@ -1322,9 +1346,8 @@ class MainActivity : AppCompatActivity() {
         }
         val tv = TextView(this).apply {
             this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
-            typeface = Typeface.MONOSPACE
+            styleBoardTextView(this)
             gravity = Gravity.START
             textAlignment = View.TEXT_ALIGNMENT_VIEW_START
             setTextIsSelectable(true)
