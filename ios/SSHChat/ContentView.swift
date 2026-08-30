@@ -1081,29 +1081,26 @@ struct ContentView: View {
         case .pm(_, let from, let body, let time):
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .top, spacing: 0) {
-                    Button {
-                        model.replyToPm(from)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("私聊 · \(from)")
-                                .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
-                                .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
-                            Text(body)
-                                .font(.system(size: model.chatFont))
-                                .foregroundStyle(Color(white: 0.13))
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text("点按回复")
-                                .font(.system(size: max(10, model.chatFont - 1)))
-                                .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
-                                .underline()
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(red: 0.89, green: 0.95, blue: 0.99))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("私聊 · \(from)")
+                            .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
+                            .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
+                        Text(body)
+                            .font(.system(size: model.chatFont))
+                            .foregroundStyle(Color(white: 0.13))
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Text("点按回复")
+                            .font(.system(size: max(10, model.chatFont - 1)))
+                            .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
+                            .underline()
+                            .onTapGesture { model.replyToPm(from) }
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 0.89, green: 0.95, blue: 0.99))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: .leading)
                     Spacer(minLength: 36)
                 }
@@ -1158,6 +1155,7 @@ struct ContentView: View {
                     .foregroundStyle(Color(white: 0.12))
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(mine ? Color(red: 0.584, green: 0.925, blue: 0.412) : Color.white)

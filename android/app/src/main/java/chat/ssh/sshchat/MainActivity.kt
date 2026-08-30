@@ -1205,12 +1205,6 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
                 it.marginEnd = dp(36)
             }
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                setSendTarget(SendTarget.User(from))
-                Toast.makeText(this@MainActivity, "已切换为私聊 $from", Toast.LENGTH_SHORT).show()
-            }
         }
         val tag = TextView(this).apply {
             text = "私聊 · $from"
@@ -1222,6 +1216,7 @@ class MainActivity : AppCompatActivity() {
             text = body
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
+            setTextIsSelectable(true)
         }
         val hint = TextView(this).apply {
             text = "点按回复"
@@ -1229,6 +1224,12 @@ class MainActivity : AppCompatActivity() {
             setTextColor(0xFF0B57D0.toInt())
             paint.isUnderlineText = true
             setPadding(0, dp(2), 0, 0)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                setSendTarget(SendTarget.User(from))
+                Toast.makeText(this@MainActivity, "已切换为私聊 $from", Toast.LENGTH_SHORT).show()
+            }
         }
         card.addView(tag)
         card.addView(bodyTv)

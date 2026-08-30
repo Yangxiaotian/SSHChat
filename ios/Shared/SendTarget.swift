@@ -196,13 +196,22 @@ enum ChatLineParsers {
     }
 
     static func parsePm(_ line: String) -> PmLine? {
-        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let range = NSRange(t.startIndex..., in: t)
-        guard let m = pmLine.firstMatch(in: t, range: range),
-              let fromR = Range(m.range(at: 1), in: t),
-              let bodyR = Range(m.range(at: 2), in: t)
-        else { return nil }
-        return PmLine(from: String(t[fromR]), body: String(t[bodyR]))
+        let t = normalizeForParse(line)
+        if let m = pmLine.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+           let fromR = Range(m.range(at: 1), in: t),
+           let bodyR = Range(m.range(at: 2), in: t) {
+            return PmLine(from: String(t[fromR]), body: String(t[bodyR]))
+        }
+        let lower = t.lowercased()
+        if let idx = lower.range(of: "[pm from ") {
+            let rest = String(t[idx.lowerBound...])
+            if let m = pmLine.firstMatch(in: rest, range: NSRange(rest.startIndex..., in: rest)),
+               let fromR = Range(m.range(at: 1), in: rest),
+               let bodyR = Range(m.range(at: 2), in: rest) {
+                return PmLine(from: String(rest[fromR]), body: String(rest[bodyR]))
+            }
+        }
+        return nil
     }
 
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
@@ -523,6 +532,15 @@ enum ChatLineParsers {
     }
 
     static func classifyForDisplay(_ line: String, myName: String) -> DisplayKind {
+        if let pm = parsePm(line) {
+            return .bubble(
+                mine: false,
+                room: nil,
+                sender: pm.from,
+                body: pm.body,
+                time: extractDisplayTime(line)
+            )
+        }
         if let body = parseGameStarBody(line) {
             return .boardLine(body)
         }

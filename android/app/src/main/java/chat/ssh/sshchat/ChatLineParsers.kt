@@ -38,9 +38,17 @@ object ChatLineParsers {
     }
 
     fun parsePm(line: String): PmLine? {
-        val t = line.trim()
-        val m = pmLine.matchEntire(t) ?: return null
-        return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+        val t = normalizeForParse(line)
+        pmLine.matchEntire(t)?.let { m ->
+            return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+        }
+        val idx = t.indexOf("[PM from ", ignoreCase = true)
+        if (idx >= 0) {
+            pmLine.matchEntire(t.substring(idx))?.let { m ->
+                return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+            }
+        }
+        return null
     }
 
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
@@ -288,6 +296,15 @@ object ChatLineParsers {
     }
 
     fun classifyForDisplay(line: String, myName: String): DisplayKind {
+        parsePm(line)?.let { pm ->
+            return DisplayKind.Bubble(
+                mine = false,
+                room = null,
+                sender = pm.from,
+                body = pm.body,
+                time = extractDisplayTime(line),
+            )
+        }
         parseGameStarBody(line)?.let { return DisplayKind.BoardLine(it) }
 
         val chat = parseChat(line) ?: run {
