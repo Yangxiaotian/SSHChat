@@ -219,7 +219,9 @@ PIANO_TEXTS = {
         "export": "Export",
         "share": "Share link",
         "recording": "Recording…",
-        "export_ok": "Recording saved to your device",
+        "export_ok": "MP3 saved to your device",
+        "export_working": "Exporting MP3…",
+        "export_fail": "MP3 export failed",
         "share_ok": "Replay link copied to clipboard",
         "share_fail": "Could not create share link",
         "share_empty": "Record something first",
@@ -258,7 +260,9 @@ PIANO_TEXTS = {
         "export": "导出",
         "share": "分享链接",
         "recording": "录制中…",
-        "export_ok": "录制已保存到本地",
+        "export_ok": "MP3 已保存到本地",
+        "export_working": "正在导出 MP3…",
+        "export_fail": "MP3 导出失败",
         "share_ok": "重放链接已复制到剪贴板",
         "share_fail": "无法创建分享链接",
         "share_empty": "请先录制一段演奏",
@@ -273,12 +277,18 @@ PIANO_TEXTS = {
 }
 
 _SAMPLES_DIR = Path(__file__).resolve().parent / "piano_samples"
+_STATIC_DIR = Path(__file__).resolve().parent / "piano_static"
 _SAMPLE_FNAME_RE = re.compile(r"^[ab]\d{2}\.mp3$", re.IGNORECASE)
 _VALID_SAMPLES = frozenset(PIANO_NOTES.values())
+_STATIC_FILES = frozenset({"lame.min.js"})
 
 
 def samples_dir() -> Path:
     return Path(os.environ.get("SSHCHAT_PIANO_SAMPLES_DIR", str(_SAMPLES_DIR)))
+
+
+def static_dir() -> Path:
+    return Path(os.environ.get("SSHCHAT_PIANO_STATIC_DIR", str(_STATIC_DIR)))
 
 
 def _safe_sample_fname(fname: str) -> Optional[str]:
@@ -314,6 +324,8 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         "share": S["share"],
         "recording": S["recording"],
         "exportOk": S["export_ok"],
+        "exportWorking": S["export_working"],
+        "exportFail": S["export_fail"],
         "shareOk": S["share_ok"],
         "shareFail": S["share_fail"],
         "shareEmpty": S["share_empty"],
@@ -895,24 +907,106 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             else startRecording();
         }}
 
-        function exportRecording() {{
-            const payload = buildRecordingPayload();
-            if (!payload || !payload.events.length) {{
+        let lameLoadPromise = null;
+
+        function loadLamejs() {{
+            if (window.lamejs && window.lamejs.Mp3Encoder) {{
+                return Promise.resolve(window.lamejs);
+            }}
+            if (lameLoadPromise) return lameLoadPromise;
+            lameLoadPromise = new Promise(function (resolve, reject) {{
+                const s = document.createElement('script');
+                s.src = '/piano-static/lame.min.js';
+                s.async = true;
+                s.onload = function () {{
+                    if (window.lamejs && window.lamejs.Mp3Encoder) resolve(window.lamejs);
+                    else reject(new Error(i18n.exportFail));
+                }};
+                s.onerror = function () {{ reject(new Error(i18n.exportFail)); }};
+                document.head.appendChild(s);
+            }});
+            return lameLoadPromise;
+        }}
+
+        function floatTo16BitPCM(float32) {{
+            const out = new Int16Array(float32.length);
+            for (let i = 0; i < float32.length; i++) {{
+                const s = Math.max(-1, Math.min(1, float32[i]));
+                out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }}
+            return out;
+        }}
+
+        async function renderRecordingMp3(recording) {{
+            await unlockAudio();
+            const ready = await preloadSamples();
+            if (!ready) throw new Error(i18n.exportFail);
+            const tailSec = 1.5;
+            const dur = Math.max(0.5, (recording.duration || 0) + tailSec);
+            const sampleRate = 44100;
+            const offline = new OfflineAudioContext(
+                2,
+                Math.ceil(sampleRate * dur),
+                sampleRate
+            );
+            for (const evt of (recording.events || [])) {{
+                if (evt.action !== 'on') continue;
+                const buffer = audioBuffers[evt.note];
+                if (!buffer) continue;
+                const src = offline.createBufferSource();
+                src.buffer = buffer;
+                src.connect(offline.destination);
+                src.start(Math.max(0, evt.t));
+            }}
+            const rendered = await offline.startRendering();
+            const left = rendered.getChannelData(0);
+            const right = rendered.numberOfChannels > 1
+                ? rendered.getChannelData(1)
+                : left;
+            const mono = new Float32Array(left.length);
+            for (let i = 0; i < left.length; i++) {{
+                mono[i] = (left[i] + right[i]) * 0.5;
+            }}
+            const samples = floatTo16BitPCM(mono);
+            const lame = await loadLamejs();
+            const encoder = new lame.Mp3Encoder(1, sampleRate, 128);
+            const blockSize = 1152;
+            const mp3Chunks = [];
+            for (let i = 0; i < samples.length; i += blockSize) {{
+                const slice = samples.subarray(i, i + blockSize);
+                const buf = encoder.encodeBuffer(slice);
+                if (buf.length > 0) mp3Chunks.push(new Uint8Array(buf));
+            }}
+            const flush = encoder.flush();
+            if (flush.length > 0) mp3Chunks.push(new Uint8Array(flush));
+            return new Blob(mp3Chunks, {{ type: 'audio/mpeg' }});
+        }}
+
+        async function exportRecording() {{
+            if (!lastRecording || !lastRecording.events.length) {{
                 alert(i18n.shareEmpty);
                 return;
             }}
-            const blob = new Blob([JSON.stringify(payload, null, 2)], {{
-                type: 'application/json',
-            }});
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'piano-recording-' + Date.now() + '.json';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function () {{ URL.revokeObjectURL(url); }}, 1000);
-            setStatus(i18n.exportOk, false);
+            exportBtn.disabled = true;
+            shareBtn.disabled = true;
+            setStatus(i18n.exportWorking, false);
+            try {{
+                const blob = await renderRecordingMp3(lastRecording);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'piano-recording-' + Date.now() + '.mp3';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(function () {{ URL.revokeObjectURL(url); }}, 1000);
+                setStatus(i18n.exportOk, false);
+            }} catch (e) {{
+                alert((e && e.message) || i18n.exportFail);
+                setStatus(i18n.statusErr, true);
+            }} finally {{
+                updateRecUi();
+            }}
         }}
 
         async function shareRecording() {{
@@ -955,7 +1049,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         }}
 
         recBtn.addEventListener('click', toggleRecording);
-        exportBtn.addEventListener('click', exportRecording);
+        exportBtn.addEventListener('click', function () {{ void exportRecording(); }});
         shareBtn.addEventListener('click', function () {{ void shareRecording(); }});
 
         function setStatus(text, err) {{
@@ -1415,6 +1509,42 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
 </html>"""
 
 
+def handle_piano_static_get(handler: "BaseHTTPRequestHandler") -> bool:
+    """Serve piano client assets at /piano-static/{fname}."""
+    parsed = urlparse(handler.path)
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 2 or parts[0] != "piano-static":
+        return False
+
+    fname = parts[1]
+    if fname not in _STATIC_FILES:
+        handler._send_error_json(404, "not found")  # type: ignore[attr-defined]
+        return True
+
+    path = static_dir() / fname
+    if not path.is_file():
+        handler._send_error_json(404, "not found")  # type: ignore[attr-defined]
+        return True
+
+    mime = mimetypes.guess_type(fname)[0] or "application/javascript"
+    try:
+        size = path.stat().st_size
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Content-Length", str(size))
+        handler.send_header("Cache-Control", "public, max-age=86400")
+        handler.end_headers()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
+    except Exception as e:
+        print(f"[PianoHTTP] static error: {e}")
+    return True
+
+
 def handle_piano_samples_get(handler: "BaseHTTPRequestHandler") -> bool:
     """Serve piano MP3 samples from piano_samples/ at /piano-samples/{fname}."""
     parsed = urlparse(handler.path)
@@ -1591,6 +1721,10 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
         "replayRestart": S["replay_restart"],
         "replayLoading": S["replay_loading"],
         "replayNotFound": S["replay_not_found"],
+        "export": S["export"],
+        "exportOk": S["export_ok"],
+        "exportWorking": S["export_working"],
+        "exportFail": S["export_fail"],
     }
     notes_json = json.dumps(PIANO_NOTES, ensure_ascii=False)
     keys_json = json.dumps(PIANO_KEYS, ensure_ascii=False)
@@ -1663,6 +1797,14 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
             color: white;
         }}
         button:disabled {{ opacity: 0.45; cursor: not-allowed; }}
+        .status {{
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(47,111,106,0.12);
+            color: var(--accent-2);
+        }}
+        .status.err {{ background: rgba(196,92,38,0.15); color: var(--accent); }}
         .progress {{
             margin-left: auto;
             font-size: 12px;
@@ -1744,6 +1886,8 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
                 <span class="meta" id="meta"></span>
                 <button type="button" id="playBtn" disabled>{html.escape(S['replay_play'])}</button>
                 <button type="button" id="restartBtn" disabled>{html.escape(S['replay_restart'])}</button>
+                <button type="button" id="exportBtn" disabled>{html.escape(S['export'])}</button>
+                <span class="status" id="status" hidden></span>
                 <span class="progress" id="progress">0:00 / 0:00</span>
             </div>
             <div class="err-msg" id="errMsg" hidden></div>
@@ -1763,6 +1907,8 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
 
         const playBtn = document.getElementById('playBtn');
         const restartBtn = document.getElementById('restartBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const statusEl = document.getElementById('status');
         const progressEl = document.getElementById('progress');
         const metaEl = document.getElementById('meta');
         const errMsg = document.getElementById('errMsg');
@@ -1781,6 +1927,120 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
         let audioCtx = null;
         const audioBuffers = Object.create(null);
         let unlockPromise = null;
+        let lameLoadPromise = null;
+
+        function setStatus(text, err) {{
+            if (!text) {{
+                statusEl.hidden = true;
+                statusEl.textContent = '';
+                statusEl.classList.remove('err');
+                return;
+            }}
+            statusEl.hidden = false;
+            statusEl.textContent = text;
+            statusEl.classList.toggle('err', !!err);
+        }}
+
+        function loadLamejs() {{
+            if (window.lamejs && window.lamejs.Mp3Encoder) {{
+                return Promise.resolve(window.lamejs);
+            }}
+            if (lameLoadPromise) return lameLoadPromise;
+            lameLoadPromise = new Promise(function (resolve, reject) {{
+                const s = document.createElement('script');
+                s.src = '/piano-static/lame.min.js';
+                s.async = true;
+                s.onload = function () {{
+                    if (window.lamejs && window.lamejs.Mp3Encoder) resolve(window.lamejs);
+                    else reject(new Error(i18n.exportFail));
+                }};
+                s.onerror = function () {{ reject(new Error(i18n.exportFail)); }};
+                document.head.appendChild(s);
+            }});
+            return lameLoadPromise;
+        }}
+
+        function floatTo16BitPCM(float32) {{
+            const out = new Int16Array(float32.length);
+            for (let i = 0; i < float32.length; i++) {{
+                const s = Math.max(-1, Math.min(1, float32[i]));
+                out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }}
+            return out;
+        }}
+
+        async function renderRecordingMp3(rec) {{
+            await unlockAudio();
+            const ready = await preloadSamples();
+            if (!ready) throw new Error(i18n.exportFail);
+            const tailSec = 1.5;
+            const dur = Math.max(0.5, (rec.duration || 0) + tailSec);
+            const sampleRate = 44100;
+            const offline = new OfflineAudioContext(
+                2,
+                Math.ceil(sampleRate * dur),
+                sampleRate
+            );
+            for (const evt of (rec.events || [])) {{
+                if (evt.action !== 'on') continue;
+                const buffer = audioBuffers[evt.note];
+                if (!buffer) continue;
+                const src = offline.createBufferSource();
+                src.buffer = buffer;
+                src.connect(offline.destination);
+                src.start(Math.max(0, evt.t));
+            }}
+            const rendered = await offline.startRendering();
+            const left = rendered.getChannelData(0);
+            const right = rendered.numberOfChannels > 1
+                ? rendered.getChannelData(1)
+                : left;
+            const mono = new Float32Array(left.length);
+            for (let i = 0; i < left.length; i++) {{
+                mono[i] = (left[i] + right[i]) * 0.5;
+            }}
+            const samples = floatTo16BitPCM(mono);
+            const lame = await loadLamejs();
+            const encoder = new lame.Mp3Encoder(1, sampleRate, 128);
+            const blockSize = 1152;
+            const mp3Chunks = [];
+            for (let i = 0; i < samples.length; i += blockSize) {{
+                const slice = samples.subarray(i, i + blockSize);
+                const buf = encoder.encodeBuffer(slice);
+                if (buf.length > 0) mp3Chunks.push(new Uint8Array(buf));
+            }}
+            const flush = encoder.flush();
+            if (flush.length > 0) mp3Chunks.push(new Uint8Array(flush));
+            return new Blob(mp3Chunks, {{ type: 'audio/mpeg' }});
+        }}
+
+        async function exportRecording() {{
+            if (!recording || !recording.events || !recording.events.length) return;
+            exportBtn.disabled = true;
+            playBtn.disabled = true;
+            restartBtn.disabled = true;
+            setStatus(i18n.exportWorking, false);
+            try {{
+                const blob = await renderRecordingMp3(recording);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'piano-replay-' + recordingId + '.mp3';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(function () {{ URL.revokeObjectURL(url); }}, 1000);
+                setStatus(i18n.exportOk, false);
+                setTimeout(function () {{ setStatus('', false); }}, 2500);
+            }} catch (e) {{
+                alert((e && e.message) || i18n.exportFail);
+                setStatus('', false);
+            }} finally {{
+                exportBtn.disabled = false;
+                playBtn.disabled = false;
+                restartBtn.disabled = false;
+            }}
+        }}
 
         function fmtTime(sec) {{
             const s = Math.max(0, Math.floor(sec));
@@ -1983,6 +2243,7 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
 
         playBtn.addEventListener('click', togglePlay);
         restartBtn.addEventListener('click', restartPlayback);
+        exportBtn.addEventListener('click', function () {{ void exportRecording(); }});
 
         async function load() {{
             buildKeyboard();
@@ -1998,6 +2259,7 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
                 progressEl.textContent = '0:00 / ' + fmtTime(data.duration || 0);
                 playBtn.disabled = false;
                 restartBtn.disabled = false;
+                exportBtn.disabled = !(data.events && data.events.length);
             }} catch (e) {{
                 errMsg.hidden = false;
                 errMsg.textContent = (e && e.message) || i18n.replayNotFound;

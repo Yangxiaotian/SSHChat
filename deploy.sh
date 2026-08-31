@@ -1083,6 +1083,9 @@ done
 rm -rf "$PREFIX/locales"
 cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
 copy_piano_samples_dir "$SCRIPT_DIR/piano_samples" "$PREFIX/piano_samples"
+if [[ -d "$SCRIPT_DIR/piano_static" ]]; then
+  copy_piano_samples_dir "$SCRIPT_DIR/piano_static" "$PREFIX/piano_static"
+fi
 for _f in chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done

@@ -9,6 +9,7 @@ Provides:
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
+- Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
 - HTTPS support with auto-generated or provided certificates
 
@@ -1425,6 +1426,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if piano_http.handle_piano_static_get(self):
+            return
         if piano_http.handle_piano_samples_get(self):
             return
         if piano_http.handle_piano_replay_get(self):
