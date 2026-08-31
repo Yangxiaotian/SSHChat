@@ -17,6 +17,7 @@
 		2D2528AC0CCFDF2388043C1C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A6E5B6078F5A131C28D76C70 /* Assets.xcassets */; };
 		33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */; };
 		4CBE4F0B4355BB146A92F215 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */; };
+		5A063F3F4338A79777477C18 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */; };
 		5BC66FF52939DC1BDD423200 /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A444AB9A07153781D9B379A7 /* SendTarget.swift */; };
 		604B556FE597621857CB97E4 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 5EABC10D09920FD873E2E322 /* Citadel */; };
 		605BB39E76EFB52381AF7128 /* WatchChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465728BED464780173D6E5F6 /* WatchChatViewModel.swift */; };
@@ -55,6 +56,7 @@
 		4FBF3187F5EE15DADE9A5F11 /* Citadel */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Citadel; path = Packages/Citadel; sourceTree = SOURCE_ROOT; };
 		51A68C58969B3B6A439DAB63 /* SSHChatWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHChatWatchApp.swift; sourceTree = "<group>"; };
 		559396D782E192802F9A441C /* SecureUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureUpload.swift; sourceTree = "<group>"; };
+		5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		64243685BD8B9E650897F969 /* SSHChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHChatApp.swift; sourceTree = "<group>"; };
 		7D83E0298EA4557B016E588C /* SSHSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHSession.swift; sourceTree = "<group>"; };
 		84F2A253B334D625853D2A30 /* WatchRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootView.swift; sourceTree = "<group>"; };
@@ -135,6 +137,7 @@
 		999087DF1AF8E60525F751F2 /* SSHChat */ = {
 			isa = PBXGroup;
 			children = (
+				5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */,
 				B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */,
 				41AF976063059AD5181A7784 /* CameraPicker.swift */,
 				02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */,
@@ -235,7 +238,7 @@
 						ProvisioningStyle = Automatic;
 					};
 					FC5597775EEA761FDD9AE7DC = {
-						DevelopmentTeam = 6Q9L8CDXSY;
+						DevelopmentTeam = 5NS64773VG;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -305,6 +308,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F1657897BC6C5B81115E37B6 /* AppConfig.swift in Sources */,
+				5A063F3F4338A79777477C18 /* AppDelegate.swift in Sources */,
 				B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */,
 				97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */,
 				B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */,
@@ -341,7 +345,7 @@
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -410,7 +414,7 @@
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (

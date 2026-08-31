@@ -31,6 +31,7 @@ import i18n
 import library
 import file_sharing
 import file_http_server
+import piano_sharing
 from locale_store import LocaleStore
 from offline_messages import OfflineMessageStore
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game, localize_level
@@ -4404,6 +4405,271 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         _federation_push_canvas_announce(session)
 
 
+def _piano_invite_message(
+    *,
+    creator: str,
+    url: str,
+    key: str,
+    room: Optional[str],
+    title: str = "",
+) -> str:
+    where = f"房间 #{room}" if room else "私密钢琴"
+    title_line = f"[*] 标题: {title}\n" if title else ""
+    return (
+        f"[*] ========== 房间钢琴 ==========\n"
+        f"[*] 发起人: {creator}\n"
+        f"[*] 范围: {where}\n"
+        f"{title_line}"
+        f"[*]\n"
+        f"[*] 钢琴网址:\n"
+        f"[*] {url}\n"
+        f"[*]\n"
+        f"[*] 访问密钥: {key}\n"
+        f"[*]\n"
+        f"[*] 说明:\n"
+        f"[*] 1. 打开网址，在页面里输入上面的密钥\n"
+        f"[*] 2. 密钥不在网址里；每人的网址和密钥都不同\n"
+        f"[*] 3. 解锁后可用键盘演奏，同房间其他人会听到\n"
+        f"[*] 4. 电脑白键 Z→M、A→'、1→= 连续排列；黑键 Q→P 等，琴键上标按键。手机三行分段。\n"
+        f"[*] 5. 图形客户端会折叠成按钮，可一键打开\n"
+        f"[*] =====================================\n"
+        f"[*] gui-open piano {url} {key}\n"
+    )
+
+
+def _deliver_piano_invites(
+    session: piano_sharing.PianoSession,
+    *,
+    only: Optional[str] = None,
+) -> None:
+    if file_http is None:
+        return
+    base_url = file_http.get_base_url().rstrip("/")
+    hub = federation.get_hub()
+    only_key = (only or "").strip().lower()
+    for participant, token in session.tokens.items():
+        if only_key and participant.lower() != only_key:
+            continue
+        key = session.keys.get(participant) or ""
+        url = f"{base_url}/piano/{token}"
+        message = _piano_invite_message(
+            creator=session.creator,
+            url=url,
+            key=key,
+            room=session.room,
+            title=session.title,
+        )
+        recipient_lower = participant.lower()
+        delivered = False
+        with lock:
+            for c, info in clients.items():
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(c, message)
+                    delivered = True
+                except Exception as e:
+                    print(f"[Piano] Failed to notify {participant}: {e}")
+        if (
+            not delivered
+            and hub is not None
+            and hub.enabled
+            and hub.has_remote_user(participant)
+        ):
+            try:
+                hub.send_pm(participant, session.creator, message)
+            except Exception as e:
+                print(f"[Piano] Federated invite failed for {participant}: {e}")
+
+
+def _ensure_piano_participant(
+    session: piano_sharing.PianoSession, nick: str
+) -> Tuple[bool, str]:
+    nick = (nick or "").strip()
+    if not nick:
+        return False, "无效昵称"
+    for existing in session.tokens:
+        if existing.lower() == nick.lower():
+            return True, ""
+    token, key, err = piano_sharing.piano_store.add_participant(
+        session.session_id, nick
+    )
+    if err or not token:
+        return False, err or "加入失败"
+    session.tokens[nick] = token
+    session.keys[nick] = key or ""
+    return True, ""
+
+
+def _handle_piano(conn, sender: str, payload: str) -> None:
+    """Handle /piano — shared room piano (URL + separate key)."""
+    if file_http is None:
+        send_line(conn, "[*] 钢琴功能依赖文件网页服务，当前未启用。\n")
+        return
+
+    raw = payload[len("/piano") :].strip()
+
+    if raw.lower() in ("help", "?", "帮助"):
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(conn, "[*] Usage:\n")
+            send_line(conn, "[*]   /piano            - room piano for the current room\n")
+            send_line(conn, "[*]   /piano #<room>    - piano for a specific room\n")
+            send_line(conn, "[*]   /piano <nick>     - private piano with an online user\n")
+            send_line(conn, "[*]   /piano close      - creator closes the current room piano\n")
+            send_line(conn, "[*]   /piano new        - force a new piano even if the room already has one\n")
+            send_line(
+                conn,
+                "[*] Desktop: consecutive whites Z→M, A→', 1→=; blacks Q→P/`/numpad. Phone: 3 rows.\n",
+            )
+            send_line(
+                conn,
+                "[*] If the room already has a piano, /piano joins it and re-sends your invite.\n",
+            )
+        else:
+            send_line(conn, "[*] 用法：\n")
+            send_line(conn, "[*]   /piano            - 当前房间共享钢琴\n")
+            send_line(conn, "[*]   /piano #<房间>    - 指定房间共享钢琴\n")
+            send_line(conn, "[*]   /piano <昵称>     - 与某人私密钢琴\n")
+            send_line(conn, "[*]   /piano close      - 发起人关闭当前房间钢琴\n")
+            send_line(conn, "[*]   /piano new        - 强制新开（即使房间已有）\n")
+            send_line(
+                conn,
+                "[*] 电脑白键 Z→M、A→'、1→= 连续排列；黑键 Q→P 等。手机三行分段。\n",
+            )
+            send_line(
+                conn,
+                "[*] 房间已有钢琴时，再发 /piano 会加入已有钢琴并给你发邀请。\n",
+            )
+        return
+
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    force_new = False
+    if target.lower() in ("new", "新建"):
+        force_new = True
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+    if target.lower() in ("close", "关闭", "end"):
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+        session = piano_sharing.piano_store.find_open_for_room(room_name)
+        if session is None:
+            send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的钢琴。\n")
+            return
+        ok, err = piano_sharing.piano_store.close_session(session.session_id, sender)
+        if not ok:
+            send_line(conn, f"[*] {err}\n")
+            return
+        send_line(conn, f"[*] 已关闭房间 #{room_name} 的共享钢琴。\n")
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 关闭了共享钢琴。\n".encode("utf-8"),
+        )
+        return
+
+    recipients: list[str] = []
+    room_name: Optional[str] = None
+
+    if not target:
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+
+    if room_name is not None:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            for c in rooms[room_name]:
+                if c in clients:
+                    recipients.append(clients[c]["name"])
+
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+
+        if len({n.lower() for n in recipients}) < 1:
+            send_line(conn, f"[*] 房间 #{room_name} 里没有人。\n")
+            return
+
+        if not force_new:
+            existing = piano_sharing.piano_store.find_open_for_room(room_name)
+            if existing is not None:
+                ok, err = _ensure_piano_participant(existing, sender)
+                if not ok:
+                    send_line(conn, f"[*] 加入已有钢琴失败：{err}\n")
+                    return
+                send_line(
+                    conn,
+                    f"[*] 房间 #{room_name} 已有共享钢琴；正在把你加入并发送邀请。"
+                    f"（强制新开用 /piano new）\n",
+                )
+                _deliver_piano_invites(existing, only=sender)
+                return
+        else:
+            old = piano_sharing.piano_store.find_open_for_room(room_name)
+            if old is not None:
+                piano_sharing.piano_store.close_session(old.session_id, old.creator)
+    else:
+        target_lower = target.lower()
+        with lock:
+            online = [
+                info["name"]
+                for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        if not online:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled and hub.has_remote_user(target):
+                online = [target]
+        if not online:
+            send_line(conn, f"[*] 用户 {target} 不在线。\n")
+            return
+        if target_lower == sender.lower():
+            send_line(conn, "[*] 私密钢琴请指定另一位在线用户。\n")
+            return
+        recipients = [sender, online[0]]
+
+    try:
+        session = piano_sharing.piano_store.create_session(
+            creator=sender,
+            participants=recipients,
+            room=room_name,
+        )
+    except Exception as e:
+        print(f"[Piano] create failed: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建钢琴失败，请稍后重试。\n")
+        return
+
+    if room_name:
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 开启了共享钢琴（请查看私信中的网址与密钥）。\n".encode(
+                "utf-8"
+            ),
+        )
+    else:
+        send_line(conn, f"[*] 已与 {recipients[-1]} 创建私密钢琴。\n")
+
+    _deliver_piano_invites(session)
+
+
 def _handle_sendfile(conn, sender: str, payload: str) -> None:
     """Handle /sendfile command for secure file sharing."""
     global file_http
@@ -6523,6 +6789,10 @@ def handle_command(conn, payload: str) -> None:
         _handle_canvas(conn, name, payload)
         return
 
+    if cmd == "/piano":
+        _handle_piano(conn, name, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
 
 
@@ -7078,7 +7348,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /leave /part /announce /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -7191,6 +7461,7 @@ def run_server() -> int:
                         try:
                             file_sharing.file_transfer_store.cleanup_expired()
                             canvas_sharing.canvas_store.cleanup_expired()
+                            piano_sharing.piano_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

@@ -76,6 +76,10 @@ _GUI_OPEN_CANVAS_RE = re.compile(
     r"^gui-open\s+canvas\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
+_GUI_OPEN_PIANO_RE = re.compile(
+    r"^gui-open\s+piano\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
 _GUI_OPEN_DOWNLOAD_RE = re.compile(
     r"^gui-open\s+download\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
@@ -106,12 +110,12 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
 _SECURE_URL_LABEL_RE = re.compile(
-    r"(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
+    r"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
     re.I,
 )
 _SECURE_KEY_LINE_RE = re.compile(
@@ -185,6 +189,7 @@ _TOP_COMMANDS = (
     "/file",
     "/canvas",
     "/board",
+    "/piano",
     "/leave",
     "/unmsg",
     "/announce",
@@ -442,7 +447,7 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if _SECURE_HTTP_URL_RE.match(t):
         return True
-    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
+    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_PIANO_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
         return True
@@ -1860,6 +1865,7 @@ class SSHChatGUI:
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
         self._canvas_open_targets: dict[str, tuple[str, str]] = {}
+        self._piano_open_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
         self._preview_win: ImagePreviewWindow | None = None
         self._send_target_kind = "room"
@@ -1980,6 +1986,7 @@ class SSHChatGUI:
         self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
         self.log.tag_configure("media_preview", foreground="#0b57d0", underline=True)
         self.log.tag_configure("canvas_open", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("piano_open", foreground="#0b57d0", underline=True)
         self.log.bind("<<Paste>>", self._on_paste_file, add="+")
         # DISABLED Text swallows tag_bind on Aqua/Win; handle clicks at widget level.
         self.log.bind("<Button-1>", self._on_log_click, add="+")
@@ -2014,6 +2021,9 @@ class SSHChatGUI:
         )
         self.btn_canvas, _ = self._pack_icon_btn(
             self._input_row, "🎨", "画板", self._start_canvas
+        )
+        self.btn_piano, _ = self._pack_icon_btn(
+            self._input_row, "🎹", "钢琴", self._start_piano
         )
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
@@ -2238,6 +2248,7 @@ class SSHChatGUI:
         self._media_save_targets.clear()
         self._media_preview_targets.clear()
         self._canvas_open_targets.clear()
+        self._piano_open_targets.clear()
         for entry in entries:
             if isinstance(entry, dict) and entry.get("_kind") == "media":
                 self._insert_media_entry(entry)
@@ -2289,6 +2300,13 @@ class SSHChatGUI:
             return f"/canvas #{self._send_target_value}"
         return "/canvas"
 
+    def _piano_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/piano {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/piano #{self._send_target_value}"
+        return "/piano"
+
     def _pack_icon_btn(self, parent, icon: str, tip: str, command):
         btn = ttk.Button(parent, text=icon, width=3, command=command)
         btn.pack(side=tk.LEFT, padx=(4, 0))
@@ -2332,6 +2350,17 @@ class SSHChatGUI:
             return
         cmd = self._canvas_command()
         self._append_chat_line(f"[*] 正在创建共享画板…（{cmd}）", local_sent=True)
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_piano(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        cmd = self._piano_command()
+        self._append_chat_line(f"[*] 正在开启房间钢琴…（{cmd}）", local_sent=True)
         try:
             self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:
@@ -2585,6 +2614,10 @@ class SSHChatGUI:
             if canvas:
                 self._open_native_canvas(canvas[0], canvas[1])
                 return
+            piano = self._piano_open_targets.get(tag)
+            if piano:
+                self._open_native_piano(piano[0], piano[1])
+                return
             save = self._media_save_targets.get(tag)
             if save:
                 self._save_media_as(Path(save[0]), save[1])
@@ -2776,6 +2809,8 @@ class SSHChatGUI:
         if parsed and parsed[1] == "*" and self._try_handle_upload_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_canvas_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_piano_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
@@ -3256,6 +3291,14 @@ class SSHChatGUI:
         self._offer_canvas_open(url, key)
         return True
 
+    def _try_handle_piano_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_PIANO_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        self._offer_piano_open(url, key)
+        return True
+
     def _offer_canvas_open(self, url: str, key: str) -> None:
         self._media_tag_seq += 1
         tag = f"canvas_id_{self._media_tag_seq}"
@@ -3276,6 +3319,28 @@ class SSHChatGUI:
                 f"[*] 收到共享画布邀请（点消息区「打开画布」）", local_sent=True
             )
         self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
+        self._alert_beep()
+
+    def _offer_piano_open(self, url: str, key: str) -> None:
+        self._media_tag_seq += 1
+        tag = f"piano_id_{self._media_tag_seq}"
+        self._piano_open_targets[tag] = (url, key)
+        try:
+            self.log.configure(state=tk.NORMAL)
+            self.log.insert(tk.END, "[*] 收到房间钢琴邀请  ", ("notice",))
+            self.log.insert(tk.END, "打开钢琴", ("piano_open", tag))
+            self.log.insert(tk.END, "\n")
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            try:
+                self.log.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+            self._append_chat_line(
+                f"[*] 收到房间钢琴邀请（点消息区「打开钢琴」）", local_sent=True
+            )
+        self._set_status("收到房间钢琴（未自动打开，可点「打开钢琴」）")
         self._alert_beep()
 
     def _try_handle_download_invite(self, body: str) -> bool:
@@ -3352,6 +3417,17 @@ class SSHChatGUI:
                 self._append_chat_line("[*] 已在系统浏览器打开共享画布", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
+
+    def _open_native_piano(self, url: str, key: str) -> None:
+        try:
+            target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
+            if _open_canvas_app_window(target, maximized=True):
+                self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
+            else:
+                webbrowser.open(target)
+                self._append_chat_line("[*] 已在系统浏览器打开房间钢琴", local_sent=True)
+        except Exception as e:
+            self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 
     def _pick_and_send_file(self) -> None:
         path = filedialog.askopenfilename(title="选择要发送的文件")

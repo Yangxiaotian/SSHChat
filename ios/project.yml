@@ -33,7 +33,7 @@ targets:
         CURRENT_PROJECT_VERSION: "28"
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
@@ -64,6 +64,8 @@ targets:
         UIRequiredDeviceCapabilities: [armv7]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

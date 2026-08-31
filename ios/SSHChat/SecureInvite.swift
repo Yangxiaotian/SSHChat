@@ -1,7 +1,7 @@
 import Foundation
 
 enum SecureInvite {
-    enum Kind { case download, canvas, upload }
+    enum Kind { case download, canvas, piano, upload }
 
     struct Open {
         let kind: Kind
@@ -22,14 +22,15 @@ enum SecureInvite {
     }
 
     private static let guiOpen = try! NSRegularExpression(
-        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$"#,
+        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$"#,
         options: [.caseInsensitive]
     )
 
     static func absorbFileMeta(_ line: String, into meta: inout FileMeta) {
         let t = normalize(line)
-        if t.hasPrefix("共享画布") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件")
-            || t.lowercased().hasPrefix("shared canvas") || t.lowercased().hasPrefix("file upload")
+        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件")
+            || t.lowercased().hasPrefix("shared canvas") || t.lowercased().hasPrefix("room piano")
+            || t.lowercased().hasPrefix("file upload")
             || t.lowercased().hasPrefix("new file")
         {
             meta.reset()
@@ -62,6 +63,7 @@ enum SecureInvite {
         switch t[kindR].lowercased() {
         case "download": kind = .download
         case "canvas": kind = .canvas
+        case "piano": kind = .piano
         case "upload": kind = .upload
         default: return nil
         }
@@ -74,10 +76,10 @@ enum SecureInvite {
         if parseGuiOpen(t) != nil { return true }
         let lower = t.lowercased()
         if t.hasPrefix("===") { return true }
-        if t.hasPrefix("共享画布") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件") { return true }
-        if lower.hasPrefix("shared canvas") || lower.hasPrefix("file upload") || lower.hasPrefix("new file") { return true }
+        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件") { return true }
+        if lower.hasPrefix("shared canvas") || lower.hasPrefix("room piano") || lower.hasPrefix("file upload") || lower.hasPrefix("new file") { return true }
         if t.range(of: #"^=+\s*$"#, options: .regularExpression) != nil { return true }
-        if t.range(of: #"(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        if t.range(of: #"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true
         }
         if t.range(of: #"^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*[A-Z0-9]{6}\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {

@@ -195,6 +195,10 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startCanvas()
         }
+        binding.btnPiano.setOnClickListener {
+            hidePlusPanel()
+            startPiano()
+        }
         binding.btnClear.setOnClickListener {
             hidePlusPanel()
             clearScreen(announce = true)
@@ -450,6 +454,15 @@ class MainActivity : AppCompatActivity() {
         }
         appendLine("[*] 正在创建共享画板…（/canvas）")
         client?.send("/canvas")
+    }
+
+    private fun startPiano() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在开启房间钢琴…（/piano）")
+        client?.send("/piano")
     }
 
     private fun sendSlashCommand(command: String) {
@@ -1023,6 +1036,10 @@ class MainActivity : AppCompatActivity() {
                     appendLine("[*] 打开共享画布…")
                     startActivity(WebInviteActivity.canvas(this, open.url, open.key))
                 }
+                SecureInvite.Kind.PIANO -> {
+                    appendLine("[*] 打开房间钢琴…")
+                    startActivity(WebInviteActivity.piano(this, open.url, open.key))
+                }
                 SecureInvite.Kind.UPLOAD -> {
                     val pending = pendingUpload
                     if (pending != null) {
@@ -1413,6 +1430,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
+        binding.btnPiano.isEnabled = on
         binding.btnLibrary.isEnabled = on
         binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
@@ -1426,6 +1444,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
+        binding.btnPiano.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f

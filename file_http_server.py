@@ -8,6 +8,7 @@ Provides:
 - Ticket exchange: POST /download/<token>/ticket - Key in body, returns two one-time links
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
+- Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
 - HTTPS support with auto-generated or provided certificates
 
 No key is ever carried in a URL, and every URL that serves file bytes is
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 import canvas_http
 import file_sharing
+import piano_http
 
 
 MAX_FILE_SIZE = int(os.environ.get("SSHCHAT_MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
@@ -1251,6 +1253,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle key exchange and file upload."""
+        if piano_http.handle_piano_post(self):
+            return
         if canvas_http.handle_canvas_post(self):
             return
 
@@ -1420,6 +1424,10 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if piano_http.handle_piano_samples_get(self):
+            return
+        if piano_http.handle_piano_get(self):
+            return
         if canvas_http.handle_canvas_get(self):
             return
 

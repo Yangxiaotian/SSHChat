@@ -7,6 +7,8 @@ struct WebInviteView: View {
     let key: String
     /// When true (canvas), start edge-to-edge; upload pages keep a normal chrome bar.
     var startsMaximized: Bool = false
+    /// Piano: allow landscape while this view is visible.
+    var allowLandscape: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var maximized = false
 
@@ -52,6 +54,14 @@ struct WebInviteView: View {
         .onAppear {
             if startsMaximized {
                 maximized = true
+            }
+            if allowLandscape {
+                OrientationLock.setLandscape(true)
+            }
+        }
+        .onDisappear {
+            if allowLandscape {
+                OrientationLock.setLandscape(false)
             }
         }
     }
@@ -138,6 +148,8 @@ private struct KeyInjectingWebView: UIViewRepresentable {
                 var d = board.style.display;
                 if (d === 'flex' || d === 'block') return 'done';
               }
+              var stage = document.getElementById('stageWrap');
+              if (stage && stage.style.display === 'flex') return 'done';
               var el = document.getElementById('key');
               if (!el) return 'wait';
               el.value = '\(safe)';

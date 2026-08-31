@@ -83,6 +83,8 @@ final class ChatViewModel: ObservableObject {
         let key: String
         /// Canvas opens full-screen; upload stays as a sheet.
         var isCanvas: Bool = false
+        /// Piano prefers landscape on phone (GarageBand-style split keyboard).
+        var allowLandscape: Bool = false
     }
 
     private static let chatFontKey = "chat_font_sp"
@@ -397,6 +399,12 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/canvas") }
     }
 
+    func startPiano() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 正在开启房间钢琴…（/piano）")
+        Task { try? await session.send("/piano") }
+    }
+
     func sendSlashCommand(_ command: String) {
         guard connected else { toast = "请先连接"; return }
         let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -679,6 +687,15 @@ final class ChatViewModel: ObservableObject {
                     key: open.key,
                     isCanvas: true
                 )
+            case .piano:
+                appendText("[*] 打开房间钢琴…")
+                webInvite = WebInvitePayload(
+                    title: "房间钢琴",
+                    url: open.url,
+                    key: open.key,
+                    isCanvas: true,
+                    allowLandscape: true
+                )
             case .upload:
                 if let pending = pendingUpload {
                     cancelUploadWait()
@@ -913,7 +930,8 @@ struct ContentView: View {
                 title: invite.title,
                 url: invite.url,
                 key: invite.key,
-                startsMaximized: true
+                startsMaximized: true,
+                allowLandscape: invite.allowLandscape
             )
         }
         .sheet(item: Binding(
@@ -1374,6 +1392,10 @@ struct ContentView: View {
             plusCell(title: "画板", system: "paintbrush.fill") {
                 showPlusPanel = false
                 model.startCanvas()
+            }
+            plusCell(title: "钢琴", system: "pianokeys") {
+                showPlusPanel = false
+                model.startPiano()
             }
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false

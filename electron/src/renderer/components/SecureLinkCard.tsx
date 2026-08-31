@@ -15,6 +15,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const { locale, t } = useTranslation();
   const loc = locale === 'zh' ? 'zh' : 'en';
   const openCanvas = useChatStore((s) => s.openCanvas);
+  const openPiano = useChatStore((s) => s.openPiano);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -23,9 +24,11 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const hint =
     payload.kind === 'canvas'
       ? t('secureLink.canvasHint')
-      : payload.kind === 'upload'
-        ? t('secureLink.uploadHint')
-        : t('secureLink.downloadHint');
+      : payload.kind === 'piano'
+        ? t('secureLink.pianoHint')
+        : payload.kind === 'upload'
+          ? t('secureLink.uploadHint')
+          : t('secureLink.downloadHint');
 
   const onOpen = async () => {
     if (busy) return;
@@ -34,6 +37,10 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
     try {
       if (payload.kind === 'canvas') {
         openCanvas({ url: payload.url, key: payload.key });
+        return;
+      }
+      if (payload.kind === 'piano') {
+        openPiano({ url: payload.url, key: payload.key });
         return;
       }
       const result = await window.api.openSecureWebSession({
@@ -54,7 +61,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   return (
     <div className={`secure-link-card kind-${payload.kind}`}>
       <div className="secure-link-icon" aria-hidden>
-        {payload.kind === 'canvas' ? '✎' : payload.kind === 'upload' ? '↑' : '↓'}
+        {payload.kind === 'canvas' ? '✎' : payload.kind === 'piano' ? '🎹' : payload.kind === 'upload' ? '↑' : '↓'}
       </div>
       <div className="secure-link-body">
         <div className="secure-link-title">{title}</div>

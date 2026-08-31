@@ -68,6 +68,8 @@ export const enMessages: MessageTree = {
       fileTitle: 'Send a file to the current room (one-click /sendfile)',
       canvas: 'Canvas',
       canvasTitle: 'Start a shared canvas in this room (one-click /canvas)',
+      piano: 'Piano',
+      pianoTitle: 'Start a shared room piano (one-click /piano)',
       pasteHint: 'Or paste / drop an image or file',
     },
     commands: {
@@ -80,6 +82,7 @@ export const enMessages: MessageTree = {
       msg: 'Send private message',
       sendfile: 'Send a file (current room / nick / #room)',
       canvas: 'Shared canvas (current room / nick / #room)',
+      piano: 'Room piano (current room / nick / #room)',
       leave: 'List or recall unread leave-messages',
       clear: 'Clear local view (current room)',
       game: 'Game commands',
@@ -336,6 +339,7 @@ export const enMessages: MessageTree = {
   },
   secureLink: {
     canvasHint: 'Key is handled for you — click to open the in-app canvas',
+    pianoHint: 'Key is handled for you — click to open the in-app piano',
     uploadHint: 'Key is handled for you — click to open the upload page',
     downloadHint: 'Key is handled for you — click to preview or download',
     opening: 'Opening…',
@@ -357,6 +361,12 @@ export const enMessages: MessageTree = {
     authFailed: 'Key verification failed',
     badUrl: 'Invalid canvas URL',
     clearConfirm: 'Clear the shared board for everyone?',
+  },
+  pianoPanel: {
+    title: 'Room piano',
+    maximize: 'Maximize',
+    restore: 'Restore',
+    close: 'Close',
   },
   pasteUpload: {
     waiting: 'Preparing to send {name}…',

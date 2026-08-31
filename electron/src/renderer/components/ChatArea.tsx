@@ -6,6 +6,7 @@ import MessageBubble from './MessageBubble';
 import SecureLinkCard from './SecureLinkCard';
 import GameWorkbench from './GameWorkbench';
 import CanvasPanel from './CanvasPanel';
+import PianoPanel from './PianoPanel';
 import { groupSecureLinkMessages } from '../lib/secureLinks';
 import {
   extractFileFromDataTransfer,
@@ -103,7 +104,9 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession, canvasMaximized } = useChatStore();
+  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession, canvasMaximized, pianoSession, pianoMaximized } = useChatStore();
+  const mediaSession = canvasSession || pianoSession;
+  const mediaMaximized = canvasSession ? canvasMaximized : pianoMaximized;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
@@ -235,6 +238,10 @@ export default function ChatArea() {
           <div className={`canvas-pane${canvasMaximized ? ' maximized' : ''}`}>
             <CanvasPanel />
           </div>
+        ) : pianoSession ? (
+          <div className={`canvas-pane${pianoMaximized ? ' maximized' : ''}`}>
+            <PianoPanel />
+          </div>
         ) : (
           <div
             className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
@@ -243,7 +250,7 @@ export default function ChatArea() {
             <GameWorkbench />
           </div>
         )}
-        {!doNotDisturb && !canvasSession && (
+        {!doNotDisturb && !mediaSession && (
         <div
           className={`chat-splitter ${isResizing ? 'active' : ''}`}
           title="Drag to resize game panel height"
@@ -253,13 +260,13 @@ export default function ChatArea() {
           <span className="chat-splitter-grip">...</span>
         </div>
         )}
-        {canvasSession && !canvasMaximized ? (
+        {mediaSession && !mediaMaximized ? (
           <div className="chat-splitter canvas-splitter" aria-hidden>
             <span className="chat-splitter-grip">...</span>
           </div>
         ) : null}
 
-        <div className={`chat-messages-surface${canvasSession && canvasMaximized ? ' canvas-hidden' : ''}`}>
+        <div className={`chat-messages-surface${mediaSession && mediaMaximized ? ' canvas-hidden' : ''}`}>
           <div
             ref={chatScrollRef}
             className={`chat-messages${dragOver ? ' drag-over' : ''}`}

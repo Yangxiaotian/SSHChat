@@ -93,7 +93,7 @@ const api = {
     return ipcRenderer.invoke(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, payload);
   },
   openSecureWebSession: (payload: {
-    kind: 'canvas' | 'upload' | 'download';
+        kind: 'canvas' | 'piano' | 'upload' | 'download';
     url: string;
     key: string;
   }): Promise<{ ok: boolean; error?: string }> => {
