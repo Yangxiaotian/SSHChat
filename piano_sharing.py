@@ -323,6 +323,7 @@ class PianoStore:
         *,
         note: str,
         action: str,
+        client_ts: Optional[float] = None,
     ) -> Tuple[Optional[dict], str]:
         note = (note or "").strip()
         action = (action or "on").strip().lower()
@@ -341,12 +342,20 @@ class PianoStore:
             ok, alive_err = self._alive(session)
             if not ok:
                 return None, alive_err
+            ts = time.time()
+            if client_ts is not None:
+                try:
+                    ct = float(client_ts)
+                    if abs(ct - ts) < 60:
+                        ts = ct
+                except (TypeError, ValueError):
+                    pass
             evt = PianoNoteEvent(
                 seq=session.next_seq,
                 note=note,
                 action=action,
                 author=participant,
-                ts=time.time(),
+                ts=ts,
             )
             session.next_seq += 1
             session.events.append(evt)

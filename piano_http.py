@@ -735,6 +735,9 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         const audioBuffers = Object.create(null);
         let audioReady = false;
         let unlockPromise = null;
+        let pushQueue = Promise.resolve();
+        let remoteTimeBase = null;
+        const REMOTE_STALE_MS = 500;
 
         function setStatus(text, err) {{
             statusEl.textContent = text;
@@ -831,8 +834,37 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             }}, remote ? 700 : 450);
         }}
 
+        function playRemoteNote(note) {{
+            if (!notes[note]) return;
+            const ctx = ensureAudioCtx();
+            const buffer = audioBuffers[note];
+            if (ctx && ctx.state === 'running' && buffer) {{
+                const src = ctx.createBufferSource();
+                src.buffer = buffer;
+                src.connect(ctx.destination);
+                try {{
+                    src.start(0);
+                    flashKey(note, true);
+                    return;
+                }} catch (_) {{}}
+            }}
+            const url = sampleUrl(note);
+            if (!url) return;
+            const a = new Audio(url);
+            try {{
+                a.currentTime = 0;
+                void a.play().then(function () {{
+                    flashKey(note, true);
+                }}).catch(function () {{}});
+            }} catch (_) {{}}
+        }}
+
         function playNote(note, remote) {{
             if (!notes[note]) return;
+            if (remote) {{
+                playRemoteNote(note);
+                return;
+            }}
             void unlockAudio().then(function () {{
                 const ctx = ensureAudioCtx();
                 const buffer = audioBuffers[note];
@@ -842,7 +874,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                     src.connect(ctx.destination);
                     try {{
                         src.start(0);
-                        flashKey(note, !!remote);
+                        flashKey(note, false);
                         return;
                     }} catch (_) {{}}
                 }}
@@ -852,10 +884,35 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 try {{
                     a.currentTime = 0;
                     void a.play().then(function () {{
-                        flashKey(note, !!remote);
+                        flashKey(note, false);
                     }}).catch(function () {{}});
                 }} catch (_) {{}}
             }});
+        }}
+
+        function resetRemoteTimeBase(evtTs) {{
+            const ts = typeof evtTs === 'number' ? evtTs : 0;
+            const perf = performance.now();
+            if (!remoteTimeBase) {{
+                remoteTimeBase = {{ serverTs: ts, perfMs: perf }};
+                return;
+            }}
+            const expected = remoteTimeBase.perfMs + (ts - remoteTimeBase.serverTs) * 1000;
+            if (perf - expected > REMOTE_STALE_MS) {{
+                remoteTimeBase = {{ serverTs: ts, perfMs: perf }};
+            }}
+        }}
+
+        function scheduleRemoteEvent(evt) {{
+            const ts = typeof evt.ts === 'number' ? evt.ts : 0;
+            resetRemoteTimeBase(ts);
+            const when = remoteTimeBase.perfMs + (ts - remoteTimeBase.serverTs) * 1000;
+            const delay = Math.max(0, when - performance.now());
+            if (evt.action === 'on') {{
+                setTimeout(function () {{ playRemoteNote(evt.note); }}, delay);
+            }} else if (evt.action === 'off') {{
+                setTimeout(function () {{ unflashKey(evt.note); }}, delay);
+            }}
         }}
 
         function unflashKey(note) {{
@@ -978,39 +1035,44 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             window.__pianoResizeTimer = setTimeout(buildKeyboard, 120);
         }});
 
-        async function pushNote(note, action) {{
+        async function pushNote(note, action, clientTs) {{
             if (!ticket) return;
-            try {{
-                const res = await fetch('/piano/' + token + '/note', {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json',
-                        'X-Piano-Ticket': ticket,
-                    }},
-                    cache: 'no-store',
-                    body: JSON.stringify({{ note: note, action: action }}),
-                }});
-                const data = await res.json().catch(function () {{ return {{}}; }});
-                const evt = data.event;
-                if (evt && typeof evt.seq === 'number') {{
-                    ownEventSeqs.add(evt.seq);
-                }}
-            }} catch (_) {{}}
+            const ts = typeof clientTs === 'number' ? clientTs : Date.now() / 1000;
+            pushQueue = pushQueue.then(async function () {{
+                try {{
+                    const res = await fetch('/piano/' + token + '/note', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json',
+                            'X-Piano-Ticket': ticket,
+                        }},
+                        cache: 'no-store',
+                        body: JSON.stringify({{ note: note, action: action, ts: ts }}),
+                    }});
+                    const data = await res.json().catch(function () {{ return {{}}; }});
+                    const evt = data.event;
+                    if (evt && typeof evt.seq === 'number') {{
+                        ownEventSeqs.add(evt.seq);
+                    }}
+                }} catch (_) {{}}
+            }});
+            return pushQueue;
         }}
 
         function noteOn(note) {{
             if (!ticket || !notes[note]) return;
             if (heldKeys[note]) return;
             heldKeys[note] = true;
+            const ts = Date.now() / 1000;
             playNote(note, false);
-            void pushNote(note, 'on');
+            void pushNote(note, 'on', ts);
         }}
 
         function noteOff(note) {{
             if (!heldKeys[note]) return;
             delete heldKeys[note];
             unflashKey(note);
-            void pushNote(note, 'off');
+            void pushNote(note, 'off', Date.now() / 1000);
         }}
 
         function noteFromKeyEvent(e) {{
@@ -1092,7 +1154,9 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 );
                 const data = await res.json().catch(function () {{ return {{}}; }});
                 if (!res.ok) throw new Error(data.error || 'sync failed');
-                const events = data.events || [];
+                const events = (data.events || []).slice().sort(function (a, b) {{
+                    return (a.seq || 0) - (b.seq || 0);
+                }});
                 for (const evt of events) {{
                     if (typeof evt.seq === 'number' && evt.seq > lastSeq) {{
                         lastSeq = evt.seq;
@@ -1100,8 +1164,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                     if (initial) continue;
                     if (!evt.note || !notes[evt.note]) continue;
                     if (ownEventSeqs.has(evt.seq)) continue;
-                    if (evt.action === 'on') playNote(evt.note, true);
-                    else if (evt.action === 'off') unflashKey(evt.note);
+                    scheduleRemoteEvent(evt);
                 }}
                 setStatus(i18n.statusReady, false);
             }} catch (_) {{
@@ -1256,11 +1319,13 @@ def handle_piano_post(handler: "BaseHTTPRequestHandler") -> bool:
         body = handler._read_json_body()  # type: ignore[attr-defined]
         note = str(body.get("note", "")).strip()
         note_action = str(body.get("action", "on")).strip().lower()
+        client_ts = body.get("ts")
         result, err = store.push_note(
             token,
             ticket,
             note=note,
             action=note_action,
+            client_ts=client_ts,
         )
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
