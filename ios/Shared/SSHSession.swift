@@ -142,8 +142,9 @@ actor SSHSession {
 
     /// Bare CSI after ESC/`?` was eaten. Params optional so `[K` (EL default) matches;
     /// finals restricted so `[*]` / `[#room]` / `[OK]` are never stripped.
+    /// Negative lookahead keeps chat nicks like `[root]` (`[r` is a valid CSI final).
     private static let bareCsiFragment = try! NSRegularExpression(
-        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu]"#
+        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\])"#
     )
 
     static func cleanLine(_ raw: String) -> String {

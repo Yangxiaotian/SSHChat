@@ -59,7 +59,8 @@ object ChatLineParsers {
     private val timePrefix = Regex("""^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+""")
     private val leadingGarbage = Regex("""^[\uFFFD\u25A1\uFEFF\u00A0\s]+""")
     /** Bare CSI fragment (params optional: `[K` as well as `[2K`). Not `[*]`/`[#`. */
-    private const val bareCsiFragment = """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu])"""
+    private const val bareCsiFragment =
+        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\]))"""
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private val ptyCrumbsBeforeTag =
         Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")
