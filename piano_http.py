@@ -308,7 +308,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             --remote: #5b4d9e;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        html, body {{ height: 100%; }}
+        html, body {{ height: 100%; height: 100dvh; }}
         body {{
             font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
             background:
@@ -397,6 +397,15 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             flex-wrap: wrap;
             gap: 12px;
             flex-shrink: 0;
+        }}
+        .room-badge {{
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(47,111,106,0.16);
+            color: var(--accent-2);
+            white-space: nowrap;
         }}
         .toolbar {{
             display: flex;
@@ -584,7 +593,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             .wrap.piano-on .stage-wrap {{
                 padding: 4px 6px 6px;
             }}
-            .wrap.piano-on .meta {{ display: none; }}
+            .wrap.piano-on .meta .meta-detail {{ display: none; }}
         }}
         @media (pointer: coarse) and (orientation: landscape), (max-width: 900px) and (orientation: landscape) {{
             .wrap.piano-on .hint {{ display: none; }}
@@ -663,6 +672,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             <div class="stage-wrap" id="stageWrap">
                 <div class="meta" id="meta"></div>
                 <div class="toolbar">
+                    <span class="room-badge" id="roomBadge" hidden></span>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="loading" id="loading">{html.escape(S['loading'])}</div>
@@ -706,6 +716,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         const wrap = document.getElementById('wrap');
         const statusEl = document.getElementById('status');
         const metaEl = document.getElementById('meta');
+        const roomBadgeEl = document.getElementById('roomBadge');
         const loadingEl = document.getElementById('loading');
         const pianoScrollEl = document.getElementById('pianoScroll');
         const pianoStackEl = document.getElementById('pianoStack');
@@ -719,11 +730,26 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         const keyEls = Object.create(null);
         const flashTimers = Object.create(null);
         const heldKeys = Object.create(null);
-        let audioUnlocked = false;
+        const ownEventSeqs = new Set();
+        let audioCtx = null;
+        const audioBuffers = Object.create(null);
+        let audioReady = false;
+        let unlockPromise = null;
 
         function setStatus(text, err) {{
             statusEl.textContent = text;
             statusEl.classList.toggle('err', !!err);
+        }}
+
+        function setRoomBadge(room) {{
+            const label = (room || '').trim();
+            if (!label) {{
+                roomBadgeEl.hidden = true;
+                roomBadgeEl.textContent = '';
+                return;
+            }}
+            roomBadgeEl.hidden = false;
+            roomBadgeEl.textContent = i18n.room + ' #' + label;
         }}
 
         function fmtExpires(ts) {{
@@ -753,14 +779,43 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             return file ? ('/piano-samples/' + file) : '';
         }}
 
+        function ensureAudioCtx() {{
+            if (audioCtx) return audioCtx;
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) return null;
+            audioCtx = new Ctx();
+            return audioCtx;
+        }}
+
+        async function preloadSamples() {{
+            const ctx = ensureAudioCtx();
+            if (!ctx) return false;
+            const jobs = Object.keys(notes).map(async function (note) {{
+                const url = sampleUrl(note);
+                if (!url || audioBuffers[note]) return;
+                const res = await fetch(url, {{ cache: 'force-cache' }});
+                if (!res.ok) return;
+                const buf = await res.arrayBuffer();
+                audioBuffers[note] = await ctx.decodeAudioData(buf);
+            }});
+            await Promise.all(jobs);
+            audioReady = Object.keys(audioBuffers).length > 0;
+            return audioReady;
+        }}
+
         function unlockAudio() {{
-            if (audioUnlocked) return Promise.resolve();
-            audioUnlocked = true;
-            const probe = sampleUrl('C4') || sampleUrl('C6') || sampleUrl('C2');
-            if (!probe) return Promise.resolve();
-            const a = new Audio(probe);
-            a.volume = 0.01;
-            return a.play().catch(function () {{}});
+            if (unlockPromise) return unlockPromise;
+            const ctx = ensureAudioCtx();
+            if (!ctx) return Promise.resolve(false);
+            unlockPromise = ctx.resume().then(function () {{
+                return preloadSamples();
+            }}).then(function () {{
+                return true;
+            }}).catch(function () {{
+                unlockPromise = null;
+                return false;
+            }});
+            return unlockPromise;
         }}
 
         function flashKey(note, remote) {{
@@ -777,21 +832,30 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         }}
 
         function playNote(note, remote) {{
-            const url = sampleUrl(note);
-            if (!url) return;
-            const play = function () {{
+            if (!notes[note]) return;
+            void unlockAudio().then(function () {{
+                const ctx = ensureAudioCtx();
+                const buffer = audioBuffers[note];
+                if (ctx && ctx.state === 'running' && buffer) {{
+                    const src = ctx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(ctx.destination);
+                    try {{
+                        src.start(0);
+                        flashKey(note, !!remote);
+                        return;
+                    }} catch (_) {{}}
+                }}
+                const url = sampleUrl(note);
+                if (!url) return;
                 const a = new Audio(url);
                 try {{
                     a.currentTime = 0;
-                    void a.play().catch(function () {{}});
+                    void a.play().then(function () {{
+                        flashKey(note, !!remote);
+                    }}).catch(function () {{}});
                 }} catch (_) {{}}
-                flashKey(note, !!remote);
-            }};
-            if (!audioUnlocked) {{
-                void unlockAudio().then(play);
-                return;
-            }}
-            play();
+            }});
         }}
 
         function unflashKey(note) {{
@@ -820,8 +884,9 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         function useSegmentedLayout() {{
             if (window.matchMedia('(pointer: coarse)').matches) return true;
             if (window.matchMedia('(max-width: 900px)').matches) return true;
-            // Phone WebViews often report "fine" pointer — use touch + narrow viewport.
-            if ('ontouchstart' in window && Math.min(window.innerWidth, window.innerHeight) <= 920) {{
+            if (window.matchMedia('(max-height: 900px)').matches) return true;
+            // Phone / iPad WebViews often report "fine" pointer — use touch + viewport.
+            if ('ontouchstart' in window && Math.min(window.innerWidth, window.innerHeight) <= 1024) {{
                 return true;
             }}
             return false;
@@ -830,7 +895,6 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         function bindKeyPointer(el, noteName) {{
             el.addEventListener('pointerdown', function (e) {{
                 e.preventDefault();
-                void unlockAudio();
                 noteOn(noteName);
             }});
             el.addEventListener('pointerup', function () {{ noteOff(noteName); }});
@@ -908,11 +972,16 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             if (!ticket) return;
             setTimeout(buildKeyboard, 120);
         }});
+        window.addEventListener('resize', function () {{
+            if (!ticket) return;
+            clearTimeout(window.__pianoResizeTimer);
+            window.__pianoResizeTimer = setTimeout(buildKeyboard, 120);
+        }});
 
         async function pushNote(note, action) {{
             if (!ticket) return;
             try {{
-                await fetch('/piano/' + token + '/note', {{
+                const res = await fetch('/piano/' + token + '/note', {{
                     method: 'POST',
                     headers: {{
                         'Content-Type': 'application/json',
@@ -921,6 +990,11 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                     cache: 'no-store',
                     body: JSON.stringify({{ note: note, action: action }}),
                 }});
+                const data = await res.json().catch(function () {{ return {{}}; }});
+                const evt = data.event;
+                if (evt && typeof evt.seq === 'number') {{
+                    ownEventSeqs.add(evt.seq);
+                }}
             }} catch (_) {{}}
         }}
 
@@ -986,15 +1060,17 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 gate.style.display = 'none';
                 stageWrap.style.display = 'flex';
                 wrap.classList.add('piano-on');
+                setRoomBadge(data.room || '');
                 metaEl.innerHTML =
-                    '<span>' + i18n.you + ': ' + (data.participant || '') + '</span>' +
-                    (data.room ? '<span>' + i18n.room + ': ' + data.room + '</span>' : '') +
-                    (data.expires ? '<span>' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
+                    '<span class="meta-detail">' + i18n.you + ': ' + (data.participant || '') + '</span>' +
+                    (data.room ? '<span class="meta-detail">' + i18n.room + ': #' + data.room + '</span>' : '') +
+                    (data.expires ? '<span class="meta-detail">' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
                 buildKeyboard();
                 bindKeyboard();
                 loadingEl.style.display = 'none';
+                void unlockAudio();
                 await syncOnce(true);
-                pollTimer = setInterval(function () {{ void syncOnce(false); }}, 120);
+                pollTimer = setInterval(function () {{ void syncOnce(false); }}, 50);
             }} catch (e) {{
                 alert((e && e.message) || i18n.statusErr);
                 unlockBtn.disabled = false;
@@ -1021,8 +1097,9 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                     if (typeof evt.seq === 'number' && evt.seq > lastSeq) {{
                         lastSeq = evt.seq;
                     }}
+                    if (initial) continue;
                     if (!evt.note || !notes[evt.note]) continue;
-                    if ((evt.author || '').toLowerCase() === (selfName || '').toLowerCase()) continue;
+                    if (ownEventSeqs.has(evt.seq)) continue;
                     if (evt.action === 'on') playNote(evt.note, true);
                     else if (evt.action === 'off') unflashKey(evt.note);
                 }}

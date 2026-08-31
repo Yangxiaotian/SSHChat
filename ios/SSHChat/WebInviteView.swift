@@ -13,6 +13,47 @@ struct WebInviteView: View {
     @State private var maximized = false
 
     var body: some View {
+        Group {
+            if startsMaximized {
+                maximizedShell
+            } else {
+                navigationShell
+            }
+        }
+        .onAppear {
+            if startsMaximized {
+                maximized = true
+            }
+            if allowLandscape {
+                OrientationLock.setLandscape(true)
+            }
+        }
+        .onDisappear {
+            if allowLandscape {
+                OrientationLock.setLandscape(false)
+            }
+        }
+    }
+
+    private var maximizedShell: some View {
+        ZStack(alignment: .topTrailing) {
+            KeyInjectingWebView(url: url, key: key.uppercased())
+                .ignoresSafeArea()
+            HStack(spacing: 12) {
+                Button("关闭") { dismiss() }
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(.top, 8)
+            .padding(.trailing, 12)
+        }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+    }
+
+    private var navigationShell: some View {
         NavigationStack {
             KeyInjectingWebView(url: url, key: key.uppercased())
                 .ignoresSafeArea(edges: maximized ? .all : .bottom)
@@ -50,19 +91,6 @@ struct WebInviteView: View {
                         .padding(.trailing, 12)
                     }
                 }
-        }
-        .onAppear {
-            if startsMaximized {
-                maximized = true
-            }
-            if allowLandscape {
-                OrientationLock.setLandscape(true)
-            }
-        }
-        .onDisappear {
-            if allowLandscape {
-                OrientationLock.setLandscape(false)
-            }
         }
     }
 }
