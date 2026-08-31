@@ -1149,134 +1149,6 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
     return False
 
 
-class CanvasWebShell:
-    """Compact controller for the Excalidraw app window (maximize / reopen / close)."""
-
-    def __init__(self, master: tk.Misc, url: str, *, on_close: Any = None) -> None:
-        self.url = url
-        self._on_close = on_close
-        self._maximized = True
-        self.win = tk.Toplevel(master)
-        self.win.title("SSHChat 共享画布")
-        self.win.geometry("460x130")
-        self.win.minsize(360, 110)
-        try:
-            self.win.transient(master)
-        except tk.TclError:
-            pass
-        self.win.protocol("WM_DELETE_WINDOW", self.close)
-        # Chrome/Safari steal focus when launched; Aqua then leaves this Toplevel's
-        # buttons unclickable until the window is dragged. Refresh hit maps on map/focus.
-        self.win.bind("<Map>", lambda _e: self._stabilize(delay_ms=0), add="+")
-        self.win.bind("<FocusIn>", lambda _e: self._stabilize(delay_ms=0), add="+")
-
-        bar = ttk.Frame(self.win)
-        bar.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(bar, text="共享画布").pack(side=tk.LEFT)
-        self._btn_max = ttk.Button(bar, text="还原窗口", command=self.toggle_maximize)
-        self._btn_max.pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(bar, text="关闭", command=self.close).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="重新打开", command=lambda: self._reopen(None)).pack(
-            side=tk.RIGHT, padx=(6, 0)
-        )
-
-        body = ttk.Frame(self.win, padding=(12, 4, 12, 12))
-        body.pack(fill=tk.BOTH, expand=True)
-        self.var_status = tk.StringVar(value="正在最大化打开画板…")
-        ttk.Label(body, textvariable=self.var_status, justify=tk.LEFT, wraplength=420).pack(
-            anchor=tk.NW
-        )
-        # Open browser after this shell is mapped so controls get a real hit region first.
-        self.win.after(80, lambda: self._reopen(True))
-
-    def _stabilize(self, delay_ms: int = 0) -> None:
-        def _do() -> None:
-            try:
-                if not self.win.winfo_exists():
-                    return
-                self.win.update_idletasks()
-                geom = self.win.winfo_geometry()
-                self.win.geometry(geom)
-                self.win.lift()
-                # Brief topmost pulse refreshes macOS window-server click targets
-                # without leaving the dialog permanently above everything.
-                try:
-                    self.win.attributes("-topmost", True)
-                    self.win.after(
-                        80,
-                        lambda: self.win.attributes("-topmost", False)
-                        if self.win.winfo_exists()
-                        else None,
-                    )
-                except tk.TclError:
-                    pass
-            except tk.TclError:
-                pass
-
-        if delay_ms <= 0:
-            _do()
-        else:
-            try:
-                self.win.after(delay_ms, _do)
-            except tk.TclError:
-                pass
-
-    def toggle_maximize(self) -> None:
-        self._maximized = not self._maximized
-        try:
-            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
-        except tk.TclError:
-            pass
-        self._reopen(self._maximized)
-
-    def _reopen(self, maximized: bool | None) -> None:
-        if maximized is not None:
-            self._maximized = bool(maximized)
-        try:
-            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
-        except tk.TclError:
-            pass
-        opened = _open_canvas_app_window(self.url, maximized=self._maximized)
-        if opened:
-            if self._maximized:
-                self.var_status.set(
-                    "画板已在独立窗口最大化打开。\n"
-                    "点「还原窗口」以普通大小重新打开；「重新打开」可再拉起画板。"
-                )
-            else:
-                self.var_status.set(
-                    "画板已以普通窗口打开。\n点「最大化」可铺满屏幕重新打开。"
-                )
-        else:
-            try:
-                webbrowser.open(self.url)
-                self.var_status.set(
-                    "已在系统浏览器打开画板（当前环境没有可用的 Chrome/Edge 应用窗口模式）。"
-                )
-            except Exception as e:
-                self.var_status.set(f"打开画板失败: {e}")
-        # Browser launch steals focus; re-assert this dialog so buttons stay clickable.
-        self._stabilize(delay_ms=50)
-        self._stabilize(delay_ms=250)
-        self._stabilize(delay_ms=700)
-
-    def close(self) -> None:
-        try:
-            self.win.attributes("-topmost", False)
-        except tk.TclError:
-            pass
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
-        cb = self._on_close
-        if cb is not None:
-            try:
-                cb()
-            except Exception:
-                pass
-
-
 class NativeCanvasWindow:
     """Tk canvas client talking to the same /canvas HTTP API as the web page."""
 
@@ -1984,7 +1856,6 @@ class SSHChatGUI:
         self._click_refresh_job: str | int | None = None
         self._room_list_refresh_job: str | int | None = None
         self._room_select_guard = False
-        self._canvas_win: CanvasWebShell | None = None
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
@@ -2191,7 +2062,7 @@ class SSHChatGUI:
 
     def _on_any_button_press(self, event) -> None:
         # Dismiss in-window completion when clicking elsewhere in the main window.
-        # Ignore other Toplevels (canvas shell, pickers) so we don't steal their clicks.
+        # Ignore other Toplevels (image preview, pickers) so we don't steal their clicks.
         if self._suggest_win is None:
             return
         w = event.widget
@@ -2234,13 +2105,22 @@ class SSHChatGUI:
             pass
 
     def _refresh_click_targets(self) -> None:
-        """Aqua sometimes keeps stale click targets until geometry is reasserted.
+        """Aqua keeps stale click targets until geometry actually changes.
 
-        Avoid lift()/topmost here — those disrupt Listbox/button hit testing worse
-        than they help when called after every focus or chat redraw.
+        Re-setting the same WxH+X+Y string is often a no-op; a 1px nudge matches
+        what happens when the user drags the window to make buttons work again.
         """
         try:
             self.root.update_idletasks()
+            if sys.platform == "darwin":
+                geo = self.root.geometry()
+                m = re.fullmatch(r"(\d+x\d+)([+-]\d+)([+-]\d+)", geo)
+                if m:
+                    size, x, y = m.group(1), int(m.group(2)), int(m.group(3))
+                    self.root.geometry(f"{size}{x + 1}{y}")
+                    self.root.update_idletasks()
+                    self.root.geometry(f"{size}{x}{y}")
+                    return
             geom = self.root.winfo_geometry()
             self.root.geometry(geom)
         except tk.TclError:
@@ -2348,6 +2228,7 @@ class SSHChatGUI:
     def _flush_room_list_refresh(self) -> None:
         self._room_list_refresh_job = None
         self._refresh_room_list()
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2385,6 +2266,7 @@ class SSHChatGUI:
                 self._chan_send_bytes((f"/switch {room}\n").encode("utf-8"))
             except Exception:
                 pass
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _send_target_label(self) -> str:
         if self._send_target_kind == "user" and self._send_target_value:
@@ -2575,6 +2457,7 @@ class SSHChatGUI:
         except (tk.TclError, TypeError, ValueError):
             return
         self._activate_room_at(idx)
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _on_room_selected(self, _event=None) -> None:
         if self._room_select_guard:
@@ -2583,6 +2466,7 @@ class SSHChatGUI:
             return
         idx = int(self.room_list.curselection()[0])
         self._activate_room_at(idx)
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _activate_room_at(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._rooms_order):
@@ -3461,31 +3345,11 @@ class SSHChatGUI:
         # Excalidraw board is the web page; #k= autofills client-side only.
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            new_tok = ""
-            try:
-                new_tok = _canvas_token_from_url(url)[1]
-            except ValueError:
-                new_tok = ""
-            # Same room board: other clients joining re-send gui-open. Do not
-            # tear down an already-open window for the same token.
-            if self._canvas_win is not None and new_tok:
-                try:
-                    if self._canvas_win.win.winfo_exists():
-                        cur = _canvas_token_from_url(self._canvas_win.url)[1]
-                        if cur == new_tok:
-                            return
-                except (tk.TclError, ValueError):
-                    self._canvas_win = None
-            if self._canvas_win is not None:
-                try:
-                    self._canvas_win.close()
-                except Exception:
-                    pass
-                self._canvas_win = None
-            self._canvas_win = CanvasWebShell(
-                self.root, target, on_close=self._on_aux_window_closed
-            )  # type: ignore[assignment]
-            self._append_chat_line("[*] 已打开共享画布（可最大化）", local_sent=True)
+            if _open_canvas_app_window(target, maximized=True):
+                self._append_chat_line("[*] 已打开共享画布", local_sent=True)
+            else:
+                webbrowser.open(target)
+                self._append_chat_line("[*] 已在系统浏览器打开共享画布", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
