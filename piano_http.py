@@ -214,6 +214,22 @@ PIANO_TEXTS = {
         "status_err": "Sync error — will retry",
         "closed": "This piano is closed or expired",
         "loading": "Loading piano…",
+        "record": "Record",
+        "stop": "Stop",
+        "export": "Export",
+        "share": "Share link",
+        "recording": "Recording…",
+        "export_ok": "Recording saved to your device",
+        "share_ok": "Replay link copied to clipboard",
+        "share_fail": "Could not create share link",
+        "share_empty": "Record something first",
+        "replay_title": "Piano replay",
+        "replay_by": "By",
+        "replay_play": "Play",
+        "replay_pause": "Pause",
+        "replay_restart": "Restart",
+        "replay_not_found": "Recording not found or expired",
+        "replay_loading": "Loading replay…",
     },
     "zh": {
         "title": "SSHChat 房间钢琴",
@@ -237,6 +253,22 @@ PIANO_TEXTS = {
         "status_err": "同步出错，将自动重试",
         "closed": "钢琴已关闭或过期",
         "loading": "正在加载钢琴…",
+        "record": "录制",
+        "stop": "停止",
+        "export": "导出",
+        "share": "分享链接",
+        "recording": "录制中…",
+        "export_ok": "录制已保存到本地",
+        "share_ok": "重放链接已复制到剪贴板",
+        "share_fail": "无法创建分享链接",
+        "share_empty": "请先录制一段演奏",
+        "replay_title": "钢琴重放",
+        "replay_by": "演奏者",
+        "replay_play": "播放",
+        "replay_pause": "暂停",
+        "replay_restart": "重播",
+        "replay_not_found": "录制不存在或已过期",
+        "replay_loading": "正在加载重放…",
     },
 }
 
@@ -276,6 +308,15 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         "expires": S["expires"],
         "closed": S["closed"],
         "loading": S["loading"],
+        "record": S["record"],
+        "stop": S["stop"],
+        "export": S["export"],
+        "share": S["share"],
+        "recording": S["recording"],
+        "exportOk": S["export_ok"],
+        "shareOk": S["share_ok"],
+        "shareFail": S["share_fail"],
+        "shareEmpty": S["share_empty"],
     }
     notes_json = json.dumps(PIANO_NOTES, ensure_ascii=False)
     keys_json = json.dumps(PIANO_KEYS, ensure_ascii=False)
@@ -424,6 +465,23 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             color: var(--accent-2);
         }}
         .status.err {{ background: rgba(196,92,38,0.15); color: var(--accent); }}
+        .tb-btn {{
+            background: rgba(47,111,106,0.14);
+            color: var(--accent-2);
+            padding: 6px 12px;
+            font-size: 12px;
+        }}
+        .tb-btn.recording {{
+            background: rgba(196,92,38,0.22);
+            color: var(--accent);
+        }}
+        .tb-btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+        .rec-time {{
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            opacity: 0.75;
+            min-width: 3.2em;
+        }}
         .piano-scroll {{
             flex: 1;
             min-height: 0;
@@ -673,6 +731,10 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 <div class="meta" id="meta"></div>
                 <div class="toolbar">
                     <span class="room-badge" id="roomBadge" hidden></span>
+                    <button type="button" class="tb-btn" id="recBtn">{html.escape(S['record'])}</button>
+                    <span class="rec-time" id="recTime" hidden>0:00</span>
+                    <button type="button" class="tb-btn" id="exportBtn" disabled>{html.escape(S['export'])}</button>
+                    <button type="button" class="tb-btn" id="shareBtn" disabled>{html.escape(S['share'])}</button>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="loading" id="loading">{html.escape(S['loading'])}</div>
@@ -721,6 +783,10 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         const pianoScrollEl = document.getElementById('pianoScroll');
         const pianoStackEl = document.getElementById('pianoStack');
         const pianoEl = document.getElementById('piano');
+        const recBtn = document.getElementById('recBtn');
+        const recTimeEl = document.getElementById('recTime');
+        const exportBtn = document.getElementById('exportBtn');
+        const shareBtn = document.getElementById('shareBtn');
 
         let ticket = '';
         let lastSeq = 0;
@@ -738,6 +804,159 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         let pushQueue = Promise.resolve();
         let remoteTimeBase = null;
         const REMOTE_STALE_MS = 500;
+
+        let isRecording = false;
+        let recordStartMs = 0;
+        let recordTimer = null;
+        let recordedEvents = [];
+        let lastRecording = null;
+
+        function fmtRecTime(sec) {{
+            const s = Math.max(0, Math.floor(sec));
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return m + ':' + String(r).padStart(2, '0');
+        }}
+
+        function updateRecUi() {{
+            if (isRecording) {{
+                recBtn.textContent = i18n.stop;
+                recBtn.classList.add('recording');
+                recTimeEl.hidden = false;
+            }} else {{
+                recBtn.textContent = i18n.record;
+                recBtn.classList.remove('recording');
+                recTimeEl.hidden = !lastRecording;
+            }}
+            const hasRec = !!(lastRecording && lastRecording.events && lastRecording.events.length);
+            exportBtn.disabled = !hasRec;
+            shareBtn.disabled = !hasRec;
+        }}
+
+        function tickRecTime() {{
+            if (!isRecording) return;
+            const sec = (performance.now() - recordStartMs) / 1000;
+            recTimeEl.textContent = fmtRecTime(sec);
+        }}
+
+        function recordEvent(note, action) {{
+            if (!isRecording) return;
+            recordedEvents.push({{
+                t: (performance.now() - recordStartMs) / 1000,
+                note: note,
+                action: action,
+            }});
+        }}
+
+        function buildRecordingPayload() {{
+            if (!lastRecording) return null;
+            return {{
+                version: 1,
+                author: selfName || lastRecording.author || '',
+                title: lastRecording.title || '',
+                duration: lastRecording.duration || 0,
+                events: lastRecording.events || [],
+            }};
+        }}
+
+        function startRecording() {{
+            if (isRecording) return;
+            isRecording = true;
+            recordStartMs = performance.now();
+            recordedEvents = [];
+            lastRecording = null;
+            recTimeEl.textContent = '0:00';
+            recordTimer = setInterval(tickRecTime, 200);
+            updateRecUi();
+        }}
+
+        function stopRecording() {{
+            if (!isRecording) return;
+            isRecording = false;
+            if (recordTimer) {{
+                clearInterval(recordTimer);
+                recordTimer = null;
+            }}
+            const duration = recordedEvents.length
+                ? recordedEvents[recordedEvents.length - 1].t
+                : 0;
+            lastRecording = {{
+                author: selfName,
+                title: '',
+                duration: duration,
+                events: recordedEvents.slice(),
+            }};
+            recTimeEl.textContent = fmtRecTime(duration);
+            updateRecUi();
+        }}
+
+        function toggleRecording() {{
+            if (isRecording) stopRecording();
+            else startRecording();
+        }}
+
+        function exportRecording() {{
+            const payload = buildRecordingPayload();
+            if (!payload || !payload.events.length) {{
+                alert(i18n.shareEmpty);
+                return;
+            }}
+            const blob = new Blob([JSON.stringify(payload, null, 2)], {{
+                type: 'application/json',
+            }});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'piano-recording-' + Date.now() + '.json';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function () {{ URL.revokeObjectURL(url); }}, 1000);
+            setStatus(i18n.exportOk, false);
+        }}
+
+        async function shareRecording() {{
+            const payload = buildRecordingPayload();
+            if (!payload || !payload.events.length) {{
+                alert(i18n.shareEmpty);
+                return;
+            }}
+            shareBtn.disabled = true;
+            try {{
+                const res = await fetch('/piano/' + token + '/recording', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-Piano-Ticket': ticket,
+                    }},
+                    cache: 'no-store',
+                    body: JSON.stringify({{
+                        title: payload.title || '',
+                        duration: payload.duration,
+                        events: payload.events,
+                    }}),
+                }});
+                const data = await res.json().catch(function () {{ return {{}}; }});
+                if (!res.ok) throw new Error(data.error || i18n.shareFail);
+                const link = location.origin + '/piano-replay/' + data.id;
+                try {{
+                    await navigator.clipboard.writeText(link);
+                }} catch (_) {{
+                    prompt(i18n.shareOk, link);
+                    setStatus(i18n.shareOk, false);
+                    return;
+                }}
+                setStatus(i18n.shareOk, false);
+            }} catch (e) {{
+                alert((e && e.message) || i18n.shareFail);
+            }} finally {{
+                updateRecUi();
+            }}
+        }}
+
+        recBtn.addEventListener('click', toggleRecording);
+        exportBtn.addEventListener('click', exportRecording);
+        shareBtn.addEventListener('click', function () {{ void shareRecording(); }});
 
         function setStatus(text, err) {{
             statusEl.textContent = text;
@@ -1065,6 +1284,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             heldKeys[note] = true;
             const ts = Date.now() / 1000;
             playNote(note, false);
+            recordEvent(note, 'on');
             void pushNote(note, 'on', ts);
         }}
 
@@ -1072,6 +1292,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             if (!heldKeys[note]) return;
             delete heldKeys[note];
             unflashKey(note);
+            recordEvent(note, 'off');
             void pushNote(note, 'off', Date.now() / 1000);
         }}
 
@@ -1333,5 +1554,508 @@ def handle_piano_post(handler: "BaseHTTPRequestHandler") -> bool:
         handler._send_json_response(200, result)  # type: ignore[attr-defined]
         return True
 
+    if action == "recording":
+        body = handler._read_json_body()  # type: ignore[attr-defined]
+        title = str(body.get("title", "")).strip()
+        events = body.get("events")
+        duration = body.get("duration", 0)
+        if not isinstance(events, list):
+            handler._send_error_json(400, "无效录制")  # type: ignore[attr-defined]
+            return True
+        rec_id, err = store.save_recording(
+            token,
+            ticket,
+            title=title,
+            events=events,
+            duration=duration,
+        )
+        if rec_id is None:
+            handler._send_error_json(403, err)  # type: ignore[attr-defined]
+            return True
+        handler._send_json_response(200, {"id": rec_id})  # type: ignore[attr-defined]
+        return True
+
     handler._send_error_json(404, "网址无效")  # type: ignore[attr-defined]
+    return True
+
+
+def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
+    lang = "zh" if str(lang or "").lower().startswith("zh") else "en"
+    S = PIANO_TEXTS[lang]
+    html_lang = "zh-CN" if lang == "zh" else "en"
+    i18n = {
+        "replayTitle": S["replay_title"],
+        "replayBy": S["replay_by"],
+        "replayPlay": S["replay_play"],
+        "replayPause": S["replay_pause"],
+        "replayRestart": S["replay_restart"],
+        "replayLoading": S["replay_loading"],
+        "replayNotFound": S["replay_not_found"],
+    }
+    notes_json = json.dumps(PIANO_NOTES, ensure_ascii=False)
+    keys_json = json.dumps(PIANO_KEYS, ensure_ascii=False)
+    segments_json = json.dumps(
+        [
+            {
+                "id": s["id"],
+                "from": s["from"],
+                "to": s["to"],
+                "label": s["label_zh" if lang == "zh" else "label_en"],
+            }
+            for s in PIANO_SEGMENTS
+        ],
+        ensure_ascii=False,
+    )
+    return f"""<!DOCTYPE html>
+<html lang="{html_lang}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{html.escape(S['replay_title'])}</title>
+    <style>
+        :root {{
+            --ink: #1a1f2e;
+            --paper: #f7f3ea;
+            --line: #d9d0c0;
+            --accent: #c45c26;
+            --accent-2: #2f6f6a;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        html, body {{ height: 100%; height: 100dvh; }}
+        body {{
+            font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+            background:
+                radial-gradient(circle at 12% 18%, rgba(196,92,38,0.14), transparent 42%),
+                radial-gradient(circle at 88% 8%, rgba(47,111,106,0.16), transparent 40%),
+                linear-gradient(160deg, #ebe4d6 0%, #dfe8e4 55%, #efe8dc 100%);
+            color: var(--ink);
+        }}
+        .wrap {{ max-width: none; padding: 8px 10px; height: 100%; display: flex; flex-direction: column; }}
+        .card {{
+            background: rgba(247, 243, 234, 0.94);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }}
+        .toolbar {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 8px;
+            flex-shrink: 0;
+        }}
+        h1 {{
+            font-family: "Fraunces", "Songti SC", Georgia, serif;
+            font-size: 20px;
+            font-weight: 600;
+            margin-right: 8px;
+        }}
+        .meta {{ font-size: 13px; opacity: 0.7; }}
+        button {{
+            border: 0;
+            border-radius: 999px;
+            padding: 8px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            background: var(--accent-2);
+            color: white;
+        }}
+        button:disabled {{ opacity: 0.45; cursor: not-allowed; }}
+        .progress {{
+            margin-left: auto;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            opacity: 0.75;
+        }}
+        .piano-scroll {{
+            flex: 1;
+            min-height: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: linear-gradient(-65deg, #000, #222, #000, #666, #222 75%);
+            padding: 8px 12px 16px;
+            touch-action: manipulation;
+        }}
+        .piano-stack {{ display: none; flex-direction: column; gap: 8px; height: 100%; min-height: 0; }}
+        .piano-scroll.segmented {{ overflow-x: hidden; overflow-y: auto; }}
+        .piano-scroll.segmented .piano-stack {{ display: flex; gap: 6px; height: 100%; min-height: 100%; }}
+        .piano-scroll.segmented > .piano {{ display: none; }}
+        .piano-segment {{
+            flex: 1 1 33%;
+            min-height: 88px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 4px 6px 6px;
+            background: rgba(0,0,0,0.22);
+        }}
+        .piano-segment__label {{
+            flex-shrink: 0;
+            font-size: 10px;
+            color: rgba(255,255,255,0.72);
+            margin-bottom: 4px;
+        }}
+        .piano-segment .piano {{ flex: 1; height: auto; min-height: 72px; width: 100%; }}
+        .piano-segment .piano-key {{
+            flex: 0 0 calc(100% / var(--slot-count, 14));
+            width: calc(100% / var(--slot-count, 14));
+            max-width: calc(100% / var(--slot-count, 14));
+            min-width: 0;
+        }}
+        .piano-segment .piano-key__black {{ width: 58%; right: -29%; }}
+        .piano {{
+            display: flex;
+            height: 22vh;
+            min-height: 140px;
+            max-height: 220px;
+            user-select: none;
+        }}
+        .piano-key {{ position: relative; flex: 0 0 auto; width: 44px; height: 100%; }}
+        .piano-key__white {{
+            width: 100%; height: 100%;
+            border-radius: 0 0 6px 6px;
+            background: linear-gradient(-30deg, #f8f8f8, #fff);
+            border: 1px solid #bbb;
+            position: relative; z-index: 1;
+        }}
+        .piano-key__black {{
+            position: absolute; top: 0; right: -14px;
+            width: 28px; height: 62%;
+            border-radius: 0 0 4px 4px;
+            background: linear-gradient(-20deg, #222, #000, #222);
+            border: 1px solid #111;
+            z-index: 2;
+        }}
+        .piano-key__white.active {{ background: linear-gradient(-20deg, #3330fb, #000, #222); }}
+        .piano-key__black.active {{ background: linear-gradient(-20deg, #3330fb, #111, #000); }}
+        .err-msg {{ padding: 24px; text-align: center; opacity: 0.8; }}
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="card">
+            <div class="toolbar">
+                <h1 id="title">{html.escape(S['replay_title'])}</h1>
+                <span class="meta" id="meta"></span>
+                <button type="button" id="playBtn" disabled>{html.escape(S['replay_play'])}</button>
+                <button type="button" id="restartBtn" disabled>{html.escape(S['replay_restart'])}</button>
+                <span class="progress" id="progress">0:00 / 0:00</span>
+            </div>
+            <div class="err-msg" id="errMsg" hidden></div>
+            <div class="piano-scroll" id="pianoScroll">
+                <div class="piano-stack" id="pianoStack"></div>
+                <div class="piano" id="piano"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+    (function () {{
+        const recordingId = {json.dumps(recording_id)};
+        const i18n = {json.dumps(i18n, ensure_ascii=False)};
+        const notes = {notes_json};
+        const pianoKeys = {keys_json};
+        const pianoSegments = {segments_json};
+
+        const playBtn = document.getElementById('playBtn');
+        const restartBtn = document.getElementById('restartBtn');
+        const progressEl = document.getElementById('progress');
+        const metaEl = document.getElementById('meta');
+        const errMsg = document.getElementById('errMsg');
+        const pianoScrollEl = document.getElementById('pianoScroll');
+        const pianoStackEl = document.getElementById('pianoStack');
+        const pianoEl = document.getElementById('piano');
+        const keyEls = Object.create(null);
+        const flashTimers = Object.create(null);
+
+        let recording = null;
+        let playing = false;
+        let playStartMs = 0;
+        let pauseAt = 0;
+        let timers = [];
+        let progressTimer = null;
+        let audioCtx = null;
+        const audioBuffers = Object.create(null);
+        let unlockPromise = null;
+
+        function fmtTime(sec) {{
+            const s = Math.max(0, Math.floor(sec));
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return m + ':' + String(r).padStart(2, '0');
+        }}
+
+        function ensureAudioCtx() {{
+            if (audioCtx) return audioCtx;
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) return null;
+            audioCtx = new Ctx();
+            return audioCtx;
+        }}
+
+        async function preloadSamples() {{
+            const ctx = ensureAudioCtx();
+            if (!ctx) return false;
+            await Promise.all(Object.keys(notes).map(async function (note) {{
+                const file = notes[note];
+                if (!file || audioBuffers[note]) return;
+                const res = await fetch('/piano-samples/' + file, {{ cache: 'force-cache' }});
+                if (!res.ok) return;
+                const buf = await res.arrayBuffer();
+                audioBuffers[note] = await ctx.decodeAudioData(buf);
+            }}));
+            return Object.keys(audioBuffers).length > 0;
+        }}
+
+        function unlockAudio() {{
+            if (unlockPromise) return unlockPromise;
+            const ctx = ensureAudioCtx();
+            if (!ctx) return Promise.resolve(false);
+            unlockPromise = ctx.resume().then(preloadSamples).then(function () {{ return true; }});
+            return unlockPromise;
+        }}
+
+        function flashKey(note) {{
+            const el = keyEls[note];
+            if (!el) return;
+            el.classList.add('active');
+            if (flashTimers[note]) clearTimeout(flashTimers[note]);
+            flashTimers[note] = setTimeout(function () {{
+                el.classList.remove('active');
+                delete flashTimers[note];
+            }}, 450);
+        }}
+
+        function playNote(note) {{
+            if (!notes[note]) return;
+            const ctx = ensureAudioCtx();
+            const buffer = audioBuffers[note];
+            if (ctx && ctx.state === 'running' && buffer) {{
+                const src = ctx.createBufferSource();
+                src.buffer = buffer;
+                src.connect(ctx.destination);
+                try {{ src.start(0); flashKey(note); return; }} catch (_) {{}}
+            }}
+            const file = notes[note];
+            if (!file) return;
+            const a = new Audio('/piano-samples/' + file);
+            void a.play().then(function () {{ flashKey(note); }}).catch(function () {{}});
+        }}
+
+        function noteOctave(name) {{
+            const m = String(name || '').match(/(\\d+)$/);
+            return m ? parseInt(m[1], 10) : 0;
+        }}
+
+        function keysForSegment(fromOct, toOct) {{
+            return pianoKeys.filter(function (item) {{
+                const o = noteOctave(item.white.name);
+                return o >= fromOct && o <= toOct;
+            }});
+        }}
+
+        function useSegmentedLayout() {{
+            if (window.matchMedia('(pointer: coarse)').matches) return true;
+            if (window.matchMedia('(max-width: 900px)').matches) return true;
+            if ('ontouchstart' in window && Math.min(window.innerWidth, window.innerHeight) <= 1024) return true;
+            return false;
+        }}
+
+        function appendKeyItem(container, item) {{
+            const wrapKey = document.createElement('div');
+            wrapKey.className = 'piano-key';
+            const white = document.createElement('div');
+            white.className = 'piano-key__white';
+            white.dataset.note = item.white.name;
+            keyEls[item.white.name] = white;
+            wrapKey.appendChild(white);
+            if (item.black && item.black.name) {{
+                const black = document.createElement('div');
+                black.className = 'piano-key__black';
+                black.dataset.note = item.black.name;
+                keyEls[item.black.name] = black;
+                wrapKey.appendChild(black);
+            }}
+            container.appendChild(wrapKey);
+        }}
+
+        function buildKeyboard() {{
+            pianoEl.replaceChildren();
+            pianoStackEl.replaceChildren();
+            const segmented = useSegmentedLayout();
+            pianoScrollEl.classList.toggle('segmented', segmented);
+            if (!segmented) {{
+                for (const item of pianoKeys) appendKeyItem(pianoEl, item);
+                return;
+            }}
+            for (const seg of pianoSegments) {{
+                const segWrap = document.createElement('div');
+                segWrap.className = 'piano-segment';
+                const label = document.createElement('div');
+                label.className = 'piano-segment__label';
+                label.textContent = seg.label || '';
+                segWrap.appendChild(label);
+                const row = document.createElement('div');
+                row.className = 'piano';
+                row.style.setProperty('--slot-count', '14');
+                for (const item of keysForSegment(seg.from, seg.to)) appendKeyItem(row, item);
+                segWrap.appendChild(row);
+                pianoStackEl.appendChild(segWrap);
+            }}
+        }}
+
+        function clearTimers() {{
+            for (const t of timers) clearTimeout(t);
+            timers = [];
+            if (progressTimer) {{ clearInterval(progressTimer); progressTimer = null; }}
+        }}
+
+        function currentPlayhead() {{
+            if (!playing) return pauseAt;
+            return pauseAt + (performance.now() - playStartMs) / 1000;
+        }}
+
+        function updateProgress() {{
+            const dur = recording ? recording.duration : 0;
+            progressEl.textContent = fmtTime(currentPlayhead()) + ' / ' + fmtTime(dur);
+        }}
+
+        function scheduleFrom(offsetSec) {{
+            clearTimers();
+            if (!recording) return;
+            const events = recording.events || [];
+            for (const evt of events) {{
+                const t = typeof evt.t === 'number' ? evt.t : 0;
+                if (t < offsetSec) continue;
+                const delay = (t - offsetSec) * 1000;
+                timers.push(setTimeout(function () {{
+                    if (!playing) return;
+                    if (evt.action === 'on') playNote(evt.note);
+                }}, delay));
+            }}
+            const remain = Math.max(0, recording.duration - offsetSec) * 1000;
+            timers.push(setTimeout(function () {{
+                if (!playing) return;
+                playing = false;
+                pauseAt = recording.duration;
+                playBtn.textContent = i18n.replayPlay;
+                updateProgress();
+            }}, remain));
+            progressTimer = setInterval(updateProgress, 200);
+        }}
+
+        function startPlayback(fromSec) {{
+            void unlockAudio().then(function () {{
+                playing = true;
+                pauseAt = fromSec || 0;
+                playStartMs = performance.now();
+                playBtn.textContent = i18n.replayPause;
+                scheduleFrom(pauseAt);
+                updateProgress();
+            }});
+        }}
+
+        function pausePlayback() {{
+            if (!playing) return;
+            playing = false;
+            pauseAt = currentPlayhead();
+            clearTimers();
+            playBtn.textContent = i18n.replayPlay;
+            updateProgress();
+        }}
+
+        function togglePlay() {{
+            if (!recording) return;
+            if (playing) pausePlayback();
+            else if (pauseAt >= recording.duration) startPlayback(0);
+            else startPlayback(pauseAt);
+        }}
+
+        function restartPlayback() {{
+            pausePlayback();
+            pauseAt = 0;
+            startPlayback(0);
+        }}
+
+        playBtn.addEventListener('click', togglePlay);
+        restartBtn.addEventListener('click', restartPlayback);
+
+        async function load() {{
+            buildKeyboard();
+            try {{
+                const res = await fetch('/piano-replay/' + recordingId + '/data', {{ cache: 'no-store' }});
+                const data = await res.json().catch(function () {{ return {{}}; }});
+                if (!res.ok) throw new Error(data.error || i18n.replayNotFound);
+                recording = data;
+                const title = (data.title || '').trim();
+                if (title) document.getElementById('title').textContent = title;
+                metaEl.textContent = i18n.replayBy + ': ' + (data.author || '') +
+                    (data.duration ? (' · ' + fmtTime(data.duration)) : '');
+                progressEl.textContent = '0:00 / ' + fmtTime(data.duration || 0);
+                playBtn.disabled = false;
+                restartBtn.disabled = false;
+            }} catch (e) {{
+                errMsg.hidden = false;
+                errMsg.textContent = (e && e.message) || i18n.replayNotFound;
+                pianoScrollEl.hidden = true;
+            }}
+        }}
+
+        void load();
+    }})();
+    </script>
+</body>
+</html>"""
+
+
+def handle_piano_replay_get(handler: "BaseHTTPRequestHandler") -> bool:
+    parsed = urlparse(handler.path)
+    parts = parsed.path.strip("/").split("/")
+    if not parts or parts[0] != "piano-replay":
+        return False
+
+    store = piano_sharing.piano_store
+    lang = "en"
+    try:
+        from file_http_server import _page_locale
+
+        lang = _page_locale(handler)
+    except Exception:
+        pass
+    loc = "zh" if str(lang).lower().startswith("zh") else "en"
+    not_found = PIANO_TEXTS[loc]["replay_not_found"]
+
+    if len(parts) == 2:
+        recording_id = parts[1]
+        rec = store.get_recording(recording_id)
+        if rec is None:
+            handler._send_html_error(404, not_found, lang=lang)  # type: ignore[attr-defined]
+            return True
+        handler._send_html_page(generate_piano_replay_page(recording_id, lang=lang))  # type: ignore[attr-defined]
+        return True
+
+    if len(parts) == 3 and parts[2] == "data":
+        recording_id = parts[1]
+        rec = store.get_recording(recording_id)
+        if rec is None:
+            handler._send_error_json(404, not_found)  # type: ignore[attr-defined]
+            return True
+        handler._send_json_response(  # type: ignore[attr-defined]
+            200,
+            {
+                "version": 1,
+                "id": rec.recording_id,
+                "author": rec.author,
+                "title": rec.title,
+                "duration": rec.duration,
+                "events": rec.events,
+            },
+        )
+        return True
+
+    handler._send_error_json(404, not_found)  # type: ignore[attr-defined]
     return True

@@ -23,6 +23,10 @@ ACCESS_TICKET_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_PIANO_TICKET_TTL_SECONDS", "1800")
 )
 MAX_EVENTS = int(os.environ.get("SSHCHAT_PIANO_MAX_EVENTS", "2000"))
+RECORDING_TTL_SECONDS = int(
+    os.environ.get("SSHCHAT_PIANO_RECORDING_TTL_SECONDS", str(7 * 24 * 3600))
+)
+MAX_RECORDING_EVENTS = int(os.environ.get("SSHCHAT_PIANO_MAX_RECORDING_EVENTS", "5000"))
 
 
 def _generate_token() -> str:
@@ -52,6 +56,17 @@ class PianoNoteEvent:
 
 
 @dataclass
+class PianoRecording:
+    recording_id: str
+    author: str
+    title: str
+    events: List[dict]
+    duration: float
+    created_at: float
+    expires: float
+
+
+@dataclass
 class PianoSession:
     session_id: str
     creator: str
@@ -70,13 +85,22 @@ class PianoSession:
 class PianoStore:
     """In-memory (+ optional disk) store for shared piano sessions."""
 
-    def __init__(self, store_path: str = "piano_sessions.json"):
+    def __init__(
+        self,
+        store_path: str = "piano_sessions.json",
+        recordings_path: Optional[str] = None,
+    ):
         self.store_path = store_path
+        self.recordings_path = recordings_path or str(
+            Path(store_path).with_name("piano_recordings.json")
+        )
         self.sessions: Dict[str, PianoSession] = {}
         self.token_to_session: Dict[str, str] = {}
         self.tickets: Dict[str, PianoAccessTicket] = {}
+        self.recordings: Dict[str, PianoRecording] = {}
         self.lock = threading.RLock()
         self._load()
+        self._load_recordings()
 
     def _load(self) -> None:
         if not os.path.exists(self.store_path):
@@ -120,6 +144,53 @@ class PianoStore:
                 self.tickets[ticket] = entry
         except Exception as e:
             print(f"[Piano] Failed to load: {e}")
+
+    def _load_recordings(self) -> None:
+        if not os.path.exists(self.recordings_path):
+            return
+        try:
+            with open(self.recordings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            now = time.time()
+            for rid, raw in (data.get("recordings") or {}).items():
+                try:
+                    rec = PianoRecording(
+                        recording_id=str(raw["recording_id"]),
+                        author=str(raw.get("author") or ""),
+                        title=str(raw.get("title") or "")[:80],
+                        events=list(raw.get("events") or [])[-MAX_RECORDING_EVENTS:],
+                        duration=float(raw.get("duration") or 0),
+                        created_at=float(raw.get("created_at") or 0),
+                        expires=float(raw.get("expires") or 0),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if rec.expires > 0 and rec.expires <= now:
+                    continue
+                self.recordings[rid] = rec
+        except Exception as e:
+            print(f"[Piano] Failed to load recordings: {e}")
+
+    def _save_recordings(self) -> None:
+        try:
+            data = {
+                "recordings": {
+                    rid: asdict(rec) for rid, rec in self.recordings.items()
+                }
+            }
+            path = Path(self.recordings_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f"{self.recordings_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, self.recordings_path)
+        except Exception as e:
+            print(f"[Piano] Failed to save recordings: {e}")
 
     def _save(self) -> None:
         try:
@@ -425,6 +496,74 @@ class PianoStore:
                     return session
         return None
 
+    def save_recording(
+        self,
+        token: str,
+        ticket: str,
+        *,
+        title: str = "",
+        events: Optional[List[dict]] = None,
+        duration: float = 0,
+    ) -> Tuple[Optional[str], str]:
+        session, participant, err = self.resolve_ticket(token, ticket)
+        if session is None or participant is None:
+            return None, err
+        raw_events = list(events or [])
+        if not raw_events:
+            return None, "录制为空"
+        if len(raw_events) > MAX_RECORDING_EVENTS:
+            return None, f"录制事件过多（最多 {MAX_RECORDING_EVENTS}）"
+        cleaned: List[dict] = []
+        for evt in raw_events:
+            if not isinstance(evt, dict):
+                continue
+            note = str(evt.get("note") or "").strip()
+            action = str(evt.get("action") or "on").strip().lower()
+            if action not in ("on", "off") or not note or len(note) > 8:
+                continue
+            try:
+                t = max(0.0, float(evt.get("t", 0)))
+            except (TypeError, ValueError):
+                t = 0.0
+            cleaned.append({"t": t, "note": note, "action": action})
+        if not cleaned:
+            return None, "录制无效"
+        try:
+            dur = max(0.0, float(duration))
+        except (TypeError, ValueError):
+            dur = 0.0
+        if dur <= 0:
+            dur = cleaned[-1]["t"]
+        now = time.time()
+        recording_id = secrets.token_urlsafe(12)
+        rec = PianoRecording(
+            recording_id=recording_id,
+            author=participant,
+            title=(title or "").strip()[:80],
+            events=cleaned,
+            duration=dur,
+            created_at=now,
+            expires=now + max(3600, RECORDING_TTL_SECONDS),
+        )
+        with self.lock:
+            self.recordings[recording_id] = rec
+            self._save_recordings()
+        return recording_id, ""
+
+    def get_recording(self, recording_id: str) -> Optional[PianoRecording]:
+        recording_id = (recording_id or "").strip()
+        if not recording_id:
+            return None
+        with self.lock:
+            rec = self.recordings.get(recording_id)
+            if rec is None:
+                return None
+            if rec.expires > 0 and time.time() > rec.expires:
+                self.recordings.pop(recording_id, None)
+                self._save_recordings()
+                return None
+            return rec
+
     def cleanup_expired(self) -> int:
         now = time.time()
         removed = 0
@@ -447,8 +586,18 @@ class PianoStore:
             ]
             for t in dead_tickets:
                 self.tickets.pop(t, None)
-            if removed or dead_tickets:
-                self._save()
+            dead_recordings = [
+                rid
+                for rid, rec in self.recordings.items()
+                if rec.expires > 0 and rec.expires <= now
+            ]
+            for rid in dead_recordings:
+                self.recordings.pop(rid, None)
+            if removed or dead_tickets or dead_recordings:
+                if removed or dead_tickets:
+                    self._save()
+                if dead_recordings:
+                    self._save_recordings()
         return removed
 
 
