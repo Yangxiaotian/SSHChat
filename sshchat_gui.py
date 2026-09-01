@@ -3444,8 +3444,9 @@ class SSHChatGUI:
     def _open_native_piano(self, url: str, key: str) -> None:
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            # Normal browser tab — Chrome --app= blocks MP3 export downloads.
-            if _open_browser_tab(target):
+            # Same Chromium --app= window as canvas/mobile WebView: grabs focus so
+            # keyboard bindings work; MP3 export uses showSaveFilePicker when needed.
+            if _open_canvas_app_window(target, maximized=True):
                 self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
             else:
                 webbrowser.open(target)
