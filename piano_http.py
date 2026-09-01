@@ -289,7 +289,7 @@ _PIANO_MP3_EXPORT_JS = """
             if (cache[note]) return cache[note];
             const file = notes[note];
             if (!file) return null;
-            const res = await fetch('/piano-samples/' + file, { cache: 'force-cache' });
+            const res = await fetch('/piano-samples/' + file, { cache: 'default' });
             if (!res.ok) return null;
             const raw = await res.arrayBuffer();
             cache[note] = await decodeCtx.decodeAudioData(raw);
@@ -982,6 +982,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
 
         function startPlayback(fromSec) {{
             if (!lastRecording || !lastRecording.events.length) return;
+            primeAudioSync();
             void unlockAudio().then(function () {{
                 playing = true;
                 pauseAt = fromSec || 0;
@@ -1289,13 +1290,25 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             return audioCtx;
         }}
 
+        function primeAudioSync() {{
+            const ctx = ensureAudioCtx();
+            if (!ctx) return false;
+            if (ctx.state === 'suspended' || ctx.state === 'interrupted') {{
+                try {{
+                    const p = ctx.resume();
+                    if (p && typeof p.catch === 'function') p.catch(function () {{}});
+                }} catch (_) {{}}
+            }}
+            return ctx.state === 'running';
+        }}
+
         async function preloadSamples() {{
             const ctx = ensureAudioCtx();
             if (!ctx) return false;
             const jobs = Object.keys(notes).map(async function (note) {{
                 const url = sampleUrl(note);
                 if (!url || audioBuffers[note]) return;
-                const res = await fetch(url, {{ cache: 'force-cache' }});
+                const res = await fetch(url, {{ cache: 'default' }});
                 if (!res.ok) return;
                 const buf = await res.arrayBuffer();
                 audioBuffers[note] = await ctx.decodeAudioData(buf);
@@ -1306,9 +1319,10 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         }}
 
         function unlockAudio() {{
-            if (unlockPromise) return unlockPromise;
             const ctx = ensureAudioCtx();
             if (!ctx) return Promise.resolve(false);
+            if (unlockPromise && ctx.state === 'running') return unlockPromise;
+            unlockPromise = null;
             unlockPromise = ctx.resume().then(function () {{
                 return preloadSamples();
             }}).then(function () {{
@@ -1335,13 +1349,14 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
 
         function playRemoteNote(note) {{
             if (!notes[note]) return;
+            primeAudioSync();
             const ctx = ensureAudioCtx();
             const buffer = audioBuffers[note];
-            if (ctx && ctx.state === 'running' && buffer) {{
-                const src = ctx.createBufferSource();
-                src.buffer = buffer;
-                src.connect(ctx.destination);
+            if (ctx && buffer) {{
                 try {{
+                    const src = ctx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(ctx.destination);
                     src.start(0);
                     flashKey(note, true);
                     return;
@@ -1352,9 +1367,9 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             const a = new Audio(url);
             try {{
                 a.currentTime = 0;
-                void a.play().then(function () {{
-                    flashKey(note, true);
-                }}).catch(function () {{}});
+                const p = a.play();
+                flashKey(note, true);
+                if (p && typeof p.catch === 'function') p.catch(function () {{}});
             }} catch (_) {{}}
         }}
 
@@ -1364,29 +1379,30 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 playRemoteNote(note);
                 return;
             }}
-            void unlockAudio().then(function () {{
-                const ctx = ensureAudioCtx();
-                const buffer = audioBuffers[note];
-                if (ctx && ctx.state === 'running' && buffer) {{
+            primeAudioSync();
+            const ctx = ensureAudioCtx();
+            const buffer = audioBuffers[note];
+            if (ctx && buffer) {{
+                try {{
                     const src = ctx.createBufferSource();
                     src.buffer = buffer;
                     src.connect(ctx.destination);
-                    try {{
-                        src.start(0);
-                        flashKey(note, false);
-                        return;
-                    }} catch (_) {{}}
-                }}
-                const url = sampleUrl(note);
-                if (!url) return;
-                const a = new Audio(url);
-                try {{
-                    a.currentTime = 0;
-                    void a.play().then(function () {{
-                        flashKey(note, false);
-                    }}).catch(function () {{}});
+                    src.start(0);
+                    flashKey(note, false);
+                    void unlockAudio();
+                    return;
                 }} catch (_) {{}}
-            }});
+            }}
+            const url = sampleUrl(note);
+            if (!url) return;
+            const a = new Audio(url);
+            try {{
+                a.currentTime = 0;
+                const p = a.play();
+                flashKey(note, false);
+                if (p && typeof p.catch === 'function') p.catch(function () {{}});
+            }} catch (_) {{}}
+            void unlockAudio();
         }}
 
         function resetRemoteTimeBase(evtTs) {{
@@ -2235,6 +2251,11 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
             return m + ':' + String(r).padStart(2, '0');
         }}
 
+        function sampleUrl(note) {{
+            const file = notes[note];
+            return file ? ('/piano-samples/' + file) : '';
+        }}
+
         function ensureAudioCtx() {{
             if (audioCtx) return audioCtx;
             const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -2243,13 +2264,25 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
             return audioCtx;
         }}
 
+        function primeAudioSync() {{
+            const ctx = ensureAudioCtx();
+            if (!ctx) return false;
+            if (ctx.state === 'suspended' || ctx.state === 'interrupted') {{
+                try {{
+                    const p = ctx.resume();
+                    if (p && typeof p.catch === 'function') p.catch(function () {{}});
+                }} catch (_) {{}}
+            }}
+            return ctx.state === 'running';
+        }}
+
         async function preloadSamples() {{
             const ctx = ensureAudioCtx();
             if (!ctx) return false;
             await Promise.all(Object.keys(notes).map(async function (note) {{
-                const file = notes[note];
-                if (!file || audioBuffers[note]) return;
-                const res = await fetch('/piano-samples/' + file, {{ cache: 'force-cache' }});
+                const url = sampleUrl(note);
+                if (!url || audioBuffers[note]) return;
+                const res = await fetch(url, {{ cache: 'default' }});
                 if (!res.ok) return;
                 const buf = await res.arrayBuffer();
                 audioBuffers[note] = await ctx.decodeAudioData(buf);
@@ -2258,10 +2291,14 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
         }}
 
         function unlockAudio() {{
-            if (unlockPromise) return unlockPromise;
             const ctx = ensureAudioCtx();
             if (!ctx) return Promise.resolve(false);
-            unlockPromise = ctx.resume().then(preloadSamples).then(function () {{ return true; }});
+            if (unlockPromise && ctx.state === 'running') return unlockPromise;
+            unlockPromise = null;
+            unlockPromise = ctx.resume().then(preloadSamples).then(function () {{ return true; }}).catch(function () {{
+                unlockPromise = null;
+                return false;
+            }});
             return unlockPromise;
         }}
 
@@ -2278,18 +2315,30 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
 
         function playNote(note) {{
             if (!notes[note]) return;
+            primeAudioSync();
             const ctx = ensureAudioCtx();
             const buffer = audioBuffers[note];
-            if (ctx && ctx.state === 'running' && buffer) {{
-                const src = ctx.createBufferSource();
-                src.buffer = buffer;
-                src.connect(ctx.destination);
-                try {{ src.start(0); flashKey(note); return; }} catch (_) {{}}
+            if (ctx && buffer) {{
+                try {{
+                    const src = ctx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(ctx.destination);
+                    src.start(0);
+                    flashKey(note);
+                    void unlockAudio();
+                    return;
+                }} catch (_) {{}}
             }}
-            const file = notes[note];
-            if (!file) return;
-            const a = new Audio('/piano-samples/' + file);
-            void a.play().then(function () {{ flashKey(note); }}).catch(function () {{}});
+            const url = sampleUrl(note);
+            if (!url) return;
+            const a = new Audio(url);
+            try {{
+                a.currentTime = 0;
+                const p = a.play();
+                flashKey(note);
+                if (p && typeof p.catch === 'function') p.catch(function () {{}});
+            }} catch (_) {{}}
+            void unlockAudio();
         }}
 
         function noteOctave(name) {{
@@ -2395,6 +2444,7 @@ def generate_piano_replay_page(recording_id: str, lang: str = "en") -> str:
         }}
 
         function startPlayback(fromSec) {{
+            primeAudioSync();
             void unlockAudio().then(function () {{
                 playing = true;
                 pauseAt = fromSec || 0;

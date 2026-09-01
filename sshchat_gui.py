@@ -3341,7 +3341,7 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        self._offer_piano_open(url, key)
+        self._open_native_piano(url, key)
         return True
 
     def _offer_canvas_open(self, url: str, key: str) -> None:
@@ -3364,28 +3364,6 @@ class SSHChatGUI:
                 f"[*] 收到共享画布邀请（点消息区「打开画布」）", local_sent=True
             )
         self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
-        self._alert_beep()
-
-    def _offer_piano_open(self, url: str, key: str) -> None:
-        self._media_tag_seq += 1
-        tag = f"piano_id_{self._media_tag_seq}"
-        self._piano_open_targets[tag] = (url, key)
-        try:
-            self.log.configure(state=tk.NORMAL)
-            self.log.insert(tk.END, "[*] 收到房间钢琴邀请  ", ("notice",))
-            self.log.insert(tk.END, "打开钢琴", ("piano_open", tag))
-            self.log.insert(tk.END, "\n")
-            self.log.see(tk.END)
-            self.log.configure(state=tk.DISABLED)
-        except tk.TclError:
-            try:
-                self.log.configure(state=tk.DISABLED)
-            except tk.TclError:
-                pass
-            self._append_chat_line(
-                f"[*] 收到房间钢琴邀请（点消息区「打开钢琴」）", local_sent=True
-            )
-        self._set_status("收到房间钢琴（未自动打开，可点「打开钢琴」）")
         self._alert_beep()
 
     def _try_handle_download_invite(self, body: str) -> bool:
