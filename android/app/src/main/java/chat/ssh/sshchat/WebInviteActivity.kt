@@ -1,13 +1,19 @@
 package chat.ssh.sshchat
 
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebChromeClient
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -18,6 +24,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import chat.ssh.sshchat.databinding.ActivityWebInviteBinding
+import java.io.File
 
 /**
  * Opens canvas / upload HTML pages and auto-fills the 6-char key.
@@ -58,6 +65,7 @@ class WebInviteActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             mediaPlaybackRequiresUserGesture = false
         }
+        binding.web.addJavascriptInterface(NativeBridge(this), "SSHChatNative")
         binding.web.webChromeClient = WebChromeClient()
         val safeKey = key.replace("\\", "\\\\").replace("'", "\\'")
         binding.web.webViewClient = object : WebViewClient() {
@@ -165,6 +173,52 @@ class WebInviteActivity : AppCompatActivity() {
         }
         binding.web.destroy()
         super.onDestroy()
+    }
+
+    private class NativeBridge(private val activity: WebInviteActivity) {
+        @JavascriptInterface
+        fun saveBlob(base64: String, filename: String, mime: String) {
+            activity.runOnUiThread {
+                try {
+                    val bytes = Base64.decode(base64, Base64.DEFAULT)
+                    saveBytesToDownloads(activity, bytes, filename, mime)
+                    Toast.makeText(activity, "MP3 已保存到下载", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        activity,
+                        "保存失败: ${e.message ?: e.javaClass.simpleName}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+
+        private fun saveBytesToDownloads(
+            context: Context,
+            bytes: ByteArray,
+            filename: String,
+            mime: String,
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime.ifBlank { "audio/mpeg" })
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = context.contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values,
+                ) ?: error("无法创建下载文件")
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(bytes)
+                } ?: error("无法写入下载文件")
+                return
+            }
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!dir.exists() && !dir.mkdirs()) error("无法访问下载目录")
+            File(dir, filename).writeBytes(bytes)
+        }
     }
 
     companion object {

@@ -269,6 +269,9 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
+_SUGGEST_UI_IDLE = object()
+
+
 def _longest_common_prefix(values: list[str]) -> str:
     if not values:
         return ""
@@ -323,7 +326,11 @@ def _command_completions(
     if subs:
         if trailing_space and len(parts) == 1:
             return [f"{parts[0]} {sub}" for sub in subs]
+        if trailing_space and len(parts) == 2:
+            return []
         if len(parts) >= 2 and not trailing_space:
+            if len(parts) > 2:
+                return []
             prefix = parts[1]
             return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
         return []
@@ -1087,6 +1094,42 @@ def _chromium_app_binaries() -> list[str]:
         shutil.which("microsoft-edge") or "",
         shutil.which("brave-browser") or "",
     ]
+
+
+def _open_browser_tab(url: str) -> bool:
+    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs.update(_windows_hidden_subprocess_kwargs())
+    else:
+        popen_kwargs["start_new_session"] = True
+    for binary in _chromium_app_binaries():
+        if not binary or not os.path.isfile(binary):
+            continue
+        try:
+            subprocess.Popen([binary, target], **popen_kwargs)
+            return True
+        except OSError:
+            continue
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(["open", target], **popen_kwargs)
+            return True
+        except OSError:
+            pass
+    if sys.platform == "win32":
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            pass
+    return False
 
 
 def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
@@ -1857,6 +1900,8 @@ class SSHChatGUI:
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
+        self._suggest_ui_job: str | int | None = None
+        self._suggest_ui_pending: list[str] | None | object = _SUGGEST_UI_IDLE
         self._suggest_focus_job: str | int | None = None
         self._click_refresh_job: str | int | None = None
         self._room_list_refresh_job: str | int | None = None
@@ -3421,7 +3466,8 @@ class SSHChatGUI:
     def _open_native_piano(self, url: str, key: str) -> None:
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            if _open_canvas_app_window(target, maximized=True):
+            # Normal browser tab — Chrome --app= blocks MP3 export downloads.
+            if _open_browser_tab(target):
                 self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
             else:
                 webbrowser.open(target)
@@ -3454,37 +3500,68 @@ class SSHChatGUI:
         self._start_paste_sendfile(path)
         return "break"
 
-    def _hide_suggestions(self) -> None:
-        if self._suggest_focus_job is not None:
-            try:
-                self.root.after_cancel(self._suggest_focus_job)
-            except (tk.TclError, ValueError):
-                pass
-            self._suggest_focus_job = None
+    def _cancel_suggestion_ui_job(self) -> None:
+        if self._suggest_ui_job is None:
+            return
+        try:
+            self.root.after_cancel(self._suggest_ui_job)
+        except (tk.TclError, ValueError):
+            pass
+        self._suggest_ui_job = None
+
+    def _destroy_suggestion_widgets(self) -> bool:
         had = self._suggest_win is not None
         if self._suggest_win is not None:
-            try:
-                self._suggest_slot.grid_remove()
-            except tk.TclError:
-                pass
             try:
                 self._suggest_win.destroy()
             except tk.TclError:
                 pass
         self._suggest_win = None
         self._suggest_list = None
-        self._suggest_items = []
-        if had:
-            # Destroying an overlay can leave Aqua click maps stale.
-            self._schedule_click_target_refresh()
+        return had
 
-    def _show_suggestions(self, items: list[str]) -> None:
-        self._hide_suggestions()
-        if not items:
+    def _apply_suggestion_ui(self) -> None:
+        self._suggest_ui_job = None
+        pending = self._suggest_ui_pending
+        self._suggest_ui_pending = _SUGGEST_UI_IDLE
+        if pending is _SUGGEST_UI_IDLE:
             return
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_focus_job = None
+
+        had = self._destroy_suggestion_widgets()
+        if pending is None:
+            self._suggest_items = []
+            try:
+                self._suggest_slot.grid_remove()
+            except tk.TclError:
+                pass
+            if had:
+                self._schedule_click_target_refresh()
+            return
+
+        items = pending
+        if not items:
+            self._suggest_items = []
+            try:
+                self._suggest_slot.grid_remove()
+            except tk.TclError:
+                pass
+            if had:
+                self._schedule_click_target_refresh()
+            return
+
         self._suggest_items = items
-        # Grid slot in the input row (not place/overrideredirect): floating layers on
-        # Aqua keep eating button clicks when their screen rect goes stale.
+        # In-window slot (not place/overrideredirect): floating layers on Aqua keep
+        # eating button clicks when their screen rect goes stale.
+        try:
+            self._suggest_slot.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        except tk.TclError:
+            pass
         frame = ttk.Frame(self._suggest_slot, relief=tk.SOLID, borderwidth=1)
         lst = tk.Listbox(frame, height=min(8, len(items)), exportselection=False)
         lst.pack(fill=tk.BOTH, expand=True)
@@ -3496,9 +3573,52 @@ class SSHChatGUI:
         frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
-        self._suggest_slot.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        if had:
+            self._schedule_click_target_refresh()
+
+    def _queue_suggestion_ui(self, items: list[str] | None) -> None:
+        self._suggest_ui_pending = items
+        self._cancel_suggestion_ui_job()
+        try:
+            self._suggest_ui_job = self.root.after_idle(self._apply_suggestion_ui)
+        except tk.TclError:
+            pass
+
+    def _flush_suggestion_ui(self) -> None:
+        if self._suggest_ui_pending is _SUGGEST_UI_IDLE and self._suggest_ui_job is None:
+            return
+        self._cancel_suggestion_ui_job()
+        self._apply_suggestion_ui()
+
+    def _hide_suggestions(self) -> None:
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_focus_job = None
+        self._queue_suggestion_ui(None)
+
+    def _show_suggestions(self, items: list[str]) -> None:
+        self._queue_suggestion_ui(items)
+
+    def _selected_suggestion_index(self) -> int:
+        if not self._suggest_list or not self._suggest_items:
+            return 0
+        sel = self._suggest_list.curselection()
+        return int(sel[0]) if sel else 0
+
+    def _should_commit_suggestion_on_enter(self) -> bool:
+        if not self._suggest_list or not self._suggest_items:
+            return False
+        current = self.var_input.get().rstrip()
+        chosen = self._suggest_items[self._selected_suggestion_index()].rstrip()
+        # Only fill in a partial prefix (e.g. "/game m" → "/game move ").
+        # If the user already typed "/game move 5 12", Enter should send.
+        return len(current) < len(chosen) and chosen.startswith(current)
 
     def _apply_selected_suggestion(self) -> None:
+        self._flush_suggestion_ui()
         if not self._suggest_list or not self._suggest_items:
             return
         sel = self._suggest_list.curselection()
@@ -3510,6 +3630,7 @@ class SSHChatGUI:
         self.var_input.set(chosen if chosen.endswith(" ") else chosen + " ")
         self.entry.icursor(tk.END)
         self._hide_suggestions()
+        self._schedule_click_target_refresh(delay_ms=0)
         self.entry.focus_set()
 
     def _completion_users(self) -> list[str]:
@@ -3559,6 +3680,7 @@ class SSHChatGUI:
             self._hide_suggestions()
 
     def _on_entry_tab(self, _event=None):
+        self._flush_suggestion_ui()
         text = self.var_input.get()
         if not text.startswith("/"):
             return "break"
@@ -3587,6 +3709,7 @@ class SSHChatGUI:
         return "break"
 
     def _on_entry_down(self, _event=None):
+        self._flush_suggestion_ui()
         if not self._suggest_list:
             return None
         size = self._suggest_list.size()
@@ -3601,6 +3724,7 @@ class SSHChatGUI:
         return "break"
 
     def _on_entry_up(self, _event=None):
+        self._flush_suggestion_ui()
         if not self._suggest_list:
             return None
         size = self._suggest_list.size()
@@ -3621,9 +3745,8 @@ class SSHChatGUI:
         return None
 
     def _on_entry_return(self, _event=None):
-        # With an open suggestion list, Enter commits the highlighted item into
-        # the entry (do not send the half-typed prefix). Press Enter again to send.
-        if self._suggest_list is not None and self._suggest_items:
+        self._flush_suggestion_ui()
+        if self._should_commit_suggestion_on_enter():
             self._apply_selected_suggestion()
             return "break"
         self._hide_suggestions()
@@ -3633,9 +3756,11 @@ class SSHChatGUI:
     def _send_clicked(self) -> None:
         if not self._chan or self._chan.closed:
             return
+        self._flush_suggestion_ui()
         line = self.var_input.get()
         self.var_input.set("")
         self._hide_suggestions()
+        self._schedule_click_target_refresh(delay_ms=0)
         if not line.strip():
             return
         low = line.strip()
@@ -3717,7 +3842,7 @@ class SSHChatGUI:
         self._refresh_send_target_button()
 
     def _on_close(self) -> None:
-        self._hide_suggestions()
+        self._flush_suggestion_ui()
         self._disconnect(clear_log=False)
         self.root.destroy()
 

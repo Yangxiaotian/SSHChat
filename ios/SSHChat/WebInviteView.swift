@@ -109,11 +109,22 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         // after Excalidraw finishes loading from CDN — not on a premature click.
         let safe = Self.jsStringLiteral(key)
         let boot = WKUserScript(
-            source: "window.__SSHCHAT_KEY='\(safe)';",
+            source: """
+            window.__SSHCHAT_KEY='\(safe)';
+            window.SSHChatNative = window.SSHChatNative || {};
+            window.SSHChatNative.saveBlob = function(b64, filename, mime) {
+                window.webkit.messageHandlers.sshchatSave.postMessage({
+                    b64: b64,
+                    filename: filename,
+                    mime: mime || 'audio/mpeg'
+                });
+            };
+            """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(boot)
+        config.userContentController.add(context.coordinator, name: "sshchatSave")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
@@ -126,13 +137,17 @@ private struct KeyInjectingWebView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "sshchatSave")
+    }
+
     private static func jsStringLiteral(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "'", with: "\\'")
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let key: String
         private var unlockDone = false
         weak var webView: WKWebView?
@@ -150,6 +165,41 @@ private struct KeyInjectingWebView: UIViewRepresentable {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "sshchatSave",
+                  let body = message.body as? [String: Any],
+                  let b64 = body["b64"] as? String,
+                  let filename = body["filename"] as? String,
+                  let data = Data(base64Encoded: b64)
+            else { return }
+            presentSaveSheet(data: data, filename: filename)
+        }
+
+        private func presentSaveSheet(data: Data, filename: String) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let webView = self.webView else { return }
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(filename)
+                do {
+                    try data.write(to: tmp, options: .atomic)
+                } catch {
+                    self.presentAlert(
+                        from: webView,
+                        title: nil,
+                        message: "保存失败：\(error.localizedDescription)",
+                        actions: [("确定", .default, {})]
+                    )
+                    return
+                }
+                let picker = UIDocumentPickerViewController(forExporting: [tmp], asCopy: true)
+                guard let presenter = self.topViewController(from: webView) else { return }
+                presenter.present(picker, animated: true)
+            }
         }
 
         @objc private func repaintCanvas() {
