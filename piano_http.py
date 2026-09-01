@@ -723,11 +723,13 @@ def generate_piano_page(
             font-size: 14px;
             opacity: 0.8;
         }}
-        @media (pointer: coarse), (max-width: 900px) {{
+        @media (pointer: coarse) {{
             .hint-desktop {{ display: none; }}
             .hint-mobile {{ display: block; }}
             .piano-bind {{ display: none; }}
             .piano-note > span:first-child {{ display: none; }}
+        }}
+        @media (pointer: coarse), (max-width: 900px) {{
             .piano-scroll.segmented {{
                 overflow-x: hidden;
                 overflow-y: auto;
@@ -1462,12 +1464,16 @@ def generate_piano_page(
             }});
         }}
 
+        function shouldShowKeyBindings() {{
+            // Touch-first devices skip letter hints; desktop / Tk Chromium keeps them.
+            return !window.matchMedia('(pointer: coarse)').matches;
+        }}
+
         function useSegmentedLayout() {{
             if (window.matchMedia('(pointer: coarse)').matches) return true;
             if (window.matchMedia('(max-width: 900px)').matches) return true;
-            if (window.matchMedia('(max-height: 900px)').matches) return true;
-            // Phone / iPad WebViews often report "fine" pointer — use touch + viewport.
-            if ('ontouchstart' in window && Math.min(window.innerWidth, window.innerHeight) <= 1024) {{
+            // Real touch hardware (not Chrome/macOS ontouchstart shim).
+            if (navigator.maxTouchPoints > 0 && Math.min(window.innerWidth, window.innerHeight) <= 768) {{
                 return true;
             }}
             return false;
@@ -1519,7 +1525,7 @@ def generate_piano_page(
             pianoStackEl.replaceChildren();
             const segmented = useSegmentedLayout();
             pianoScrollEl.classList.toggle('segmented', segmented);
-            const showBind = !segmented;
+            const showBind = shouldShowKeyBindings();
             if (!segmented) {{
                 for (const item of pianoKeys) {{
                     appendKeyItem(pianoEl, item, showBind);
