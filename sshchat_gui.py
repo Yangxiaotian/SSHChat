@@ -673,14 +673,23 @@ def _http_base_candidates(url: str, fallback_host: str) -> list[str]:
             out.append(base)
 
     add(scheme, orig_host, orig_port)
-    if fb and fb.lower() != orig_host.lower():
+    hosts_for_file_port: list[str] = []
+    if orig_host:
+        hosts_for_file_port.append(orig_host)
+    if fb and fb.lower() != (orig_host or "").lower():
         add(scheme, fb, orig_port)
-        # Cloudflare links use https:443; LAN clients often need the local HTTP port.
-        if scheme == "https" and orig_port in (None, 443):
-            add("http", fb, 8443)
-            add("https", fb, 8443)
-        elif orig_port not in (None, 80, 443):
-            add("http", fb, orig_port)
+        hosts_for_file_port.append(fb)
+    # Invite links often use https://host (implicit :443) while FileHTTP listens on 8443.
+    if scheme == "https" and orig_port in (None, 443):
+        for host in hosts_for_file_port:
+            add("http", host, 8443)
+            add("https", host, 8443)
+    elif (
+        orig_port not in (None, 80, 443)
+        and fb
+        and fb.lower() != (orig_host or "").lower()
+    ):
+        add("http", fb, orig_port)
 
     if not out:
         raise ValueError("invalid http url")
@@ -1156,7 +1165,21 @@ def _piano_http_retryable(err: BaseException) -> bool:
     if _is_dns_error(err):
         return True
     msg = str(err).strip().lower()
-    return "nodename nor servname" in msg or "getaddrinfo failed" in msg
+    if "nodename nor servname" in msg or "getaddrinfo failed" in msg:
+        return True
+    if "connection refused" in msg or "errno 61" in msg:
+        return True
+    cur: BaseException | None = err
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ConnectionRefusedError):
+            return True
+        if isinstance(cur, OSError) and getattr(cur, "errno", None) == 61:
+            return True
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "reason", None)
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return False
 
 
 def _piano_open_url(url: str, key: str, *, fallback_host: str = "") -> str:
@@ -3552,9 +3575,10 @@ class SSHChatGUI:
             return ""
 
     def _open_native_piano(self, url: str, key: str) -> None:
+        # Same as canvas: open the Cloudflare HTTPS page in Chromium --app=;
+        # #k= autofills client-side only (never sent to the server).
         try:
-            # Key stays in Tk → server handoff; browser opens a one-time link only.
-            target = _piano_open_url(url, key, fallback_host=self._reachability_host())
+            target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
                 self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
             else:
