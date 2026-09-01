@@ -705,6 +705,14 @@ def _canvas_token_from_url(url: str) -> tuple[str, str]:
     return bases[0], parts[1]
 
 
+def _piano_token_from_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url.strip())
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2 and parts[0] == "piano":
+        return parts[1]
+    return ""
+
+
 def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
     """Load image as RGB PIL.Image, capped on longest side. None if unavailable."""
     global _LAST_PIL_ERROR
@@ -2009,6 +2017,8 @@ class SSHChatGUI:
         self._paste_pending: dict[str, Any] | None = None
         self._pending_file_meta: dict[str, str] = {}
         self._expecting_own_canvas = False
+        self._expecting_own_piano = False
+        self._open_piano_tokens: set[str] = set()
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
@@ -2520,6 +2530,7 @@ class SSHChatGUI:
             return
         cmd = self._piano_command()
         self._append_chat_line(f"[*] 正在开启房间钢琴…（{cmd}）", local_sent=True)
+        self._expecting_own_piano = True
         try:
             self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:
@@ -3463,8 +3474,40 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        self._open_native_piano(url, key)
+        me = self.var_user.get().strip()
+        creator = str(self._pending_file_meta.get("sender") or "").strip()
+        own = self._expecting_own_piano or (
+            bool(creator and me) and creator.lower() == me.lower()
+        )
+        self._expecting_own_piano = False
+        if own:
+            self._open_native_piano(url, key)
+        else:
+            self._offer_piano_open(url, key)
         return True
+
+    def _offer_piano_open(self, url: str, key: str) -> None:
+        self._media_tag_seq += 1
+        tag = f"piano_id_{self._media_tag_seq}"
+        self._piano_open_targets[tag] = (url, key)
+        try:
+            self.log.configure(state=tk.NORMAL)
+            self.log.insert(tk.END, "[*] 收到房间钢琴邀请  ", ("notice",))
+            self.log.insert(tk.END, "打开钢琴", ("piano_open", tag))
+            self.log.insert(tk.END, "\n")
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            try:
+                self.log.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+            self._append_chat_line(
+                "[*] 收到房间钢琴邀请（点消息区「打开钢琴」）", local_sent=True
+            )
+        self._set_status("收到房间钢琴（未自动打开，可点「打开钢琴」）")
+        self._alert_beep()
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _offer_canvas_open(self, url: str, key: str) -> None:
         self._media_tag_seq += 1
@@ -3577,12 +3620,20 @@ class SSHChatGUI:
     def _open_native_piano(self, url: str, key: str) -> None:
         # Same as canvas: open the Cloudflare HTTPS page in Chromium --app=;
         # #k= autofills client-side only (never sent to the server).
+        token = _piano_token_from_url(url)
+        if token and token in self._open_piano_tokens:
+            self._append_chat_line("[*] 房间钢琴已在浏览器中打开", local_sent=True)
+            return
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
+                if token:
+                    self._open_piano_tokens.add(token)
                 self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
             else:
                 webbrowser.open(target)
+                if token:
+                    self._open_piano_tokens.add(token)
                 self._append_chat_line("[*] 已在系统浏览器打开房间钢琴", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
@@ -3942,6 +3993,8 @@ class SSHChatGUI:
         self.btn_disconnect.configure(state=tk.DISABLED)
         self._online_users = []
         self._expecting_names = False
+        self._expecting_own_piano = False
+        self._open_piano_tokens.clear()
         if clear_log:
             self._rooms_order = ["default"]
             self._active_room = "default"
