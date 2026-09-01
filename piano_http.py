@@ -13,7 +13,7 @@ import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import piano_sharing
 
@@ -371,7 +371,12 @@ def _safe_sample_fname(fname: str) -> Optional[str]:
     return low
 
 
-def generate_piano_page(token: str, lang: str = "en") -> str:
+def generate_piano_page(
+    token: str,
+    lang: str = "en",
+    *,
+    bootstrap: Optional[dict] = None,
+) -> str:
     lang = "zh" if str(lang or "").lower().startswith("zh") else "en"
     S = PIANO_TEXTS[lang]
     html_lang = "zh-CN" if lang == "zh" else "en"
@@ -419,6 +424,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
         ],
         ensure_ascii=False,
     )
+    bootstrap_json = json.dumps(bootstrap, ensure_ascii=False) if bootstrap else "null"
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
 <head>
@@ -789,21 +795,6 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                         }} catch (_) {{}}
                         return hm[1].toUpperCase();
                     }}
-                    try {{
-                        var q = new URLSearchParams(location.search || '');
-                        var qk = (q.get('k') || '').trim().toUpperCase();
-                        if (/^[A-Z0-9]{{6}}$/.test(qk)) {{
-                            q.delete('k');
-                            var qs = q.toString();
-                            try {{
-                                history.replaceState(
-                                    null, '',
-                                    location.pathname + (qs ? '?' + qs : '') + (location.hash || '')
-                                );
-                            }} catch (_) {{}}
-                            return qk;
-                        }}
-                    }} catch (_) {{}}
                     return '';
                 }}
                 var k = takeKey();
@@ -838,6 +829,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
     <script>
     (function () {{
         const token = {json.dumps(token)};
+        const bootstrap = {bootstrap_json};
         const i18n = {json.dumps(i18n, ensure_ascii=False)};
         const notes = {notes_json};
         const pianoKeys = {keys_json};
@@ -1277,6 +1269,23 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             return m[1].toUpperCase();
         }}
 
+        function inviteKey() {{
+            const fromInject = hashFragmentKey();
+            if (fromInject) return fromInject;
+            const typed = (keyInput.value || '').trim().toUpperCase();
+            return /^[A-Z0-9]{{6}}$/.test(typed) ? typed : '';
+        }}
+
+        function bootFromFragment() {{
+            const m = (location.hash || '').match(/(?:^|[&#])boot=([^&]+)/);
+            if (!m) return null;
+            try {{
+                const data = JSON.parse(decodeURIComponent(m[1]));
+                if (data && data.ticket) return data;
+            }} catch (_) {{}}
+            return null;
+        }}
+
         function sampleUrl(note) {{
             const file = notes[note];
             return file ? ('/piano-samples/' + file) : '';
@@ -1618,6 +1627,30 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             }});
         }}
 
+        function applySession(data) {{
+            ticket = data.ticket;
+            selfName = data.participant || '';
+            gate.style.display = 'none';
+            stageWrap.style.display = 'flex';
+            wrap.classList.add('piano-on');
+            setRoomBadge(data.room || '');
+            metaEl.innerHTML =
+                '<span class="meta-detail">' + i18n.you + ': ' + (data.participant || '') + '</span>' +
+                (data.room ? '<span class="meta-detail">' + i18n.room + ': #' + data.room + '</span>' : '') +
+                (data.expires ? '<span class="meta-detail">' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
+            buildKeyboard();
+            bindKeyboard();
+            loadingEl.style.display = 'none';
+            void unlockAudio();
+        }}
+
+        async function startSession(data) {{
+            applySession(data);
+            await syncOnce(true);
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(function () {{ void syncOnce(false); }}, 50);
+        }}
+
         async function auth() {{
             const key = (keyInput.value || '').trim().toUpperCase();
             if (key.length !== 6) {{
@@ -1635,22 +1668,7 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
                 }});
                 const data = await res.json().catch(function () {{ return {{}}; }});
                 if (!res.ok) throw new Error(data.error || 'auth failed');
-                ticket = data.ticket;
-                selfName = data.participant || '';
-                gate.style.display = 'none';
-                stageWrap.style.display = 'flex';
-                wrap.classList.add('piano-on');
-                setRoomBadge(data.room || '');
-                metaEl.innerHTML =
-                    '<span class="meta-detail">' + i18n.you + ': ' + (data.participant || '') + '</span>' +
-                    (data.room ? '<span class="meta-detail">' + i18n.room + ': #' + data.room + '</span>' : '') +
-                    (data.expires ? '<span class="meta-detail">' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
-                buildKeyboard();
-                bindKeyboard();
-                loadingEl.style.display = 'none';
-                void unlockAudio();
-                await syncOnce(true);
-                pollTimer = setInterval(function () {{ void syncOnce(false); }}, 50);
+                await startSession(data);
             }} catch (e) {{
                 alert((e && e.message) || i18n.statusErr);
                 unlockBtn.disabled = false;
@@ -1697,12 +1715,21 @@ def generate_piano_page(token: str, lang: str = "en") -> str:
             if (e.key === 'Enter') auth();
         }});
 
-        const injected = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
-        try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
-        const autofill = (injected.length === 6 ? injected : '') || hashFragmentKey();
-        if (autofill) {{
-            keyInput.value = autofill;
-            setTimeout(function () {{ void auth(); }}, 50);
+        const fragBoot = bootFromFragment();
+        if (fragBoot && fragBoot.ticket) {{
+            void startSession(fragBoot).then(function () {{
+                try {{ history.replaceState(null, '', location.pathname); }} catch (_) {{}}
+            }});
+        }} else if (bootstrap && bootstrap.ticket) {{
+            void startSession(bootstrap).then(function () {{
+                try {{ history.replaceState(null, '', location.pathname); }} catch (_) {{}}
+            }});
+        }} else {{
+            const autofill = inviteKey();
+            if (autofill) {{
+                keyInput.value = autofill;
+                setTimeout(function () {{ void auth(); }}, 50);
+            }}
         }}
 
         window.paintAll = function () {{}};
@@ -1815,6 +1842,28 @@ def handle_piano_get(handler: "BaseHTTPRequestHandler") -> bool:
         handler._send_html_page(generate_piano_page(token, lang=lang))  # type: ignore[attr-defined]
         return True
 
+    if len(parts) == 4 and parts[2] == "open":
+        token = parts[1]
+        code = unquote(parts[3])
+        session = store.get_by_token(token)
+        loc = "zh" if str(lang).lower().startswith("zh") else "en"
+        closed_msg = PIANO_TEXTS[loc]["closed"]
+        if session is None:
+            handler._send_html_error(404, closed_msg, lang=lang)  # type: ignore[attr-defined]
+            return True
+        ok, err = store._alive(session)
+        if not ok:
+            handler._send_html_error(403, err or closed_msg, lang=lang)  # type: ignore[attr-defined]
+            return True
+        bootstrap, herr = store.consume_handoff(token, code)
+        if bootstrap is None:
+            handler._send_html_error(403, herr or closed_msg, lang=lang)  # type: ignore[attr-defined]
+            return True
+        handler._send_html_page(  # type: ignore[attr-defined]
+            generate_piano_page(token, lang=lang, bootstrap=bootstrap)
+        )
+        return True
+
     if len(parts) == 3 and parts[2] == "sync":
         token = parts[1]
         ticket = (handler.headers.get("X-Piano-Ticket") or "").strip()
@@ -1848,6 +1897,16 @@ def handle_piano_post(handler: "BaseHTTPRequestHandler") -> bool:
     token = parts[1]
     action = parts[2]
     ticket = (handler.headers.get("X-Piano-Ticket") or "").strip()
+
+    if action == "handoff":
+        body = handler._read_json_body()  # type: ignore[attr-defined]
+        key = str(body.get("key", "")).strip().upper()
+        code, err = store.create_handoff(token, key)
+        if not code:
+            handler._send_error_json(403, err)  # type: ignore[attr-defined]
+            return True
+        handler._send_json_response(200, {"handoff": code})  # type: ignore[attr-defined]
+        return True
 
     if action == "auth":
         body = handler._read_json_body()  # type: ignore[attr-defined]

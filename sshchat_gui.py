@@ -1132,6 +1132,95 @@ def _open_browser_tab(url: str) -> bool:
     return False
 
 
+def _piano_auth_trampoline_url(piano_url: str, boot: dict[str, Any]) -> str:
+    """Local HTML trampoline → piano page with #boot= session (key never in URL)."""
+    boot_json = json.dumps(boot, separators=(",", ":"), ensure_ascii=False)
+    fragment = "boot=" + urllib.parse.quote(boot_json, safe="")
+    target = f"{piano_url.rstrip('/')}#{fragment}"
+    fd, path = tempfile.mkstemp(prefix="sshchat-piano-", suffix=".html")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(
+            "<!DOCTYPE html><meta charset=utf-8>"
+            f"<script>location.replace({json.dumps(target)});</script>"
+            "<p>Opening piano…</p>\n"
+        )
+    return Path(path).resolve().as_uri()
+
+
+def _piano_handoff_unavailable(err: BaseException) -> bool:
+    msg = str(err).strip()
+    return msg in ("网址无效", "handoff failed", "not found") or msg.startswith("HTTP 404")
+
+
+def _piano_http_retryable(err: BaseException) -> bool:
+    if _is_dns_error(err):
+        return True
+    msg = str(err).strip().lower()
+    return "nodename nor servname" in msg or "getaddrinfo failed" in msg
+
+
+def _piano_open_url(url: str, key: str, *, fallback_host: str = "") -> str:
+    """Return a browser URL to open piano without putting the access key in the link."""
+    parsed = urllib.parse.urlparse(url.strip())
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0] != "piano":
+        raise ValueError("invalid piano url")
+    token = parts[1]
+    key_clean = str(key or "").strip().upper()
+    if len(key_clean) != 6:
+        raise ValueError("invalid piano key")
+    last_err = "无法连接钢琴服务"
+    for base in _http_base_candidates(url, fallback_host):
+        piano_url = f"{base}/piano/{token}"
+        handoff_err: BaseException | None = None
+        # Prefer one-time handoff (new servers).
+        try:
+            data = _http_json(
+                f"{base}/piano/{token}/handoff",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"key": key_clean}).encode("utf-8"),
+            )
+            code = str(data.get("handoff") or "").strip()
+            if code:
+                safe_code = urllib.parse.quote(code, safe="")
+                return f"{piano_url}/open/{safe_code}"
+        except Exception as e:
+            handoff_err = e
+            if _piano_http_retryable(e):
+                last_err = str(e)
+                continue
+            if not _piano_handoff_unavailable(e):
+                last_err = str(e)
+                continue
+        # Fallback: auth in Tk, pass short-lived ticket via #boot= fragment (not the key).
+        try:
+            auth = _http_json(
+                f"{base}/piano/{token}/auth",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"key": key_clean}).encode("utf-8"),
+            )
+            ticket = str(auth.get("ticket") or "").strip()
+            if not ticket:
+                raise RuntimeError("auth failed")
+            boot = {
+                "ticket": ticket,
+                "participant": auth.get("participant") or "",
+                "room": auth.get("room") or "",
+                "expires": auth.get("expires") or 0,
+            }
+            return _piano_auth_trampoline_url(piano_url, boot)
+        except Exception as e:
+            if handoff_err and _piano_handoff_unavailable(handoff_err):
+                last_err = str(e)
+            else:
+                last_err = str(e)
+            if _piano_http_retryable(e):
+                continue
+    raise RuntimeError(last_err)
+
+
 def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
     """Open Excalidraw in a dedicated Chromium app window (optionally maximized)."""
     target = (url or "").strip()
@@ -1896,6 +1985,7 @@ class SSHChatGUI:
         self._room_history: dict[str, list[Any]] = {"default": []}
         self._paste_pending: dict[str, Any] | None = None
         self._pending_file_meta: dict[str, str] = {}
+        self._expecting_own_canvas = False
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
@@ -2395,6 +2485,7 @@ class SSHChatGUI:
             return
         cmd = self._canvas_command()
         self._append_chat_line(f"[*] 正在创建共享画板…（{cmd}）", local_sent=True)
+        self._expecting_own_canvas = True
         try:
             self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:
@@ -3332,8 +3423,16 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        # Never auto-open canvas (privacy). Offer a clickable link instead.
-        self._offer_canvas_open(url, key)
+        me = self.var_user.get().strip()
+        creator = str(self._pending_file_meta.get("sender") or "").strip()
+        own = self._expecting_own_canvas or (
+            bool(creator and me) and creator.lower() == me.lower()
+        )
+        self._expecting_own_canvas = False
+        if own:
+            self._open_native_canvas(url, key)
+        else:
+            self._offer_canvas_open(url, key)
         return True
 
     def _try_handle_piano_invite(self, body: str) -> bool:
@@ -3365,6 +3464,7 @@ class SSHChatGUI:
             )
         self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
         self._alert_beep()
+        self._schedule_click_target_refresh(delay_ms=40)
 
     def _try_handle_download_invite(self, body: str) -> bool:
         m = _GUI_OPEN_DOWNLOAD_RE.match(body.strip())
@@ -3441,11 +3541,20 @@ class SSHChatGUI:
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
+    def _reachability_host(self) -> str:
+        if self._bundle:
+            h = str(self._bundle.get("host") or "").strip()
+            if h:
+                return h
+        try:
+            return self.var_host.get().strip()
+        except tk.TclError:
+            return ""
+
     def _open_native_piano(self, url: str, key: str) -> None:
         try:
-            target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            # Same Chromium --app= window as canvas/mobile WebView: grabs focus so
-            # keyboard bindings work; MP3 export uses showSaveFilePicker when needed.
+            # Key stays in Tk → server handoff; browser opens a one-time link only.
+            target = _piano_open_url(url, key, fallback_host=self._reachability_host())
             if _open_canvas_app_window(target, maximized=True):
                 self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
             else:

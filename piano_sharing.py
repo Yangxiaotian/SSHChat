@@ -22,6 +22,7 @@ PIANO_TTL_SECONDS = int(os.environ.get("SSHCHAT_PIANO_TTL_SECONDS", str(4 * 3600
 ACCESS_TICKET_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_PIANO_TICKET_TTL_SECONDS", "1800")
 )
+HANDOFF_TTL_SECONDS = int(os.environ.get("SSHCHAT_PIANO_HANDOFF_TTL_SECONDS", "120"))
 MAX_EVENTS = int(os.environ.get("SSHCHAT_PIANO_MAX_EVENTS", "2000"))
 RECORDING_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_PIANO_RECORDING_TTL_SECONDS", str(7 * 24 * 3600))
@@ -44,6 +45,17 @@ class PianoAccessTicket:
     session_id: str
     participant: str
     expires: float
+
+
+@dataclass
+class PianoHandoff:
+    token: str
+    ticket: str
+    participant: str
+    room: Optional[str]
+    title: str
+    expires: float
+    handoff_expires: float
 
 
 @dataclass
@@ -97,6 +109,7 @@ class PianoStore:
         self.sessions: Dict[str, PianoSession] = {}
         self.token_to_session: Dict[str, str] = {}
         self.tickets: Dict[str, PianoAccessTicket] = {}
+        self.handoffs: Dict[str, PianoHandoff] = {}
         self.recordings: Dict[str, PianoRecording] = {}
         self.lock = threading.RLock()
         self._load()
@@ -356,6 +369,64 @@ class PianoStore:
             self._save()
             return session, participant, ticket, ""
 
+    def create_handoff(self, token: str, key: str) -> Tuple[Optional[str], str]:
+        session, participant, ticket, err = self.issue_access_ticket(token, key)
+        if session is None or not ticket or participant is None:
+            return None, err or "密钥错误"
+        code = secrets.token_urlsafe(24)
+        now = time.time()
+        with self.lock:
+            self.handoffs[code] = PianoHandoff(
+                token=token,
+                ticket=ticket,
+                participant=participant,
+                room=session.room,
+                title=session.title,
+                expires=session.expires,
+                handoff_expires=now + HANDOFF_TTL_SECONDS,
+            )
+            self._purge_handoffs_locked(now)
+        return code, ""
+
+    def consume_handoff(
+        self, token: str, code: str
+    ) -> Tuple[Optional[dict], str]:
+        token = (token or "").strip()
+        code = (code or "").strip()
+        if not token or not code:
+            return None, "链接无效"
+        with self.lock:
+            now = time.time()
+            self._purge_handoffs_locked(now)
+            entry = self.handoffs.pop(code, None)
+            if entry is None:
+                return None, "链接无效或已使用"
+            if entry.token != token:
+                return None, "链接无效"
+            if entry.handoff_expires <= now:
+                return None, "链接已过期，请重新打开"
+            session = self.get_by_token(token)
+            if session is None:
+                return None, "钢琴链接无效"
+            ok, err = self._alive(session)
+            if not ok:
+                return None, err
+            return (
+                {
+                    "ticket": entry.ticket,
+                    "participant": entry.participant,
+                    "room": entry.room or "",
+                    "title": entry.title or "",
+                    "expires": entry.expires,
+                },
+                "",
+            )
+
+    def _purge_handoffs_locked(self, now: float) -> None:
+        dead = [c for c, h in self.handoffs.items() if h.handoff_expires <= now]
+        for code in dead:
+            self.handoffs.pop(code, None)
+
     def resolve_ticket(
         self, token: str, ticket: str
     ) -> Tuple[Optional[PianoSession], Optional[str], str]:
@@ -586,6 +657,11 @@ class PianoStore:
             ]
             for t in dead_tickets:
                 self.tickets.pop(t, None)
+            dead_handoffs = [
+                c for c, h in self.handoffs.items() if h.handoff_expires <= now
+            ]
+            for code in dead_handoffs:
+                self.handoffs.pop(code, None)
             dead_recordings = [
                 rid
                 for rid, rec in self.recordings.items()
