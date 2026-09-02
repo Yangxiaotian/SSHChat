@@ -1990,11 +1990,6 @@ class SSHChatGUI:
         self.config_path = config_path.expanduser().resolve()
         self._bundle = None if force_full_ui else load_bundled_site_config()
         self.root = tk.Tk()
-        title = "SSHChat"
-        if self._bundle:
-            h = str(self._bundle["host"]).strip()
-            title = f"SSHChat · {h}"
-        self.root.title(title)
         self.root.minsize(520, 420)
 
         self._ssh: paramiko.SSHClient | None = None
@@ -2049,6 +2044,7 @@ class SSHChatGUI:
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
+        self._refresh_window_title()
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
         self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
@@ -2110,6 +2106,8 @@ class SSHChatGUI:
         )
 
         top.columnconfigure(1, weight=1)
+        for var in (self.var_host, self.var_port, self.var_user):
+            var.trace_add("write", self._on_endpoint_fields_changed)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill=tk.X, padx=6, pady=(0, 4))
@@ -3106,6 +3104,23 @@ class SSHChatGUI:
     def _set_status(self, s: str) -> None:
         self.var_status.set(s)
 
+    def _on_endpoint_fields_changed(self, *_args) -> None:
+        self._refresh_window_title()
+
+    def _refresh_window_title(self) -> None:
+        host = self.var_host.get().strip() if hasattr(self, "var_host") else ""
+        port_s = (self.var_port.get().strip() if hasattr(self, "var_port") else "") or "22"
+        user = self.var_user.get().strip() if hasattr(self, "var_user") else ""
+        if not host:
+            self.root.title("SSHChat")
+            return
+        try:
+            port_n = int(port_s)
+        except ValueError:
+            port_n = 22
+        who = f"{user}@" if user else ""
+        self.root.title(f"SSHChat · {who}{host}:{port_n}")
+
     def _apply_profile(self, cfg: dict[str, Any] | None) -> None:
         if not cfg:
             return
@@ -3126,6 +3141,7 @@ class SSHChatGUI:
                 str(x).strip() for x in recent if str(x).strip()
             ][:12]
         self._refresh_send_target_button()
+        self._refresh_window_title()
 
     def _collect_profile_dict(self) -> dict[str, Any]:
         user = self.var_user.get().strip()
@@ -3280,6 +3296,7 @@ class SSHChatGUI:
         self._online_users = []
         self._expecting_names = False
         self._refresh_send_target_button()
+        self._refresh_window_title()
         self.root.after(500, self._refresh_online_users)
         if sys.platform == "darwin" and self._aqua_startup_nudge_done:
             self.root.after(300, self._stabilize_initial_interaction)
@@ -3289,6 +3306,7 @@ class SSHChatGUI:
         self._ssh = None
         self._chan = None
         self._session_user = ""
+        self._refresh_window_title()
         self._set_status("连接失败")
         messagebox.showerror("SSHChat", msg)
 
@@ -4050,6 +4068,7 @@ class SSHChatGUI:
 
         self.btn_connect.configure(state=tk.NORMAL)
         self.btn_disconnect.configure(state=tk.DISABLED)
+        self._refresh_window_title()
         self._online_users = []
         self._expecting_names = False
         self._expecting_own_piano = False
