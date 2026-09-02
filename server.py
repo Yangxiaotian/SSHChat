@@ -134,6 +134,13 @@ room_game_provisional: set[str] = set()
 _greq_until: dict[str, float] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
+# The room catalog predates several games. Keep this separate from the
+# persisted session version so adding a game does not silently re-enable it
+# after the owner explicitly turns it off on a current server.
+ROOM_GAME_CATALOG_VERSION = 2
+ROOM_GAME_CATALOG_MIGRATION_IDS = frozenset(
+    {"doushou", "reversi", "darkchess", "battleship", "junqi"}
+)
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
 # conn -> {"path": str, "page": int (0-based)}  (remote: also origin/name/title/total_pages)
@@ -936,6 +943,7 @@ def _build_session_payload_locked() -> dict[str, object]:
             room: sorted(enabled)
             for room, enabled in room_enabled_games.items()
         },
+        "room_enabled_games_version": ROOM_GAME_CATALOG_VERSION,
         "room_announcements": dict(room_announcements),
         "room_game_authority": {
             room: auth
@@ -955,7 +963,8 @@ def _build_session_payload_locked() -> dict[str, object]:
     }
 
 
-def _apply_session_payload_locked(payload: dict[str, object]) -> None:
+def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
+    catalog_migrated = False
     games_blob = payload.get("room_games")
     if isinstance(games_blob, dict):
         for room, encoded in games_blob.items():
@@ -1002,11 +1011,18 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 "current_room": current,
                 "ts": float(sess.get("ts") or time.time()),
             }
+    try:
+        catalog_version = int(payload.get("room_enabled_games_version") or 0)
+    except (TypeError, ValueError):
+        catalog_version = 0
     enabled = payload.get("room_enabled_games")
     if isinstance(enabled, dict):
         for room, names in enabled.items():
             if isinstance(room, str) and isinstance(names, list):
                 room_enabled_games[room] = {str(n) for n in names}
+                if catalog_version < ROOM_GAME_CATALOG_VERSION:
+                    room_enabled_games[room].update(ROOM_GAME_CATALOG_MIGRATION_IDS)
+                    catalog_migrated = True
     announcements = payload.get("room_announcements")
     if isinstance(announcements, dict):
         for room, text in announcements.items():
@@ -1039,6 +1055,7 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> None:
                 and room.strip()
             ):
                 _remember_ended_game_locked(room.strip(), tok.strip())
+    return catalog_migrated
 
 
 def _remember_ended_game_locked(room: str, token: str) -> None:
@@ -1123,7 +1140,7 @@ def _load_persisted_sessions() -> None:
     if not payload:
         return
     with lock:
-        _apply_session_payload_locked(payload)
+        catalog_migrated = _apply_session_payload_locked(payload)
         parked_back = _restore_idle_parked_games_locked()
         active = sum(
             1
@@ -1136,6 +1153,7 @@ def _load_persisted_sessions() -> None:
             "promoted parked game(s) to active: "
             + ", ".join(f"#{room}" for room, _ in parked_back)
         )
+    if parked_back or catalog_migrated:
         _persist_after_game_change()
     if active or sessions:
         print(
