@@ -1836,7 +1836,9 @@ class GomokuGame(BoardUndoMixin):
     def show(self, conn=None) -> list[str]:
         lines = [
             f"gomoku 对局（{self.state}）  黑：{self.black_name}   "
-            f"白：{self.white_name or '空席'}"
+            f"白：{self.white_name or '空席'}",
+            f"黑方（先手）：{self.black_name}",
+            f"白方：{self.white_name or '(空席, 可 /game join)'}",
         ]
         lines.extend(self._rating_lines())
         lines.extend(self._board_render(conn))
@@ -2203,6 +2205,8 @@ class GoGame(BoardUndoMixin):
             return ([f"对局已结束，请先 /game new {self.name} 开新局。"], [], False)
         if conn is self.black_conn:
             return (["你已经是黑方。"], [], False)
+        if conn is self.white_conn:
+            return (["你已经是白方。"], [], False)
         if self.white_conn is not None:
             return ([f"白方席位已被 {self.white_name} 占。"], [], False)
         self.white_conn = conn

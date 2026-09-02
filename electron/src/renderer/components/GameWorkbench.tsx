@@ -58,7 +58,7 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
   if (start < 0) return { board: '', game: 'none' };
   const out: string[] = [];
   for (let i = start; i < systemLines.length; i++) {
-    const line = systemLines[i];
+    const line = stripGameProtocolPrefix(systemLines[i]);
     const trimmed = line.trim();
     if (trimmed.startsWith('---') && out.length > 0) break;
     if (/^\[\*\]\s/.test(trimmed) && out.length > 0) break;
@@ -81,12 +81,21 @@ function isXiangqiBoardLine(line: string): boolean {
   return tokens.slice(0, 9).every((t) => t === '·' || t === '*' || /^[+\-!]/.test(t));
 }
 
+function stripGameProtocolPrefix(line: string): string {
+  return line.replace(/^\s*\[#[-a-zA-Z0-9_]+\]\s+\[\*\]\s+/, '');
+}
+
 function isLikelyGameLine(line: string): boolean {
+  line = stripGameProtocolPrefix(line);
   if (isXiangqiBoardLine(line)) return true;
+  // SSH/protocol normalization may remove the renderer's leading padding.
+  // Keep a plain 1..15 Gomoku column header so the panel can parse the board.
+  if (/^\s*(?:\d+\s+){14}\d+\s*$/.test(line)) return true;
   if (/^\s+\d+\s+\d+\s+\d+/.test(line)) return true;
   if (/^\s*\d+\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])(?:\s+(?:\(#\)|\(o\)|\(\.\)|[#.o])){4,}\s*$/.test(line)) return true;
   if (/^\s*[1-8]\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])(?:\s+(?:\([♔♕♖♗♘♙♚♛♜♝♞♟·]\)|[♔♕♖♗♘♙♚♛♜♝♞♟·])){7}\s*$/.test(line)) return true;
   if (/^\s+[a-h](?:\s+[a-h]){7}\s*$/.test(line.trim().toLowerCase())) return true;
+  if (/^(?:黑|白)(?:方)?(?:（先手）)?[:：]/.test(line.trim())) return true;
   if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
   if (/^(红|黑|白)[:：]\s*\S+/.test(line.trim())) return true;
   if (/^红[:：]\s*\S+\s+黑[:：]\s*\S+/.test(line.trim())) return true;
@@ -145,6 +154,13 @@ function isLikelyGameLine(line: string): boolean {
   return keywords.some((k) => t.includes(k));
 }
 
+function isGomokuSeatLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^(?:黑|白)(?:方)?(?:（先手）)?[:：]/.test(trimmed)
+    || /^黑(?:方)?(?:（先手）)?[:：].+\s+白(?:方)?[:：]/.test(trimmed)
+    || /^黑(?:方)?[:：].+\s+白(?:方)?[:：]/.test(trimmed);
+}
+
 function inferOpenGame(lines: string[]): GameKind {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
@@ -193,22 +209,27 @@ function gameTip(game: GameKind, locale: Locale): string {
 }
 
 function parseTurnName(board: string): string {
-  const line = board.split('\n').find((l) => /^(turn|轮到)[:：]/i.test(l.trim()));
-  if (!line) {
-    const cnLine = board.split('\n').find((l) => /^轮到\s+(黑|白|红)(?:方)?\s+.+/.test(l.trim()));
-    // xiangqi uses 走子; gomoku/go use 落子; doushou may use 行棋 / 走棋.
-    const m = cnLine?.trim().match(/^轮到\s+(?:黑|白|红)(?:方)?\s+(\S+?)(?:\s+(?:落子|走子|走棋|行棋)|（|$)/);
-    return m ? m[1].trim() : '';
-  }
-  return line.replace(/^(turn|轮到)[:：]\s*/i, '').trim().split(/\s+/)[0] || '';
+  const lines = board.split('\n');
+  const line = [...lines].reverse().find((l) => /^(turn|轮到)[:：]/i.test(l.trim()));
+  if (line) return line.replace(/^(turn|轮到)[:：]\s*/i, '').trim().split(/\s+/)[0] || '';
+  const cnLine = [...lines].reverse().find((l) => /^(?:\u8f6e\u5230)\s+(?:\u9ed1|\u767d|\u7ea2)\u65b9\s+.+/.test(l.trim()));
+  const cn = cnLine?.trim().match(/^(?:\u8f6e\u5230)\s+(?:\u9ed1|\u767d|\u7ea2)\u65b9\s+(\S+?)(?:\s+(?:\u843d\u5b50|\u8d70\u68cb|\u8d70\u68cb|\u884c\u68cb)|（|$)/);
+  if (cn) return cn[1].trim();
+  const enLine = [...lines].reverse().find((l) => /^(?:Black|White|Red)\s+.+?\s+to\s+move$/i.test(l.trim()));
+  const en = enLine?.trim().match(/^(?:Black|White|Red)\s+(.+?)\s+to\s+move$/i);
+  return en ? en[1].trim() : '';
 }
 
 function inSeats(board: string, nickname: string): boolean {
   const esc = nickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`^#\\d+\\s+${esc}[:：]`, 'm');
-  if (re.test(board)) return true;
-  return new RegExp(`(?:黑|白|红)方(?:（[^）]+）)?[:：]\\s*${esc}(?:\\s|$)`, 'm').test(board) ||
-    new RegExp(`(?:黑|白|红)[:：]\\s*${esc}(?:\\s|$)`, 'm').test(board);
+  const patterns = [
+    new RegExp(`^#\\d+\\s+${esc}[:\\uff1a]`, 'm'),
+    new RegExp(`(?:\\u9ed1|\\u767d|\\u7ea2)\\u65b9(?:（[^）]+）)?[:\\uff1a]\\s*${esc}(?:\\s|$)`, 'm'),
+    new RegExp(`(?:\\u9ed1|\\u767d|\\u7ea2)[:\\uff1a]\\s*${esc}(?:\\s|$)`, 'm'),
+    new RegExp(`\\b(?:Black|White|Red)(?:\\s*\\(first\\))?\\s*:\\s*${esc}(?:\\s|$)`, 'im'),
+    new RegExp(`^(?:Black|White|Red)\\s+${esc}\\s+to\\s+move$`, 'im'),
+  ];
+  return patterns.some((pattern) => pattern.test(board));
 }
 
 function hostName(board: string): string {
@@ -414,7 +435,9 @@ function sanitizeBoard(raw: string): string {
   let prev = '';
   for (const line of lines) {
     if (line.trim() === '' && prev.trim() === '') continue;
-    if (line === prev) continue;
+    // Empty board rows may legitimately repeat; removing one shifts every
+    // following Xiangqi piece up by a row.
+    if (line === prev && !isXiangqiBoardLine(line)) continue;
     out.push(line);
     prev = line;
   }
@@ -442,8 +465,39 @@ export default function GameWorkbench() {
   const [showBoard, setShowBoard] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showWorkbenchContent, setShowWorkbenchContent] = useState(true);
+  const [assistantVisible, setAssistantVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sshchat:game-assistant-visible:v1') !== '0';
+    } catch {
+      return true;
+    }
+  });
   const [actionHint, setActionHint] = useState('');
   const syncRoomRef = useRef('');
+  const lastCtrlPressRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('sshchat:game-assistant-visible:v1', assistantVisible ? '1' : '0');
+    } catch {
+      // Visibility is a convenience preference; storage failures must not affect gameplay.
+    }
+  }, [assistantVisible]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Control' || event.repeat) return;
+      const now = Date.now();
+      if (now - lastCtrlPressRef.current <= 450) {
+        setAssistantVisible((visible) => !visible);
+        lastCtrlPressRef.current = 0;
+        return;
+      }
+      lastCtrlPressRef.current = now;
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const roomMessages = messages.get(activeRoom) || [];
   const { board, game, systemLines } = useMemo(() => {
@@ -472,6 +526,21 @@ export default function GameWorkbench() {
     [locale, game, board, systemLines, nickname],
   );
   const rawCleanBoard = useMemo(() => sanitizeBoard(board), [board]);
+  const gomokuBoard = useMemo(() => {
+    if (game !== 'gomoku') return board;
+    // `/game seats` is commonly sent before `/game show`; the latest board
+    // block then starts after those seat lines. Keep the current room's seat
+    // lines alongside the board so the hidden assistant can identify sides.
+    const seatLines = systemLines.filter(isGomokuSeatLine).slice(-4);
+    return seatLines.length > 0 ? `${board}\n${seatLines.join('\n')}` : board;
+  }, [board, game, systemLines]);
+  const goBoard = useMemo(() => {
+    if (game !== 'go') return board;
+    const contextLines = systemLines
+      .filter((line) => /(?:轮到|黑方|白方|Black|White|to move|Last move|KataGo|棋盘)/i.test(line))
+      .slice(-40);
+    return contextLines.length > 0 ? `${board}\n${contextLines.join('\n')}` : board;
+  }, [board, game, systemLines]);
   const stableBoardRef = useRef<{ game: GameKind; board: string }>({ game: 'none', board: '' });
   let cleanBoard = rawCleanBoard;
   if (game === 'xiangqi') {
@@ -565,6 +634,15 @@ export default function GameWorkbench() {
           <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game show')}>{tr('game.showBoard')}</button>
           <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game help')}>{tr('game.help')}</button>
           <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game list')}>{tr('game.list')}</button>
+          <button
+            className={`mini-btn ${assistantVisible ? 'assistant-share-visible' : 'assistant-share-hidden'}`}
+            type="button"
+            aria-pressed={assistantVisible}
+            onClick={() => setAssistantVisible((visible) => !visible)}
+            title="双击 Ctrl 可切换助手显示"
+          >
+            share
+          </button>
           {game !== 'none' && (
             <button className="mini-btn" disabled={disabled} onClick={() => runAction('/game end')}>{tr('game.end')}</button>
           )}
@@ -582,27 +660,29 @@ export default function GameWorkbench() {
           </div>
           {actionHint && <div className="game-workbench-hint">{actionHint}</div>}
           <div className="game-workbench-hint">{gameTip(game, locale)}</div>
-          <div className={`game-advisor game-advisor-${advisor.level}`}>
-            <div className="game-advisor-title">{advisor.title}</div>
-            <div className="game-advisor-detail">{advisor.detail}</div>
-            <div className="game-advisor-actions">
-              {advisor.primaryCmd && advisor.primaryLabel && (
-                <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.primaryCmd!)}>
-                  {advisor.primaryLabel}
-                </button>
-              )}
-              {advisor.secondaryCmd && advisor.secondaryLabel && (
-                <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.secondaryCmd!)}>
-                  {advisor.secondaryLabel}
-                </button>
-              )}
+          {assistantVisible && (
+            <div className={`game-advisor game-advisor-${advisor.level}`}>
+              <div className="game-advisor-title">{advisor.title}</div>
+              <div className="game-advisor-detail">{advisor.detail}</div>
+              <div className="game-advisor-actions">
+                {advisor.primaryCmd && advisor.primaryLabel && (
+                  <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.primaryCmd!)}>
+                    {advisor.primaryLabel}
+                  </button>
+                )}
+                {advisor.secondaryCmd && advisor.secondaryLabel && (
+                  <button className="mini-btn" disabled={disabled} onClick={() => runAction(advisor.secondaryCmd!)}>
+                    {advisor.secondaryLabel}
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
-          {game === 'gomoku' && <GomokuPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} onSoulDraft={setComposerText} />}
-          {game === 'go' && <GoPanel disabled={disabled} nickname={nickname} boardText={board} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c, locale))} onCmd={(cmd) => sendMove(cmd)} />}
-          {game === 'xiangqi' && <XiangqiPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc, locale))} />}
+          {game === 'gomoku' && <GomokuPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={gomokuBoard} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} onSoulDraft={setComposerText} />}
+          {game === 'go' && <GoPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={goBoard} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c, locale))} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'xiangqi' && <XiangqiPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc, locale))} />}
           {game === 'doushou' && <DoushouPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.doushouCoordMove(fr, fc, tr, tc, locale))} />}
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
@@ -665,5 +745,4 @@ export default function GameWorkbench() {
     </div>
   );
 }
-
 

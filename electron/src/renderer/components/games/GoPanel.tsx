@@ -3,6 +3,7 @@ import { useTranslation } from '../../i18n';
 
 type Props = {
   disabled: boolean;
+  assistantVisible: boolean;
   nickname: string;
   boardText: string;
   onPick: (row: number, col: number) => void;
@@ -65,28 +66,35 @@ function parseBoard(boardText: string): Cell[][] {
 }
 
 function parseTurn(boardText: string): { name: string; side: 'black' | 'white' | null } {
-  const line = boardText.split('\n').find((l) => /^轮到\s+/.test(l.trim()));
-  if (!line) return { name: '', side: null };
-  const m = line.trim().match(/^轮到\s+(黑|白)方\s+(.+?)\s+落子/);
-  if (!m) return { name: '', side: null };
-  return { side: m[1] === '黑' ? 'black' : 'white', name: m[2].trim() };
+  const lines = boardText.split('\n');
+  const cnLine = [...lines].reverse().find((l) => /^(?:\u8f6e\u5230)\s+/.test(l.trim()));
+  const cn = cnLine?.trim().match(/^(?:\u8f6e\u5230)\s+(\u9ed1|\u767d)\u65b9\s+(.+?)\s+(?:\u843d\u5b50|\u8d70\u68cb)/);
+  if (cn) return { side: cn[1] === '\u9ed1' ? 'black' : 'white', name: cn[2].trim() };
+  const enLine = [...lines].reverse().find((l) => /^(?:Black|White)\s+.+?\s+to\s+move$/i.test(l.trim()));
+  const en = enLine?.trim().match(/^(Black|White)\s+(.+?)\s+to\s+move$/i);
+  if (en) return { side: en[1].toLowerCase() === 'black' ? 'black' : 'white', name: en[2].trim() };
+  return { name: '', side: null };
 }
 
 function parseSeats(boardText: string): { black: string; white: string } {
   const out = { black: '', white: '' };
-  const header = boardText.match(/黑：(.+?)\s+白：(.+?)(?:\n|$)/);
-  if (header) {
-    out.black = header[1].trim();
-    out.white = header[2].trim();
-  }
   for (const raw of boardText.split('\n')) {
     const line = raw.trim();
-    const black = line.match(/^黑方(?:（先手）)?：(.+)$/);
-    if (black) out.black = black[1].replace(/\(.+\)/, '').trim();
-    const white = line.match(/^白方：(.+)$/);
-    if (white) out.white = white[1].replace(/\(.+\)/, '').trim();
+    const cn = line.match(/^\u9ed1\u65b9.*?[:\uff1a]\s*(\S+)/);
+    if (cn) out.black = cn[1].trim();
+    const cnWhite = line.match(/^\u767d\u65b9.*?[:\uff1a]\s*(\S+)/);
+    if (cnWhite) out.white = cnWhite[1].trim();
+    const combined = line.match(/\bBlack\s*:\s*(\S+).*?\bWhite\s*:\s*(\S+)/i);
+    if (combined) {
+      out.black = combined[1].trim();
+      out.white = combined[2].trim();
+    }
+    const black = line.match(/^Black(?:\s*\(first\))?\s*:\s*(\S+)/i);
+    if (black) out.black = black[1].trim();
+    const white = line.match(/^White\s*:\s*(\S+)/i);
+    if (white) out.white = white[1].trim();
   }
-  if (out.white === '空席') out.white = '';
+  if (out.white === '\u7a7a\u5e2d' || out.white === '(empty)') out.white = '';
   return out;
 }
 
@@ -180,6 +188,29 @@ function filterPlayableMoves(
   koPoint: { row: number; col: number } | null,
 ): AdvisorMove[] {
   return moves.filter((m) => isClientLegalGoMove(matrix, m.row, m.col, side, koPoint));
+}
+
+function filterEngineMoves(
+  moves: AdvisorMove[],
+  matrix: number[][],
+  koPoint: { row: number; col: number } | null,
+): AdvisorMove[] {
+  // KataGo already validates suicide/ko. Keep a conservative board check here,
+  // but do not re-run the client's rule simulator and discard valid engine moves.
+  return moves.filter((m) => {
+    if (!isLegalEmptyPoint(matrix, m.row, m.col)) return false;
+    return !(koPoint && koPoint.row === m.row && koPoint.col === m.col);
+  });
+}
+
+function isPlayableAdvisorMove(
+  move: AdvisorMove,
+  matrix: number[][],
+  side: 1 | 2 | null,
+  koPoint: { row: number; col: number } | null,
+): boolean {
+  if (move.source === 'katago') return filterEngineMoves([move], matrix, koPoint).length > 0;
+  return isClientLegalGoMove(matrix, move.row, move.col, side, koPoint);
 }
 
 function goNeighbors(r: number, c: number): Array<[number, number]> {
@@ -521,7 +552,7 @@ function fallbackGoSuggestions(
     }));
 }
 
-export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }: Props) {
+export default function GoPanel({ assistantVisible, disabled, nickname, boardText, onPick, onCmd }: Props) {
   const { t } = useTranslation();
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const turn = useMemo(() => parseTurn(boardText), [boardText]);
@@ -535,10 +566,17 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   );
   const matrix = useMemo(() => toMatrix(cells), [cells]);
   const sig = useMemo(() => boardSignature(matrix), [matrix]);
-  const mySide = nickname === seats.black ? 'black' : nickname === seats.white ? 'white' : null;
+  const normalizedNickname = nickname.trim().toLowerCase();
+  const mySide = normalizedNickname === seats.black.trim().toLowerCase()
+    ? 'black'
+    : normalizedNickname === seats.white.trim().toLowerCase()
+      ? 'white'
+      : null;
   const mySideNum: 1 | 2 | null = mySide === 'black' ? 1 : mySide === 'white' ? 2 : null;
-  const myTurn = !!turn.name && turn.name === nickname;
-  const isHiddenMaster = false;
+  const myTurn = turn.side
+    ? (turn.side === 'black' ? mySide === 'black' : mySide === 'white')
+    : !!turn.name && turn.name.trim().toLowerCase() === normalizedNickname;
+  const isHiddenMaster = normalizedNickname === 'zouyu' || normalizedNickname === 'zy';
   const [katagoPending, setKataGoPending] = useState(false);
   const [katagoError, setKataGoError] = useState('');
   const [katagoMoves, setKataGoMoves] = useState<AdvisorMove[]>([]);
@@ -557,15 +595,18 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
     [matrix, mySideNum, koPoint],
   );
   const playableKataGoMoves = useMemo(
-    () => filterPlayableMoves(katagoMoves, matrix, mySideNum, koPoint),
+    () => {
+      const strict = filterPlayableMoves(katagoMoves, matrix, mySideNum, koPoint);
+      return strict.length > 0 ? strict : filterEngineMoves(katagoMoves, matrix, koPoint);
+    },
     [katagoMoves, matrix, mySideNum, koPoint],
   );
-  const rawShownMoves = playableKataGoMoves.length > 0 ? playableKataGoMoves : fallbackMoves;
-  const shownMoves = filterPlayableMoves(rawShownMoves, matrix, mySideNum, koPoint);
+  const rawShownMoves = playableKataGoMoves;
+  const shownMoves = rawShownMoves.filter((move) => isPlayableAdvisorMove(move, matrix, mySideNum, koPoint));
   const canPlayAdvisorMove = (m: AdvisorMove): boolean =>
     !disabled &&
     (!turn.name || myTurn) &&
-    isClientLegalGoMove(matrix, m.row, m.col, mySideNum, koPoint);
+    isPlayableAdvisorMove(m, matrix, mySideNum, koPoint);
   const pickAdvisorMove = (m: AdvisorMove): void => {
     if (!canPlayAdvisorMove(m)) return;
     onPick(m.row, m.col);
@@ -573,13 +614,15 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   const katagoElapsedSec = katagoPending && katagoStartedAt > 0
     ? Math.max(0, Math.floor((katagoStatusTick - katagoStartedAt) / 1000))
     : 0;
-  const katagoStatusText = katagoPending
-    ? `${katagoEverOkRef.current ? 'KataGo 分析中' : 'KataGo 首次预热中'} ${katagoElapsedSec}s，已先显示内置全局建议`
-    : playableKataGoMoves.length
-      ? `已接入 KataGo${katagoLastMeta ? `（${katagoLastMeta}）` : ''}`
-      : katagoError
-        ? `已回退内置：${katagoError}`
-        : '等待 KataGo，当前显示内置全局建议';
+  const katagoStatusText = !myTurn && turn.side
+    ? '当前不是你的回合，等待对手落子'
+    : katagoPending
+      ? `${katagoEverOkRef.current ? 'KataGo 分析中' : 'KataGo 首次分析中'} ${katagoElapsedSec}s，等待引擎结果`
+      : playableKataGoMoves.length
+        ? `已接入 KataGo${katagoLastMeta ? `（${katagoLastMeta}）` : ''}`
+        : katagoError
+          ? `KataGo 暂不可用：${katagoError}`
+          : '等待 KataGo 分析';
 
   useEffect(() => {
     if (!katagoPending) return;
@@ -588,6 +631,9 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
   }, [katagoPending]);
 
   useEffect(() => {
+    // Analysis starts only in the main turn-gated effect below; never warm up
+    // KataGo during the opponent's turn.
+    return;
     if (!isHiddenMaster || !mySideNum || !sig || disabled) return;
     if (katagoWarmupRef.current.started || katagoWarmupRef.current.ok || katagoEverOkRef.current) return;
     const likelyMyTurn = myTurn || (!turn.name && isGoSideTurnByMatrix(matrix, mySideNum));
@@ -625,6 +671,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
     const likelyMyTurn = myTurn || (!turn.name && isGoSideTurnByMatrix(matrix, mySideNum));
 
     if (!likelyMyTurn) {
+      // Do not analyze or expose advice during the opponent's turn.
       katagoSeqRef.current += 1;
       setKataGoPending(false);
       setKataGoMoves([]);
@@ -635,7 +682,12 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
     }
 
     const cached = katagoCacheRef.current.get(key);
-    const playableCached = cached ? filterPlayableMoves(cached, matrix, mySideNum, koPoint) : [];
+    const playableCached = cached
+      ? (() => {
+          const strict = filterPlayableMoves(cached, matrix, mySideNum, koPoint);
+          return strict.length > 0 ? strict : filterEngineMoves(cached, matrix, koPoint);
+        })()
+      : [];
     if (cached?.length && playableCached.length === 0) {
       katagoCacheRef.current.delete(key);
       katagoOkKeyRef.current = '';
@@ -693,16 +745,19 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
               detail: [wr, lead, visits].filter(Boolean).join('，') || 'KataGo 推荐',
               source: 'katago' as const,
             };
-          }).filter((m) => isClientLegalGoMove(matrix, m.row, m.col, mySideNum, koPoint)).slice(0, 3);
-          if (moves.length === 0) {
+          });
+          const playableMoves = filterPlayableMoves(moves, matrix, mySideNum, koPoint);
+          const engineMoves = filterEngineMoves(moves, matrix, koPoint);
+          const selectedMoves = (playableMoves.length > 0 ? playableMoves : engineMoves).slice(0, 3);
+          if (selectedMoves.length === 0) {
             setKataGoMoves([]);
             setKataGoError('KataGo 返回的建议点当前已不可落子，已自动过滤。');
             katagoFailCooldownRef.current = { key, until: Date.now() + 5000 };
             return;
           }
-          setKataGoMoves(moves);
-          setKataGoLastMeta(`耗时${resp.ms}ms${moves[0]?.detail ? `，${moves[0].detail}` : ''}`);
-          katagoCacheRef.current.set(key, moves);
+          setKataGoMoves(selectedMoves);
+          setKataGoLastMeta(`耗时${resp.ms}ms${selectedMoves[0]?.detail ? `，${selectedMoves[0].detail}` : ''}`);
+          katagoCacheRef.current.set(key, selectedMoves);
           while (katagoCacheRef.current.size > 24) {
             const first = katagoCacheRef.current.keys().next();
             if (first.done) break;
@@ -751,7 +806,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
       {turn.name && !myTurn && (
         <div className="game-workbench-hint">当前不是你的回合，可先观察气口、劫点和下一手方向。</div>
       )}
-      {isHiddenMaster && mySideNum && (
+      {isHiddenMaster && assistantVisible && mySideNum && (
         <div className="game-advisor game-advisor-info" style={{ marginTop: 8, marginBottom: 8 }}>
           <div className="game-advisor-title">隐藏功能：KataGo 围棋助手</div>
           <div className="game-advisor-detail">
@@ -786,7 +841,7 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
             row.map((cell) => (
               <button
                 key={`${cell.row}-${cell.col}`}
-                className={`go-point ${cell.stone === '#' ? 'black' : ''} ${cell.stone === 'o' ? 'white' : ''} ${cell.last ? 'last' : ''} ${isHiddenMaster && shownMoves[0]?.row === cell.row && shownMoves[0]?.col === cell.col ? 'suggested' : ''}`}
+                className={`go-point ${cell.stone === '#' ? 'black' : ''} ${cell.stone === 'o' ? 'white' : ''} ${cell.last ? 'last' : ''} ${isHiddenMaster && assistantVisible && shownMoves[0]?.row === cell.row && shownMoves[0]?.col === cell.col ? 'suggested' : ''}`}
                 disabled={
                   disabled ||
                   cell.stone !== '.' ||
@@ -809,4 +864,3 @@ export default function GoPanel({ disabled, nickname, boardText, onPick, onCmd }
     </div>
   );
 }
-

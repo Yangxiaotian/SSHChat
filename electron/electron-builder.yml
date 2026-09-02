@@ -10,6 +10,12 @@ files:
 extraResources:
   - from: assets/
     to: assets/
+  - from: engines/rapfi/
+    to: engines/rapfi/
+  - from: engines/katago/
+    to: engines/katago/
+  - from: engines/Pikafish/
+    to: engines/Pikafish/
 asar: true
 # ssh2 的 cpu-features / crypto binding 均为可选；跳过 rebuild 避免 buildcheck.gypi 缺失导致打包失败
 npmRebuild: false

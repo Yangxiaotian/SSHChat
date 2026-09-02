@@ -55,6 +55,58 @@ function buildGomokuLines() {
   return lines;
 }
 
+function buildGomokuPlayedLines() {
+  return [
+    'gomoku 对局（playing）  黑：zouyu   白：yxt',
+    '积分体系：Elo；积分跨房间共享。',
+    '#1 zouyu: 积分=1264 等级=炼虚初期 战绩=41/32/0',
+    '#2 yxt: 积分=1136 等级=化神中期 战绩=32/41/0',
+    '1  2  3  4  5  6  7  8  9 10 11 12 13 14 15',
+    '1  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '2  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '3  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '4  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '5  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '6  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '7  .  .  .  .  .  .  .  (o) .  .  .  .  .  .  .',
+    '8  .  .  .  .  .  .  o  #  #  .  .  .  .  .  .',
+    '9  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '10 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '11 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '12 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '13 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '14 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '15 .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .',
+    '1  2  3  4  5  6  7  8  9 10 11 12 13 14 15',
+    '上一步：(7, 8)  （行 列，1 起算，左上为 1,1）',
+    '轮到 黑方 zouyu 落子',
+  ];
+}
+
+function buildGomokuSplitSeatLines() {
+  return [
+    '黑方（先手）：zouyu',
+    '白方：yxt',
+    '五子棋 对局进行中',
+    '直接点击棋盘落子点。',
+    '1  2  3  4  5  6  7  8  9 10 11 12 13 14 15',
+    ...Array.from({ length: 15 }, (_, row) => `${row + 1}  ${Array.from({ length: 15 }, () => '.').join('  ')}`),
+    '上一步：(1, 1)  （行 列，1 起算，左上为 1,1）',
+  ];
+}
+
+function buildGomokuEnglishSeatLines() {
+  return [
+    'gomoku (playing)  Black: zouyu   White: yxt',
+    '1  2  3  4  5  6  7  8  9 10 11 12 13 14 15',
+    ...Array.from({ length: 15 }, (_, row) => `${row + 1}  ${Array.from({ length: 15 }, () => '.').join('  ')}`),
+  ];
+}
+
+function buildGomokuPrefixedLines() {
+  return buildGomokuEnglishSeatLines().map((line) => `[#default] [*] ${line}`);
+}
+
 const viteCmd = process.platform === 'win32'
   ? 'npx vite --host 127.0.0.1 --port 5173'
   : 'npx vite --host 127.0.0.1 --port 5173';
@@ -244,12 +296,33 @@ try {
 
   // 1) 五子棋
   await openByLines(buildGomokuLines(), '五子棋棋盘');
+  const shareButton = page.getByRole('button', { name: 'share', exact: true });
+  await shareButton.waitFor({ state: 'visible' });
+  assert((await shareButton.getAttribute('aria-pressed')) === 'true', 'share 初始状态不正确');
+  await shareButton.click();
+  assert((await shareButton.getAttribute('aria-pressed')) === 'false', 'share 点击后未隐藏助手');
+  await page.keyboard.press('Control');
+  await page.keyboard.press('Control');
+  assert((await shareButton.getAttribute('aria-pressed')) === 'true', '双击 Ctrl 未恢复助手');
   await page.evaluate(() => {
     // @ts-ignore
     window.__qa.clearSent();
   });
-  await page.locator('.gomoku-cell[title="8,8"]').first().click();
+  await page.locator('.gomoku-cell[title^="8,8"]').first().click();
   await assertSentIncludes('/game move 8 8');
+  await openByLines(buildGomokuPlayedLines(), '五子棋棋盘');
+  assert((await page.locator('.gomoku-cell[title="7,8"]').innerText()) === '○', '五子棋最近一步未落在 7,8');
+  assert((await page.locator('.gomoku-cell[title="7,8"]').getAttribute('class'))?.includes('last'), '五子棋最近一步标记错位');
+  assert((await page.locator('.gomoku-cell[title="8,7"]').innerText()) === '○', '五子棋 8,7 白子坐标错位');
+  assert((await page.locator('.gomoku-cell[title="8,8"]').innerText()) === '●', '五子棋 8,8 黑子坐标错位');
+  assert((await page.locator('.gomoku-cell[title="8,9"]').innerText()) === '●', '五子棋 8,9 黑子坐标错位');
+  await openByLines(buildGomokuSplitSeatLines(), '五子棋棋盘');
+  assert(await page.locator('.game-advisor-title:has-text("大师级五子棋助手")').isVisible(), '拆分席位格式未显示五子棋助手');
+  assert(!(await page.locator('.game-advisor-detail').allTextContents()).some((text) => text.includes('未识别到你的黑白席位')), '拆分席位格式未识别 zouyu');
+  await openByLines(buildGomokuEnglishSeatLines(), '五子棋棋盘');
+  assert(!(await page.locator('.game-advisor-detail').allTextContents()).some((text) => text.includes('未识别到你的黑白席位')), '英文 Black/White 席位格式未识别 zouyu');
+  await openByLines(buildGomokuPrefixedLines(), '五子棋棋盘');
+  assert((await page.locator('.gomoku-cell').count()) === 225, '带协议前缀的五子棋棋盘未解析完整');
 
   // 2) 国际象棋
   await openByLines([
@@ -269,17 +342,18 @@ try {
     '中国象棋 对局',
     '红：zouyu 黑：R1',
     '轮到 红方 zouyu 走子',
-    '1 -车 -马 -象 -士 -将 -士 -象 -马 -车',
-    '2 · · · · · · · · ·',
-    '3 · -炮 · · · · · -炮 ·',
-    '4 -卒 · -卒 · -卒 · -卒 · -卒',
-    '5 · · · · · · · · ·',
-    '6 · · · · · · · · ·',
-    '7 +兵 · +兵 · +兵 · +兵 · +兵',
-    '8 · +炮 · · · · · +炮 ·',
-    '9 · · · · · · · · ·',
-    '10 +车 +马 +相 +仕 +帅 +仕 +相 +马 +车',
+    '   -车 -马 -象 -士 -将 -士 -象 -马 -车',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   ·   -炮 ·   ·   ·   ·   ·   -炮 ·',
+    '   -卒 ·   -卒 ·   -卒 ·   -卒 ·   -卒',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   +兵 ·   +兵 ·   +兵 ·   +兵 ·   +兵',
+    '   ·   +炮 ·   ·   ·   ·   ·   +炮 ·',
+    '   ·   ·   ·   ·   ·   ·   ·   ·   ·',
+    '   +车 +马 +相 +仕 +帅 +仕 +相 +马 +车',
   ], '中国象棋棋盘');
+  await assert((await page.locator('.xiangqi-cell[title="10,1"]').innerText()) === '车', '连续空行导致底线棋子上移');
   await page.evaluate(() => {
     // @ts-ignore
     window.__qa.clearSent();
