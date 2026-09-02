@@ -1274,6 +1274,41 @@ def _federation_seed_file_leave(
         print(f"federation: broadcast_file_leave failed: {e!r}")
 
 
+def _federation_push_all_offline_clears() -> None:
+    """Re-broadcast tombstones so a partitioned peer drops recalled/delivered leaves."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        cleared = offline_messages.snapshot_cleared()
+    except Exception as e:
+        print(f"federation: snapshot offline clears failed: {e!r}")
+        return
+    pushed_pm = 0
+    pushed_file = 0
+    for item in cleared:
+        to_name = str(item.get("to") or "").strip()
+        if not to_name:
+            continue
+        kind = str(item.get("kind") or "pm")
+        try:
+            if kind == "file":
+                tid = str(item.get("transfer_id") or "").strip()
+                if tid and hub.clear_file_leave(to_name, tid):
+                    pushed_file += 1
+            else:
+                leave_id = str(item.get("id") or "").strip()
+                if leave_id and hub.clear_offline_pm(to_name, leave_id):
+                    pushed_pm += 1
+        except Exception as e:
+            print(f"federation: catch-up clear failed: {e!r}")
+    if pushed_pm or pushed_file:
+        print(
+            f"federation: catch-up offline clears "
+            f"pm={pushed_pm} file={pushed_file}"
+        )
+
+
 def _federation_push_all_offline_leaves() -> None:
     """Re-seed every pending leave so a newly linked peer shares the mailbox.
 
@@ -6028,6 +6063,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             except Exception as e:
                 print(f"federation: peer-up file public sync error: {e!r}")
             try:
+                _federation_push_all_offline_clears()
+            except Exception as e:
+                print(f"federation: peer-up offline clear sync error: {e!r}")
+            try:
                 _federation_push_all_offline_leaves()
             except Exception as e:
                 print(f"federation: peer-up offline leave sync error: {e!r}")
@@ -6242,6 +6281,10 @@ def _ensure_federation_hub() -> None:
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    try:
+        _federation_push_all_offline_clears()
+    except Exception as e:
+        print(f"federation: initial offline clear sync error: {e!r}")
     try:
         _federation_push_all_offline_leaves()
     except Exception as e:
