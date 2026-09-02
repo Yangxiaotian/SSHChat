@@ -855,6 +855,18 @@ html, body, #root {
   color: #d2b878;
 }
 
+.darkchess-cell.piece-red {
+  background: linear-gradient(135deg, #68464b, #3e2d34);
+  color: #f0a0a0;
+  border-color: #9c6469;
+}
+
+.darkchess-cell.piece-black {
+  background: linear-gradient(135deg, #56616d, #303841);
+  color: #d6e0e8;
+  border-color: #778795;
+}
+
 .darkchess-cell.last {
   box-shadow: inset 0 0 0 2px rgba(112, 165, 208, 0.9);
 }
@@ -971,6 +983,18 @@ html, body, #root {
 .junqi-cell.hidden-piece {
   background: linear-gradient(135deg, #4d5360, #282d35);
   color: #d2b878;
+}
+
+.junqi-cell.piece-red {
+  background: linear-gradient(135deg, #68464b, #3e2d34);
+  color: #f0a0a0;
+  border-color: #9c6469;
+}
+
+.junqi-cell.piece-blue {
+  background: linear-gradient(135deg, #405e78, #293e52);
+  color: #a9d2f1;
+  border-color: #648caf;
 }
 
 .junqi-cell.last {

@@ -46,11 +46,27 @@ function pieceLabel(token: string, locale: string): string {
   return item ? (locale === 'zh' ? item[1] : item[2]) : token;
 }
 
+function pieceSide(token: string): 'red' | 'blue' | null {
+  if (token.startsWith('+')) return 'red';
+  if (token.startsWith('-')) return 'blue';
+  return null;
+}
+
+function sideForNickname(text: string, nickname: string): 'red' | 'blue' | null {
+  const match = text.match(/^junqi game \([^)]*\)\s+Red:\s+(.+?)\s+Blue:\s+(.+)$/im);
+  if (!match) return null;
+  const wanted = nickname.trim().toLowerCase();
+  if (match[1].trim().toLowerCase() === wanted) return 'red';
+  if (match[2].trim().toLowerCase() === wanted) return 'blue';
+  return null;
+}
+
 export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Props) {
   const { locale } = useTranslation();
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const state = useMemo(() => gameState(boardText), [boardText]);
   const currentTurn = useMemo(() => turnName(boardText), [boardText]);
+  const mySide = useMemo(() => sideForNickname(boardText, nickname), [boardText, nickname]);
   const [piece, setPiece] = useState(PIECES[0][0]);
   const [selected, setSelected] = useState<Cell | null>(null);
   const myTurn = !!nickname && currentTurn === nickname;
@@ -64,11 +80,15 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
     }
     if (!myTurn || state !== 'playing') return;
     if (!selected) {
-      if (cell.token.startsWith('+') || cell.token.startsWith('-')) setSelected(cell);
+      if ((cell.token.startsWith('+') || cell.token.startsWith('-')) && (!mySide || pieceSide(cell.token) === mySide)) setSelected(cell);
       return;
     }
     if (selected.row === cell.row && selected.col === cell.col) {
       setSelected(null);
+      return;
+    }
+    if (cell.token !== '?' && cell.token !== '.' && pieceSide(cell.token) === mySide) {
+      setSelected(cell);
       return;
     }
     onMove(`move ${selected.row} ${selected.col} ${cell.row} ${cell.col}`);
@@ -78,6 +98,7 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">{locale === 'zh' ? '军棋（先布阵，再轮流行棋）' : 'Junqi (place your army, then move by turn)'}</div>
+      <div className="game-workbench-hint">{locale === 'zh' ? '红方：暖红；蓝方：冷蓝；?：对手未揭示棋子' : 'Red: warm red · Blue: cool blue · ?: hidden opponent piece'}</div>
       {setup && (
         <div className="junqi-setup-controls">
           {PIECES.map(([name, zh, code]) => (
@@ -98,7 +119,7 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
           <button
             type="button"
             key={`${cell.row}-${cell.col}`}
-            className={`junqi-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''}`}
+            className={`junqi-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''} ${pieceSide(cell.token) ? `piece-${pieceSide(cell.token)}` : ''}`}
             disabled={disabled}
             onClick={() => pick(cell)}
             aria-label={`${cell.row},${cell.col}`}

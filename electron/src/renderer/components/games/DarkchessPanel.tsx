@@ -37,14 +37,31 @@ function label(token: string, locale: string): string {
     G: ['将', 'G'], A: ['士', 'A'], E: ['象', 'E'], R: ['车', 'R'],
     H: ['马', 'H'], C: ['炮', 'C'], S: ['卒', 'S'],
   };
-  const key = token.slice(1);
+  const key = token.replace(/^[-+]/, '');
   return labels[key]?.[locale === 'zh' ? 0 : 1] || token;
+}
+
+function pieceSide(token: string): 'red' | 'black' | null {
+  if (token.startsWith('+')) return 'red';
+  if (token.startsWith('-')) return 'black';
+  return null;
+}
+
+function sideForNickname(text: string, nickname: string): 'red' | 'black' | null {
+  const match = text.match(/^darkchess game \([^)]*\)\s+Player 1:\s+(.+?)\s+Player 2:\s+(.+)$/im);
+  const sides = text.match(/^Sides:\s+P1\s+(red|black|unknown)\s+P2\s+(red|black|unknown)$/im);
+  if (!match || !sides) return null;
+  const wanted = nickname.trim().toLowerCase();
+  const player = match[1].trim().toLowerCase() === wanted ? 1 : match[2].trim().toLowerCase() === wanted ? 2 : 0;
+  const side = player === 1 ? sides[1].toLowerCase() : player === 2 ? sides[2].toLowerCase() : '';
+  return side === 'red' || side === 'black' ? side : null;
 }
 
 export default function DarkchessPanel({ disabled, nickname, boardText, onMove }: Props) {
   const { locale } = useTranslation();
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const currentTurn = useMemo(() => turnName(boardText), [boardText]);
+  const mySide = useMemo(() => sideForNickname(boardText, nickname), [boardText, nickname]);
   const [selected, setSelected] = useState<Cell | null>(null);
   const myTurn = !!nickname && currentTurn === nickname;
   const canAct = !disabled && myTurn;
@@ -53,17 +70,18 @@ export default function DarkchessPanel({ disabled, nickname, boardText, onMove }
     if (!canAct) return;
     if (!selected) {
       if (cell.token === '?') onMove(`flip ${cell.row} ${cell.col}`);
-      else if (cell.token !== '.') setSelected(cell);
+      else if (cell.token !== '.' && (!mySide || pieceSide(cell.token) === mySide)) setSelected(cell);
       return;
     }
     if (selected.row === cell.row && selected.col === cell.col) {
       setSelected(null);
       return;
     }
-    if (cell.token !== '?' && cell.token !== '.') {
+    if (cell.token !== '?' && cell.token !== '.' && pieceSide(cell.token) === mySide) {
       setSelected(cell);
       return;
     }
+    if (cell.token === '?') return;
     onMove(`move ${selected.row} ${selected.col} ${cell.row} ${cell.col}`);
     setSelected(null);
   };
@@ -71,6 +89,7 @@ export default function DarkchessPanel({ disabled, nickname, boardText, onMove }
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">{locale === 'zh' ? '暗棋 / 翻翻棋（点击暗子翻开）' : 'Dark Chess (click a face-down piece to flip)'}</div>
+      <div className="game-workbench-hint">{locale === 'zh' ? '红方：暖红；黑方：冷灰；?：未翻开' : 'Red: warm red · Black: cool gray · ?: face-down'}</div>
       {currentTurn && <div className="game-workbench-hint">{locale === 'zh' ? `当前回合：${currentTurn}` : `Turn: ${currentTurn}`}</div>}
       {!myTurn && currentTurn && <div className="game-workbench-hint">{locale === 'zh' ? '等待对手操作' : 'Waiting for the opponent'}</div>}
       <div className="darkchess-grid" role="grid" aria-label={locale === 'zh' ? '暗棋棋盘' : 'Dark chess board'}>
@@ -78,7 +97,7 @@ export default function DarkchessPanel({ disabled, nickname, boardText, onMove }
           <button
             type="button"
             key={`${cell.row}-${cell.col}`}
-            className={`darkchess-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''}`}
+            className={`darkchess-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''} ${pieceSide(cell.token) ? `piece-${pieceSide(cell.token)}` : ''}`}
             disabled={!canAct}
             onClick={() => pick(cell)}
             aria-label={`${cell.row},${cell.col}`}
