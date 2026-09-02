@@ -696,6 +696,18 @@ def _replace_conn_refs(value, old_conn, new_conn):
                 changed = True
         return value, changed
 
+    slots = getattr(value, "__slots__", None)
+    if slots:
+        for attr in slots if isinstance(slots, (list, tuple)) else (slots,):
+            if not hasattr(value, attr):
+                continue
+            cur = getattr(value, attr)
+            new_cur, cur_changed = _replace_conn_refs(cur, old_conn, new_conn)
+            if cur_changed:
+                setattr(value, attr, new_cur)
+                changed = True
+        return value, changed
+
     return value, False
 
 
@@ -708,9 +720,12 @@ def _game_seat_conn_by_name(game, nickname: str):
     players = getattr(game, "players", None)
     if isinstance(players, list):
         for item in players:
-            if not isinstance(item, tuple) or len(item) < 2:
+            if isinstance(item, tuple) and len(item) >= 2:
+                conn, name = item[0], item[1]
+            elif hasattr(item, "conn") and hasattr(item, "name"):
+                conn, name = item.conn, item.name
+            else:
                 continue
-            conn, name = item[0], item[1]
             if isinstance(name, str) and name.strip().lower() == key:
                 return conn
 
