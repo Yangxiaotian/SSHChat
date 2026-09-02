@@ -2028,7 +2028,7 @@ class SSHChatGUI:
         self._suggest_focus_job: str | int | None = None
         self._click_refresh_job: str | int | None = None
         self._room_list_refresh_job: str | int | None = None
-        self._aqua_click_refresh_at = 0.0
+        self._aqua_last_geometry_nudge_at = 0.0
         self._room_select_guard = False
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
@@ -2048,8 +2048,6 @@ class SSHChatGUI:
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
         self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
-        if sys.platform == "darwin":
-            self.root.bind("<Expose>", self._on_aqua_expose, add="+")
         # bind_all: root-only ButtonPress never fires for ttk.Button children, so
         # orphaned suggestion chrome would keep eating clicks until the window moves.
         self.root.bind_all("<ButtonPress-1>", self._on_any_button_press, add="+")
@@ -2217,50 +2215,13 @@ class SSHChatGUI:
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
-        self._bind_aqua_click_recovery(
-            self.root,
-            bar,
-            body,
-            left,
-            bot,
-            self._target_row,
-            self._input_row,
-            self.entry,
-            self.btn_connect,
-            self.btn_disconnect,
-            self.btn_send,
-            self.btn_send_target,
-            self.btn_send_file,
-            self.btn_canvas,
-            self.btn_piano,
-            self.btn_library,
-            self.btn_clear,
-            self.room_list,
-            self.log,
-        )
-
-    def _bind_aqua_click_recovery(self, *widgets: tk.Misc) -> None:
-        if sys.platform != "darwin":
-            return
-        for widget in widgets:
-            try:
-                widget.bind("<Enter>", self._on_aqua_pointer_enter, add="+")
-            except tk.TclError:
-                pass
-
-    def _on_aqua_pointer_enter(self, _event=None) -> None:
-        self._schedule_click_target_refresh(delay_ms=0)
-
-    def _on_aqua_expose(self, _event=None) -> None:
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _on_window_mapped(self, _event=None) -> None:
         # On some macOS/Tk builds, first paint can leave controls seemingly
-        # unresponsive until a manual move/resize. Force a post-map refresh.
+        # unresponsive until a manual move/resize. One post-map refresh is enough;
+        # repeated 1px geometry nudges look like the window is shaking.
         self._is_minimized = False
-        self.root.after_idle(self._stabilize_initial_interaction)
-        self.root.after(200, self._stabilize_initial_interaction)
-        self.root.after(60, self._render_active_room)
+        self.root.after(150, self._stabilize_initial_interaction)
         self.root.after(60, self._render_active_room)
 
     def _on_window_unmapped(self, _event=None) -> None:
@@ -2320,7 +2281,7 @@ class SSHChatGUI:
 
         def _run() -> None:
             self._click_refresh_job = None
-            self._refresh_click_targets(force=True)
+            self._refresh_click_targets()
 
         try:
             if delay_ms <= 0:
@@ -2330,27 +2291,28 @@ class SSHChatGUI:
         except tk.TclError:
             pass
 
-    def _refresh_click_targets(self, *, force: bool = False) -> None:
-        """Aqua keeps stale click targets until geometry actually changes.
+    def _nudge_aqua_geometry(self, *, force: bool = False) -> None:
+        """1px resize tricks Aqua into rebuilding stale click targets."""
+        if sys.platform != "darwin":
+            return
+        now = time.monotonic()
+        if not force and now - self._aqua_last_geometry_nudge_at < 0.45:
+            return
+        self._aqua_last_geometry_nudge_at = now
+        w = max(int(self.root.winfo_width()), 1)
+        h = max(int(self.root.winfo_height()), 1)
+        x = int(self.root.winfo_x())
+        y = int(self.root.winfo_y())
+        self.root.geometry(f"{w}x{h + 1}+{x}+{y}")
+        self.root.update_idletasks()
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-        Re-setting the same WxH+X+Y string is often a no-op; a 1px nudge matches
-        what happens when the user drags the window to make buttons work again.
-        """
-        if sys.platform == "darwin" and not force:
-            now = time.monotonic()
-            if now - self._aqua_click_refresh_at < 0.06:
-                return
-            self._aqua_click_refresh_at = now
+    def _refresh_click_targets(self, *, force: bool = False) -> None:
+        """Refresh hit-testing; on Aqua a rare 1px nudge may be required."""
         try:
             self.root.update_idletasks()
             if sys.platform == "darwin":
-                w = max(int(self.root.winfo_width()), 1)
-                h = max(int(self.root.winfo_height()), 1)
-                x = int(self.root.winfo_x())
-                y = int(self.root.winfo_y())
-                self.root.geometry(f"{w}x{h + 1}+{x}+{y}")
-                self.root.update_idletasks()
-                self.root.geometry(f"{w}x{h}+{x}+{y}")
+                self._nudge_aqua_geometry(force=force)
                 return
             geom = self.root.winfo_geometry()
             self.root.geometry(geom)
@@ -2459,7 +2421,6 @@ class SSHChatGUI:
     def _flush_room_list_refresh(self) -> None:
         self._room_list_refresh_job = None
         self._refresh_room_list()
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2478,7 +2439,6 @@ class SSHChatGUI:
                 self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
-        self._schedule_click_target_refresh(delay_ms=30)
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
         if (
@@ -2499,7 +2459,6 @@ class SSHChatGUI:
                 self._chan_send_bytes((f"/switch {room}\n").encode("utf-8"))
             except Exception:
                 pass
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _send_target_label(self) -> str:
         if self._send_target_kind == "user" and self._send_target_value:
@@ -2713,7 +2672,6 @@ class SSHChatGUI:
         except (tk.TclError, TypeError, ValueError):
             return
         self._activate_room_at(idx)
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _on_room_selected(self, _event=None) -> None:
         if self._room_select_guard:
@@ -2722,7 +2680,6 @@ class SSHChatGUI:
             return
         idx = int(self.room_list.curselection()[0])
         self._activate_room_at(idx)
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _activate_room_at(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._rooms_order):
@@ -2782,7 +2739,6 @@ class SSHChatGUI:
             self._insert_log_fragment(text, tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
-            self._schedule_click_target_refresh(delay_ms=30)
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
             self._schedule_room_list_refresh()
@@ -3274,8 +3230,7 @@ class SSHChatGUI:
         self._refresh_send_target_button()
         self.root.after(500, self._refresh_online_users)
         if sys.platform == "darwin":
-            for delay in (0, 80, 200, 500):
-                self.root.after(delay, self._stabilize_initial_interaction)
+            self.root.after(200, self._stabilize_initial_interaction)
 
     def _connect_failed(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
@@ -3356,7 +3311,6 @@ class SSHChatGUI:
             pass
         if buf:
             self._append_rendered_block("".join(buf))
-            self._schedule_click_target_refresh(delay_ms=30)
         if remote_eof:
             self._on_remote_eof()
             return
@@ -3758,15 +3712,13 @@ class SSHChatGUI:
                 pass
             self._suggest_focus_job = None
 
-        had = self._destroy_suggestion_widgets()
+        self._destroy_suggestion_widgets()
         if pending is None:
             self._suggest_items = []
             try:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
-            if had:
-                self._schedule_click_target_refresh()
             return
 
         items = pending
@@ -3776,8 +3728,6 @@ class SSHChatGUI:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
-            if had:
-                self._schedule_click_target_refresh()
             return
 
         self._suggest_items = items
@@ -3798,7 +3748,6 @@ class SSHChatGUI:
         frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
-        self._schedule_click_target_refresh(delay_ms=30)
 
     def _queue_suggestion_ui(self, items: list[str] | None) -> None:
         self._suggest_ui_pending = items
@@ -3854,7 +3803,6 @@ class SSHChatGUI:
         self.var_input.set(chosen if chosen.endswith(" ") else chosen + " ")
         self.entry.icursor(tk.END)
         self._hide_suggestions()
-        self._schedule_click_target_refresh(delay_ms=0)
         self.entry.focus_set()
 
     def _completion_users(self) -> list[str]:
@@ -3984,7 +3932,6 @@ class SSHChatGUI:
         line = self.var_input.get()
         self.var_input.set("")
         self._hide_suggestions()
-        self._schedule_click_target_refresh(delay_ms=0)
         if not line.strip():
             return
         low = line.strip()
