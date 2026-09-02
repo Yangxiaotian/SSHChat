@@ -237,7 +237,8 @@ html, body, #root {
 
 .titlebar-actions {
   position: absolute;
-  right: 8px;
+  /* Leave room for Electron's native minimize/maximize/close controls. */
+  right: 140px;
   display: flex;
   align-items: center;
   -webkit-app-region: no-drag;
@@ -263,6 +264,12 @@ html, body, #root {
 .titlebar-language-button:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
+}
+
+@media (max-width: 600px) {
+  .titlebar-actions {
+    right: 96px;
+  }
 }
 
 /* ============================================================
