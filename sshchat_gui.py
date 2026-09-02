@@ -2029,6 +2029,10 @@ class SSHChatGUI:
         self._click_refresh_job: str | int | None = None
         self._room_list_refresh_job: str | int | None = None
         self._aqua_last_geometry_nudge_at = 0.0
+        self._aqua_startup_nudge_done = False
+        self._target_picker_frame: tk.Misc | None = None
+        self._target_picker_list: tk.Listbox | None = None
+        self._target_picker_items: list[tuple[str, str, str]] = []
         self._room_select_guard = False
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
@@ -2166,6 +2170,7 @@ class SSHChatGUI:
         self._suggest_slot = ttk.Frame(bot)
         self._target_row = ttk.Frame(bot)
         self._target_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self._target_picker_slot = ttk.Frame(bot)
         ttk.Label(self._target_row, text="发送至").pack(side=tk.LEFT)
         self.var_send_target = tk.StringVar(value=self._send_target_label())
         self.btn_send_target = ttk.Button(
@@ -2174,9 +2179,10 @@ class SSHChatGUI:
             command=self._show_send_target_picker,
         )
         self.btn_send_target.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        self._send_target_tip = _HoverTip(self.btn_send_target, self._send_target_label())
+        # No HoverTip here — topmost tooltip Toplevels break Aqua hit-testing on macOS.
+        self._send_target_tip = None
         self._input_row = ttk.Frame(bot)
-        self._input_row.grid(row=2, column=0, sticky="ew")
+        self._input_row.grid(row=3, column=0, sticky="ew")
         self.var_input = tk.StringVar()
         self.entry = ttk.Entry(self._input_row, textvariable=self.var_input)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -2215,28 +2221,12 @@ class SSHChatGUI:
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
-        self._bind_aqua_click_recovery(top, bar, bot, self._target_row, self._input_row)
-
-    def _bind_aqua_click_recovery(self, *widgets: tk.Misc) -> None:
-        """Refresh stale Aqua hit targets when the pointer enters button/tool rows."""
-        if sys.platform != "darwin":
-            return
-        for widget in widgets:
-            try:
-                widget.bind("<Enter>", self._on_aqua_pointer_enter, add="+")
-            except tk.TclError:
-                pass
-
-    def _on_aqua_pointer_enter(self, _event=None) -> None:
-        self._schedule_click_target_refresh(delay_ms=120)
 
     def _on_window_mapped(self, _event=None) -> None:
-        # On some macOS/Tk builds, first paint can leave controls seemingly
-        # unresponsive until a manual move/resize. Two spaced nudges fix targets
-        # without the rapid-fire shaking from Expose/Enter on every widget.
+        # One delayed refresh on first map; avoid repeated 1px resizes (visible shake).
         self._is_minimized = False
-        self.root.after(100, self._stabilize_initial_interaction)
-        self.root.after(400, self._stabilize_initial_interaction)
+        if not self._aqua_startup_nudge_done:
+            self.root.after(450, self._stabilize_initial_interaction)
         self.root.after(60, self._render_active_room)
 
     def _on_window_unmapped(self, _event=None) -> None:
@@ -2262,11 +2252,12 @@ class SSHChatGUI:
             return False
 
     def _on_any_button_press(self, event) -> None:
+        w = event.widget
+        if self._target_picker_visible() and not self._widget_in_target_picker(w):
+            self.root.after_idle(self._hide_send_target_picker)
         # Dismiss in-window completion when clicking elsewhere in the main window.
-        # Ignore other Toplevels (image preview, pickers) so we don't steal their clicks.
         if self._suggest_win is None:
             return
-        w = event.widget
         try:
             if w.winfo_toplevel() is not self.root:
                 return
@@ -2274,18 +2265,15 @@ class SSHChatGUI:
             return
         if self._widget_in_suggestions(w):
             return
-        # Defer so the widget under the pointer still receives this click.
         self.root.after_idle(self._hide_suggestions)
 
     def _on_root_focus_in(self, event=None) -> None:
-        # FocusIn propagates from children; only refresh when the toplevel activates.
-        # Never pulse/lift here — that steals the click that just activated the window.
         if event is not None and event.widget is not self.root:
             return
-        self._schedule_click_target_refresh(delay_ms=80)
+        self._schedule_click_target_refresh(delay_ms=120)
 
     def _on_aux_window_closed(self) -> None:
-        self._schedule_click_target_refresh(delay_ms=40)
+        self._schedule_click_target_refresh(delay_ms=80)
 
     def _schedule_click_target_refresh(
         self, delay_ms: int = 0, *, force: bool = False
@@ -2328,14 +2316,14 @@ class SSHChatGUI:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _refresh_click_targets(self, *, force: bool = False) -> None:
-        """Refresh hit-testing; on Aqua a rare 1px nudge may be required."""
+        """Refresh hit-testing; geometry nudge is a last resort and only when forced."""
         try:
             self.root.update_idletasks()
             if sys.platform == "darwin":
-                self._nudge_aqua_geometry(force=force)
+                if force:
+                    self._nudge_aqua_geometry(force=True)
                 return
-            geom = self.root.winfo_geometry()
-            self.root.geometry(geom)
+            self.root.geometry(self.root.winfo_geometry())
         except tk.TclError:
             pass
 
@@ -2365,9 +2353,11 @@ class SSHChatGUI:
             self.root.update_idletasks()
         except tk.TclError:
             return
-        # Avoid focus_force / lift / topmost — on Aqua they leave hit-testing
-        # stale until the user manually moves the window.
-        self._refresh_click_targets(force=True)
+        if sys.platform == "darwin" and not self._aqua_startup_nudge_done:
+            self._aqua_startup_nudge_done = True
+            self._refresh_click_targets(force=True)
+        else:
+            self._refresh_click_targets(force=False)
         try:
             if self.btn_connect.instate(("disabled",)):
                 self.btn_connect.state(("!disabled",))
@@ -2441,7 +2431,6 @@ class SSHChatGUI:
     def _flush_room_list_refresh(self) -> None:
         self._room_list_refresh_job = None
         self._refresh_room_list()
-        self._schedule_click_target_refresh(delay_ms=100)
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2460,7 +2449,6 @@ class SSHChatGUI:
                 self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
-        self._schedule_click_target_refresh(delay_ms=100)
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
         if (
@@ -2470,6 +2458,7 @@ class SSHChatGUI:
         ):
             self._fail_paste("已切换房间")
         self._ensure_room(room)
+        self._hide_send_target_picker()
         self._active_room = room
         self._room_unread[room] = 0
         self._refresh_room_list()
@@ -2547,8 +2536,36 @@ class SSHChatGUI:
         label = self._send_target_label()
         if hasattr(self, "var_send_target"):
             self.var_send_target.set(label)
-        if hasattr(self, "_send_target_tip"):
-            self._send_target_tip.set_text(label)
+        tip = getattr(self, "_send_target_tip", None)
+        if tip is not None:
+            tip.set_text(label)
+
+    def _target_picker_visible(self) -> bool:
+        return self._target_picker_frame is not None
+
+    def _widget_in_target_picker(self, w) -> bool:
+        if w is self.btn_send_target:
+            return True
+        if self._target_picker_frame is None:
+            return False
+        try:
+            return str(w).startswith(str(self._target_picker_frame))
+        except tk.TclError:
+            return False
+
+    def _hide_send_target_picker(self) -> None:
+        if self._target_picker_frame is not None:
+            try:
+                self._target_picker_frame.destroy()
+            except tk.TclError:
+                pass
+        self._target_picker_frame = None
+        self._target_picker_list = None
+        self._target_picker_items = []
+        try:
+            self._target_picker_slot.grid_remove()
+        except tk.TclError:
+            pass
 
     def _start_canvas(self) -> None:
         if not self._chan or self._chan.closed:
@@ -2598,22 +2615,10 @@ class SSHChatGUI:
         if not self._chan or self._chan.closed:
             messagebox.showwarning("SSHChat", "请先连接")
             return
-
-        win = tk.Toplevel(self.root)
-        win.title("发送至")
-        win.transient(self.root)
-        win.grab_set()
-
-        def _close_picker() -> None:
-            try:
-                win.grab_release()
-            except tk.TclError:
-                pass
-            try:
-                win.destroy()
-            except tk.TclError:
-                pass
-            self._schedule_click_target_refresh(delay_ms=40)
+        if self._target_picker_visible():
+            self._hide_send_target_picker()
+            return
+        self._hide_suggestions()
 
         items: list[tuple[str, str, str]] = []
         items.append((f"当前房间 #{self._active_room}", "room", ""))
@@ -2636,13 +2641,27 @@ class SSHChatGUI:
         for u in self._recent_users:
             add_user(u)
 
-        lb = tk.Listbox(win, width=44, height=min(14, max(4, len(items) + 2)))
-        lb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._target_picker_items = items
+        try:
+            self._target_picker_slot.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        except tk.TclError:
+            pass
+
+        frame = ttk.Frame(self._target_picker_slot, relief=tk.SOLID, borderwidth=1)
+        lb = tk.Listbox(
+            frame,
+            width=44,
+            height=min(8, max(4, len(items))),
+            exportselection=False,
+        )
+        lb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         for label, _, _ in items:
             lb.insert(tk.END, label)
+        if items:
+            lb.selection_set(0)
 
-        btn_row = ttk.Frame(win)
-        btn_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill=tk.X, padx=4, pady=(0, 4))
 
         def apply_choice() -> None:
             sel = lb.curselection()
@@ -2650,43 +2669,54 @@ class SSHChatGUI:
                 return
             _, kind, value = items[sel[0]]
             self._set_send_target(kind, value)
-            _close_picker()
+            self._hide_send_target_picker()
 
         def pick_named_user() -> None:
             r = simpledialog.askstring(
                 "私聊指定用户",
                 "昵称（不在线也会留言发文件）:",
-                parent=win,
+                parent=self.root,
             )
             if r:
                 nick = r.strip()
                 if nick:
                     self._set_send_target("user", nick)
-                    _close_picker()
+                    self._hide_send_target_picker()
 
         def pick_named_room() -> None:
-            r = simpledialog.askstring("发送到房间", "房间名（不含 #）:", parent=win)
+            r = simpledialog.askstring(
+                "发送到房间", "房间名（不含 #）:", parent=self.root
+            )
             if r:
                 room = r.strip().lstrip("#")
                 if room:
                     self._set_send_target("named_room", room)
-                    _close_picker()
+                    self._hide_send_target_picker()
 
         def refresh_online() -> None:
             self._refresh_online_users()
             self._set_status("正在刷新在线用户…")
-            _close_picker()
+            self._hide_send_target_picker()
 
         ttk.Button(btn_row, text="确定", command=apply_choice).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(
+            side=tk.LEFT, padx=8
+        )
         ttk.Button(btn_row, text="刷新在线", command=refresh_online).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="取消", command=_close_picker).pack(side=tk.RIGHT)
-        win.protocol("WM_DELETE_WINDOW", _close_picker)
+        ttk.Button(btn_row, text="取消", command=self._hide_send_target_picker).pack(
+            side=tk.RIGHT
+        )
         lb.bind("<Double-Button-1>", lambda _e: apply_choice())
-        if items:
-            lb.selection_set(0)
-        _place_toplevel_near_widget(win, self.btn_send_target, align="right")
+        frame.pack(fill=tk.BOTH, expand=True)
+        self._target_picker_frame = frame
+        self._target_picker_list = lb
+        try:
+            lb.focus_set()
+        except tk.TclError:
+            pass
 
     def _on_room_list_click(self, event) -> None:
         try:
@@ -2761,7 +2791,6 @@ class SSHChatGUI:
             self._insert_log_fragment(text, tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
-            self._schedule_click_target_refresh(delay_ms=120)
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
             self._schedule_room_list_refresh()
@@ -3252,9 +3281,8 @@ class SSHChatGUI:
         self._expecting_names = False
         self._refresh_send_target_button()
         self.root.after(500, self._refresh_online_users)
-        if sys.platform == "darwin":
-            self.root.after(200, self._stabilize_initial_interaction)
-            self.root.after(450, self._stabilize_initial_interaction)
+        if sys.platform == "darwin" and self._aqua_startup_nudge_done:
+            self.root.after(300, self._stabilize_initial_interaction)
 
     def _connect_failed(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
@@ -3547,7 +3575,6 @@ class SSHChatGUI:
             )
         self._set_status("收到房间钢琴（未自动打开，可点「打开钢琴」）")
         self._alert_beep()
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _offer_canvas_open(self, url: str, key: str) -> None:
         self._media_tag_seq += 1
@@ -3570,7 +3597,6 @@ class SSHChatGUI:
             )
         self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
         self._alert_beep()
-        self._schedule_click_target_refresh(delay_ms=40)
 
     def _try_handle_download_invite(self, body: str) -> bool:
         m = _GUI_OPEN_DOWNLOAD_RE.match(body.strip())
@@ -3736,15 +3762,13 @@ class SSHChatGUI:
                 pass
             self._suggest_focus_job = None
 
-        had = self._destroy_suggestion_widgets()
+        self._destroy_suggestion_widgets()
         if pending is None:
             self._suggest_items = []
             try:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
-            if had:
-                self._schedule_click_target_refresh(delay_ms=80)
             return
 
         items = pending
@@ -3754,10 +3778,9 @@ class SSHChatGUI:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
-            if had:
-                self._schedule_click_target_refresh(delay_ms=80)
             return
 
+        self._hide_send_target_picker()
         self._suggest_items = items
         # In-window slot (not place/overrideredirect): floating layers on Aqua keep
         # eating button clicks when their screen rect goes stale.
@@ -3776,7 +3799,6 @@ class SSHChatGUI:
         frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
-        self._schedule_click_target_refresh(delay_ms=80)
 
     def _queue_suggestion_ui(self, items: list[str] | None) -> None:
         self._suggest_ui_pending = items
