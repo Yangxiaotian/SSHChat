@@ -64,6 +64,8 @@ MESSAGES: dict = {
         "[*] /game seats            显示双方与对局状态。",
         "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
         "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
+        "[*] 终端玩法：reversi 黑白棋用 /game move 行 列（无合法落点时 pass）；darkchess 暗棋先 /game move flip 行 列，再 /game move move 起行 起列 终行 终列。",
+        "[*] 终端玩法：battleship 海战棋先 place 舰名 行 列 h|v，再 ready、fire 行 列；junqi 军棋先 setup 棋子 行 列，再 ready、move 起行 起列 终行 终列。",
         "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
         "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
         "[*] /game move …           chess: SAN/UCI；gomoku/go: 行 列；go 可 pass 停一手；"

@@ -5793,18 +5793,46 @@ def _finish_game_action(
             _route_game_private(room, peer_conn, extra)
     if bcast:
         broadcast_game(room, bcast)
-    if send_boards and (ended or getattr(game, "send_view_on_move", True)):
-        send_oriented_boards(room, game)
-    send_sanguo_hand_views(room, game)
+    # The move is committed before this function runs. Rendering, persistence,
+    # and federation are follow-up services and must not turn it into a generic
+    # command failure when one of them is temporarily unavailable.
+    try:
+        if send_boards and (ended or getattr(game, "send_view_on_move", True)):
+            send_oriented_boards(room, game)
+    except Exception:
+        print(f"game board refresh failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+        traceback.print_exc()
+        _route_game_private(room, actor_conn, ["Move accepted; board refresh failed. Use /game show to retry."])
+    try:
+        send_sanguo_hand_views(room, game)
+    except Exception:
+        print(f"game private view failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+        traceback.print_exc()
     if not ended:
-        games.touch_session(game)
-    _persist_after_game_change()
+        try:
+            games.touch_session(game)
+        except Exception:
+            print(f"game session timestamp failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+            traceback.print_exc()
+    try:
+        _persist_after_game_change()
+    except Exception:
+        print(f"game persistence failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+        traceback.print_exc()
     if ended:
         with lock:
             room_games.pop(room, None)
-        _federation_notify_game_end(room)
+        try:
+            _federation_notify_game_end(room)
+        except Exception:
+            print(f"game federation end failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+            traceback.print_exc()
     else:
-        _federation_sync_game(room)
+        try:
+            _federation_sync_game(room)
+        except Exception:
+            print(f"game federation sync failed: room={room!r} game={getattr(game, 'name', '?')!r}")
+            traceback.print_exc()
 
 
 def _fed_execute_game_cmd(
@@ -7071,6 +7099,9 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             room,
             [f"{name} 开了一局 {game_name}（{seat}），{join_hint}"],
         )
+        terminal_hint = games.terminal_hint(game_name)
+        if terminal_hint:
+            broadcast_game(room, [terminal_hint])
         send_oriented_boards(room, new_game)
         _persist_after_game_change()
         _federation_sync_game(room)

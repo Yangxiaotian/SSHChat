@@ -12001,6 +12001,17 @@ def all_game_names() -> list[str]:
     return sorted(GAMES)
 
 
+def terminal_hint(name: str) -> str:
+    """Give terminal players the first legal command after a game starts."""
+    hints = {
+        "reversi": "Terminal: /game move <row> <col>; use /game move pass only when no legal move exists.",
+        "darkchess": "Terminal: /game move flip <row> <col>, then /game move move <fr> <fc> <tr> <tc>.",
+        "battleship": "Terminal: place all five ships with /game move place <ship> <row> <col> <h|v>, then ready and fire <row> <col>.",
+        "junqi": "Terminal: place pieces with /game move setup <piece> <row> <col>, then ready and move <fr> <fc> <tr> <tc>.",
+    }
+    return hints.get(name, "")
+
+
 def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:
     """Canonical game ids for /game list; optional room filter (online only)."""
     if enabled is None:
@@ -12021,6 +12032,10 @@ HELP_LINES = (
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
+    "[*] reversi（黑白棋）终端：/game move <行> <列>；无合法落点时 /game move pass。",
+    "[*] darkchess（暗棋/翻翻棋）终端：先 /game move flip <行> <列>，再 /game move move <起行> <起列> <终行> <终列>。",
+    "[*] battleship（海战棋）终端：双方 place 五艘舰船后 ready，再 /game move fire <行> <列>。",
+    "[*] junqi（军棋）终端：双方 setup 棋子后 ready，再 /game move move <起行> <起列> <终行> <终列>。",
     "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
     "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
     "[*] /game move …           chess: SAN/UCI；gomoku/go: 行 列；go 可 pass 停一手；"

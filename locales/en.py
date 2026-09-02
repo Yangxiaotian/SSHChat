@@ -64,6 +64,8 @@ MESSAGES: dict = {
         "[*] /game seats            Show players and game state.",
         "[*] /game show             Redraw the board (you at the bottom; opponent view flips automatically).",
         "[*] /game rating [game] [nick]  Show persisted board-game rating/level; ratings are shared across rooms.",
+        "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked); darkchess = /game move flip <row> <col>, then /game move move <fr> <fc> <tr> <tc>.",
+        "[*] Terminal: battleship = place carrier/battleship/cruiser/submarine/destroyer row col h|v, then ready; fire row col. Junqi = setup <piece> row col, then ready and move fr fc tr tc.",
         "[*] chess boards use Unicode pieces (♔♟ etc.); empty squares are ·; last move is marked with parentheses. "
         "Use a monospace font; if Black is hard to see on a dark theme, try a light terminal theme.",
         "[*] /game move …           chess: SAN/UCI; gomoku/go: row col; go may pass; "

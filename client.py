@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import pwd
+import getpass
 import re
 import shutil
 import socket
@@ -28,7 +28,8 @@ from sshchat_client_util import (
 SERVER_IP = os.environ.get("SSHCHAT_SERVER", "127.0.0.1")
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
-name = pwd.getpwuid(os.getuid()).pw_name
+# ``pwd`` is Unix-only; the terminal client also runs on Windows.
+name = getpass.getuser() or os.environ.get("USERNAME") or os.environ.get("USER") or "user"
 
 # beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
 _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
@@ -126,6 +127,11 @@ _DND_SUBCOMMANDS = {
     "off": None,
 }
 
+_GAME_NAMES = (
+    "chess", "xiangqi", "gomoku", "go", "reversi", "darkchess", "battleship",
+    "junqi", "doushou", "sanguo", "werewolf", "holdem", "zjh", "niutou", "mahjong",
+)
+
 _TOP_COMMANDS = (
     "/help",
     "/lang",
@@ -176,6 +182,9 @@ _SUBCOMMANDS_BY_CMD = {
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "new"): _GAME_NAMES,
+    ("/game", "on"): _GAME_NAMES,
+    ("/game", "off"): _GAME_NAMES,
 }
 
 # Learned from /rooms, /names, and chat traffic for Tab completion.
@@ -406,6 +415,10 @@ def _is_game_flood_line(payload: str) -> bool:
         "围棋",
         "chess",
         "xiangqi",
+        "reversi",
+        "darkchess",
+        "battleship",
+        "junqi",
         "holdem",
         "zjh",
         "niutou",
@@ -415,6 +428,11 @@ def _is_game_flood_line(payload: str) -> bool:
         "斗兽棋",
         "国际象棋",
         "五子棋",
+        "黑白棋",
+        "暗棋",
+        "翻翻棋",
+        "海战棋",
+        "军棋",
         "中国象棋",
         "德州扑克",
         "炸金花",
@@ -478,7 +496,7 @@ def _is_game_context_line(payload: str) -> bool:
     if re.match(r"^[a-h](?:\s+[a-h]){7}\s*$", t):
         return True
     if re.match(
-        r"^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b",
+        r"^(go|chess|gomoku|xiangqi|doushou|reversi|darkchess|battleship|junqi|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b",
         t,
     ):
         return True
@@ -564,6 +582,8 @@ def _is_game_command_feedback_line(payload: str) -> bool:
     t = payload.strip()
     if not t:
         return False
+    if t.startswith("Terminal:"):
+        return True
     markers = (
         "已有进行",
         "没有进行",

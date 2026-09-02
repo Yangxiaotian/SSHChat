@@ -216,6 +216,19 @@ class ClientDndTest(unittest.TestCase):
         self.assertTrue(any(c.text.startswith("on") for c in partial))
         self.assertTrue(any(c.text.startswith("off") for c in partial))
 
+    def test_new_games_are_detected_in_terminal_game_output(self) -> None:
+        for game in ("reversi", "darkchess", "battleship", "junqi"):
+            self.assertTrue(client_mod._is_game_context_line(f"{game} game (playing)"))
+        self.assertIsNone(client_mod._dnd_system_action("Terminal: /game move flip 1 1", "alice"))
+
+    def test_new_game_names_are_tab_completable(self) -> None:
+        from prompt_toolkit.document import Document
+
+        comp = client_mod.SSHChatCommandCompleter()
+        completions = list(comp.get_completions(Document("/game new "), None))
+        names = {item.text.strip() for item in completions}
+        self.assertTrue({"reversi", "darkchess", "battleship", "junqi"}.issubset(names))
+
 
 if __name__ == "__main__":
     unittest.main()
