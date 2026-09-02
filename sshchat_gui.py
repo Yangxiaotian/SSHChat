@@ -2215,13 +2215,28 @@ class SSHChatGUI:
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
+        self._bind_aqua_click_recovery(top, bar, bot, self._target_row, self._input_row)
+
+    def _bind_aqua_click_recovery(self, *widgets: tk.Misc) -> None:
+        """Refresh stale Aqua hit targets when the pointer enters button/tool rows."""
+        if sys.platform != "darwin":
+            return
+        for widget in widgets:
+            try:
+                widget.bind("<Enter>", self._on_aqua_pointer_enter, add="+")
+            except tk.TclError:
+                pass
+
+    def _on_aqua_pointer_enter(self, _event=None) -> None:
+        self._schedule_click_target_refresh(delay_ms=120)
 
     def _on_window_mapped(self, _event=None) -> None:
         # On some macOS/Tk builds, first paint can leave controls seemingly
-        # unresponsive until a manual move/resize. One post-map refresh is enough;
-        # repeated 1px geometry nudges look like the window is shaking.
+        # unresponsive until a manual move/resize. Two spaced nudges fix targets
+        # without the rapid-fire shaking from Expose/Enter on every widget.
         self._is_minimized = False
-        self.root.after(150, self._stabilize_initial_interaction)
+        self.root.after(100, self._stabilize_initial_interaction)
+        self.root.after(400, self._stabilize_initial_interaction)
         self.root.after(60, self._render_active_room)
 
     def _on_window_unmapped(self, _event=None) -> None:
@@ -2272,16 +2287,20 @@ class SSHChatGUI:
     def _on_aux_window_closed(self) -> None:
         self._schedule_click_target_refresh(delay_ms=40)
 
-    def _schedule_click_target_refresh(self, delay_ms: int = 0) -> None:
+    def _schedule_click_target_refresh(
+        self, delay_ms: int = 0, *, force: bool = False
+    ) -> None:
         if self._click_refresh_job is not None:
             try:
                 self.root.after_cancel(self._click_refresh_job)
             except (tk.TclError, ValueError):
                 pass
 
+        pending_force = force
+
         def _run() -> None:
             self._click_refresh_job = None
-            self._refresh_click_targets()
+            self._refresh_click_targets(force=pending_force)
 
         try:
             if delay_ms <= 0:
@@ -2296,7 +2315,8 @@ class SSHChatGUI:
         if sys.platform != "darwin":
             return
         now = time.monotonic()
-        if not force and now - self._aqua_last_geometry_nudge_at < 0.45:
+        elapsed = now - self._aqua_last_geometry_nudge_at
+        if not force and elapsed < 0.35:
             return
         self._aqua_last_geometry_nudge_at = now
         w = max(int(self.root.winfo_width()), 1)
@@ -2421,6 +2441,7 @@ class SSHChatGUI:
     def _flush_room_list_refresh(self) -> None:
         self._room_list_refresh_job = None
         self._refresh_room_list()
+        self._schedule_click_target_refresh(delay_ms=100)
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2439,6 +2460,7 @@ class SSHChatGUI:
                 self._insert_log_fragment(text, tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
+        self._schedule_click_target_refresh(delay_ms=100)
 
     def _switch_room_local(self, room: str, *, send_switch: bool = False) -> None:
         if (
@@ -2739,6 +2761,7 @@ class SSHChatGUI:
             self._insert_log_fragment(text, tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
+            self._schedule_click_target_refresh(delay_ms=120)
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
             self._schedule_room_list_refresh()
@@ -3231,6 +3254,7 @@ class SSHChatGUI:
         self.root.after(500, self._refresh_online_users)
         if sys.platform == "darwin":
             self.root.after(200, self._stabilize_initial_interaction)
+            self.root.after(450, self._stabilize_initial_interaction)
 
     def _connect_failed(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
@@ -3712,13 +3736,15 @@ class SSHChatGUI:
                 pass
             self._suggest_focus_job = None
 
-        self._destroy_suggestion_widgets()
+        had = self._destroy_suggestion_widgets()
         if pending is None:
             self._suggest_items = []
             try:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
+            if had:
+                self._schedule_click_target_refresh(delay_ms=80)
             return
 
         items = pending
@@ -3728,6 +3754,8 @@ class SSHChatGUI:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
+            if had:
+                self._schedule_click_target_refresh(delay_ms=80)
             return
 
         self._suggest_items = items
@@ -3748,6 +3776,7 @@ class SSHChatGUI:
         frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
+        self._schedule_click_target_refresh(delay_ms=80)
 
     def _queue_suggestion_ui(self, items: list[str] | None) -> None:
         self._suggest_ui_pending = items
