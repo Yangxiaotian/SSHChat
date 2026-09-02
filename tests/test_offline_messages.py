@@ -405,6 +405,41 @@ class OfflineLeaveFederationCatchUpTests(unittest.TestCase):
         server._fed_on_offline_pm("bob", "alice", "bye", "leave-recall-1", 10.0)
         self.assertEqual(server.offline_messages.count("bob"), 0)
 
+    def test_recall_tombstone_blocks_different_id_same_body(self) -> None:
+        """Partitioned peer may re-seed with a fresh id for the same text."""
+        server.offline_messages.leave(
+            "bob", "alice", "bye", leave_id="leave-recall-1", ts=10.0
+        )
+        self.assertIsNotNone(server.offline_messages.recall("alice", "bob", 1))
+        restored = server.offline_messages.leave(
+            "bob", "alice", "bye", leave_id="leave-recall-2", ts=10.0
+        )
+        self.assertIsNone(restored)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+        server._fed_on_offline_pm("bob", "alice", "bye", "leave-recall-2", 10.0)
+        self.assertEqual(server.offline_messages.count("bob"), 0)
+
+    def test_push_offline_clears_on_peer_up(self) -> None:
+        server.offline_messages.leave(
+            "bob", "alice", "sync clear", leave_id="leave-sync-1", ts=1.0
+        )
+        server.offline_messages.recall("alice", "bob", 1)
+        cleared: list[tuple[str, str]] = []
+
+        class FakeHub:
+            enabled = True
+
+            def clear_offline_pm(self, to, leave_id):
+                cleared.append((to, leave_id))
+                return True
+
+            def clear_file_leave(self, *a, **k):
+                return False
+
+        with patch.object(server.federation, "get_hub", return_value=FakeHub()):
+            server._federation_push_all_offline_clears()
+        self.assertEqual(cleared, [("bob", "leave-sync-1")])
+
     def test_file_clear_tombstone_blocks_fleave_reseed(self) -> None:
         server.offline_messages.leave(
             "bob",

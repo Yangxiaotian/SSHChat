@@ -5,7 +5,7 @@ package chat.ssh.sshchat
  * GUI clients collapse (same idea as sshchat_gui._is_secure_invite_noise).
  */
 object SecureInvite {
-    enum class Kind { DOWNLOAD, CANVAS, UPLOAD }
+    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD }
 
     data class Open(val kind: Kind, val url: String, val key: String)
 
@@ -22,17 +22,17 @@ object SecureInvite {
     }
 
     private val guiOpen = Regex(
-        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$""",
+        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$""",
         RegexOption.IGNORE_CASE,
     )
 
     private val bannerStart = Regex(
-        """^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)""",
+        """^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)""",
         RegexOption.IGNORE_CASE,
     )
     private val bannerEnd = Regex("""^=+\s*$""")
     private val urlLabel = Regex(
-        """(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
+        """(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
         RegexOption.IGNORE_CASE,
     )
     private val keyLine = Regex(
@@ -81,6 +81,7 @@ object SecureInvite {
         val kind = when (m.groupValues[1].lowercase()) {
             "download" -> Kind.DOWNLOAD
             "canvas" -> Kind.CANVAS
+            "piano" -> Kind.PIANO
             "upload" -> Kind.UPLOAD
             else -> return null
         }

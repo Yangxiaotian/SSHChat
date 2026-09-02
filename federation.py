@@ -188,6 +188,8 @@ class FederationHub:
         self.on_file_host_result = on_file_host_result
         # () -> public file base URL (empty if not externally reachable)
         self.get_local_file_public = get_local_file_public
+        # origin_node, announce_dict — room canvas advertise / conflict merge
+        self.on_canvas_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -754,6 +756,32 @@ class FederationHub:
                 return
         url = str(base_url or "").strip() or "-"
         line = f"fpub\t{self.node_id}\t{url}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def known_peer_ids(self) -> list[str]:
+        """Routable peer node ids (direct + learned), excluding self."""
+        ids = set(self._peers) | set(self._routes)
+        ids.discard(self.node_id)
+        return sorted(ids)
+
+    def sync_canvas_announce(self, announce: dict[str, Any]) -> None:
+        """Fan-out an open room-canvas advertisement (csync)."""
+        if not self.enabled or not self._peers:
+            return
+        if not isinstance(announce, dict):
+            return
+        room = str(announce.get("room") or "").strip()
+        sid = str(announce.get("session_id") or "").strip()
+        if not room or not sid:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(announce, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"csync\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -1768,6 +1796,36 @@ class FederationHub:
                     self.on_ratings(origin, rows)
                 except Exception as e:
                     print(f"federation: on_ratings error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "csync":
+            # csync\torigin\tb64json\tnonce
+            cparts = line.split("\t", 3)
+            if len(cparts) < 3:
+                return
+            if self._remember_seen(line):
+                return
+            origin, blob = cparts[1], cparts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            announce: dict[str, Any] = {}
+            try:
+                raw = base64.b64decode(blob.encode("ascii"))
+                parsed = json.loads(raw.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    announce = parsed
+            except Exception as e:
+                print(f"federation: csync decode error: {e!r}")
+                return
+            host = str(announce.get("host_node") or "").strip()
+            if host and host != self.node_id:
+                self._learn_route(host, peer_node)
+            if self.on_canvas_sync is not None:
+                try:
+                    self.on_canvas_sync(origin, announce)
+                except Exception as e:
+                    print(f"federation: on_canvas_sync error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gsync" and self.on_game_sync:

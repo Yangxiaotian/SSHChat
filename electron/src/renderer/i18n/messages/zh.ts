@@ -66,6 +66,8 @@ export const zhMessages = {
       fileTitle: '向当前房间发送文件（一键 /sendfile）',
       canvas: '画布',
       canvasTitle: '开启当前房间共享画布（一键 /canvas）',
+      piano: '钢琴',
+      pianoTitle: '开启当前房间共享钢琴（一键 /piano）',
       pasteHint: '也可直接粘贴/拖入图片或文件',
     },
     commands: {
@@ -78,6 +80,7 @@ export const zhMessages = {
       msg: '发送私聊',
       sendfile: '收发文件（当前房间 / 指定用户 / #房间）',
       canvas: '共享画布（当前房间 / 指定用户 / #房间）',
+      piano: '房间钢琴（当前房间 / 指定用户 / #房间）',
       leave: '查看/撤回未读留言',
       clear: '清空本地视图（当前房间）',
       game: '游戏命令',
@@ -334,6 +337,7 @@ export const zhMessages = {
   },
   secureLink: {
     canvasHint: '密钥已自动处理，点按钮即可在客户端内打开画布',
+    pianoHint: '密钥已自动处理，点按钮即可在客户端内打开钢琴',
     uploadHint: '密钥已自动处理，点按钮打开上传页并选择文件',
     downloadHint: '密钥已自动处理，点按钮打开预览/下载页',
     opening: '打开中…',
@@ -355,6 +359,12 @@ export const zhMessages = {
     authFailed: '密钥验证失败',
     badUrl: '画布网址无效',
     clearConfirm: '确定清空共享画布？（所有人都会清空）',
+  },
+  pianoPanel: {
+    title: '房间钢琴',
+    maximize: '最大化',
+    restore: '还原',
+    close: '关闭',
   },
   pasteUpload: {
     waiting: '正在准备发送 {name}…',

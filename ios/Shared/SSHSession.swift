@@ -15,7 +15,7 @@ actor SSHSession {
         port: Int,
         username: String,
         privateSeed: Data,
-        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void,
+        onLine: @escaping @MainActor @Sendable (_ line: String, _ serverBell: Bool) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onDisconnect: @escaping @Sendable (String?) -> Void
     ) async throws {
@@ -57,12 +57,14 @@ actor SSHSession {
                         switch chunk {
                         case .stdout(let bytes), .stderr(let bytes):
                             for line in lines.append(bytes) {
-                                Self.emitLine(line, onLine: onLine)
+                                // Await MainActor so /lib show lines stay in order (unstructured
+                                // Task { @MainActor } can reorder and orphan a [*] system row).
+                                await Self.emitLine(line, onLine: onLine)
                             }
                         }
                     }
                     if let rest = lines.finish() {
-                        Self.emitLine(rest, onLine: onLine)
+                        await Self.emitLine(rest, onLine: onLine)
                     }
                 }
                 onDisconnect(nil)
@@ -106,15 +108,17 @@ actor SSHSession {
 
     private static func emitLine(
         _ raw: String,
-        onLine: @escaping @Sendable (_ line: String, _ serverBell: Bool) -> Void
-    ) {
+        onLine: @escaping @MainActor @Sendable (_ line: String, _ serverBell: Bool) -> Void
+    ) async {
         // OSC / title sequences are BEL-terminated (`ESC ] … BEL`). Strip those first so
         // their BEL is not mistaken for client.py's peer-chat alert bell.
         let withoutOSC = stripOSC(raw)
         let serverBell = withoutOSC.contains("\u{0007}")
         let cleaned = cleanLine(withoutOSC)
         guard hasVisibleContent(cleaned) else { return }
-        onLine(cleaned, serverBell)
+        await MainActor.run {
+            onLine(cleaned, serverBell)
+        }
     }
 
     /// Remove ESC] … BEL (and ESC] … ST) operating-system commands.
@@ -136,6 +140,13 @@ actor SSHSession {
         return false
     }
 
+    /// Bare CSI after ESC/`?` was eaten. Params optional so `[K` (EL default) matches;
+    /// finals restricted so `[*]` / `[#room]` / `[OK]` are never stripped.
+    /// Negative lookahead keeps chat nicks like `[root]` (`[r` is a valid CSI final).
+    private static let bareCsiFragment = try! NSRegularExpression(
+        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\])"#
+    )
+
     static func cleanLine(_ raw: String) -> String {
         var s = raw.replacingOccurrences(of: "\r", with: "")
         s = s.replacingOccurrences(of: "\u{0007}", with: "") // bell
@@ -152,6 +163,10 @@ actor SSHSession {
             let range = NSRange(s.startIndex..., in: s)
             s = re.stringByReplacingMatches(in: s, range: range, withTemplate: "")
         }
+        // ESC fully lost: leftover `[2K` / `[K` / `[9;1H` stuck before chat tags.
+        s = bareCsiFragment.stringByReplacingMatches(
+            in: s, range: NSRange(s.startIndex..., in: s), withTemplate: ""
+        )
         s = s.replacingOccurrences(of: "\u{001B}", with: "")
         // Keep leading spaces — board padding / 楚河汉界 centering depends on them.
         while let last = s.last, last == "\n" || last == "\r" || last == " " || last == "\t" {

@@ -1,12 +1,18 @@
 import CryptoKit
 import Foundation
 import Security
+#if os(iOS)
 import UIKit
+#endif
 
 /// Ed25519 identity with Keychain + Documents backup (same file format as Android).
 enum DeviceKeyStore {
     static let durableName = "SSHChat-ed25519.identity"
-    private static let keychainService = "com.stdlib.SSHChat.identity"
+    #if os(watchOS)
+    private static let keychainService = "com.q267267275.SSHChat.watch.identity"
+    #else
+    private static let keychainService = "com.q267267275.SSHChat.identity"
+    #endif
     private static let keychainAccount = "ed25519"
 
     struct Keys {
@@ -38,8 +44,12 @@ enum DeviceKeyStore {
     static func createNew() -> Keys {
         let priv = Curve25519.Signing.PrivateKey()
         let seed = priv.rawRepresentation
+        #if os(watchOS)
+        let comment = "sshchat-watch"
+        #else
         let model = UIDevice.current.model.replacingOccurrences(of: " ", with: "-")
         let comment = "sshchat-ios@\(model)"
+        #endif
         let pubLine = formatOpenSshPublicKey(priv.publicKey, comment: comment)
         persistAll(seed: seed, pubLine: pubLine, comment: comment)
         return Keys(

@@ -41,30 +41,36 @@ class OfflineMessageStore:
         self._cache: dict[str, Any] | None = None
 
     def _empty_data(self) -> dict[str, Any]:
-        return {"version": 1, "mailboxes": {}, "cleared": {"pm": {}, "file": {}}}
+        return {"version": 1, "mailboxes": {}, "cleared": {"pm": {}, "file": {}, "content": {}}}
 
-    def _cleared_maps_locked(self) -> tuple[dict[str, float], dict[str, float]]:
+    def _cleared_maps_locked(
+        self,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
         assert self._cache is not None
         raw = self._cache.get("cleared")
         if not isinstance(raw, dict):
-            raw = {"pm": {}, "file": {}}
+            raw = {"pm": {}, "file": {}, "content": {}}
             self._cache["cleared"] = raw
         pm = raw.get("pm")
         fl = raw.get("file")
+        content = raw.get("content")
         if not isinstance(pm, dict):
             pm = {}
             raw["pm"] = pm
         if not isinstance(fl, dict):
             fl = {}
             raw["file"] = fl
-        return pm, fl  # type: ignore[return-value]
+        if not isinstance(content, dict):
+            content = {}
+            raw["content"] = content
+        return pm, fl, content  # type: ignore[return-value]
 
     def _prune_cleared_locked(self) -> bool:
         """Drop expired tombstones. Returns True if anything changed."""
         now = time.time()
-        pm, fl = self._cleared_maps_locked()
+        pm, fl, content = self._cleared_maps_locked()
         dirty = False
-        for bucket in (pm, fl):
+        for bucket in (pm, fl, content):
             for key, exp in list(bucket.items()):
                 try:
                     expiry = float(exp)
@@ -81,11 +87,53 @@ class OfflineMessageStore:
     def _cleared_key(recipient: str, item_id: str) -> str:
         return f"{_normalize_user(recipient)}\t{str(item_id or '').strip()}"
 
+    @staticmethod
+    def _content_cleared_key(
+        recipient: str, content_key: tuple[str, str, str, str]
+    ) -> str:
+        kind, sender, text, tid = content_key
+        return (
+            f"{_normalize_user(recipient)}\t{kind}\t{sender}\t{text}\t{tid}"
+        )
+
+    def _mark_cleared_content_locked(
+        self, recipient: str, content_key: tuple[str, str, str, str]
+    ) -> bool:
+        if not _normalize_user(recipient):
+            return False
+        _, _, content = self._cleared_maps_locked()
+        content[self._content_cleared_key(recipient, content_key)] = (
+            time.time() + self.cleared_ttl_sec
+        )
+        return True
+
+    def _is_cleared_content_locked(
+        self, recipient: str, content_key: tuple[str, str, str, str]
+    ) -> bool:
+        self._prune_cleared_locked()
+        _, _, content = self._cleared_maps_locked()
+        return self._content_cleared_key(recipient, content_key) in content
+
+    def _mark_entry_cleared_locked(
+        self, recipient: str, parsed: dict[str, Any]
+    ) -> None:
+        lid = str(parsed.get("id") or "").strip()
+        if lid:
+            self._mark_cleared_pm_locked(recipient, lid)
+        if (parsed.get("kind") or "pm") == "file":
+            meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+            tid = str(meta.get("transfer_id") or "").strip()
+            if tid:
+                self._mark_cleared_file_locked(recipient, tid)
+        self._mark_cleared_content_locked(
+            recipient, self._content_dedupe_key(parsed)
+        )
+
     def _mark_cleared_pm_locked(self, recipient: str, leave_id: str) -> bool:
         lid = str(leave_id or "").strip()
         if not _normalize_user(recipient) or not lid:
             return False
-        pm, _ = self._cleared_maps_locked()
+        pm, _, _ = self._cleared_maps_locked()
         pm[self._cleared_key(recipient, lid)] = time.time() + self.cleared_ttl_sec
         return True
 
@@ -93,7 +141,7 @@ class OfflineMessageStore:
         tid = str(transfer_id or "").strip()
         if not _normalize_user(recipient) or not tid:
             return False
-        _, fl = self._cleared_maps_locked()
+        _, fl, _ = self._cleared_maps_locked()
         fl[self._cleared_key(recipient, tid)] = time.time() + self.cleared_ttl_sec
         return True
 
@@ -102,7 +150,7 @@ class OfflineMessageStore:
         if not lid:
             return False
         self._prune_cleared_locked()
-        pm, _ = self._cleared_maps_locked()
+        pm, _, _ = self._cleared_maps_locked()
         return self._cleared_key(recipient, lid) in pm
 
     def _is_cleared_file_locked(self, recipient: str, transfer_id: str) -> bool:
@@ -110,7 +158,7 @@ class OfflineMessageStore:
         if not tid:
             return False
         self._prune_cleared_locked()
-        _, fl = self._cleared_maps_locked()
+        _, fl, _ = self._cleared_maps_locked()
         return self._cleared_key(recipient, tid) in fl
 
     def _ensure_loaded_locked(self) -> None:
@@ -128,7 +176,11 @@ class OfflineMessageStore:
         if not isinstance(mailboxes, dict):
             data = self._empty_data()
         if "cleared" not in data or not isinstance(data.get("cleared"), dict):
-            data["cleared"] = {"pm": {}, "file": {}}
+            data["cleared"] = {"pm": {}, "file": {}, "content": {}}
+        else:
+            cleared = data["cleared"]
+            if not isinstance(cleared.get("content"), dict):
+                cleared["content"] = {}
         self._cache = data
 
     def _save_locked(self) -> None:
@@ -244,6 +296,8 @@ class OfflineMessageStore:
             assert self._cache is not None
             # Reject federation catch-up after /leave recall or delivery.
             if self._is_cleared_pm_locked(key, lid):
+                return None
+            if self._is_cleared_content_locked(key, content_key):
                 return None
             if msg_kind == "file" and isinstance(meta, dict):
                 tid = str(meta.get("transfer_id") or "").strip()
@@ -406,9 +460,6 @@ class OfflineMessageStore:
                     continue
                 meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
                 if str(meta.get("transfer_id") or "").strip() == tid:
-                    lid = str(parsed.get("id") or "").strip()
-                    if lid:
-                        self._mark_cleared_pm_locked(key, lid)
                     removed.append(parsed)
                 else:
                     kept.append(item)
@@ -416,6 +467,8 @@ class OfflineMessageStore:
                 mailboxes[key] = kept
             else:
                 mailboxes.pop(key, None)
+            for parsed in removed:
+                self._mark_entry_cleared_locked(key, parsed)
             self._save_locked()
             return removed
 
@@ -529,14 +582,9 @@ class OfflineMessageStore:
                 mailboxes[to_key] = box
             else:
                 mailboxes.pop(to_key, None)
-            lid = str(removed.get("id") or "").strip()
-            if lid:
-                self._mark_cleared_pm_locked(to_key, lid)
-            if (removed.get("kind") or "pm") == "file":
-                meta = removed.get("meta") if isinstance(removed.get("meta"), dict) else {}
-                tid = str(meta.get("transfer_id") or "").strip()
-                if tid:
-                    self._mark_cleared_file_locked(to_key, tid)
+            parsed_removed = self._parse_entry(removed)
+            if parsed_removed:
+                self._mark_entry_cleared_locked(to_key, parsed_removed)
             self._save_locked()
             return removed
 
@@ -569,19 +617,40 @@ class OfflineMessageStore:
                     mailboxes[key] = box
                 else:
                     mailboxes.pop(key, None)
-                if parsed and (parsed.get("kind") or "pm") == "file":
-                    meta = (
-                        parsed.get("meta")
-                        if isinstance(parsed.get("meta"), dict)
-                        else {}
-                    )
-                    tid = str(meta.get("transfer_id") or "").strip()
-                    if tid:
-                        self._mark_cleared_file_locked(key, tid)
+                if parsed:
+                    self._mark_entry_cleared_locked(key, parsed)
                 self._save_locked()
                 return parsed
             self._save_locked()
             return None
+
+    def snapshot_cleared(self) -> list[dict[str, str]]:
+        """Active tombstones for federation clear catch-up."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            assert self._cache is not None
+            self._prune_cleared_locked()
+            pm, fl, _ = self._cleared_maps_locked()
+            out: list[dict[str, str]] = []
+            for key in pm:
+                parts = str(key).split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                to_key, leave_id = parts[0].strip(), parts[1].strip()
+                if not to_key or not leave_id:
+                    continue
+                out.append({"to": to_key, "kind": "pm", "id": leave_id})
+            for key in fl:
+                parts = str(key).split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                to_key, transfer_id = parts[0].strip(), parts[1].strip()
+                if not to_key or not transfer_id:
+                    continue
+                out.append(
+                    {"to": to_key, "kind": "file", "transfer_id": transfer_id}
+                )
+            return out
 
     def take_all(self, recipient: str) -> list[dict[str, Any]]:
         """Pop and return all pending messages for recipient (clears mailbox)."""
@@ -601,17 +670,6 @@ class OfflineMessageStore:
                 if parsed is None:
                     continue
                 out.append(parsed)
-                lid = str(parsed.get("id") or "").strip()
-                if lid:
-                    self._mark_cleared_pm_locked(key, lid)
-                if (parsed.get("kind") or "pm") == "file":
-                    meta = (
-                        parsed.get("meta")
-                        if isinstance(parsed.get("meta"), dict)
-                        else {}
-                    )
-                    tid = str(meta.get("transfer_id") or "").strip()
-                    if tid:
-                        self._mark_cleared_file_locked(key, tid)
+                self._mark_entry_cleared_locked(key, parsed)
             self._save_locked()
             return out

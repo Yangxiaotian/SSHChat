@@ -49,6 +49,7 @@ final class ChatViewModel: ObservableObject {
     @Published var photoItem: PhotosPickerItem?
     @Published var sendTarget: SendTarget = .currentRoom("default")
     @Published var onlineUsers: [String] = []
+    @Published var knownRooms: [String] = SendTargetStore.loadKnownRooms()
     @Published var showSendTargetPicker = false
 
     enum FileImportKind { case media, identity }
@@ -82,6 +83,8 @@ final class ChatViewModel: ObservableObject {
         let key: String
         /// Canvas opens full-screen; upload stays as a sheet.
         var isCanvas: Bool = false
+        /// Piano prefers landscape on phone (GarageBand-style split keyboard).
+        var allowLandscape: Bool = false
     }
 
     private static let chatFontKey = "chat_font_sp"
@@ -120,7 +123,47 @@ final class ChatViewModel: ObservableObject {
 
     func refreshOnlineUsers() {
         expectingNames = true
-        Task { try? await session.send("/names") }
+        Task {
+            try? await session.send("/names")
+            try? await session.send("/rooms")
+        }
+    }
+
+    private var completionUsers: [String] {
+        let me = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var seen = Set<String>()
+        var out: [String] = []
+        for nick in onlineUsers + SendTargetStore.loadRecentUsers() {
+            let n = nick.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !n.isEmpty, n.lowercased() != me else { continue }
+            guard seen.insert(n.lowercased()).inserted else { continue }
+            out.append(n)
+        }
+        return out
+    }
+
+    func refreshSuggestions() {
+        suggestions = draft.hasPrefix("/")
+            ? Array(CommandCompletions.completions(draft, rooms: knownRooms, users: completionUsers).prefix(12))
+            : []
+    }
+
+    func applySuggestion(_ chosen: String) {
+        let fill = chosen.hasSuffix(" ") ? chosen : "\(chosen) "
+        draft = fill
+        refreshSuggestions()
+    }
+
+    func insertSlash() {
+        draft += "/"
+        refreshSuggestions()
+    }
+
+    func applyTab() {
+        if let next = CommandCompletions.applyTab(draft, rooms: knownRooms, users: completionUsers) {
+            draft = next
+        }
+        refreshSuggestions()
     }
 
     func replyToPm(_ nick: String) {
@@ -158,28 +201,6 @@ final class ChatViewModel: ObservableObject {
         } catch {
             toast = "恢复失败: \(error.localizedDescription)"
         }
-    }
-
-    func refreshSuggestions() {
-        suggestions = draft.hasPrefix("/") ? Array(CommandCompletions.completions(draft).prefix(12)) : []
-    }
-
-    func applySuggestion(_ chosen: String) {
-        let fill = chosen.hasSuffix(" ") ? chosen : "\(chosen) "
-        draft = fill
-        refreshSuggestions()
-    }
-
-    func insertSlash() {
-        draft += "/"
-        refreshSuggestions()
-    }
-
-    func applyTab() {
-        if let next = CommandCompletions.applyTab(draft) {
-            draft = next
-        }
-        refreshSuggestions()
     }
 
     func connect(clearChat: Bool = true) {
@@ -221,9 +242,7 @@ final class ChatViewModel: ObservableObject {
                     username: user,
                     privateSeed: keys.privateSeed,
                     onLine: { [weak self] line, serverBell in
-                        Task { @MainActor in
-                            self?.handleIncoming(line, serverBell: serverBell)
-                        }
+                        self?.handleIncoming(line, serverBell: serverBell)
                     },
                     onStatus: { [weak self] s in
                         Task { @MainActor in
@@ -332,6 +351,7 @@ final class ChatViewModel: ObservableObject {
         if text == lastSendText && now.timeIntervalSince(lastSendAt) < 0.5 { return }
         lastSendText = text
         lastSendAt = now
+        if text.hasPrefix("/") { CommandUsage.record(text) }
         draft = ""
         suggestions = []
         let cmd = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -377,6 +397,28 @@ final class ChatViewModel: ObservableObject {
         guard connected else { toast = "请先连接"; return }
         appendText("[*] 正在创建共享画板…（/canvas）")
         Task { try? await session.send("/canvas") }
+    }
+
+    func startPiano() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 正在开启房间钢琴…（/piano）")
+        Task { try? await session.send("/piano") }
+    }
+
+    func sendSlashCommand(_ command: String) {
+        guard connected else { toast = "请先连接"; return }
+        let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        CommandUsage.record(cmd)
+        Task { try? await session.send(cmd) }
+    }
+
+    func openLibrary() {
+        sendSlashCommand("/library")
+    }
+
+    func openHelp() {
+        sendSlashCommand("/help")
     }
 
     func beginSendFile(_ url: URL) {
@@ -607,6 +649,8 @@ final class ChatViewModel: ObservableObject {
         if expectingNames, let names = ChatLineParsers.parseNames(stripped) {
             onlineUsers = names.members
             expectingNames = false
+            SendTargetStore.rememberRooms([names.room])
+            knownRooms = SendTargetStore.loadKnownRooms()
             if case .currentRoom = sendTarget {
                 sendTarget = .currentRoom(names.room)
                 SendTargetStore.saveCurrentRoom(names.room)
@@ -615,6 +659,7 @@ final class ChatViewModel: ObservableObject {
         }
         if let pm = ChatLineParsers.parsePm(stripped) {
             MessageAlert.playIfNeeded(for: stripped, myName: username, serverBell: serverBell)
+            SendTargetStore.rememberRecent(pm.from)
             appendPm(from: pm.from, body: pm.body)
             return
         }
@@ -641,6 +686,15 @@ final class ChatViewModel: ObservableObject {
                     url: open.url,
                     key: open.key,
                     isCanvas: true
+                )
+            case .piano:
+                appendText("[*] 打开房间钢琴…")
+                webInvite = WebInvitePayload(
+                    title: "房间钢琴",
+                    url: open.url,
+                    key: open.key,
+                    isCanvas: true,
+                    allowLandscape: true
                 )
             case .upload:
                 if let pending = pendingUpload {
@@ -710,6 +764,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func applyRoomFromServer(_ line: String) {
+        if let rooms = ChatLineParsers.parseRoomsList(line) {
+            SendTargetStore.rememberRooms(rooms)
+            knownRooms = SendTargetStore.loadKnownRooms()
+        }
         guard let room = ChatLineParsers.parseActiveRoom(line) else { return }
         if pendingUpload != nil {
             cancelUploadWait()
@@ -717,6 +775,7 @@ final class ChatViewModel: ObservableObject {
             status = "已切换房间，取消待发文件"
         }
         SendTargetStore.saveCurrentRoom(room)
+        knownRooms = SendTargetStore.loadKnownRooms()
         if case .currentRoom = sendTarget {
             sendTarget = .currentRoom(room)
             SendTargetStore.saveTarget(sendTarget)
@@ -871,7 +930,8 @@ struct ContentView: View {
                 title: invite.title,
                 url: invite.url,
                 key: invite.key,
-                startsMaximized: true
+                startsMaximized: true,
+                allowLandscape: invite.allowLandscape
             )
         }
         .sheet(item: Binding(
@@ -1039,29 +1099,26 @@ struct ContentView: View {
         case .pm(_, let from, let body, let time):
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .top, spacing: 0) {
-                    Button {
-                        model.replyToPm(from)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("私聊 · \(from)")
-                                .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
-                                .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
-                            Text(body)
-                                .font(.system(size: model.chatFont))
-                                .foregroundStyle(Color(white: 0.13))
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text("点按回复")
-                                .font(.system(size: max(10, model.chatFont - 1)))
-                                .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
-                                .underline()
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(red: 0.89, green: 0.95, blue: 0.99))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("私聊 · \(from)")
+                            .font(.system(size: max(10, model.chatFont - 1), weight: .semibold))
+                            .foregroundStyle(Color(red: 0.082, green: 0.396, blue: 0.753))
+                        Text(body)
+                            .font(.system(size: model.chatFont))
+                            .foregroundStyle(Color(white: 0.13))
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Text("点按回复")
+                            .font(.system(size: max(10, model.chatFont - 1)))
+                            .foregroundStyle(Color(red: 0.043, green: 0.341, blue: 0.816))
+                            .underline()
+                            .onTapGesture { model.replyToPm(from) }
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 0.89, green: 0.95, blue: 0.99))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: .leading)
                     Spacer(minLength: 36)
                 }
@@ -1116,6 +1173,7 @@ struct ContentView: View {
                     .foregroundStyle(Color(white: 0.12))
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(mine ? Color(red: 0.584, green: 0.925, blue: 0.412) : Color.white)
@@ -1237,10 +1295,28 @@ struct ContentView: View {
                     .autocorrectionDisabled()
                     .foregroundStyle(Color(white: 0.12))
                     .tint(Color(red: 0.106, green: 0.369, blue: 0.125))
-                    .padding(.horizontal, 12)
+                    .padding(.leading, 12)
+                    .padding(.trailing, model.draft.isEmpty ? 12 : 32)
                     .padding(.vertical, 10)
                     .background(Color(white: 0.95))
                     .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .overlay(alignment: .trailing) {
+                        if !model.draft.isEmpty {
+                            Button {
+                                model.draft = ""
+                                model.refreshSuggestions()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Color(white: 0.55))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 4)
+                            .accessibilityLabel("清除输入")
+                        }
+                    }
                     .focused($draftFocused)
                     .disabled(!model.connected)
                     .onChange(of: model.draft) { _, _ in model.refreshSuggestions() }
@@ -1248,12 +1324,26 @@ struct ContentView: View {
                     .onChange(of: draftFocused) { _, focused in
                         if focused { showPlusPanel = false }
                     }
+                    .onKeyPress(.tab) {
+                        guard model.draft.hasPrefix("/") else { return .ignored }
+                        model.applyTab()
+                        return .handled
+                    }
 
-                Button("/") { model.insertSlash() }
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(Color(white: 0.2))
-                    .frame(width: 36, height: 40)
-                    .disabled(!model.connected)
+                Button {
+                    model.insertSlash()
+                } label: {
+                    Text("/")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Color(white: 0.2))
+                        .frame(width: 40, height: 40)
+                        .background(Color(white: 0.92))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.connected)
+                .opacity(model.connected ? 1 : 0.35)
 
                 Button("Tab") { model.applyTab() }
                     .font(.system(size: 13, weight: .medium))
@@ -1302,6 +1392,18 @@ struct ContentView: View {
             plusCell(title: "画板", system: "paintbrush.fill") {
                 showPlusPanel = false
                 model.startCanvas()
+            }
+            plusCell(title: "钢琴", system: "pianokeys") {
+                showPlusPanel = false
+                model.startPiano()
+            }
+            plusCell(title: "图书馆", system: "books.vertical.fill") {
+                showPlusPanel = false
+                model.openLibrary()
+            }
+            plusCell(title: "帮助", system: "questionmark.circle.fill") {
+                showPlusPanel = false
+                model.openHelp()
             }
             plusCell(title: "清屏", system: "trash.fill", alwaysEnabled: true) {
                 showPlusPanel = false

@@ -1961,6 +1961,10 @@ html, body, #root {
   background: linear-gradient(120deg, rgba(206, 145, 120, 0.16), rgba(78, 201, 176, 0.08));
 }
 
+.secure-link-card.kind-piano {
+  background: linear-gradient(120deg, rgba(180, 120, 220, 0.16), rgba(78, 201, 176, 0.08));
+}
+
 .secure-link-icon {
   width: 34px;
   height: 34px;

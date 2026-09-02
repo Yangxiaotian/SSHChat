@@ -493,11 +493,16 @@ class TestWrapOutputLines(unittest.TestCase):
         line = "[*] " + ("测" * 30) + "\n"
         parts = library.wrap_output_lines(line)
         self.assertGreater(len(parts), 1)
-        joined = "".join(p.rstrip("\n") for p in parts)
-        self.assertEqual(joined, line.rstrip("\n"))
+        content = "".join(
+            p.rstrip("\n")[4:] if p.rstrip("\n").startswith("[*] ") else p.rstrip("\n")
+            for p in parts
+        )
+        self.assertEqual(content, "测" * 30)
         for part in parts:
+            p = part.rstrip("\n")
+            self.assertTrue(p.startswith("[*] "))
             self.assertLessEqual(
-                len(part.rstrip("\n").encode("utf-8")),
+                len(p.encode("utf-8")),
                 library.LIBRARY_WRAP_BYTES,
             )
 

@@ -169,6 +169,70 @@ ish_ensure_py_apk_deps() {
   exit 1
 }
 
+# /piano needs MP3 samples (~2MB). Repo may ship piano_samples/; otherwise fetch Wscats/piano once.
+ensure_piano_samples() {
+  local dest=$1
+  local n=0
+  if [[ -d "$dest" ]]; then
+    n=$(find "$dest" -maxdepth 1 -name '*.mp3' 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  if [[ "${n:-0}" -ge 50 ]]; then
+    return 0
+  fi
+  echo "info: piano_samples/ missing or incomplete; fetching from Wscats/piano (~2MB)..." >&2
+  if is_ish; then
+    echo "info: iSH: piano download needs network; on slow links this can take a few minutes" >&2
+  fi
+  mkdir -p "$dest"
+  local tmp ok=0
+  tmp=$(mktemp -d)
+  local url=${SSHCHAT_PIANO_SAMPLES_URL:-https://github.com/Wscats/piano/archive/refs/heads/master.tar.gz}
+  local timeout=${SSHCHAT_PIANO_DOWNLOAD_TIMEOUT:-600}
+  if command -v curl &>/dev/null; then
+    if curl -fsSL --connect-timeout 30 --max-time "$timeout" "$url" \
+      | tar xz -C "$dest" --strip-components=4 piano-master/public/samples/piano 2>/dev/null; then
+      ok=1
+    fi
+  elif command -v wget &>/dev/null; then
+    if wget -qO- "$url" 2>/dev/null \
+      | tar xz -C "$dest" --strip-components=4 piano-master/public/samples/piano 2>/dev/null; then
+      ok=1
+    fi
+  fi
+  if [[ "$ok" -eq 0 ]] && command -v git &>/dev/null; then
+    if git clone --depth 1 --quiet https://github.com/Wscats/piano.git "$tmp/piano" 2>/dev/null \
+      && [[ -d "$tmp/piano/public/samples/piano" ]]; then
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      cp -a "$tmp/piano/public/samples/piano/." "$dest/"
+      ok=1
+    fi
+  fi
+  rm -rf "$tmp"
+  n=$(find "$dest" -maxdepth 1 -name '*.mp3' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$ok" -eq 1 && "${n:-0}" -ge 50 ]]; then
+    echo "info: piano_samples ready ($n MP3 files)" >&2
+    return 0
+  fi
+  echo "error: could not obtain piano_samples (need GitHub or place piano_samples/ in repo)" >&2
+  if is_ish; then
+    echo "error: iSH: ensure apk add curl wget git, or copy piano_samples/ to $dest before deploy" >&2
+  fi
+  return 1
+}
+
+copy_piano_samples_dir() {
+  local src=$1 dest=$2
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  # BusyBox cp on iSH fake FS: avoid cp -a directory quirks; file-by-file is safer.
+  if is_ish; then
+    cp -r "$src/." "$dest/"
+  else
+    cp -a "$src/." "$dest/"
+  fi
+}
+
 # Install python3 (+venv) when missing — mirrors the bash apk bootstrap for Alpine/iSH.
 ensure_python3() {
   if command -v python3 &>/dev/null; then
@@ -441,11 +505,20 @@ apply_data_plane_permissions() {
     fi
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$u:$g" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -d "$PREFIX/piano_samples" ]]; then
+    chown -R "$u:$CLIENT_GROUP" "$PREFIX/piano_samples"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      find "$PREFIX/piano_samples" -type d -exec chmod 755 {} + 2>/dev/null || true
+      find "$PREFIX/piano_samples" -type f -exec chmod 644 {} + 2>/dev/null || true
+    else
+      chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/piano_samples"
+    fi
   fi
   if [[ -f "$PREFIX/user_locales.json" ]]; then
     chown "$u:$g" "$PREFIX/user_locales.json"
@@ -587,12 +660,16 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -d "$PREFIX/piano_samples" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/piano_samples"
+    chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/piano_samples"
   fi
   if [[ -f "$PREFIX/user_locales.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/user_locales.json"
@@ -895,9 +972,10 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
+ensure_piano_samples "$SCRIPT_DIR/piano_samples" || exit 1
 
 chmod +x \
   "$SCRIPT_DIR/chat.sh" \
@@ -999,11 +1077,15 @@ copy_app_file() {
 }
 for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
   library.py dict_lookup.py session_store.py federation.py offline_messages.py \
-  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py i18n.py locale_store.py; do
+  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py i18n.py locale_store.py; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
 rm -rf "$PREFIX/locales"
 cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
+copy_piano_samples_dir "$SCRIPT_DIR/piano_samples" "$PREFIX/piano_samples"
+if [[ -d "$SCRIPT_DIR/piano_static" ]]; then
+  copy_piano_samples_dir "$SCRIPT_DIR/piano_static" "$PREFIX/piano_static"
+fi
 for _f in chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
@@ -1087,6 +1169,11 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
 else
   echo "info: skipped venv recreate / pip install"
 fi
+
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import piano_sharing, piano_http" || {
+  echo "error: piano modules failed to import (need piano_sharing.py, piano_http.py, piano_samples/)" >&2
+  exit 1
+}
 
 umask 022
 if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then

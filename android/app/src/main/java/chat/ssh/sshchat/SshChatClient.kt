@@ -170,6 +170,10 @@ class SshChatClient(
     companion object {
         private val CSI = Regex("""\u001B\[[0-9;?]*[ -/]*[@-~]""")
         private val OSC = Regex("""\u001B\][^\u0007]*\u0007""")
+        private val MANGLED_CSI = Regex("""\?\[[0-9;?]*[A-Za-z@-~]""")
+        /** ESC fully lost: leftover `[2K` / `[K` / `[9;1H` (not `[*]` / `[#room]` / `[root]`). */
+        private val BARE_CSI_FRAGMENT =
+            Regex("""\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\])""")
 
         fun errText(e: Throwable): String {
             val msg = e.message?.trim().orEmpty()
@@ -183,6 +187,8 @@ class SshChatClient(
             var s = raw.replace("\r", "")
             s = CSI.replace(s, "")
             s = OSC.replace(s, "")
+            s = MANGLED_CSI.replace(s, "")
+            s = BARE_CSI_FRAGMENT.replace(s, "")
             s = s.replace("\u001B", "")
             // Keep leading spaces — board padding / 楚河汉界 centering depends on them.
             return s.trimEnd()

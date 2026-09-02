@@ -7,47 +7,67 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		10030E44C864EA0BB49A8B9E /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = A48E2370BD79D9768B6145C4 /* NIO */; };
+		105BDB1C0887E0005F78DF2F /* Utf8LineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */; };
+		118EB1B55E60E7A580CEA209 /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A444AB9A07153781D9B379A7 /* SendTarget.swift */; };
 		11F5CC89B5B6C9D89FE1D79D /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = A08C4E92EBFEEC5E68BF8338 /* NIO */; };
+		1E085B8F1FEA160FB0992774 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B83D7B2716C6BA3941551A /* AppConfig.swift */; };
 		25648748AA6143FECF4EE327 /* SecureUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 559396D782E192802F9A441C /* SecureUpload.swift */; };
+		2A7F104EC14D7544E01DEA5F /* SSHChatWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A68C58969B3B6A439DAB63 /* SSHChatWatchApp.swift */; };
+		2D2528AC0CCFDF2388043C1C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A6E5B6078F5A131C28D76C70 /* Assets.xcassets */; };
 		33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */; };
 		4CBE4F0B4355BB146A92F215 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */; };
-		5BF3FF2AB7A2FDF229DC96A4 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F61DA43C55F21565952BCA3 /* SSHSession.swift */; };
-		5E0AFB179A7265C6895357F9 /* DeviceKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22BD7B5CD5B7AD933D8031A2 /* DeviceKeyStore.swift */; };
+		5A063F3F4338A79777477C18 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */; };
+		5BC66FF52939DC1BDD423200 /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A444AB9A07153781D9B379A7 /* SendTarget.swift */; };
 		604B556FE597621857CB97E4 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 5EABC10D09920FD873E2E322 /* Citadel */; };
-		6D8C2BDF171F8707B91D4BC1 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3103F546C3513D85EBDEAFC /* AppConfig.swift */; };
+		605BB39E76EFB52381AF7128 /* WatchChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465728BED464780173D6E5F6 /* WatchChatViewModel.swift */; };
+		67FAC2431E1B0C67ED073E61 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D83E0298EA4557B016E588C /* SSHSession.swift */; };
 		75099855702B2A4E70101994 /* WebInviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62D55F063B5A6E13A717437 /* WebInviteView.swift */; };
+		78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */; };
+		7F8E26B8F07B6BE64D4C9A82 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 3556A8FC852FF2B36C09A77F /* Citadel */; };
 		8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */; };
-		8391A408EA4A0149C68D4D66 /* Utf8LineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */; };
+		8D09FA9939D41D8053AB29AB /* DeviceKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */; };
 		8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */; };
 		97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */; };
 		9996DD63FE8CB7193177B88A /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = B245092BF3D02215B8999CDE /* NIOSSH */; };
-		9C35480F9106C8DDB6A7118F /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92176ADAA13D9659017E1D65 /* SendTarget.swift */; };
 		9DDB3D80244E190346BBAE96 /* SecureInvite.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */; };
+		9EB6F7EE4CF2418362FA2020 /* Utf8LineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */; };
 		A144E0E8EA6E802EB015A427 /* SecureDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90E177203159780DB095D76 /* SecureDownload.swift */; };
 		B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4659214F0C54010180B570ED /* ContentView.swift */; };
 		B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = F19D61F982D7132AB0491F6A /* MessageAlert.swift */; };
 		B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41AF976063059AD5181A7784 /* CameraPicker.swift */; };
 		B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5382B5859F78E00B2C7A222 /* MediaMime.swift */; };
+		BD67B539F8441967582D8123 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D83E0298EA4557B016E588C /* SSHSession.swift */; };
+		CB4028DA1D7F208B9739ADFD /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = A6426611A081C6DD05ADEA57 /* NIOSSH */; };
 		D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */; };
 		DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64243685BD8B9E650897F969 /* SSHChatApp.swift */; };
+		F1657897BC6C5B81115E37B6 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B83D7B2716C6BA3941551A /* AppConfig.swift */; };
+		FEE29724CA2C26941522EF17 /* WatchRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84F2A253B334D625853D2A30 /* WatchRootView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCompletions.swift; sourceTree = "<group>"; };
 		0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyNoise.swift; sourceTree = "<group>"; };
-		1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
-		22BD7B5CD5B7AD933D8031A2 /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
+		256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
+		2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
 		41AF976063059AD5181A7784 /* CameraPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPicker.swift; sourceTree = "<group>"; };
+		465728BED464780173D6E5F6 /* WatchChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchChatViewModel.swift; sourceTree = "<group>"; };
 		4659214F0C54010180B570ED /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		4FBF3187F5EE15DADE9A5F11 /* Citadel */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Citadel; path = Packages/Citadel; sourceTree = SOURCE_ROOT; };
+		51A68C58969B3B6A439DAB63 /* SSHChatWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHChatWatchApp.swift; sourceTree = "<group>"; };
 		559396D782E192802F9A441C /* SecureUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureUpload.swift; sourceTree = "<group>"; };
+		5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		64243685BD8B9E650897F969 /* SSHChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHChatApp.swift; sourceTree = "<group>"; };
-		6F61DA43C55F21565952BCA3 /* SSHSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHSession.swift; sourceTree = "<group>"; };
-		92176ADAA13D9659017E1D65 /* SendTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTarget.swift; sourceTree = "<group>"; };
+		7D83E0298EA4557B016E588C /* SSHSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHSession.swift; sourceTree = "<group>"; };
+		84F2A253B334D625853D2A30 /* WatchRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootView.swift; sourceTree = "<group>"; };
+		A444AB9A07153781D9B379A7 /* SendTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTarget.swift; sourceTree = "<group>"; };
 		A62D55F063B5A6E13A717437 /* WebInviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInviteView.swift; sourceTree = "<group>"; };
+		A6E5B6078F5A131C28D76C70 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTargetPickerView.swift; sourceTree = "<group>"; };
 		B5382B5859F78E00B2C7A222 /* MediaMime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaMime.swift; sourceTree = "<group>"; };
 		B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C2B83D7B2716C6BA3941551A /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		C3F4144E1C8DE0CDD8431E22 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C90E177203159780DB095D76 /* SecureDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDownload.swift; sourceTree = "<group>"; };
 		CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInvite.swift; sourceTree = "<group>"; };
 		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -55,10 +75,20 @@
 		E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		F0CCD510639ECD134A68FF28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F19D61F982D7132AB0491F6A /* MessageAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAlert.swift; sourceTree = "<group>"; };
-		F3103F546C3513D85EBDEAFC /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		FDBE96CE86836353F34959AD /* SSHChatWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChatWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		846FB4BAD554A6A9D97A83A9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7F8E26B8F07B6BE64D4C9A82 /* Citadel in Frameworks */,
+				CB4028DA1D7F208B9739ADFD /* NIOSSH in Frameworks */,
+				10030E44C864EA0BB49A8B9E /* NIO in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DA6BDC3AE2DD2F86D88F972D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -76,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				D37C08A205C190F1E87758CD /* SSHChat.app */,
+				FDBE96CE86836353F34959AD /* SSHChatWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -84,20 +115,33 @@
 			isa = PBXGroup;
 			children = (
 				F5F469122AC4BF388FA86024 /* Packages */,
+				AD91A917BB49D0554D504416 /* Shared */,
 				999087DF1AF8E60525F751F2 /* SSHChat */,
+				857B4ECC9C809EAF18411B4A /* SSHChatWatch */,
 				1F6B2754CE2EE4855076BDC7 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		857B4ECC9C809EAF18411B4A /* SSHChatWatch */ = {
+			isa = PBXGroup;
+			children = (
+				A6E5B6078F5A131C28D76C70 /* Assets.xcassets */,
+				C3F4144E1C8DE0CDD8431E22 /* Info.plist */,
+				51A68C58969B3B6A439DAB63 /* SSHChatWatchApp.swift */,
+				465728BED464780173D6E5F6 /* WatchChatViewModel.swift */,
+				84F2A253B334D625853D2A30 /* WatchRootView.swift */,
+			);
+			path = SSHChatWatch;
 			sourceTree = "<group>";
 		};
 		999087DF1AF8E60525F751F2 /* SSHChat */ = {
 			isa = PBXGroup;
 			children = (
-				F3103F546C3513D85EBDEAFC /* AppConfig.swift */,
+				5A1943FC2D1D4073A10DBB29 /* AppDelegate.swift */,
 				B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */,
 				41AF976063059AD5181A7784 /* CameraPicker.swift */,
 				02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */,
 				4659214F0C54010180B570ED /* ContentView.swift */,
-				22BD7B5CD5B7AD933D8031A2 /* DeviceKeyStore.swift */,
 				F0CCD510639ECD134A68FF28 /* Info.plist */,
 				B5382B5859F78E00B2C7A222 /* MediaMime.swift */,
 				D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */,
@@ -106,15 +150,24 @@
 				C90E177203159780DB095D76 /* SecureDownload.swift */,
 				CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */,
 				559396D782E192802F9A441C /* SecureUpload.swift */,
-				92176ADAA13D9659017E1D65 /* SendTarget.swift */,
 				B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */,
 				64243685BD8B9E650897F969 /* SSHChatApp.swift */,
-				6F61DA43C55F21565952BCA3 /* SSHSession.swift */,
-				1C2B7427EA11369222FBCC1C /* Utf8LineBuffer.swift */,
 				E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */,
 				A62D55F063B5A6E13A717437 /* WebInviteView.swift */,
 			);
 			path = SSHChat;
+			sourceTree = "<group>";
+		};
+		AD91A917BB49D0554D504416 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				C2B83D7B2716C6BA3941551A /* AppConfig.swift */,
+				2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */,
+				A444AB9A07153781D9B379A7 /* SendTarget.swift */,
+				7D83E0298EA4557B016E588C /* SSHSession.swift */,
+				256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		F5F469122AC4BF388FA86024 /* Packages */ = {
@@ -150,6 +203,28 @@
 			productReference = D37C08A205C190F1E87758CD /* SSHChat.app */;
 			productType = "com.apple.product-type.application";
 		};
+		FC5597775EEA761FDD9AE7DC /* SSHChatWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5020608EF5220A86CEEF125F /* Build configuration list for PBXNativeTarget "SSHChatWatch" */;
+			buildPhases = (
+				70D1581BFC72BDF28F8452FB /* Sources */,
+				3B881DD190DC945ACC4F9C38 /* Resources */,
+				846FB4BAD554A6A9D97A83A9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SSHChatWatch;
+			packageProductDependencies = (
+				3556A8FC852FF2B36C09A77F /* Citadel */,
+				A6426611A081C6DD05ADEA57 /* NIOSSH */,
+				A48E2370BD79D9768B6145C4 /* NIO */,
+			);
+			productName = SSHChatWatch;
+			productReference = FDBE96CE86836353F34959AD /* SSHChatWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -160,6 +235,10 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					739AF9DBED3E5B04161507A4 = {
+						ProvisioningStyle = Automatic;
+					};
+					FC5597775EEA761FDD9AE7DC = {
+						DevelopmentTeam = 5NS64773VG;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -184,11 +263,20 @@
 			projectRoot = "";
 			targets = (
 				739AF9DBED3E5B04161507A4 /* SSHChat */,
+				FC5597775EEA761FDD9AE7DC /* SSHChatWatch */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		3B881DD190DC945ACC4F9C38 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2D2528AC0CCFDF2388043C1C /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		4CC2161C76DF3DEA78C588CE /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -200,27 +288,43 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		70D1581BFC72BDF28F8452FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1E085B8F1FEA160FB0992774 /* AppConfig.swift in Sources */,
+				8D09FA9939D41D8053AB29AB /* DeviceKeyStore.swift in Sources */,
+				2A7F104EC14D7544E01DEA5F /* SSHChatWatchApp.swift in Sources */,
+				67FAC2431E1B0C67ED073E61 /* SSHSession.swift in Sources */,
+				5BC66FF52939DC1BDD423200 /* SendTarget.swift in Sources */,
+				9EB6F7EE4CF2418362FA2020 /* Utf8LineBuffer.swift in Sources */,
+				605BB39E76EFB52381AF7128 /* WatchChatViewModel.swift in Sources */,
+				FEE29724CA2C26941522EF17 /* WatchRootView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F66A2A08AE1C5A15859D2504 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6D8C2BDF171F8707B91D4BC1 /* AppConfig.swift in Sources */,
+				F1657897BC6C5B81115E37B6 /* AppConfig.swift in Sources */,
+				5A063F3F4338A79777477C18 /* AppDelegate.swift in Sources */,
 				B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */,
 				97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */,
 				B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */,
-				5E0AFB179A7265C6895357F9 /* DeviceKeyStore.swift in Sources */,
+				78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */,
 				B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */,
 				8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */,
 				B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */,
 				33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */,
 				DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */,
-				5BF3FF2AB7A2FDF229DC96A4 /* SSHSession.swift in Sources */,
+				BD67B539F8441967582D8123 /* SSHSession.swift in Sources */,
 				A144E0E8EA6E802EB015A427 /* SecureDownload.swift in Sources */,
 				9DDB3D80244E190346BBAE96 /* SecureInvite.swift in Sources */,
 				25648748AA6143FECF4EE327 /* SecureUpload.swift in Sources */,
-				9C35480F9106C8DDB6A7118F /* SendTarget.swift in Sources */,
+				118EB1B55E60E7A580CEA209 /* SendTarget.swift in Sources */,
 				D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */,
-				8391A408EA4A0149C68D4D66 /* Utf8LineBuffer.swift in Sources */,
+				105BDB1C0887E0005F78DF2F /* Utf8LineBuffer.swift in Sources */,
 				8D8D3736959523F9AFEC5535 /* VoiceRecorder.swift in Sources */,
 				75099855702B2A4E70101994 /* WebInviteView.swift in Sources */,
 			);
@@ -235,25 +339,68 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				CURRENT_PROJECT_VERSION = 28;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
+				MARKETING_VERSION = 0.3.15;
+				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
+		};
+		201B7EF29FE066DF8A26A37B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 28;
+				DEVELOPMENT_TEAM = 5NS64773VG;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SSHChatWatch/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
+				MARKETING_VERSION = 0.3.15;
+				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat.watchkitapp;
+				PRODUCT_NAME = SSHChatWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		7C963079EAD6FEDC042849CE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 28;
+				DEVELOPMENT_TEAM = 5NS64773VG;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SSHChatWatch/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
+				MARKETING_VERSION = 0.3.15;
+				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat.watchkitapp;
+				PRODUCT_NAME = SSHChatWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
 		};
 		92BFA3B4CA2940E51951DBF1 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -261,20 +408,21 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
-				DEVELOPMENT_TEAM = JVKAWTMQZ4;
+				CURRENT_PROJECT_VERSION = 28;
+				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stdlib.SSHChat;
+				MARKETING_VERSION = 0.3.15;
+				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -337,11 +485,10 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Debug;
 		};
@@ -394,17 +541,25 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		5020608EF5220A86CEEF125F /* Build configuration list for PBXNativeTarget "SSHChatWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7C963079EAD6FEDC042849CE /* Debug */,
+				201B7EF29FE066DF8A26A37B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		5E5AC03C680BAC2B88C2E1E7 /* Build configuration list for PBXProject "SSHChat" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -452,6 +607,10 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		3556A8FC852FF2B36C09A77F /* Citadel */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Citadel;
+		};
 		5EABC10D09920FD873E2E322 /* Citadel */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Citadel;
@@ -460,6 +619,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AE34050D193A4E8B26D15432 /* XCRemoteSwiftPackageReference "swift-nio" */;
 			productName = NIO;
+		};
+		A48E2370BD79D9768B6145C4 /* NIO */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AE34050D193A4E8B26D15432 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIO;
+		};
+		A6426611A081C6DD05ADEA57 /* NIOSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F9C893BB2B0A084C4B6D3FF2 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;
+			productName = NIOSSH;
 		};
 		B245092BF3D02215B8999CDE /* NIOSSH */ = {
 			isa = XCSwiftPackageProductDependency;

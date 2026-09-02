@@ -31,6 +31,7 @@ import i18n
 import library
 import file_sharing
 import file_http_server
+import piano_sharing
 from locale_store import LocaleStore
 from offline_messages import OfflineMessageStore
 from ratings import GAME_CONFIGS, GameRatingStore, is_rated_game, localize_level
@@ -169,7 +170,8 @@ ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 SESSION_RESUME_TTL_SECONDS = int(
-    os.environ.get("SSHCHAT_SESSION_RESUME_TTL_SECONDS", "86400")
+    # 0 = never expire. Default 30d so "last room" survives typical reconnects.
+    os.environ.get("SSHCHAT_SESSION_RESUME_TTL_SECONDS", "2592000")
 )
 
 # VT100: clear display + cursor home; trailing \n so line-oriented clients flush it.
@@ -573,6 +575,19 @@ def _remember_session_locked(name: str, joined_rooms: list[str], current_room: s
     }
 
 
+def _sync_live_session_locked(conn) -> None:
+    """Persist last active room while still online (so reconnect hits the last room)."""
+    info = clients.get(conn)
+    if not info:
+        return
+    _remember_session_locked(
+        info["name"],
+        list(info.get("rooms") or ()),
+        info.get("current_room", DEFAULT_ROOM),
+    )
+    _mark_sessions_dirty()
+
+
 def _load_recent_session_locked(name: str) -> dict[str, object] | None:
     key = _nick_key(name)
     if not key:
@@ -681,6 +696,18 @@ def _replace_conn_refs(value, old_conn, new_conn):
                 changed = True
         return value, changed
 
+    slots = getattr(value, "__slots__", None)
+    if slots:
+        for attr in slots if isinstance(slots, (list, tuple)) else (slots,):
+            if not hasattr(value, attr):
+                continue
+            cur = getattr(value, attr)
+            new_cur, cur_changed = _replace_conn_refs(cur, old_conn, new_conn)
+            if cur_changed:
+                setattr(value, attr, new_cur)
+                changed = True
+        return value, changed
+
     return value, False
 
 
@@ -693,9 +720,12 @@ def _game_seat_conn_by_name(game, nickname: str):
     players = getattr(game, "players", None)
     if isinstance(players, list):
         for item in players:
-            if not isinstance(item, tuple) or len(item) < 2:
+            if isinstance(item, tuple) and len(item) >= 2:
+                conn, name = item[0], item[1]
+            elif hasattr(item, "conn") and hasattr(item, "name"):
+                conn, name = item.conn, item.name
+            else:
                 continue
-            conn, name = item[0], item[1]
             if isinstance(name, str) and name.strip().lower() == key:
                 return conn
 
@@ -1257,6 +1287,41 @@ def _federation_seed_file_leave(
         hub.broadcast_file_leave(recipient, sender, notice)
     except Exception as e:
         print(f"federation: broadcast_file_leave failed: {e!r}")
+
+
+def _federation_push_all_offline_clears() -> None:
+    """Re-broadcast tombstones so a partitioned peer drops recalled/delivered leaves."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    try:
+        cleared = offline_messages.snapshot_cleared()
+    except Exception as e:
+        print(f"federation: snapshot offline clears failed: {e!r}")
+        return
+    pushed_pm = 0
+    pushed_file = 0
+    for item in cleared:
+        to_name = str(item.get("to") or "").strip()
+        if not to_name:
+            continue
+        kind = str(item.get("kind") or "pm")
+        try:
+            if kind == "file":
+                tid = str(item.get("transfer_id") or "").strip()
+                if tid and hub.clear_file_leave(to_name, tid):
+                    pushed_file += 1
+            else:
+                leave_id = str(item.get("id") or "").strip()
+                if leave_id and hub.clear_offline_pm(to_name, leave_id):
+                    pushed_pm += 1
+        except Exception as e:
+            print(f"federation: catch-up clear failed: {e!r}")
+    if pushed_pm or pushed_file:
+        print(
+            f"federation: catch-up offline clears "
+            f"pm={pushed_pm} file={pushed_file}"
+        )
 
 
 def _federation_push_all_offline_leaves() -> None:
@@ -2467,6 +2532,8 @@ def _fed_on_file_host_request(
                         "keys": dict(session.keys),
                         "title": session.title,
                         "expires": session.expires,
+                        "conflict_token": session.conflict_token,
+                        "rev": session.rev,
                     }
                     print(
                         f"[Canvas] Hosted federated canvas for {requester}: "
@@ -2531,6 +2598,7 @@ def _fed_on_file_host_request(
             if not session_id or not nick:
                 reply["error"] = "invalid session_id/nick"
             else:
+                canvas_sharing.canvas_store.rotate_keys_if_due(session_id)
                 token, key, err = canvas_sharing.canvas_store.add_participant(
                     session_id, nick
                 )
@@ -2559,6 +2627,50 @@ def _fed_on_file_host_request(
             hub.reply_file_host(requester, req_id, reply)
         except Exception as e:
             print(f"federation: reply_file_host (canvas_join) failed: {e!r}")
+        return
+    if mode == "canvas_query":
+        reply = {
+            "ok": True,
+            "found": False,
+            "req_id": req_id,
+            "mode": "canvas_query",
+        }
+        try:
+            room_name = str(payload.get("room") or "").strip()
+            session = (
+                canvas_sharing.canvas_store.find_open_for_room(room_name)
+                if room_name
+                else None
+            )
+            if session is not None:
+                ann = canvas_sharing.canvas_store.announce_dict(session)
+                if not ann.get("host_node"):
+                    ann["host_node"] = hub.node_id
+                if not ann.get("base_url"):
+                    if file_http is not None:
+                        ann["base_url"] = file_http.get_base_url().rstrip("/")
+                if ann.get("base_url"):
+                    reply = {
+                        "ok": True,
+                        "found": True,
+                        "req_id": req_id,
+                        "mode": "canvas_query",
+                        **ann,
+                    }
+        except Exception as e:
+            print(f"[Canvas] federated query error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "found": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_query",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_query) failed: {e!r}")
         return
 
     reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
@@ -2729,6 +2841,11 @@ def _federation_request_file_host(
             "mode": "canvas_join",
             "session_id": session_id,
             "nick": nick,
+        }
+    elif mode == "canvas_query":
+        payload = {
+            "mode": "canvas_query",
+            "room": room,
         }
     else:
         payload = {
@@ -3715,7 +3832,15 @@ def _deliver_canvas_invites(
     """Privately deliver each participant their canvas URL + key.
 
     If *only* is set, deliver solely to that nick (case-insensitive).
+    Rotates keys when due so re-entry uses fresh keys; open tickets stay valid.
     """
+    # Host-owned rotation; no-op for federated mirrors / disabled interval.
+    if canvas_sharing.canvas_store.rotate_keys_if_due(session.session_id):
+        with canvas_sharing.canvas_store.lock:
+            live = canvas_sharing.canvas_store.sessions.get(session.session_id)
+            if live is not None:
+                session.keys = dict(live.keys)
+                session.keys_rotated_at = live.keys_rotated_at
     base_url = (session.host_base_url or "").strip()
     if not base_url:
         if file_http is None:
@@ -3801,6 +3926,218 @@ def _ensure_canvas_participant(
     return True, ""
 
 
+def _canvas_host_reachable(host: str) -> bool:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return False
+    host = (host or "").strip()
+    if not host:
+        return False
+    if host == hub.node_id:
+        return True
+    return host in hub.known_peer_ids()
+
+
+def _federation_adopt_remote_canvas(announce: dict) -> Optional[canvas_sharing.CanvasSession]:
+    """Install a remote room board mirror from query/csync metadata."""
+    session_id = str(announce.get("session_id") or "").strip()
+    room = str(announce.get("room") or "").strip() or None
+    host_node = str(announce.get("host_node") or "").strip()
+    base_url = str(announce.get("base_url") or "").strip().rstrip("/")
+    if not session_id or not room or not host_node or not base_url:
+        return None
+    tokens = announce.get("tokens") or {}
+    keys = announce.get("keys") or {}
+    if not isinstance(tokens, dict):
+        tokens = {}
+    if not isinstance(keys, dict):
+        keys = {}
+    try:
+        expires = float(announce.get("expires") or 0)
+    except (TypeError, ValueError):
+        expires = 0.0
+    try:
+        rev = int(announce.get("rev") or 0)
+    except (TypeError, ValueError):
+        rev = 0
+    return canvas_sharing.canvas_store.register_remote_session(
+        session_id=session_id,
+        creator=str(announce.get("creator") or "").strip() or "remote",
+        participants=list(tokens.keys()),
+        room=room,
+        tokens={str(k): str(v) for k, v in tokens.items()},
+        keys={str(k): str(v) for k, v in keys.items()},
+        host_node=host_node,
+        host_base_url=base_url,
+        title=str(announce.get("title") or ""),
+        expires=expires,
+        conflict_token=str(announce.get("conflict_token") or ""),
+        rev=rev,
+    )
+
+
+def _federation_query_room_canvas(room: str) -> Optional[dict]:
+    """Ask peers whether an open board already exists for *room*."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return None
+    room = (room or "").strip()
+    if not room:
+        return None
+    for peer in hub.known_peer_ids():
+        try:
+            reply = _federation_request_file_host(
+                peer,
+                "",
+                [],
+                room,
+                mode="canvas_query",
+                timeout=8.0,
+            )
+        except Exception as e:
+            print(f"[Canvas] query {peer} failed: {e!r}")
+            continue
+        if reply.get("ok") and reply.get("found") and reply.get("session_id"):
+            if not reply.get("host_node"):
+                reply["host_node"] = peer
+            return reply
+    return None
+
+
+def _federation_push_canvas_announce(
+    session: canvas_sharing.CanvasSession,
+) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    if not session.room or session.closed or session.parked or session.host_node:
+        return
+    ann = canvas_sharing.canvas_store.announce_dict(session)
+    ann["host_node"] = hub.node_id
+    if file_http is not None:
+        ann["base_url"] = file_http.get_base_url().rstrip("/")
+    if not ann.get("base_url"):
+        return
+    try:
+        hub.sync_canvas_announce(ann)
+    except Exception as e:
+        print(f"[Canvas] csync push failed: {e!r}")
+
+
+def _federation_push_all_canvas_announces() -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    for ann in canvas_sharing.canvas_store.list_open_room_announces(
+        local_node_id=hub.node_id
+    ):
+        if not ann.get("base_url") and file_http is not None:
+            ann["base_url"] = file_http.get_base_url().rstrip("/")
+        if not ann.get("base_url"):
+            continue
+        try:
+            hub.sync_canvas_announce(ann)
+        except Exception as e:
+            print(f"[Canvas] csync fanout failed: {e!r}")
+
+
+def _fed_on_canvas_sync(origin: str, announce: dict) -> None:
+    """Merge peer room-canvas ads; park loser like federated games."""
+    if not isinstance(announce, dict):
+        return
+    room = str(announce.get("room") or "").strip()
+    sid = str(announce.get("session_id") or "").strip()
+    remote_host = str(announce.get("host_node") or origin or "").strip()
+    base_url = str(announce.get("base_url") or "").strip().rstrip("/")
+    remote_tok = str(announce.get("conflict_token") or sid).strip()
+    if not room or not sid or not remote_host or not base_url:
+        return
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    if remote_host == local_id:
+        return
+
+    local = canvas_sharing.canvas_store.find_open_for_room(room)
+    if local is None:
+        _federation_adopt_remote_canvas(announce)
+        return
+    if local.session_id == sid:
+        return
+
+    local_auth = (local.host_node or local_id).strip()
+    local_tok = (local.conflict_token or local.session_id).strip()
+    win_auth, _win_tok = _game_conflict_winner(
+        local_auth, local_tok, remote_host, remote_tok
+    )
+    if win_auth == local_auth:
+        if not local.host_node:
+            _federation_push_canvas_announce(local)
+        return
+
+    # Remote wins: park local fork (keep scene), adopt remote board.
+    loser = local_auth
+    if not local.host_node:
+        canvas_sharing.canvas_store.park_session(local.session_id)
+    else:
+        with canvas_sharing.canvas_store.lock:
+            live = canvas_sharing.canvas_store.sessions.get(local.session_id)
+            if live is not None:
+                live.closed = True
+                canvas_sharing.canvas_store._save()
+    adopted = _federation_adopt_remote_canvas(announce)
+    if adopted is None:
+        return
+    notice = (
+        f"[*] 联邦画板冲突：#{room} 同时存在多块画板，已启用节点 "
+        f"{remote_host} 的画板；节点 {loser} 上的画板已暂存。"
+        f"联邦断开后可恢复暂存画板；请重新 /canvas 获取最新密钥。\n"
+    )
+    broadcast_room(room, notice.encode("utf-8"))
+
+
+def _fed_handle_unreachable_canvas_authority(down_peer: str = "") -> None:
+    """When a canvas host drops, promote any parked local room board."""
+    down_peer = (down_peer or "").strip()
+    hub = federation.get_hub()
+    local_id = hub.node_id if hub is not None else _local_node_id()
+    restored: list[tuple[str, canvas_sharing.CanvasSession]] = []
+    with canvas_sharing.canvas_store.lock:
+        rooms = {
+            s.room
+            for s in canvas_sharing.canvas_store.sessions.values()
+            if s.room and not s.closed
+        }
+    for room in rooms:
+        active = canvas_sharing.canvas_store.find_open_for_room(room)
+        if active is None:
+            # Idle room with only a parked local fork.
+            parked = canvas_sharing.canvas_store.find_parked_for_room(room)
+            if parked is None:
+                continue
+            promoted = canvas_sharing.canvas_store.promote_parked_for_room(room)
+            if promoted is not None:
+                restored.append((room, promoted))
+            continue
+        host = (active.host_node or "").strip()
+        if not host or host == local_id:
+            continue
+        if down_peer and host != down_peer:
+            continue
+        if _canvas_host_reachable(host):
+            continue
+        promoted = canvas_sharing.canvas_store.promote_parked_for_room(room)
+        if promoted is None:
+            continue
+        restored.append((room, promoted))
+    for room, session in restored:
+        notice = (
+            f"[*] 联邦画板宿主不可达，已恢复本节点暂存的 #{room} 画板。"
+            f"请重新 /canvas 获取密钥。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+        _federation_push_canvas_announce(session)
+
+
 def _create_canvas_via_federation_proxy(
     conn,
     sender: str,
@@ -3867,6 +4204,8 @@ def _create_canvas_via_federation_proxy(
         host_base_url=base_url,
         title=str(hosted.get("title") or ""),
         expires=expires,
+        conflict_token=str(hosted.get("conflict_token") or ""),
+        rev=int(hosted.get("rev") or 0) if isinstance(hosted.get("rev"), (int, float)) else 0,
     )
     send_line(
         conn,
@@ -3921,6 +4260,11 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
             )
             send_line(
                 conn,
+                "[*] Room board content persists until /canvas close; keys rotate periodically "
+                "(open sessions keep working; re-entry needs the latest key).\n",
+            )
+            send_line(
+                conn,
                 "[*] Open the URL in a browser, enter the key, then draw; strokes sync live.\n",
             )
         else:
@@ -3937,6 +4281,11 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
             send_line(
                 conn,
                 "[*] 房间已有画板时，再发 /canvas（或点画板）会加入已有画板并给你发邀请。\n",
+            )
+            send_line(
+                conn,
+                "[*] 房间画板内容会一直保留（直到 /canvas close）；密钥会定期更换，"
+                "已打开的画板不受影响，重新进入需用最新密钥。\n",
             )
             send_line(
                 conn,
@@ -4022,6 +4371,43 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
                 )
                 _deliver_canvas_invites(existing, only=sender)
                 return
+            # Federation already linked: join peer's board instead of forking.
+            remote = _federation_query_room_canvas(room_name)
+            if remote is not None:
+                adopted = _federation_adopt_remote_canvas(remote)
+                if adopted is not None:
+                    ok, err = _ensure_canvas_participant(adopted, sender)
+                    if not ok:
+                        send_line(conn, f"[*] 加入联邦画布失败：{err}\n")
+                        return
+                    send_line(
+                        conn,
+                        f"[*] 已加入联邦节点上的房间 #{room_name} 画板并发送邀请。\n",
+                    )
+                    _deliver_canvas_invites(adopted, only=sender)
+                    return
+            parked = canvas_sharing.canvas_store.find_parked_for_room(room_name)
+            if parked is not None:
+                promoted = canvas_sharing.canvas_store.promote_parked_for_room(
+                    room_name
+                )
+                if promoted is not None:
+                    ok, err = _ensure_canvas_participant(promoted, sender)
+                    if not ok:
+                        send_line(conn, f"[*] 恢复暂存画布失败：{err}\n")
+                        return
+                    send_line(
+                        conn,
+                        f"[*] 已恢复本节点暂存的房间 #{room_name} 画板并发送邀请。\n",
+                    )
+                    _deliver_canvas_invites(promoted, only=sender)
+                    _federation_push_canvas_announce(promoted)
+                    return
+        else:
+            # Replace room board; keep disk history only if previously closed.
+            old = canvas_sharing.canvas_store.find_open_for_room(room_name)
+            if old is not None:
+                canvas_sharing.canvas_store.close_session(old.session_id, old.creator)
     else:
         target_lower = target.lower()
         with lock:
@@ -4069,6 +4455,273 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         send_line(conn, f"[*] 已与 {recipients[-1]} 创建私密画布。\n")
 
     _deliver_canvas_invites(session)
+    if room_name and session is not None and not session.host_node:
+        _federation_push_canvas_announce(session)
+
+
+def _piano_invite_message(
+    *,
+    creator: str,
+    url: str,
+    key: str,
+    room: Optional[str],
+    title: str = "",
+) -> str:
+    where = f"房间 #{room}" if room else "私密钢琴"
+    title_line = f"[*] 标题: {title}\n" if title else ""
+    return (
+        f"[*] ========== 房间钢琴 ==========\n"
+        f"[*] 发起人: {creator}\n"
+        f"[*] 范围: {where}\n"
+        f"{title_line}"
+        f"[*]\n"
+        f"[*] 钢琴网址:\n"
+        f"[*] {url}\n"
+        f"[*]\n"
+        f"[*] 访问密钥: {key}\n"
+        f"[*]\n"
+        f"[*] 说明:\n"
+        f"[*] 1. 打开网址，在页面里输入上面的密钥\n"
+        f"[*] 2. 密钥不在网址里；每人的网址和密钥都不同\n"
+        f"[*] 3. 解锁后可用键盘演奏，同房间其他人会听到\n"
+        f"[*] 4. 电脑白键 Z→M、A→'、1→= 连续排列；黑键 Q→P 等，琴键上标按键。手机三行分段。\n"
+        f"[*] 5. 图形客户端会折叠成按钮，可一键打开\n"
+        f"[*] =====================================\n"
+        f"[*] gui-open piano {url} {key}\n"
+    )
+
+
+def _deliver_piano_invites(
+    session: piano_sharing.PianoSession,
+    *,
+    only: Optional[str] = None,
+) -> None:
+    if file_http is None:
+        return
+    base_url = file_http.get_base_url().rstrip("/")
+    hub = federation.get_hub()
+    only_key = (only or "").strip().lower()
+    for participant, token in session.tokens.items():
+        if only_key and participant.lower() != only_key:
+            continue
+        key = session.keys.get(participant) or ""
+        url = f"{base_url}/piano/{token}"
+        message = _piano_invite_message(
+            creator=session.creator,
+            url=url,
+            key=key,
+            room=session.room,
+            title=session.title,
+        )
+        recipient_lower = participant.lower()
+        delivered = False
+        with lock:
+            for c, info in clients.items():
+                if info["name"].lower() != recipient_lower:
+                    continue
+                try:
+                    send_line(c, message)
+                    delivered = True
+                except Exception as e:
+                    print(f"[Piano] Failed to notify {participant}: {e}")
+        if (
+            not delivered
+            and hub is not None
+            and hub.enabled
+            and hub.has_remote_user(participant)
+        ):
+            try:
+                hub.send_pm(participant, session.creator, message)
+            except Exception as e:
+                print(f"[Piano] Federated invite failed for {participant}: {e}")
+
+
+def _ensure_piano_participant(
+    session: piano_sharing.PianoSession, nick: str
+) -> Tuple[bool, str]:
+    nick = (nick or "").strip()
+    if not nick:
+        return False, "无效昵称"
+    for existing in session.tokens:
+        if existing.lower() == nick.lower():
+            return True, ""
+    token, key, err = piano_sharing.piano_store.add_participant(
+        session.session_id, nick
+    )
+    if err or not token:
+        return False, err or "加入失败"
+    session.tokens[nick] = token
+    session.keys[nick] = key or ""
+    return True, ""
+
+
+def _handle_piano(conn, sender: str, payload: str) -> None:
+    """Handle /piano — shared room piano (URL + separate key)."""
+    if file_http is None:
+        send_line(conn, "[*] 钢琴功能依赖文件网页服务，当前未启用。\n")
+        return
+
+    raw = payload[len("/piano") :].strip()
+
+    if raw.lower() in ("help", "?", "帮助"):
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(conn, "[*] Usage:\n")
+            send_line(conn, "[*]   /piano            - room piano for the current room\n")
+            send_line(conn, "[*]   /piano #<room>    - piano for a specific room\n")
+            send_line(conn, "[*]   /piano <nick>     - private piano with an online user\n")
+            send_line(conn, "[*]   /piano close      - creator closes the current room piano\n")
+            send_line(conn, "[*]   /piano new        - force a new piano even if the room already has one\n")
+            send_line(
+                conn,
+                "[*] Desktop: consecutive whites Z→M, A→', 1→=; blacks Q→P/`/numpad. Phone: 3 rows.\n",
+            )
+            send_line(
+                conn,
+                "[*] If the room already has a piano, /piano joins it and re-sends your invite.\n",
+            )
+        else:
+            send_line(conn, "[*] 用法：\n")
+            send_line(conn, "[*]   /piano            - 当前房间共享钢琴\n")
+            send_line(conn, "[*]   /piano #<房间>    - 指定房间共享钢琴\n")
+            send_line(conn, "[*]   /piano <昵称>     - 与某人私密钢琴\n")
+            send_line(conn, "[*]   /piano close      - 发起人关闭当前房间钢琴\n")
+            send_line(conn, "[*]   /piano new        - 强制新开（即使房间已有）\n")
+            send_line(
+                conn,
+                "[*] 电脑白键 Z→M、A→'、1→= 连续排列；黑键 Q→P 等。手机三行分段。\n",
+            )
+            send_line(
+                conn,
+                "[*] 房间已有钢琴时，再发 /piano 会加入已有钢琴并给你发邀请。\n",
+            )
+        return
+
+    parts = raw.split()
+    target = parts[0].strip() if parts else ""
+    force_new = False
+    if target.lower() in ("new", "新建"):
+        force_new = True
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+    if target.lower() in ("close", "关闭", "end"):
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+        session = piano_sharing.piano_store.find_open_for_room(room_name)
+        if session is None:
+            send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的钢琴。\n")
+            return
+        ok, err = piano_sharing.piano_store.close_session(session.session_id, sender)
+        if not ok:
+            send_line(conn, f"[*] {err}\n")
+            return
+        send_line(conn, f"[*] 已关闭房间 #{room_name} 的共享钢琴。\n")
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 关闭了共享钢琴。\n".encode("utf-8"),
+        )
+        return
+
+    recipients: list[str] = []
+    room_name: Optional[str] = None
+
+    if not target:
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+
+    if room_name is not None:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+            for c in rooms[room_name]:
+                if c in clients:
+                    recipients.append(clients[c]["name"])
+
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled:
+            seen = {n.lower() for n in recipients}
+            for remote_name in hub.names_in_room(room_name):
+                rk = remote_name.lower()
+                if rk not in seen:
+                    recipients.append(remote_name)
+                    seen.add(rk)
+
+        if len({n.lower() for n in recipients}) < 1:
+            send_line(conn, f"[*] 房间 #{room_name} 里没有人。\n")
+            return
+
+        if not force_new:
+            existing = piano_sharing.piano_store.find_open_for_room(room_name)
+            if existing is not None:
+                ok, err = _ensure_piano_participant(existing, sender)
+                if not ok:
+                    send_line(conn, f"[*] 加入已有钢琴失败：{err}\n")
+                    return
+                send_line(
+                    conn,
+                    f"[*] 房间 #{room_name} 已有共享钢琴；正在把你加入并发送邀请。"
+                    f"（强制新开用 /piano new）\n",
+                )
+                _deliver_piano_invites(existing, only=sender)
+                return
+        else:
+            old = piano_sharing.piano_store.find_open_for_room(room_name)
+            if old is not None:
+                piano_sharing.piano_store.close_session(old.session_id, old.creator)
+    else:
+        target_lower = target.lower()
+        with lock:
+            online = [
+                info["name"]
+                for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        if not online:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled and hub.has_remote_user(target):
+                online = [target]
+        if not online:
+            send_line(conn, f"[*] 用户 {target} 不在线。\n")
+            return
+        if target_lower == sender.lower():
+            send_line(conn, "[*] 私密钢琴请指定另一位在线用户。\n")
+            return
+        recipients = [sender, online[0]]
+
+    try:
+        session = piano_sharing.piano_store.create_session(
+            creator=sender,
+            participants=recipients,
+            room=room_name,
+        )
+    except Exception as e:
+        print(f"[Piano] create failed: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建钢琴失败，请稍后重试。\n")
+        return
+
+    if room_name:
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 开启了共享钢琴（请查看私信中的网址与密钥）。\n".encode(
+                "utf-8"
+            ),
+        )
+    else:
+        send_line(conn, f"[*] 已与 {recipients[-1]} 创建私密钢琴。\n")
+
+    _deliver_piano_invites(session)
 
 
 def _handle_sendfile(conn, sender: str, payload: str) -> None:
@@ -5429,6 +6082,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             except Exception as e:
                 print(f"federation: peer-up file public sync error: {e!r}")
             try:
+                _federation_push_all_offline_clears()
+            except Exception as e:
+                print(f"federation: peer-up offline clear sync error: {e!r}")
+            try:
                 _federation_push_all_offline_leaves()
             except Exception as e:
                 print(f"federation: peer-up offline leave sync error: {e!r}")
@@ -5436,6 +6093,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_sync_ratings(rating_store.export_entries())
             except Exception as e:
                 print(f"federation: peer-up ratings sync error: {e!r}")
+            try:
+                _federation_push_all_canvas_announces()
+            except Exception as e:
+                print(f"federation: peer-up canvas catch-up error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -5449,6 +6110,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             _fed_handle_unreachable_game_authority(peer_node)
         except Exception as e:
             print(f"federation: peer-down game park/restore error: {e!r}")
+        try:
+            _fed_handle_unreachable_canvas_authority(peer_node)
+        except Exception as e:
+            print(f"federation: peer-down canvas park/restore error: {e!r}")
     else:
         return
     broadcast_local_notice(text)
@@ -5627,6 +6292,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
     _fed_hub.on_offline_pm = _fed_on_offline_pm
+    _fed_hub.on_canvas_sync = _fed_on_canvas_sync
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _fed_hub.on_ratings = _fed_on_ratings
     _fed_hub.get_local_ratings = rating_store.export_entries
@@ -5634,6 +6300,10 @@ def _ensure_federation_hub() -> None:
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    try:
+        _federation_push_all_offline_clears()
+    except Exception as e:
+        print(f"federation: initial offline clear sync error: {e!r}")
     try:
         _federation_push_all_offline_leaves()
     except Exception as e:
@@ -5856,6 +6526,7 @@ def handle_command(conn, payload: str) -> None:
                     room_owners[new_room] = conn
                 newly_joined = True
             clients[conn]["current_room"] = new_room
+            _sync_live_session_locked(conn)
 
         if newly_joined:
             broadcast_room(
@@ -5910,6 +6581,7 @@ def handle_command(conn, payload: str) -> None:
                 send_line(conn, f"[*] Already active in #{target_room}\n")
                 return
             clients[conn]["current_room"] = target_room
+            _sync_live_session_locked(conn)
         hub = federation.get_hub()
         if hub is not None and hub.enabled:
             hub.notify_switch(name, target_room)
@@ -6008,6 +6680,7 @@ def handle_command(conn, payload: str) -> None:
             if active == target_room:
                 switched_to = sorted(joined)[0]
                 clients[conn]["current_room"] = switched_to
+            _sync_live_session_locked(conn)
         if game_bcast:
             broadcast_game(target_room, game_bcast)
         hub = federation.get_hub()
@@ -6176,6 +6849,10 @@ def handle_command(conn, payload: str) -> None:
 
     if cmd == "/canvas" or cmd == "/board":
         _handle_canvas(conn, name, payload)
+        return
+
+    if cmd == "/piano":
+        _handle_piano(conn, name, payload)
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -6733,7 +7410,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /leave /part /announce /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -6846,6 +7523,7 @@ def run_server() -> int:
                         try:
                             file_sharing.file_transfer_store.cleanup_expired()
                             canvas_sharing.canvas_store.cleanup_expired()
+                            piano_sharing.piano_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

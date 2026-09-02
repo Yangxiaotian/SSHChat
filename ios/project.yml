@@ -3,13 +3,12 @@ options:
   bundleIdPrefix: chat.ssh
   deploymentTarget:
     iOS: "17.0"
+    watchOS: "10.0"
   xcodeVersion: "15.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    TARGETED_DEVICE_FAMILY: "1,2"
-    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
 packages:
   Citadel:
     path: Packages/Citadel
@@ -25,23 +24,25 @@ targets:
     platform: iOS
     sources:
       - SSHChat
+      - Shared
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.stdlib.SSHChat
+        PRODUCT_BUNDLE_IDENTIFIER: com.q267267275.SSHChat
         PRODUCT_NAME: SSHChat
-        MARKETING_VERSION: "0.3.6"
-        CURRENT_PROJECT_VERSION: "19"
+        MARKETING_VERSION: "0.3.15"
+        CURRENT_PROJECT_VERSION: "28"
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
-        # stdlib@foxmail.com Personal Team
-        DEVELOPMENT_TEAM: 6Q9L8CDXSY
+        # 267267275@qq.com Personal Team
+        DEVELOPMENT_TEAM: 5NS64773VG
         CODE_SIGN_IDENTITY: "Apple Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     dependencies:
       - package: Citadel
         product: Citadel
@@ -49,16 +50,22 @@ targets:
         product: NIOSSH
       - package: swift-nio
         product: NIO
+      # Optional companion: build scheme SSHChatWatch after installing watchOS platform.
+      # Re-enable embed when shipping a paired iPhone+Watch archive:
+      # - target: SSHChatWatch
+      #   embed: true
     info:
       path: SSHChat/Info.plist
       properties:
         CFBundleDisplayName: SSHChat
-        CFBundleShortVersionString: "0.3.6"
-        CFBundleVersion: "19"
+        CFBundleShortVersionString: "0.3.15"
+        CFBundleVersion: "28"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities: [armv7]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -69,3 +76,42 @@ targets:
         NSLocalNetworkUsageDescription: SSHChat 通过 SSH 连接聊天服务器。
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+
+  SSHChatWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - SSHChatWatch
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.q267267275.SSHChat.watchkitapp
+        PRODUCT_NAME: SSHChatWatch
+        MARKETING_VERSION: "0.3.15"
+        CURRENT_PROJECT_VERSION: "28"
+        INFOPLIST_KEY_CFBundleDisplayName: SSHChat
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 5NS64773VG
+        CODE_SIGN_IDENTITY: "Apple Development"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "4"
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+    dependencies:
+      - package: Citadel
+        product: Citadel
+      - package: swift-nio-ssh
+        product: NIOSSH
+      - package: swift-nio
+        product: NIO
+    info:
+      path: SSHChatWatch/Info.plist
+      properties:
+        CFBundleDisplayName: SSHChat
+        CFBundleShortVersionString: "0.3.15"
+        CFBundleVersion: "28"
+        # Independent Watch MVP: omit WKCompanionAppBundleIdentifier so XcodeGen
+        # does not auto-embed into the iPhone target (needs watchOS SDK to build).
+        WKRunsIndependentlyOfCompanionApp: true
+        NSLocalNetworkUsageDescription: SSHChat Watch 通过 SSH 连接聊天服务器。
+        NSMicrophoneUsageDescription: SSHChat Watch 需要麦克风以听写发送消息。

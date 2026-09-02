@@ -67,7 +67,7 @@ declare global {
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
       analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
       openSecureWebSession: (payload: {
-        kind: 'canvas' | 'upload' | 'download';
+        kind: 'canvas' | 'piano' | 'upload' | 'download';
         url: string;
         key: string;
       }) => Promise<{ ok: boolean; error?: string }>;
@@ -115,6 +115,8 @@ interface ChatState {
   libraryView: LibraryViewState;
   canvasSession: { url: string; key: string } | null;
   canvasMaximized: boolean;
+  pianoSession: { url: string; key: string } | null;
+  pianoMaximized: boolean;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -153,6 +155,9 @@ interface ChatState {
   openCanvas: (session: { url: string; key: string }) => void;
   closeCanvas: () => void;
   setCanvasMaximized: (value: boolean) => void;
+  openPiano: (session: { url: string; key: string }) => void;
+  closePiano: () => void;
+  setPianoMaximized: (value: boolean) => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -181,6 +186,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   libraryView: emptyLibraryViewState(),
   canvasSession: null,
   canvasMaximized: false,
+  pianoSession: null,
+  pianoMaximized: false,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -347,6 +354,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     users: [],
     canvasSession: null,
     canvasMaximized: false,
+    pianoSession: null,
+    pianoMaximized: false,
   }),
 
   setUsers: (users) => set({ users }),
@@ -386,9 +395,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
-  openCanvas: (session) => set({ canvasSession: session, canvasMaximized: true }),
+  openCanvas: (session) => set({ canvasSession: session, canvasMaximized: true, pianoSession: null, pianoMaximized: false }),
   closeCanvas: () => set({ canvasSession: null, canvasMaximized: false }),
   setCanvasMaximized: (value) => set({ canvasMaximized: value }),
+  openPiano: (session) => set({ pianoSession: session, pianoMaximized: true, canvasSession: null, canvasMaximized: false }),
+  closePiano: () => set({ pianoSession: null, pianoMaximized: false }),
+  setPianoMaximized: (value) => set({ pianoMaximized: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

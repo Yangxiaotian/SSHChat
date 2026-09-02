@@ -17,6 +17,7 @@ English version: [docs/en/deploy-ish.md](docs/en/deploy-ish.md)
 | Cloudflare | **默认关闭**：官方 `cloudflared` 无 i686 包 |
 | PDF 库 | **不装 pymupdf**；图书馆 PDF 走 `pypdf` |
 | 依赖 | venv 使用 `--system-site-packages`，复用 apk 的 `py3-lxml`（避免源码编译） |
+| `/piano` | 需 `piano_samples/`（约 2MB）；仓库未带时 deploy 会从 GitHub 自动下载 |
 | 耗时 | 首次建 venv / pip 可能要 **十几分钟**，属正常；再次部署若依赖已齐会复用 venv |
 
 局域网文件页默认形如：`http://手机IP:8443`（需 `--no-cloudflare`，一般已自动关闭）。
@@ -242,6 +243,18 @@ chmod -R a+rX /opt/sshchat/venv
 ### 7. 手机休眠后服务停了
 
 iSH 在后台可能被系统挂起。保持 iSH 前台、接电，或按需重开 App 后再 `rc-service sshchat start`。这是 iOS 限制，不是 SSHChat 独有。
+
+### 8. 重启后连不上 / `ModuleNotFoundError: piano_http`
+
+`/piano` 需要 `piano_sharing.py`、`piano_http.py` 和 `piano_samples/` **一起**部署。只复制 `server.py` 会导致服务起不来、12345 无监听。
+
+请用完整 deploy：
+
+```bash
+./deploy.sh --keep-env --no-cloudflare --no-file-https
+```
+
+若仓库里没有 `piano_samples/`，脚本会从 GitHub 自动下载约 2MB 采样（iSH 需能访问 GitHub；慢网可能数分钟）。建议 `apk add curl wget git`。下载失败时，把 `piano_samples/` 目录拷到 `~/SSHChat/` 再 deploy。
 
 ---
 

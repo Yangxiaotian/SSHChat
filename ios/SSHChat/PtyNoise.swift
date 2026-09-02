@@ -9,8 +9,8 @@ enum PtyNoise {
         if t.isEmpty { return true }
 
         // Real chat/system lines always carry a bracket tag — never drop those.
-        // Keeps [#room] / [*] / [user] / [OK] visible even if prompt echo heuristics misfire.
-        if t.contains("[#") || t.hasPrefix("[*]") || t.hasPrefix("[OK]") || t.hasPrefix("[ERROR]")
+        // `contains("[*]")` covers CSI crumbs like `[K[*] 9 …` (hasPrefix("[*]") alone misses those).
+        if t.contains("[#") || t.contains("[*]") || t.hasPrefix("[OK]") || t.hasPrefix("[ERROR]")
             || t.hasPrefix("[INFO]") || t.hasPrefix("[+]") || t.hasPrefix("[-]") || t.hasPrefix("[!]")
         {
             return false

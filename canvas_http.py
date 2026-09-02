@@ -604,13 +604,19 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
                     applyingRemote = true;
                     try {{
+                        // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
+                        // Files must be registered before image elements or peers see placeholders.
+                        const remoteFileMap = data.files || {{}};
+                        const fileList = Object.values(remoteFileMap).filter(
+                            (f) => f && typeof f === 'object' && f.dataURL
+                        );
+                        if (fileList.length && api.addFiles) {{
+                            try {{ api.addFiles(fileList); }} catch (_) {{}}
+                        }}
                         api.updateScene({{
                             elements: nextEls,
                             ...remoteUpdateOpts,
                         }});
-                        if (data.files && Object.keys(data.files).length && api.addFiles) {{
-                            try {{ api.addFiles(data.files); }} catch (_) {{}}
-                        }}
                         lastLocalSig = nextSig;
                     }} finally {{
                         applyingRemote = false;

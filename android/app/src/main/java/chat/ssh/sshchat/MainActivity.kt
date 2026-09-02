@@ -11,6 +11,7 @@ import android.text.TextWatcher
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.util.TypedValue
+import androidx.core.content.res.ResourcesCompat
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private var client: SshChatClient? = null
     private val bg = Executors.newSingleThreadExecutor()
     private var chatSp = 13f
+    /** Bundled mono — OEM system fonts must not replace Typeface.MONOSPACE on board rows. */
+    private var boardMono: Typeface? = null
     private val pendingFileMeta = SecureInvite.FileMeta()
     /** Local file waiting for gui-open upload after /sendfile. */
     @Volatile private var pendingUpload: File? = null
@@ -57,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var onConnectedOnce: (() -> Unit)? = null
     private var sendTarget: SendTarget = SendTarget.CurrentRoom("default")
     private var onlineUsers: List<String> = emptyList()
+    private var knownRooms: List<String> = emptyList()
     private var expectingNames = false
 
     private val requestNotifyPermission = registerForActivityResult(
@@ -148,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        CommandUsage.init(this)
         keys = DeviceKeyStore.getOrCreate(this)
         binding.etHost.setText(ServerSettings.loadHost(this))
         binding.etPort.setText(ServerSettings.loadPort(this).toString())
@@ -190,17 +195,34 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startCanvas()
         }
+        binding.btnPiano.setOnClickListener {
+            hidePlusPanel()
+            startPiano()
+        }
         binding.btnClear.setOnClickListener {
             hidePlusPanel()
             clearScreen(announce = true)
         }
+        binding.btnLibrary.setOnClickListener {
+            hidePlusPanel()
+            sendSlashCommand("/library")
+        }
+        binding.btnHelp.setOnClickListener {
+            hidePlusPanel()
+            sendSlashCommand("/help")
+        }
         binding.btnSlash.setOnClickListener { insertSlash() }
         binding.btnTab.setOnClickListener { applyTabComplete() }
+        binding.btnClearDraft.setOnClickListener {
+            binding.etDraft.setText("")
+            binding.etDraft.requestFocus()
+        }
         binding.etDraft.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) hidePlusPanel()
         }
         setupVoiceButton()
         sendTarget = SendTargetStore.loadTarget(this)
+        knownRooms = SendTargetStore.loadKnownRooms(this)
         refreshSendTargetButton()
         binding.btnSendTarget.setOnClickListener { showSendTargetPicker() }
         binding.btnFontMinus.setOnClickListener { bumpFont(-1f) }
@@ -218,11 +240,25 @@ class MainActivity : AppCompatActivity() {
                 false
             }
         }
+        binding.etDraft.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_TAB &&
+                event.action == android.view.KeyEvent.ACTION_DOWN &&
+                binding.etDraft.text?.toString().orEmpty().startsWith("/")
+            ) {
+                applyTabComplete()
+                true
+            } else {
+                false
+            }
+        }
         binding.etDraft.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                refreshSuggestions(s?.toString().orEmpty())
+                val text = s?.toString().orEmpty()
+                binding.btnClearDraft.visibility =
+                    if (text.isNotEmpty()) View.VISIBLE else View.GONE
+                refreshSuggestions(text)
             }
         })
         chatSp = uiPrefs().getFloat(PREF_CHAT_FONT_SP, 13f).coerceIn(7f, 22f)
@@ -231,7 +267,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshSuggestions(text: String) {
-        val items = if (text.startsWith("/")) CommandCompletions.completions(text).take(12) else emptyList()
+        val users = completionUsers()
+        val items = if (text.startsWith("/")) {
+            CommandCompletions.completions(text, knownRooms, users).take(12)
+        } else {
+            emptyList()
+        }
         val row = binding.suggestRow
         row.removeAllViews()
         if (items.isEmpty()) {
@@ -250,6 +291,19 @@ class MainActivity : AppCompatActivity() {
             }
             row.addView(b)
         }
+    }
+
+    private fun completionUsers(): List<String> {
+        val me = binding.etUsername.text?.toString()?.trim().orEmpty().lowercase()
+        val seen = linkedSetOf<String>()
+        val out = mutableListOf<String>()
+        for (nick in onlineUsers + SendTargetStore.loadRecentUsers(this)) {
+            val n = nick.trim()
+            if (n.isEmpty() || n.lowercase() == me) continue
+            if (!seen.add(n.lowercase())) continue
+            out.add(n)
+        }
+        return out
     }
 
     private fun applySuggestion(chosen: String) {
@@ -273,7 +327,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyTabComplete() {
         val text = binding.etDraft.text?.toString().orEmpty()
-        val next = CommandCompletions.applyTab(text)
+        val next = CommandCompletions.applyTab(text, knownRooms, completionUsers())
         if (next != null) {
             binding.etDraft.setText(next)
             binding.etDraft.setSelection(next.length)
@@ -400,6 +454,26 @@ class MainActivity : AppCompatActivity() {
         }
         appendLine("[*] 正在创建共享画板…（/canvas）")
         client?.send("/canvas")
+    }
+
+    private fun startPiano() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在开启房间钢琴…（/piano）")
+        client?.send("/piano")
+    }
+
+    private fun sendSlashCommand(command: String) {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cmd = command.trim()
+        if (cmd.isEmpty()) return
+        if (cmd.startsWith("/")) CommandUsage.record(cmd)
+        client?.send(cmd)
     }
 
     private fun copyUriAndSend(uri: Uri, fallbackName: String) {
@@ -552,21 +626,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun uiPrefs() = getSharedPreferences(PREFS_UI, MODE_PRIVATE)
 
+    private fun boardTypeface(): Typeface {
+        boardMono?.let { return it }
+        val tf = ResourcesCompat.getFont(this, R.font.board_mono) ?: Typeface.MONOSPACE
+        boardMono = tf
+        return tf
+    }
+
+    private fun styleBoardTextView(tv: TextView) {
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+        tv.typeface = boardTypeface()
+        tv.letterSpacing = 0f
+        tv.includeFontPadding = false
+    }
+
     private fun applyFont() {
         for (i in 0 until binding.chatLog.childCount) {
             when (val child = binding.chatLog.getChildAt(i)) {
-                is TextView -> child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+                is TextView -> applyFontToTextView(child)
                 is ViewGroup -> applyFontToGroup(child)
             }
         }
     }
 
+    private fun applyFontToTextView(tv: TextView) {
+        if (tv is Button) return
+        if (tv.tag == "board") {
+            styleBoardTextView(tv)
+            return
+        }
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
+    }
+
     private fun applyFontToGroup(group: ViewGroup) {
         for (i in 0 until group.childCount) {
             when (val child = group.getChildAt(i)) {
-                is TextView -> if (child !is Button) {
-                    child.setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
-                }
+                is TextView -> applyFontToTextView(child)
                 is ViewGroup -> applyFontToGroup(child)
             }
         }
@@ -744,6 +839,7 @@ class MainActivity : AppCompatActivity() {
         if (text == lastSendText && now - lastSendAt < 500L) return
         lastSendText = text
         lastSendAt = now
+        if (text.startsWith("/")) CommandUsage.record(text)
         binding.etDraft.setText("")
         val cmd = text.trim().lowercase()
         if (cmd == "/cls" || cmd == "/clear") {
@@ -780,6 +876,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshOnlineUsers() {
         expectingNames = true
         client?.send("/names")
+        client?.send("/rooms")
     }
 
     private fun showSendTargetPicker() {
@@ -856,6 +953,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyRoomFromServer(line: String) {
+        ChatLineParsers.parseRoomsList(line)?.let { rooms ->
+            SendTargetStore.rememberRooms(this, rooms)
+            knownRooms = SendTargetStore.loadKnownRooms(this)
+        }
         ChatLineParsers.parseActiveRoom(line)?.let { room ->
             if (pendingUpload != null) {
                 cancelUploadWait()
@@ -863,6 +964,7 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.text = "已切换房间，取消待发文件"
             }
             SendTargetStore.saveCurrentRoom(this, room)
+            knownRooms = SendTargetStore.loadKnownRooms(this)
             if (sendTarget is SendTarget.CurrentRoom) {
                 sendTarget = SendTarget.CurrentRoom(room)
                 SendTargetStore.saveTarget(this, sendTarget)
@@ -901,6 +1003,8 @@ class MainActivity : AppCompatActivity() {
             ChatLineParsers.parseNames(stripped)?.let { names ->
                 onlineUsers = names.members
                 expectingNames = false
+                SendTargetStore.rememberRooms(this, listOf(names.room))
+                knownRooms = SendTargetStore.loadKnownRooms(this)
                 if (sendTarget is SendTarget.CurrentRoom) {
                     sendTarget = SendTarget.CurrentRoom(names.room)
                     SendTargetStore.saveCurrentRoom(this, names.room)
@@ -911,6 +1015,7 @@ class MainActivity : AppCompatActivity() {
         }
         ChatLineParsers.parsePm(stripped)?.let { pm ->
             MessageAlert.playIfNeeded(this, stripped, binding.etUsername.text?.toString().orEmpty())
+            SendTargetStore.rememberRecent(this, pm.from)
             appendPmLine(pm.from, pm.body)
             return
         }
@@ -930,6 +1035,10 @@ class MainActivity : AppCompatActivity() {
                 SecureInvite.Kind.CANVAS -> {
                     appendLine("[*] 打开共享画布…")
                     startActivity(WebInviteActivity.canvas(this, open.url, open.key))
+                }
+                SecureInvite.Kind.PIANO -> {
+                    appendLine("[*] 打开房间钢琴…")
+                    startActivity(WebInviteActivity.piano(this, open.url, open.key))
                 }
                 SecureInvite.Kind.UPLOAD -> {
                     val pending = pendingUpload
@@ -1113,12 +1222,6 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
                 it.marginEnd = dp(36)
             }
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                setSendTarget(SendTarget.User(from))
-                Toast.makeText(this@MainActivity, "已切换为私聊 $from", Toast.LENGTH_SHORT).show()
-            }
         }
         val tag = TextView(this).apply {
             text = "私聊 · $from"
@@ -1130,6 +1233,7 @@ class MainActivity : AppCompatActivity() {
             text = body
             setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
+            setTextIsSelectable(true)
         }
         val hint = TextView(this).apply {
             text = "点按回复"
@@ -1137,6 +1241,12 @@ class MainActivity : AppCompatActivity() {
             setTextColor(0xFF0B57D0.toInt())
             paint.isUnderlineText = true
             setPadding(0, dp(2), 0, 0)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                setSendTarget(SendTarget.User(from))
+                Toast.makeText(this@MainActivity, "已切换为私聊 $from", Toast.LENGTH_SHORT).show()
+            }
         }
         card.addView(tag)
         card.addView(bodyTv)
@@ -1242,11 +1352,20 @@ class MainActivity : AppCompatActivity() {
 
     /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
     private fun appendBoardLine(text: String) {
+        val log = binding.chatLog
+        val lastIdx = log.childCount - 1
+        if (lastIdx >= 0) {
+            val last = log.getChildAt(lastIdx)
+            if (last is TextView && last.tag == "board") {
+                last.text = "${last.text}\n$text"
+                scrollChatToBottom()
+                return
+            }
+        }
         val tv = TextView(this).apply {
             this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, chatSp)
             setTextColor(0xFF222222.toInt())
-            typeface = Typeface.MONOSPACE
+            styleBoardTextView(this)
             gravity = Gravity.START
             textAlignment = View.TEXT_ALIGNMENT_VIEW_START
             setTextIsSelectable(true)
@@ -1311,15 +1430,23 @@ class MainActivity : AppCompatActivity() {
         binding.btnVoice.isEnabled = on
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
+        binding.btnPiano.isEnabled = on
+        binding.btnLibrary.isEnabled = on
+        binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
         binding.btnTab.isEnabled = on
+        binding.btnClearDraft.isEnabled = on
         val iconAlpha = if (on) 1f else 0.35f
         binding.btnPlus.alpha = iconAlpha
+        binding.btnSlash.alpha = iconAlpha
         binding.btnPhoto.alpha = iconAlpha
         binding.btnVoice.alpha = iconAlpha
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
+        binding.btnPiano.alpha = iconAlpha
+        binding.btnLibrary.alpha = iconAlpha
+        binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {

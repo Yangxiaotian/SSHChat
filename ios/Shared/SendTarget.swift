@@ -37,6 +37,7 @@ enum SendTargetStore {
     private static let valueKey = "send_target_value"
     private static let recentKey = "send_target_recent"
     private static let roomKey = "current_room"
+    private static let knownRoomsKey = "known_rooms"
 
     static func loadCurrentRoom() -> String {
         let r = UserDefaults.standard.string(forKey: roomKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -44,7 +45,33 @@ enum SendTargetStore {
     }
 
     static func saveCurrentRoom(_ room: String) {
-        UserDefaults.standard.set(room.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "default" : room, forKey: roomKey)
+        let cleaned = room.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "default" : room
+        UserDefaults.standard.set(cleaned, forKey: roomKey)
+        rememberRooms([cleaned])
+    }
+
+    static func loadKnownRooms() -> [String] {
+        var rooms = UserDefaults.standard.stringArray(forKey: knownRoomsKey) ?? []
+        let current = loadCurrentRoom()
+        if !rooms.contains(where: { $0.caseInsensitiveCompare(current) == .orderedSame }) {
+            rooms.insert(current, at: 0)
+        }
+        if !rooms.contains(where: { $0.caseInsensitiveCompare("default") == .orderedSame }) {
+            rooms.append("default")
+        }
+        return rooms
+    }
+
+    static func rememberRooms(_ rooms: [String]) {
+        var merged = loadKnownRooms()
+        for raw in rooms {
+            let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+            guard !key.isEmpty else { continue }
+            merged.removeAll { $0.caseInsensitiveCompare(key) == .orderedSame }
+            merged.insert(key, at: 0)
+        }
+        UserDefaults.standard.set(Array(merged.prefix(32)), forKey: knownRoomsKey)
     }
 
     static func loadTarget() -> SendTarget {
@@ -74,6 +101,7 @@ enum SendTargetStore {
         case .namedRoom(let room):
             UserDefaults.standard.set("named_room", forKey: kindKey)
             UserDefaults.standard.set(room, forKey: valueKey)
+            rememberRooms([room])
         }
     }
 
@@ -113,6 +141,12 @@ enum ChatLineParsers {
     private static let pmLine = try! NSRegularExpression(
         pattern: #"^\[PM from ([^\]]+)]\s*(.*)$"#, options: [.caseInsensitive]
     )
+    private static let roomsList = try! NSRegularExpression(
+        pattern: #"Rooms:\s*(.*)$"#, options: [.caseInsensitive]
+    )
+    private static let roomToken = try! NSRegularExpression(
+        pattern: #"\*?#([A-Za-z0-9_-]{1,32})"#
+    )
 
     static func parseActiveRoom(_ line: String) -> String? {
         let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,6 +158,25 @@ enum ChatLineParsers {
             return String(t[r])
         }
         return nil
+    }
+
+    /// Parse `Rooms: #default, *#ops` (body or full system line).
+    static func parseRoomsList(_ line: String) -> [String]? {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(t.startIndex..., in: t)
+        guard let m = roomsList.firstMatch(in: t, range: range),
+              let bodyR = Range(m.range(at: 1), in: t)
+        else { return nil }
+        let body = String(t[bodyR])
+        let bodyRange = NSRange(body.startIndex..., in: body)
+        var rooms: [String] = []
+        roomToken.enumerateMatches(in: body, options: [], range: bodyRange) { match, _, _ in
+            guard let match,
+                  let r = Range(match.range(at: 1), in: body)
+            else { return }
+            rooms.append(String(body[r]))
+        }
+        return rooms.isEmpty ? nil : rooms
     }
 
     static func parseNames(_ line: String) -> NamesLine? {
@@ -143,13 +196,22 @@ enum ChatLineParsers {
     }
 
     static func parsePm(_ line: String) -> PmLine? {
-        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let range = NSRange(t.startIndex..., in: t)
-        guard let m = pmLine.firstMatch(in: t, range: range),
-              let fromR = Range(m.range(at: 1), in: t),
-              let bodyR = Range(m.range(at: 2), in: t)
-        else { return nil }
-        return PmLine(from: String(t[fromR]), body: String(t[bodyR]))
+        let t = normalizeForParse(line)
+        if let m = pmLine.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+           let fromR = Range(m.range(at: 1), in: t),
+           let bodyR = Range(m.range(at: 2), in: t) {
+            return PmLine(from: String(t[fromR]), body: String(t[bodyR]))
+        }
+        let lower = t.lowercased()
+        if let idx = lower.range(of: "[pm from ") {
+            let rest = String(t[idx.lowerBound...])
+            if let m = pmLine.firstMatch(in: rest, range: NSRange(rest.startIndex..., in: rest)),
+               let fromR = Range(m.range(at: 1), in: rest),
+               let bodyR = Range(m.range(at: 2), in: rest) {
+                return PmLine(from: String(rest[fromR]), body: String(rest[bodyR]))
+            }
+        }
+        return nil
     }
 
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
@@ -175,6 +237,22 @@ enum ChatLineParsers {
         "OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT",
     ]
 
+    /// Bare CSI fragment (params optional: `[K` as well as `[2K` / `[9;1H`). Not `[*]`/`[#`.
+    /// Lookahead avoids eating chat nicks like `[root]` (`[r` is a valid CSI final).
+    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\]))"#
+    /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
+    private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
+    )
+    /// Entire prefix before `[*]` is only CSI crumbs (not a nick like `[alice]`).
+    private static let ptyNoiseOnlyPrefix = try! NSRegularExpression(
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+$"#
+    )
+    /// Bare CSI at line start when ESC/`?` was eaten (e.g. `[2K` / `[K` before `[*] 9 …`).
+    private static let bareCsiPrefix = try! NSRegularExpression(
+        pattern: #"^(?:"# + bareCsiFragment + #")+"#
+    )
+
     /// Strip local clock / prompt prefixes before parsing chat.
     static func normalizeForParse(_ line: String) -> String {
         var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +268,14 @@ enum ChatLineParsers {
         }
         if t.hasPrefix(">") {
             t = String(t.drop(while: { $0 == ">" || $0 == " " }))
+        }
+        // Drop CSI crumbs stuck before [*] / [#room] so /lib show lines stay board rows.
+        while true {
+            let range = NSRange(t.startIndex..., in: t)
+            guard let m = ptyCrumbsBeforeTag.firstMatch(in: t, range: range),
+                  let r = Range(m.range, in: t)
+            else { break }
+            t = String(t[r.upperBound...])
         }
         return t
     }
@@ -217,6 +303,10 @@ enum ChatLineParsers {
             let sender = String(t[senderR])
             // Avoid treating "[PM from x] …" as a plain chat sender.
             if sender.lowercased().hasPrefix("pm from ") { return nil }
+            // CSI crumb + [*] → fake sender like "2K[*" / "K[*"; let board heuristics handle it.
+            if sender.contains("*") { return nil }
+            let senderRange = NSRange(sender.startIndex..., in: sender)
+            if clockSender.firstMatch(in: sender, range: senderRange) != nil { return nil }
             return ChatLine(room: nil, sender: sender, body: String(t[bodyR]))
         }
         // PTY sometimes leaves junk before the real chat brackets — take the last pair.
@@ -294,6 +384,17 @@ enum ChatLineParsers {
     private static let clockCapture = try! NSRegularExpression(
         pattern: #"^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+"#
     )
+    private static let clockSender = try! NSRegularExpression(
+        pattern: #"^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$"#
+    )
+
+    /// client.py timestamps on wrapped `[*]` continuations (`[09:03:28] 续行` without `[*]`).
+    static func isClientClockContinuation(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.contains("[*]") || t.contains("[#") { return false }
+        let range = NSRange(t.startIndex..., in: t)
+        return clockCapture.firstMatch(in: t, range: range) != nil
+    }
 
     /// Prefer line clock (`[HH:MM:SS]`); else local now.
     static func extractDisplayTime(_ line: String) -> String {
@@ -322,6 +423,23 @@ enum ChatLineParsers {
     /// Mobile SSH sessions run client.py, which rewrites `[#room] [*]` → `[*]`.
     static func parseGameStarBody(_ line: String) -> String? {
         let t = normalizeForParse(line)
+        if let body = matchGameStarBody(t) { return body }
+        // Last resort: junk/CSI before [*] — keep when prefix is noise OR body looks like a board row.
+        if let star = t.range(of: "[*]"), star.lowerBound > t.startIndex {
+            let prefix = String(t[..<star.lowerBound])
+            let pr = NSRange(prefix.startIndex..., in: prefix)
+            let rest = String(t[star.lowerBound...])
+            if ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil {
+                return matchGameStarBody(rest)
+            }
+            if let body = matchGameStarBody(rest), looksLikeGameBoardContent(body) {
+                return body
+            }
+        }
+        return nil
+    }
+
+    private static func matchGameStarBody(_ t: String) -> String? {
         let range = NSRange(t.startIndex..., in: t)
         if let m = gameStarRoom.firstMatch(in: t, range: range) {
             if m.range(at: 1).location == NSNotFound { return "" }
@@ -334,6 +452,32 @@ enum ChatLineParsers {
             return String(t[bodyR])
         }
         return nil
+    }
+
+    /// Board row text with `[*]` / PTY crumbs removed (used when heuristics match before star parse).
+    static func boardLineText(from line: String) -> String {
+        if let body = parseGameStarBody(line) { return body }
+        var t = normalizeForParse(line)
+        while true {
+            let range = NSRange(t.startIndex..., in: t)
+            guard let m = bareCsiPrefix.firstMatch(in: t, range: range),
+                  let r = Range(m.range, in: t)
+            else { break }
+            t = String(t[r.upperBound...])
+        }
+        if let star = t.range(of: "[*]") {
+            var after = String(t[star.upperBound...])
+            if after.first == " " { after = String(after.dropFirst()) }
+            let prefix = String(t[..<star.lowerBound])
+            let pr = NSRange(prefix.startIndex..., in: prefix)
+            if prefix.isEmpty
+                || ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil
+                || looksLikeGameBoardContent(after)
+            {
+                return after.trimmingCharacters(in: .newlines)
+            }
+        }
+        return t.trimmingCharacters(in: .newlines)
     }
 
     static func shouldContinueBoard(_ line: String) -> Bool {
@@ -389,6 +533,15 @@ enum ChatLineParsers {
     }
 
     static func classifyForDisplay(_ line: String, myName: String) -> DisplayKind {
+        if let pm = parsePm(line) {
+            return .bubble(
+                mine: false,
+                room: nil,
+                sender: pm.from,
+                body: pm.body,
+                time: extractDisplayTime(line)
+            )
+        }
         if let body = parseGameStarBody(line) {
             return .boardLine(body)
         }
@@ -420,9 +573,16 @@ enum ChatLineParsers {
             let mine = !me.isEmpty && sender.caseInsensitiveCompare(me) == .orderedSame
             return .bubble(mine: mine, room: room, sender: sender, body: body, time: extractDisplayTime(line))
         }
-        if looksLikeGameBoardContent(line) {
-            return .boardLine(line.trimmingCharacters(in: .newlines))
+        let payload = boardLineText(from: line)
+        if looksLikeGameBoardContent(payload) {
+            return .boardLine(payload)
         }
-        return .system(line)
+        if normalizeForParse(line).contains("[*]") || line.contains("[*]") {
+            return .boardLine(payload)
+        }
+        if isClientClockContinuation(line) {
+            return .boardLine(boardLineText(from: line))
+        }
+        return .system(normalizeForParse(line))
     }
 }

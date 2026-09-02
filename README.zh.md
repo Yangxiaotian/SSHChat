@@ -694,6 +694,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `games.py` | 房间小游戏逻辑 |
 | `file_sharing.py` / `file_http_server.py` | `/sendfile` 的传输会话管理与收发网页 |
 | `canvas_sharing.py` / `canvas_http.py` | `/canvas` 共享画板会话与绘画网页 |
+| `piano_sharing.py` / `piano_http.py` / `piano_samples/` | `/piano` 房间钢琴会话、网页与 MP3 采样 |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
 | `sshchat_gui.py` | 图形客户端源码 |
 | `easy_connect.py` | 按 JSON 调用 `ssh` |

@@ -9,11 +9,20 @@ object ChatLineParsers {
     private val switchedTo = Regex("""Switched from #\S+ to #([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
     private val namesLine = Regex("""^\[\*]\s+#([^\s(]+)\s+\(\d+\):\s*(.*)$""", RegexOption.IGNORE_CASE)
     private val pmLine = Regex("""^\[PM from ([^\]]+)]\s*(.*)$""", RegexOption.IGNORE_CASE)
+    private val roomsList = Regex("""Rooms:\s*(.*)$""", RegexOption.IGNORE_CASE)
+    private val roomToken = Regex("""\*?#([A-Za-z0-9_-]{1,32})""")
 
     fun parseActiveRoom(line: String): String? {
         val t = line.trim()
         return activeRoom.find(t)?.groupValues?.getOrNull(1)
             ?: switchedTo.find(t)?.groupValues?.getOrNull(1)
+    }
+
+    /** Parse `Rooms: #default, *#ops` (body or full system line). */
+    fun parseRoomsList(line: String): List<String>? {
+        val body = roomsList.find(line.trim())?.groupValues?.getOrNull(1) ?: return null
+        val rooms = roomToken.findAll(body).map { it.groupValues[1] }.toList()
+        return rooms.ifEmpty { null }
     }
 
     fun parseNames(line: String): NamesLine? {
@@ -29,9 +38,17 @@ object ChatLineParsers {
     }
 
     fun parsePm(line: String): PmLine? {
-        val t = line.trim()
-        val m = pmLine.matchEntire(t) ?: return null
-        return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+        val t = normalizeForParse(line)
+        pmLine.matchEntire(t)?.let { m ->
+            return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+        }
+        val idx = t.indexOf("[PM from ", ignoreCase = true)
+        if (idx >= 0) {
+            pmLine.matchEntire(t.substring(idx))?.let { m ->
+                return PmLine(m.groupValues[1].trim(), m.groupValues[2])
+            }
+        }
+        return null
     }
 
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
@@ -41,6 +58,16 @@ object ChatLineParsers {
     private val roomChatLoose = Regex("""\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
     private val timePrefix = Regex("""^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+""")
     private val leadingGarbage = Regex("""^[\uFFFD\u25A1\uFEFF\u00A0\s]+""")
+    /** Bare CSI fragment (params optional: `[K` as well as `[2K`). Not `[*]`/`[#`. */
+    private const val bareCsiFragment =
+        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\]))"""
+    /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
+    private val ptyCrumbsBeforeTag =
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")
+    private val ptyNoiseOnlyPrefix =
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+$""")
+    /** Bare CSI at line start when ESC/`?` was eaten (e.g. `[2K` / `[K` before `[*] 9 …). */
+    private val bareCsiPrefix = Regex("""^(?:$bareCsiFragment)+""")
     private val systemSenders = setOf("+", "-", "*", "!")
     private val ignoredSenders = setOf("OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT")
 
@@ -57,6 +84,11 @@ object ChatLineParsers {
         }
         if (t.startsWith(">")) {
             t = t.dropWhile { it == '>' || it == ' ' }
+        }
+        while (true) {
+            val nxt = ptyCrumbsBeforeTag.replaceFirst(t, "")
+            if (nxt == t) break
+            t = nxt
         }
         return t
     }
@@ -91,6 +123,9 @@ object ChatLineParsers {
         plainChat.matchEntire(t)?.let { m ->
             val sender = m.groupValues[1]
             if (sender.lowercase().startsWith("pm from ")) return null
+            // CSI crumb + [*] → fake sender like "2K[*" / "K[*"; let board heuristics handle it.
+            if ("*" in sender) return null
+            if (clockSender.matches(sender)) return null
             return ChatLine(null, sender, m.groupValues[2])
         }
         roomChatLoose.find(t)?.let { m ->
@@ -154,6 +189,14 @@ object ChatLineParsers {
     }
 
     private val clockCapture = Regex("""^>?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+""")
+    private val clockSender = Regex("""^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$""")
+
+    /** client.py timestamps on wrapped `[*]` continuations (`[09:03:28] 续行` without `[*]`). */
+    fun isClientClockContinuation(line: String): Boolean {
+        val t = line.trim()
+        if ("[*]" in t || "[#" in t) return false
+        return clockCapture.containsMatchIn(t)
+    }
 
     /** Prefer line clock (`[HH:MM:SS]`); else local now. */
     fun extractDisplayTime(line: String): String {
@@ -176,9 +219,46 @@ object ChatLineParsers {
      */
     fun parseGameStarBody(line: String): String? {
         val t = normalizeForParse(line)
+        matchGameStarBody(t)?.let { return it }
+        val idx = t.indexOf("[*]")
+        if (idx > 0) {
+            val prefix = t.substring(0, idx)
+            val rest = t.substring(idx)
+            if (ptyNoiseOnlyPrefix.matches(prefix)) {
+                return matchGameStarBody(rest)
+            }
+            matchGameStarBody(rest)?.let { body ->
+                if (looksLikeGameBoardContent(body)) return body
+            }
+        }
+        return null
+    }
+
+    private fun matchGameStarBody(t: String): String? {
         gameStarRoom.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         gameStarBare.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         return null
+    }
+
+    /** Board row text with `[*]` / PTY crumbs removed. */
+    fun boardLineText(line: String): String {
+        parseGameStarBody(line)?.let { return it }
+        var t = normalizeForParse(line)
+        while (true) {
+            val nxt = bareCsiPrefix.replaceFirst(t, "")
+            if (nxt == t) break
+            t = nxt
+        }
+        val idx = t.indexOf("[*]")
+        if (idx >= 0) {
+            var after = t.substring(idx + 3)
+            if (after.startsWith(" ")) after = after.substring(1)
+            val prefix = t.substring(0, idx)
+            if (prefix.isEmpty() || ptyNoiseOnlyPrefix.matches(prefix) || looksLikeGameBoardContent(after)) {
+                return after.trimEnd()
+            }
+        }
+        return t.trimEnd()
     }
 
     fun shouldContinueBoard(line: String): Boolean {
@@ -217,13 +297,29 @@ object ChatLineParsers {
     }
 
     fun classifyForDisplay(line: String, myName: String): DisplayKind {
+        parsePm(line)?.let { pm ->
+            return DisplayKind.Bubble(
+                mine = false,
+                room = null,
+                sender = pm.from,
+                body = pm.body,
+                time = extractDisplayTime(line),
+            )
+        }
         parseGameStarBody(line)?.let { return DisplayKind.BoardLine(it) }
 
         val chat = parseChat(line) ?: run {
-            if (looksLikeGameBoardContent(line)) {
-                return DisplayKind.BoardLine(line.trimEnd())
+            val payload = boardLineText(line)
+            if (looksLikeGameBoardContent(payload)) {
+                return DisplayKind.BoardLine(payload)
             }
-            return DisplayKind.System(line)
+            if (normalizeForParse(line).contains("[*]") || line.contains("[*]")) {
+                return DisplayKind.BoardLine(payload)
+            }
+            if (isClientClockContinuation(line)) {
+                return DisplayKind.BoardLine(boardLineText(line))
+            }
+            return DisplayKind.System(normalizeForParse(line))
         }
         val unwrapped = unwrapChat(chat)
         val sender = unwrapped.sender

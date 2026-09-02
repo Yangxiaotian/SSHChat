@@ -19,7 +19,9 @@ from prompt_toolkit.patch_stdout import StdoutProxy, patch_stdout
 
 from sshchat_client_util import (
     default_client_config_path,
+    extract_completion_hints,
     load_client_config,
+    name_arg_completions,
     save_client_config,
 )
 
@@ -176,9 +178,44 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
 }
 
+# Learned from /rooms, /names, and chat traffic for Tab completion.
+_KNOWN_ROOMS: set[str] = {"default"}
+_KNOWN_USERS: set[str] = set()
+_COMPLETION_LOCK = threading.Lock()
+
+
+def _remember_completion_hints(*, rooms: list[str] | None = None, users: list[str] | None = None) -> None:
+    with _COMPLETION_LOCK:
+        if rooms:
+            for r in rooms:
+                key = r.strip().lstrip("#")
+                if key:
+                    _KNOWN_ROOMS.add(key)
+        if users:
+            for u in users:
+                key = u.strip()
+                if key and key not in _SYSTEM_SENDERS:
+                    _KNOWN_USERS.add(key)
+
+
+def _completion_rooms() -> list[str]:
+    with _COMPLETION_LOCK:
+        return sorted(_KNOWN_ROOMS, key=str.lower)
+
+
+def _completion_users() -> list[str]:
+    with _COMPLETION_LOCK:
+        return sorted(_KNOWN_USERS, key=str.lower)
+
+
+def _absorb_completion_line(text: str) -> None:
+    rooms, users = extract_completion_hints(text)
+    if rooms or users:
+        _remember_completion_hints(rooms=rooms, users=users)
+
 
 class SSHChatCommandCompleter(Completer):
-    """Prefix-complete top-level /commands and nested subcommands."""
+    """Prefix-complete top-level /commands, nested subcommands, and room/nick args."""
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -212,9 +249,19 @@ class SSHChatCommandCompleter(Completer):
                     return
             cmd = parts[0].lower()
             sub_prefix = parts[-1]
+            matched_sub = False
             for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
                 if sub.startswith(sub_prefix):
+                    matched_sub = True
                     yield Completion(sub, start_position=-len(sub_prefix))
+            if matched_sub:
+                return
+            # Room / nick argument (replace from command start via full strings).
+            for full in name_arg_completions(
+                text, rooms=_completion_rooms(), users=_completion_users()
+            ):
+                # Replace from start of current arg.
+                yield Completion(full.split(" ", 1)[-1], start_position=-len(parts[-1]))
             return
 
         parts = text.rstrip().split()
@@ -227,8 +274,16 @@ class SSHChatCommandCompleter(Completer):
                     yield Completion(item + " ", start_position=0)
                 return
         cmd = parts[0].lower()
-        for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
-            yield Completion(sub + " ", start_position=0)
+        subs = _SUBCOMMANDS_BY_CMD.get(cmd, ())
+        if subs:
+            for sub in subs:
+                yield Completion(sub + " ", start_position=0)
+            return
+        for full in name_arg_completions(
+            text, rooms=_completion_rooms(), users=_completion_users()
+        ):
+            arg = full.split(" ", 1)[-1]
+            yield Completion(arg + " ", start_position=0)
 
 
 def _load_dnd_setting() -> bool:
@@ -1052,6 +1107,7 @@ def recv_msg(sock, my_name: str):
                     continue
                 if _consume_sent_input_echo(text):
                     continue
+                _absorb_completion_line(text)
                 if _is_clear_csi_line(text):
                     _terminal_hard_clear()
                     continue

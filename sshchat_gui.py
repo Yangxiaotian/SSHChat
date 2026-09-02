@@ -45,6 +45,7 @@ from sshchat_client_util import (
     default_client_config_path,
     load_bundled_site_config,
     load_client_config,
+    name_arg_completions,
     save_client_config,
 )
 
@@ -73,6 +74,10 @@ _GUI_OPEN_UPLOAD_RE = re.compile(
 )
 _GUI_OPEN_CANVAS_RE = re.compile(
     r"^gui-open\s+canvas\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
+_GUI_OPEN_PIANO_RE = re.compile(
+    r"^gui-open\s+piano\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
 _GUI_OPEN_DOWNLOAD_RE = re.compile(
@@ -105,12 +110,12 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
 _SECURE_URL_LABEL_RE = re.compile(
-    r"(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
+    r"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
     re.I,
 )
 _SECURE_KEY_LINE_RE = re.compile(
@@ -184,6 +189,7 @@ _TOP_COMMANDS = (
     "/file",
     "/canvas",
     "/board",
+    "/piano",
     "/leave",
     "/unmsg",
     "/announce",
@@ -263,6 +269,9 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
+_SUGGEST_UI_IDLE = object()
+
+
 def _longest_common_prefix(values: list[str]) -> str:
     if not values:
         return ""
@@ -275,7 +284,12 @@ def _longest_common_prefix(values: list[str]) -> str:
     return prefix
 
 
-def _command_completions(text: str) -> list[str]:
+def _command_completions(
+    text: str,
+    *,
+    rooms: list[str] | None = None,
+    users: list[str] | None = None,
+) -> list[str]:
     """Return full replacement strings for the current input prefix."""
     if not text.startswith("/"):
         return []
@@ -309,14 +323,19 @@ def _command_completions(text: str) -> list[str]:
                 return []
 
     subs = _SUBCOMMANDS_BY_CMD.get(cmd, ())
-    if not subs:
+    if subs:
+        if trailing_space and len(parts) == 1:
+            return [f"{parts[0]} {sub}" for sub in subs]
+        if trailing_space and len(parts) == 2:
+            return []
+        if len(parts) >= 2 and not trailing_space:
+            if len(parts) > 2:
+                return []
+            prefix = parts[1]
+            return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
         return []
-    if trailing_space and len(parts) == 1:
-        return [f"{parts[0]} {sub}" for sub in subs]
-    if len(parts) >= 2 and not trailing_space:
-        prefix = parts[1]
-        return [f"{parts[0]} {sub}" for sub in subs if sub.startswith(prefix)]
-    return []
+
+    return name_arg_completions(text, rooms=rooms or (), users=users or ())
 
 
 def _is_ssl_verify_error(exc: BaseException) -> bool:
@@ -435,7 +454,7 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if _SECURE_HTTP_URL_RE.match(t):
         return True
-    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
+    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_PIANO_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
         return True
@@ -654,14 +673,23 @@ def _http_base_candidates(url: str, fallback_host: str) -> list[str]:
             out.append(base)
 
     add(scheme, orig_host, orig_port)
-    if fb and fb.lower() != orig_host.lower():
+    hosts_for_file_port: list[str] = []
+    if orig_host:
+        hosts_for_file_port.append(orig_host)
+    if fb and fb.lower() != (orig_host or "").lower():
         add(scheme, fb, orig_port)
-        # Cloudflare links use https:443; LAN clients often need the local HTTP port.
-        if scheme == "https" and orig_port in (None, 443):
-            add("http", fb, 8443)
-            add("https", fb, 8443)
-        elif orig_port not in (None, 80, 443):
-            add("http", fb, orig_port)
+        hosts_for_file_port.append(fb)
+    # Invite links often use https://host (implicit :443) while FileHTTP listens on 8443.
+    if scheme == "https" and orig_port in (None, 443):
+        for host in hosts_for_file_port:
+            add("http", host, 8443)
+            add("https", host, 8443)
+    elif (
+        orig_port not in (None, 80, 443)
+        and fb
+        and fb.lower() != (orig_host or "").lower()
+    ):
+        add("http", fb, orig_port)
 
     if not out:
         raise ValueError("invalid http url")
@@ -675,6 +703,14 @@ def _canvas_token_from_url(url: str) -> tuple[str, str]:
         raise ValueError("invalid canvas url")
     bases = _http_base_candidates(url, "")
     return bases[0], parts[1]
+
+
+def _piano_token_from_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url.strip())
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2 and parts[0] == "piano":
+        return parts[1]
+    return ""
 
 
 def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
@@ -735,6 +771,117 @@ def _pil_to_photoimage(im: Any) -> tk.PhotoImage | None:
         return None
 
 
+class _HoverTip:
+    """Compact tooltip for icon toolbar buttons."""
+
+    def __init__(self, widget: tk.Misc, text: str = "") -> None:
+        self.widget = widget
+        self.text = text
+        self._tip: tk.Toplevel | None = None
+        self._after: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def set_text(self, text: str) -> None:
+        self.text = text
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        try:
+            self._after = self.widget.after(400, self._show)
+        except tk.TclError:
+            self._after = None
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except (tk.TclError, ValueError):
+                pass
+            self._after = None
+
+    def _show(self) -> None:
+        self._after = None
+        if not self.text or self._tip is not None:
+            return
+        try:
+            if not self.widget.winfo_ismapped():
+                return
+            x = self.widget.winfo_rootx() + 8
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        lbl = tk.Label(
+            tip,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            foreground="#222",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=6,
+            pady=3,
+            font=("TkDefaultFont", 10),
+        )
+        lbl.pack()
+        self._tip = tip
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def _place_toplevel_near_widget(
+    win: tk.Toplevel,
+    anchor: tk.Misc,
+    *,
+    gap: int = 4,
+    align: str = "left",
+) -> None:
+    """Place a Toplevel just below *anchor* in screen coordinates."""
+    try:
+        win.update_idletasks()
+        anchor.update_idletasks()
+        ax = anchor.winfo_rootx()
+        ay = anchor.winfo_rooty()
+        aw = max(anchor.winfo_width(), 1)
+        ah = max(anchor.winfo_height(), 1)
+        ww = max(win.winfo_reqwidth(), 1)
+        wh = max(win.winfo_reqheight(), 1)
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+    except tk.TclError:
+        return
+
+    if align == "right":
+        x = ax + aw - ww
+    elif align == "center":
+        x = ax + (aw - ww) // 2
+    else:
+        x = ax
+
+    y = ay + ah + gap
+    if y + wh > sh:
+        y = max(0, ay - wh - gap)
+
+    x = max(0, min(x, sw - ww))
+    y = max(0, min(y, sh - wh))
+    win.geometry(f"+{x}+{y}")
+
+
 class ImagePreviewWindow:
     """Zoomable image preview in a Toplevel (Canvas + scrollbars, never Text embed)."""
 
@@ -745,10 +892,12 @@ class ImagePreviewWindow:
         name: str,
         *,
         on_save: Any,
+        on_close: Any = None,
     ) -> None:
         self.path = path
         self.name = name
         self.on_save = on_save
+        self._on_close = on_close
         self._pil = _pil_rgb_image(path)
         if self._pil is None:
             raise RuntimeError(_LAST_PIL_ERROR or "无法解码图片")
@@ -826,6 +975,12 @@ class ImagePreviewWindow:
             self.win.destroy()
         except tk.TclError:
             pass
+        cb = self._on_close
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _on_configure(self, _event=None) -> None:
         return
@@ -958,6 +1113,145 @@ def _chromium_app_binaries() -> list[str]:
     ]
 
 
+def _open_browser_tab(url: str) -> bool:
+    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs.update(_windows_hidden_subprocess_kwargs())
+    else:
+        popen_kwargs["start_new_session"] = True
+    for binary in _chromium_app_binaries():
+        if not binary or not os.path.isfile(binary):
+            continue
+        try:
+            subprocess.Popen([binary, target], **popen_kwargs)
+            return True
+        except OSError:
+            continue
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(["open", target], **popen_kwargs)
+            return True
+        except OSError:
+            pass
+    if sys.platform == "win32":
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def _piano_auth_trampoline_url(piano_url: str, boot: dict[str, Any]) -> str:
+    """Local HTML trampoline → piano page with #boot= session (key never in URL)."""
+    boot_json = json.dumps(boot, separators=(",", ":"), ensure_ascii=False)
+    fragment = "boot=" + urllib.parse.quote(boot_json, safe="")
+    target = f"{piano_url.rstrip('/')}#{fragment}"
+    fd, path = tempfile.mkstemp(prefix="sshchat-piano-", suffix=".html")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(
+            "<!DOCTYPE html><meta charset=utf-8>"
+            f"<script>location.replace({json.dumps(target)});</script>"
+            "<p>Opening piano…</p>\n"
+        )
+    return Path(path).resolve().as_uri()
+
+
+def _piano_handoff_unavailable(err: BaseException) -> bool:
+    msg = str(err).strip()
+    return msg in ("网址无效", "handoff failed", "not found") or msg.startswith("HTTP 404")
+
+
+def _piano_http_retryable(err: BaseException) -> bool:
+    if _is_dns_error(err):
+        return True
+    msg = str(err).strip().lower()
+    if "nodename nor servname" in msg or "getaddrinfo failed" in msg:
+        return True
+    if "connection refused" in msg or "errno 61" in msg:
+        return True
+    cur: BaseException | None = err
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ConnectionRefusedError):
+            return True
+        if isinstance(cur, OSError) and getattr(cur, "errno", None) == 61:
+            return True
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "reason", None)
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return False
+
+
+def _piano_open_url(url: str, key: str, *, fallback_host: str = "") -> str:
+    """Return a browser URL to open piano without putting the access key in the link."""
+    parsed = urllib.parse.urlparse(url.strip())
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0] != "piano":
+        raise ValueError("invalid piano url")
+    token = parts[1]
+    key_clean = str(key or "").strip().upper()
+    if len(key_clean) != 6:
+        raise ValueError("invalid piano key")
+    last_err = "无法连接钢琴服务"
+    for base in _http_base_candidates(url, fallback_host):
+        piano_url = f"{base}/piano/{token}"
+        handoff_err: BaseException | None = None
+        # Prefer one-time handoff (new servers).
+        try:
+            data = _http_json(
+                f"{base}/piano/{token}/handoff",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"key": key_clean}).encode("utf-8"),
+            )
+            code = str(data.get("handoff") or "").strip()
+            if code:
+                safe_code = urllib.parse.quote(code, safe="")
+                return f"{piano_url}/open/{safe_code}"
+        except Exception as e:
+            handoff_err = e
+            if _piano_http_retryable(e):
+                last_err = str(e)
+                continue
+            if not _piano_handoff_unavailable(e):
+                last_err = str(e)
+                continue
+        # Fallback: auth in Tk, pass short-lived ticket via #boot= fragment (not the key).
+        try:
+            auth = _http_json(
+                f"{base}/piano/{token}/auth",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"key": key_clean}).encode("utf-8"),
+            )
+            ticket = str(auth.get("ticket") or "").strip()
+            if not ticket:
+                raise RuntimeError("auth failed")
+            boot = {
+                "ticket": ticket,
+                "participant": auth.get("participant") or "",
+                "room": auth.get("room") or "",
+                "expires": auth.get("expires") or 0,
+            }
+            return _piano_auth_trampoline_url(piano_url, boot)
+        except Exception as e:
+            if handoff_err and _piano_handoff_unavailable(handoff_err):
+                last_err = str(e)
+            else:
+                last_err = str(e)
+            if _piano_http_retryable(e):
+                continue
+    raise RuntimeError(last_err)
+
+
 def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
     """Open Excalidraw in a dedicated Chromium app window (optionally maximized)."""
     target = (url or "").strip()
@@ -1021,127 +1315,6 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
         except OSError:
             pass
     return False
-
-
-class CanvasWebShell:
-    """Compact controller for the Excalidraw app window (maximize / reopen / close)."""
-
-    def __init__(self, master: tk.Misc, url: str) -> None:
-        self.url = url
-        self._maximized = True
-        self.win = tk.Toplevel(master)
-        self.win.title("SSHChat 共享画布")
-        self.win.geometry("460x130")
-        self.win.minsize(360, 110)
-        try:
-            self.win.transient(master)
-        except tk.TclError:
-            pass
-        self.win.protocol("WM_DELETE_WINDOW", self.close)
-        # Chrome/Safari steal focus when launched; Aqua then leaves this Toplevel's
-        # buttons unclickable until the window is dragged. Refresh hit maps on map/focus.
-        self.win.bind("<Map>", lambda _e: self._stabilize(delay_ms=0), add="+")
-        self.win.bind("<FocusIn>", lambda _e: self._stabilize(delay_ms=0), add="+")
-
-        bar = ttk.Frame(self.win)
-        bar.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(bar, text="共享画布").pack(side=tk.LEFT)
-        self._btn_max = ttk.Button(bar, text="还原窗口", command=self.toggle_maximize)
-        self._btn_max.pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(bar, text="关闭", command=self.close).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="重新打开", command=lambda: self._reopen(None)).pack(
-            side=tk.RIGHT, padx=(6, 0)
-        )
-
-        body = ttk.Frame(self.win, padding=(12, 4, 12, 12))
-        body.pack(fill=tk.BOTH, expand=True)
-        self.var_status = tk.StringVar(value="正在最大化打开画板…")
-        ttk.Label(body, textvariable=self.var_status, justify=tk.LEFT, wraplength=420).pack(
-            anchor=tk.NW
-        )
-        # Open browser after this shell is mapped so controls get a real hit region first.
-        self.win.after(80, lambda: self._reopen(True))
-
-    def _stabilize(self, delay_ms: int = 0) -> None:
-        def _do() -> None:
-            try:
-                if not self.win.winfo_exists():
-                    return
-                self.win.update_idletasks()
-                geom = self.win.winfo_geometry()
-                self.win.geometry(geom)
-                self.win.lift()
-                # Brief topmost pulse refreshes macOS window-server click targets
-                # without leaving the dialog permanently above everything.
-                try:
-                    self.win.attributes("-topmost", True)
-                    self.win.after(
-                        80,
-                        lambda: self.win.attributes("-topmost", False)
-                        if self.win.winfo_exists()
-                        else None,
-                    )
-                except tk.TclError:
-                    pass
-            except tk.TclError:
-                pass
-
-        if delay_ms <= 0:
-            _do()
-        else:
-            try:
-                self.win.after(delay_ms, _do)
-            except tk.TclError:
-                pass
-
-    def toggle_maximize(self) -> None:
-        self._maximized = not self._maximized
-        try:
-            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
-        except tk.TclError:
-            pass
-        self._reopen(self._maximized)
-
-    def _reopen(self, maximized: bool | None) -> None:
-        if maximized is not None:
-            self._maximized = bool(maximized)
-        try:
-            self._btn_max.configure(text="还原窗口" if self._maximized else "最大化")
-        except tk.TclError:
-            pass
-        opened = _open_canvas_app_window(self.url, maximized=self._maximized)
-        if opened:
-            if self._maximized:
-                self.var_status.set(
-                    "画板已在独立窗口最大化打开。\n"
-                    "点「还原窗口」以普通大小重新打开；「重新打开」可再拉起画板。"
-                )
-            else:
-                self.var_status.set(
-                    "画板已以普通窗口打开。\n点「最大化」可铺满屏幕重新打开。"
-                )
-        else:
-            try:
-                webbrowser.open(self.url)
-                self.var_status.set(
-                    "已在系统浏览器打开画板（当前环境没有可用的 Chrome/Edge 应用窗口模式）。"
-                )
-            except Exception as e:
-                self.var_status.set(f"打开画板失败: {e}")
-        # Browser launch steals focus; re-assert this dialog so buttons stay clickable.
-        self._stabilize(delay_ms=50)
-        self._stabilize(delay_ms=250)
-        self._stabilize(delay_ms=700)
-
-    def close(self) -> None:
-        try:
-            self.win.attributes("-topmost", False)
-        except tk.TclError:
-            pass
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
 
 
 class NativeCanvasWindow:
@@ -1843,16 +2016,29 @@ class SSHChatGUI:
         self._room_history: dict[str, list[Any]] = {"default": []}
         self._paste_pending: dict[str, Any] | None = None
         self._pending_file_meta: dict[str, str] = {}
+        self._expecting_own_canvas = False
+        self._expecting_own_piano = False
+        self._open_piano_tokens: set[str] = set()
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
         self._suggest_items: list[str] = []
-        self._suggest_geom_job: str | int | None = None
+        self._suggest_ui_job: str | int | None = None
+        self._suggest_ui_pending: list[str] | None | object = _SUGGEST_UI_IDLE
         self._suggest_focus_job: str | int | None = None
-        self._canvas_win: CanvasWebShell | None = None
+        self._click_refresh_job: str | int | None = None
+        self._room_list_refresh_job: str | int | None = None
+        self._aqua_last_geometry_nudge_at = 0.0
+        self._aqua_startup_nudge_done = False
+        self._target_picker_frame: tk.Misc | None = None
+        self._target_picker_list: tk.Listbox | None = None
+        self._target_picker_items: list[tuple[str, str, str]] = []
+        self._room_select_guard = False
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
+        self._canvas_open_targets: dict[str, tuple[str, str]] = {}
+        self._piano_open_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
         self._preview_win: ImagePreviewWindow | None = None
         self._send_target_kind = "room"
@@ -1865,7 +2051,7 @@ class SSHChatGUI:
         self._apply_profile(load_client_config(self.config_path))
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
-        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
         # bind_all: root-only ButtonPress never fires for ttk.Button children, so
         # orphaned suggestion chrome would keep eating clicks until the window moves.
         self.root.bind_all("<ButtonPress-1>", self._on_any_button_press, add="+")
@@ -1873,7 +2059,6 @@ class SSHChatGUI:
         self.root.bind("<Command-v>", self._on_paste_file, add="+")
         self.root.bind("<Control-v>", self._on_paste_file, add="+")
         self._is_minimized = False
-        self._last_root_geom = ""
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1897,47 +2082,34 @@ class SSHChatGUI:
 
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 4}
-        if self._bundle:
-            bh = str(self._bundle["host"]).strip()
-            bp = int(self._bundle.get("ssh_port", 22))
-            top = ttk.Frame(self.root)
-            top.pack(fill=tk.X, **pad)
-            ttk.Label(
-                top,
-                text=f"SSH 服务器: {bh}    端口 {bp}",
-            ).pack(anchor="w")
-            row_u = ttk.Frame(self.root)
-            row_u.pack(fill=tk.X, **pad)
-            ttk.Label(row_u, text="用户名").pack(side=tk.LEFT)
-            self.var_user = tk.StringVar()
-            ttk.Entry(row_u, textvariable=self.var_user, width=28).pack(
-                side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True
-            )
-            self.var_host = tk.StringVar(value=bh)
-            self.var_port = tk.StringVar(value=str(bp))
-        else:
-            top = ttk.Frame(self.root)
-            top.pack(fill=tk.X, **pad)
+        top = ttk.Frame(self.root)
+        top.pack(fill=tk.X, **pad)
 
-            ttk.Label(top, text="主机").grid(row=0, column=0, sticky="w")
-            self.var_host = tk.StringVar()
-            ttk.Entry(top, textvariable=self.var_host, width=22).grid(
-                row=0, column=1, sticky="ew", padx=(4, 8)
-            )
+        bh = str(self._bundle["host"]).strip() if self._bundle else ""
+        try:
+            bp = int(self._bundle.get("ssh_port", 22)) if self._bundle else 22
+        except (TypeError, ValueError):
+            bp = 22
 
-            ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w")
-            self.var_user = tk.StringVar()
-            ttk.Entry(top, textvariable=self.var_user, width=14).grid(
-                row=0, column=3, sticky="ew", padx=(4, 8)
-            )
+        ttk.Label(top, text="主机").grid(row=0, column=0, sticky="w")
+        self.var_host = tk.StringVar(value=bh)
+        ttk.Entry(top, textvariable=self.var_host, width=22).grid(
+            row=0, column=1, sticky="ew", padx=(4, 8)
+        )
 
-            ttk.Label(top, text="SSH 端口").grid(row=0, column=4, sticky="w")
-            self.var_port = tk.StringVar(value="22")
-            ttk.Entry(top, textvariable=self.var_port, width=6).grid(
-                row=0, column=5, sticky="w", padx=(4, 8)
-            )
+        ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w")
+        self.var_user = tk.StringVar()
+        ttk.Entry(top, textvariable=self.var_user, width=14).grid(
+            row=0, column=3, sticky="ew", padx=(4, 8)
+        )
 
-            top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="SSH 端口").grid(row=0, column=4, sticky="w")
+        self.var_port = tk.StringVar(value=str(bp))
+        ttk.Entry(top, textvariable=self.var_port, width=6).grid(
+            row=0, column=5, sticky="w", padx=(4, 8)
+        )
+
+        top.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill=tk.X, padx=6, pady=(0, 4))
@@ -1962,6 +2134,10 @@ class SSHChatGUI:
         ttk.Label(left, text="频道").pack(anchor="w")
         self.room_list = tk.Listbox(left, width=20, height=18, exportselection=False)
         self.room_list.pack(fill=tk.Y, expand=True)
+        # Aqua: <<ListboxSelect>> alone often needs a focus click first; drive
+        # switches from the pointer y via nearest() so one click always works.
+        self.room_list.bind("<ButtonPress-1>", lambda _e: self.room_list.focus_set(), add="+")
+        self.room_list.bind("<ButtonRelease-1>", self._on_room_list_click, add="+")
         self.room_list.bind("<<ListboxSelect>>", self._on_room_selected)
 
         self.log = scrolledtext.ScrolledText(
@@ -1982,14 +2158,33 @@ class SSHChatGUI:
         self.log.tag_configure("xq_black", foreground="#263238")
         self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
         self.log.tag_configure("media_preview", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("canvas_open", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("piano_open", foreground="#0b57d0", underline=True)
         self.log.bind("<<Paste>>", self._on_paste_file, add="+")
         # DISABLED Text swallows tag_bind on Aqua/Win; handle clicks at widget level.
         self.log.bind("<Button-1>", self._on_log_click, add="+")
 
         bot = ttk.Frame(self.root)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
+        bot.columnconfigure(0, weight=1)
+        self._suggest_slot = ttk.Frame(bot)
+        self._target_row = ttk.Frame(bot)
+        self._target_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self._target_picker_slot = ttk.Frame(bot)
+        ttk.Label(self._target_row, text="发送至").pack(side=tk.LEFT)
+        self.var_send_target = tk.StringVar(value=self._send_target_label())
+        self.btn_send_target = ttk.Button(
+            self._target_row,
+            textvariable=self.var_send_target,
+            command=self._show_send_target_picker,
+        )
+        self.btn_send_target.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        # No HoverTip here — topmost tooltip Toplevels break Aqua hit-testing on macOS.
+        self._send_target_tip = None
+        self._input_row = ttk.Frame(bot)
+        self._input_row.grid(row=3, column=0, sticky="ew")
         self.var_input = tk.StringVar()
-        self.entry = ttk.Entry(bot, textvariable=self.var_input)
+        self.entry = ttk.Entry(self._input_row, textvariable=self.var_input)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.entry.bind("<Return>", self._on_entry_return)
         self.entry.bind("<Tab>", self._on_entry_tab)
@@ -2001,34 +2196,37 @@ class SSHChatGUI:
         self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
         self.entry.bind("<Command-v>", self._on_paste_file, add="+")
         self.entry.bind("<Control-v>", self._on_paste_file, add="+")
-        ttk.Button(bot, text="发送", command=self._send_clicked).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_send, _ = self._pack_icon_btn(
+            self._input_row, "➤", "发送", self._send_clicked
         )
-        self.btn_send_target = ttk.Button(
-            bot, text=self._send_target_label(), command=self._show_send_target_picker
+        self.btn_send_file, _ = self._pack_icon_btn(
+            self._input_row, "📎", "发文件", self._pick_and_send_file
         )
-        self.btn_send_target.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(bot, text="发文件", command=self._pick_and_send_file).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_canvas, _ = self._pack_icon_btn(
+            self._input_row, "🎨", "画板", self._start_canvas
         )
-        ttk.Button(bot, text="清屏", command=self._clear_active_room).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.btn_piano, _ = self._pack_icon_btn(
+            self._input_row, "🎹", "钢琴", self._start_piano
+        )
+        self.btn_library, _ = self._pack_icon_btn(
+            self._input_row, "📚", "图书馆", self._start_library
+        )
+        self.btn_clear, _ = self._pack_icon_btn(
+            self._input_row, "⌫", "清屏", self._clear_active_room
         )
         hint = ttk.Label(
             self.root,
-            text="提示: 「发送至」可选私聊/房间；指定用户可对不在线的人留言或发文件",
+            text="提示: 悬停图标看说明；点「发送至」可选私聊/房间；指定用户可留言或发文件",
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
 
     def _on_window_mapped(self, _event=None) -> None:
-        # On some macOS/Tk builds, first paint can leave controls seemingly
-        # unresponsive until a manual move/resize. Force a post-map refresh.
+        # One delayed refresh on first map; avoid repeated 1px resizes (visible shake).
         self._is_minimized = False
-        self.root.after_idle(self._stabilize_initial_interaction)
-        self.root.after(200, self._stabilize_initial_interaction)
-        self.root.after(60, self._render_active_room)
+        if not self._aqua_startup_nudge_done:
+            self.root.after(450, self._stabilize_initial_interaction)
         self.root.after(60, self._render_active_room)
 
     def _on_window_unmapped(self, _event=None) -> None:
@@ -2038,27 +2236,13 @@ class SSHChatGUI:
             self._is_minimized = False
         self._hide_suggestions()
 
-    def _on_root_configure(self, event=None) -> None:
-        # Only react to the toplevel itself (not child widget configures).
-        if event is not None and event.widget is not self.root:
-            return
-        try:
-            geom = self.root.geometry()
-        except tk.TclError:
-            return
-        if geom == self._last_root_geom:
-            return
-        self._last_root_geom = geom
-        if self._suggest_win is not None:
-            if self._suggest_geom_job is not None:
-                try:
-                    self.root.after_cancel(self._suggest_geom_job)
-                except (tk.TclError, ValueError):
-                    pass
-            self._suggest_geom_job = self.root.after(40, self._reposition_or_hide_suggestions)
-
     def _widget_in_suggestions(self, w) -> bool:
-        if w is self.entry or w is self._suggest_list or w is self._suggest_win:
+        if (
+            w is self.entry
+            or w is self._suggest_list
+            or w is self._suggest_win
+            or w is self._suggest_slot
+        ):
             return True
         if self._suggest_win is None:
             return False
@@ -2068,11 +2252,12 @@ class SSHChatGUI:
             return False
 
     def _on_any_button_press(self, event) -> None:
+        w = event.widget
+        if self._target_picker_visible() and not self._widget_in_target_picker(w):
+            self.root.after_idle(self._hide_send_target_picker)
         # Dismiss in-window completion when clicking elsewhere in the main window.
-        # Ignore other Toplevels (canvas shell, pickers) so we don't steal their clicks.
         if self._suggest_win is None:
             return
-        w = event.widget
         try:
             if w.winfo_toplevel() is not self.root:
                 return
@@ -2080,7 +2265,67 @@ class SSHChatGUI:
             return
         if self._widget_in_suggestions(w):
             return
-        self._hide_suggestions()
+        self.root.after_idle(self._hide_suggestions)
+
+    def _on_root_focus_in(self, event=None) -> None:
+        if event is not None and event.widget is not self.root:
+            return
+        self._schedule_click_target_refresh(delay_ms=120)
+
+    def _on_aux_window_closed(self) -> None:
+        self._schedule_click_target_refresh(delay_ms=80)
+
+    def _schedule_click_target_refresh(
+        self, delay_ms: int = 0, *, force: bool = False
+    ) -> None:
+        if self._click_refresh_job is not None:
+            try:
+                self.root.after_cancel(self._click_refresh_job)
+            except (tk.TclError, ValueError):
+                pass
+
+        pending_force = force
+
+        def _run() -> None:
+            self._click_refresh_job = None
+            self._refresh_click_targets(force=pending_force)
+
+        try:
+            if delay_ms <= 0:
+                self._click_refresh_job = self.root.after_idle(_run)
+            else:
+                self._click_refresh_job = self.root.after(delay_ms, _run)
+        except tk.TclError:
+            pass
+
+    def _nudge_aqua_geometry(self, *, force: bool = False) -> None:
+        """1px resize tricks Aqua into rebuilding stale click targets."""
+        if sys.platform != "darwin":
+            return
+        now = time.monotonic()
+        elapsed = now - self._aqua_last_geometry_nudge_at
+        if not force and elapsed < 0.35:
+            return
+        self._aqua_last_geometry_nudge_at = now
+        w = max(int(self.root.winfo_width()), 1)
+        h = max(int(self.root.winfo_height()), 1)
+        x = int(self.root.winfo_x())
+        y = int(self.root.winfo_y())
+        self.root.geometry(f"{w}x{h + 1}+{x}+{y}")
+        self.root.update_idletasks()
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _refresh_click_targets(self, *, force: bool = False) -> None:
+        """Refresh hit-testing; geometry nudge is a last resort and only when forced."""
+        try:
+            self.root.update_idletasks()
+            if sys.platform == "darwin":
+                if force:
+                    self._nudge_aqua_geometry(force=True)
+                return
+            self.root.geometry(self.root.winfo_geometry())
+        except tk.TclError:
+            pass
 
     def _on_entry_focus_out(self, _event=None) -> None:
         # Delay so a click on the suggestion list can land first.
@@ -2103,27 +2348,16 @@ class SSHChatGUI:
             return
         self._hide_suggestions()
 
-    def _nudge_hit_testing(self) -> None:
-        """Aqua sometimes keeps stale click targets until geometry changes."""
-        try:
-            self.root.update_idletasks()
-            geom = self.root.winfo_geometry()
-            self.root.geometry(geom)
-        except tk.TclError:
-            pass
-
     def _stabilize_initial_interaction(self) -> None:
         try:
             self.root.update_idletasks()
         except tk.TclError:
             return
-        # Avoid repeated focus_force — on Aqua it can leave hit-testing stale
-        # until the user manually moves the window (the symptom we are fixing).
-        try:
-            self.root.lift()
-        except tk.TclError:
-            pass
-        self._nudge_hit_testing()
+        if sys.platform == "darwin" and not self._aqua_startup_nudge_done:
+            self._aqua_startup_nudge_done = True
+            self._refresh_click_targets(force=True)
+        else:
+            self._refresh_click_targets(force=False)
         try:
             if self.btn_connect.instate(("disabled",)):
                 self.btn_connect.state(("!disabled",))
@@ -2157,14 +2391,46 @@ class SSHChatGUI:
     def _refresh_room_list(self) -> None:
         if not hasattr(self, "room_list"):
             return
-        self.room_list.delete(0, tk.END)
-        for room in self._rooms_order:
-            self.room_list.insert(tk.END, self._room_label(room))
-        if self._active_room in self._rooms_order:
-            idx = self._rooms_order.index(self._active_room)
-            self.room_list.selection_clear(0, tk.END)
-            self.room_list.selection_set(idx)
-            self.room_list.activate(idx)
+        labels = [self._room_label(room) for room in self._rooms_order]
+        self._room_select_guard = True
+        try:
+            size = int(self.room_list.size())
+            # Prefer in-place label updates: full delete/rebuild on Aqua eats
+            # clicks that land while unread badges are changing.
+            if size == len(labels):
+                for i, label in enumerate(labels):
+                    if self.room_list.get(i) != label:
+                        self.room_list.delete(i)
+                        self.room_list.insert(i, label)
+            else:
+                self.room_list.delete(0, tk.END)
+                for label in labels:
+                    self.room_list.insert(tk.END, label)
+            if self._active_room in self._rooms_order:
+                idx = self._rooms_order.index(self._active_room)
+                self.room_list.selection_clear(0, tk.END)
+                self.room_list.selection_set(idx)
+                self.room_list.activate(idx)
+                self.room_list.see(idx)
+        except tk.TclError:
+            pass
+        finally:
+            self._room_select_guard = False
+
+    def _schedule_room_list_refresh(self) -> None:
+        if self._room_list_refresh_job is not None:
+            try:
+                self.root.after_cancel(self._room_list_refresh_job)
+            except (tk.TclError, ValueError):
+                pass
+        try:
+            self._room_list_refresh_job = self.root.after(40, self._flush_room_list_refresh)
+        except tk.TclError:
+            self._room_list_refresh_job = None
+
+    def _flush_room_list_refresh(self) -> None:
+        self._room_list_refresh_job = None
+        self._refresh_room_list()
 
     def _render_active_room(self) -> None:
         entries = self._room_history.get(self._active_room, [])
@@ -2173,6 +2439,8 @@ class SSHChatGUI:
         self._photo_refs.clear()
         self._media_save_targets.clear()
         self._media_preview_targets.clear()
+        self._canvas_open_targets.clear()
+        self._piano_open_targets.clear()
         for entry in entries:
             if isinstance(entry, dict) and entry.get("_kind") == "media":
                 self._insert_media_entry(entry)
@@ -2190,6 +2458,7 @@ class SSHChatGUI:
         ):
             self._fail_paste("已切换房间")
         self._ensure_room(room)
+        self._hide_send_target_picker()
         self._active_room = room
         self._room_unread[room] = 0
         self._refresh_room_list()
@@ -2215,6 +2484,25 @@ class SSHChatGUI:
         if self._send_target_kind == "named_room" and self._send_target_value:
             return f"/sendfile #{self._send_target_value}"
         return "/sendfile"
+
+    def _canvas_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/canvas {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/canvas #{self._send_target_value}"
+        return "/canvas"
+
+    def _piano_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/piano {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/piano #{self._send_target_value}"
+        return "/piano"
+
+    def _pack_icon_btn(self, parent, icon: str, tip: str, command):
+        btn = ttk.Button(parent, text=icon, width=3, command=command)
+        btn.pack(side=tk.LEFT, padx=(4, 0))
+        return btn, _HoverTip(btn, tip)
 
     def _outbound_text(self, draft: str) -> str:
         t = draft.strip()
@@ -2245,8 +2533,73 @@ class SSHChatGUI:
         self._recent_users = self._recent_users[:12]
 
     def _refresh_send_target_button(self) -> None:
-        if hasattr(self, "btn_send_target"):
-            self.btn_send_target.configure(text=self._send_target_label())
+        label = self._send_target_label()
+        if hasattr(self, "var_send_target"):
+            self.var_send_target.set(label)
+        tip = getattr(self, "_send_target_tip", None)
+        if tip is not None:
+            tip.set_text(label)
+
+    def _target_picker_visible(self) -> bool:
+        return self._target_picker_frame is not None
+
+    def _widget_in_target_picker(self, w) -> bool:
+        if w is self.btn_send_target:
+            return True
+        if self._target_picker_frame is None:
+            return False
+        try:
+            return str(w).startswith(str(self._target_picker_frame))
+        except tk.TclError:
+            return False
+
+    def _hide_send_target_picker(self) -> None:
+        if self._target_picker_frame is not None:
+            try:
+                self._target_picker_frame.destroy()
+            except tk.TclError:
+                pass
+        self._target_picker_frame = None
+        self._target_picker_list = None
+        self._target_picker_items = []
+        try:
+            self._target_picker_slot.grid_remove()
+        except tk.TclError:
+            pass
+
+    def _start_canvas(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        cmd = self._canvas_command()
+        self._append_chat_line(f"[*] 正在创建共享画板…（{cmd}）", local_sent=True)
+        self._expecting_own_canvas = True
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_piano(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        cmd = self._piano_command()
+        self._append_chat_line(f"[*] 正在开启房间钢琴…（{cmd}）", local_sent=True)
+        self._expecting_own_piano = True
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_library(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        self._append_chat_line("[*] 正在打开图书馆…（/library）", local_sent=True)
+        try:
+            self._chan_send_bytes(b"/library\n")
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
 
     def _refresh_online_users(self) -> None:
         if not self._chan or self._chan.closed:
@@ -2262,21 +2615,10 @@ class SSHChatGUI:
         if not self._chan or self._chan.closed:
             messagebox.showwarning("SSHChat", "请先连接")
             return
-
-        win = tk.Toplevel(self.root)
-        win.title("发送至")
-        win.transient(self.root)
-        win.grab_set()
-
-        def _close_picker() -> None:
-            try:
-                win.grab_release()
-            except tk.TclError:
-                pass
-            try:
-                win.destroy()
-            except tk.TclError:
-                pass
+        if self._target_picker_visible():
+            self._hide_send_target_picker()
+            return
+        self._hide_suggestions()
 
         items: list[tuple[str, str, str]] = []
         items.append((f"当前房间 #{self._active_room}", "room", ""))
@@ -2299,13 +2641,27 @@ class SSHChatGUI:
         for u in self._recent_users:
             add_user(u)
 
-        lb = tk.Listbox(win, width=44, height=min(14, max(4, len(items) + 2)))
-        lb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._target_picker_items = items
+        try:
+            self._target_picker_slot.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        except tk.TclError:
+            pass
+
+        frame = ttk.Frame(self._target_picker_slot, relief=tk.SOLID, borderwidth=1)
+        lb = tk.Listbox(
+            frame,
+            width=44,
+            height=min(8, max(4, len(items))),
+            exportselection=False,
+        )
+        lb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         for label, _, _ in items:
             lb.insert(tk.END, label)
+        if items:
+            lb.selection_set(0)
 
-        btn_row = ttk.Frame(win)
-        btn_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill=tk.X, padx=4, pady=(0, 4))
 
         def apply_choice() -> None:
             sel = lb.curselection()
@@ -2313,47 +2669,71 @@ class SSHChatGUI:
                 return
             _, kind, value = items[sel[0]]
             self._set_send_target(kind, value)
-            _close_picker()
+            self._hide_send_target_picker()
 
         def pick_named_user() -> None:
             r = simpledialog.askstring(
                 "私聊指定用户",
                 "昵称（不在线也会留言发文件）:",
-                parent=win,
+                parent=self.root,
             )
             if r:
                 nick = r.strip()
                 if nick:
                     self._set_send_target("user", nick)
-                    _close_picker()
+                    self._hide_send_target_picker()
 
         def pick_named_room() -> None:
-            r = simpledialog.askstring("发送到房间", "房间名（不含 #）:", parent=win)
+            r = simpledialog.askstring(
+                "发送到房间", "房间名（不含 #）:", parent=self.root
+            )
             if r:
                 room = r.strip().lstrip("#")
                 if room:
                     self._set_send_target("named_room", room)
-                    _close_picker()
+                    self._hide_send_target_picker()
 
         def refresh_online() -> None:
             self._refresh_online_users()
             self._set_status("正在刷新在线用户…")
-            _close_picker()
+            self._hide_send_target_picker()
 
         ttk.Button(btn_row, text="确定", command=apply_choice).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="指定用户…", command=pick_named_user).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(btn_row, text="指定房间…", command=pick_named_room).pack(
+            side=tk.LEFT, padx=8
+        )
         ttk.Button(btn_row, text="刷新在线", command=refresh_online).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="取消", command=_close_picker).pack(side=tk.RIGHT)
-        win.protocol("WM_DELETE_WINDOW", _close_picker)
+        ttk.Button(btn_row, text="取消", command=self._hide_send_target_picker).pack(
+            side=tk.RIGHT
+        )
         lb.bind("<Double-Button-1>", lambda _e: apply_choice())
-        if items:
-            lb.selection_set(0)
+        frame.pack(fill=tk.BOTH, expand=True)
+        self._target_picker_frame = frame
+        self._target_picker_list = lb
+        try:
+            lb.focus_set()
+        except tk.TclError:
+            pass
+
+    def _on_room_list_click(self, event) -> None:
+        try:
+            idx = int(self.room_list.nearest(event.y))
+        except (tk.TclError, TypeError, ValueError):
+            return
+        self._activate_room_at(idx)
 
     def _on_room_selected(self, _event=None) -> None:
+        if self._room_select_guard:
+            return
         if not self.room_list.curselection():
             return
         idx = int(self.room_list.curselection()[0])
+        self._activate_room_at(idx)
+
+    def _activate_room_at(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._rooms_order):
             return
         room = self._rooms_order[idx]
@@ -2413,7 +2793,7 @@ class SSHChatGUI:
             self.log.configure(state=tk.DISABLED)
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
-            self._refresh_room_list()
+            self._schedule_room_list_refresh()
 
     def _format_file_size(self, size: int) -> str:
         if size < 1024:
@@ -2466,6 +2846,14 @@ class SSHChatGUI:
             if prev:
                 self._open_media_preview(Path(prev[0]), prev[1])
                 return
+            canvas = self._canvas_open_targets.get(tag)
+            if canvas:
+                self._open_native_canvas(canvas[0], canvas[1])
+                return
+            piano = self._piano_open_targets.get(tag)
+            if piano:
+                self._open_native_piano(piano[0], piano[1])
+                return
             save = self._media_save_targets.get(tag)
             if save:
                 self._save_media_as(Path(save[0]), save[1])
@@ -2500,6 +2888,7 @@ class SSHChatGUI:
                 path,
                 name,
                 on_save=self._save_media_as,
+                on_close=self._on_aux_window_closed,
             )
         except Exception as e:
             # Auto-open after send/receive must not look like "发送失败".
@@ -2553,15 +2942,8 @@ class SSHChatGUI:
                 self._insert_media_entry(media)
                 self.log.see(tk.END)
                 self.log.configure(state=tk.DISABLED)
-                if media.get("is_image") and Path(str(media.get("path") or "")).is_file():
-                    name = str(media.get("name") or "file")
-                    path = Path(str(media["path"]))
-                    self.root.after(
-                        80,
-                        lambda p=path, n=name: self._open_media_preview(
-                            p, n, quiet=True
-                        ),
-                    )
+                # Do not auto-open image windows — privacy (shared screen / shoulder).
+                # User clicks 「预览」 when ready.
             except Exception as e:
                 self._set_status(f"预览失败: {e}")
                 try:
@@ -2577,7 +2959,7 @@ class SSHChatGUI:
                     pass
         else:
             self._room_unread[room] = self._room_unread.get(room, 0) + 1
-            self._refresh_room_list()
+            self._schedule_room_list_refresh()
 
     def _save_media_as(self, path: Path, name: str) -> None:
         if not path.is_file():
@@ -2598,10 +2980,14 @@ class SSHChatGUI:
 
     def _update_rooms_from_system(self, body: str) -> None:
         # Examples:
+        # "Active room #ops. /names /rooms ..."
         # "Rooms: #default, *#ops"
         # "Joined #ops and switched from #default to #ops"
         # "Switched from #ops to #dev"
         # "Left #dev, switched to #default"
+        m_active = re.search(r"Active room\s+#([a-zA-Z0-9_-]{1,32})", body, re.I)
+        if m_active:
+            self._switch_room_local(m_active.group(1), send_switch=False)
         m = re.search(r"Rooms:\s*(.*)$", body)
         if m:
             rooms_text = m.group(1)
@@ -2659,6 +3045,8 @@ class SSHChatGUI:
         if parsed and parsed[1] == "*" and self._try_handle_upload_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_canvas_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_piano_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
@@ -2721,11 +3109,10 @@ class SSHChatGUI:
     def _apply_profile(self, cfg: dict[str, Any] | None) -> None:
         if not cfg:
             return
-        if not self._bundle:
-            if isinstance(cfg.get("host"), str):
-                self.var_host.set(cfg["host"])
-            port = cfg.get("ssh_port", 22)
-            self.var_port.set(str(port))
+        if isinstance(cfg.get("host"), str) and cfg["host"].strip():
+            self.var_host.set(cfg["host"].strip())
+        if cfg.get("ssh_port") is not None:
+            self.var_port.set(str(cfg["ssh_port"]))
         if isinstance(cfg.get("user"), str):
             self.var_user.set(cfg["user"])
         kind = cfg.get("send_target_kind")
@@ -2744,18 +3131,14 @@ class SSHChatGUI:
         user = self.var_user.get().strip()
         if not user:
             raise ValueError("请填写用户名")
-        if self._bundle:
-            host = str(self._bundle["host"]).strip()
-            port_n = int(self._bundle.get("ssh_port", 22))
-        else:
-            port_s = self.var_port.get().strip() or "22"
-            try:
-                port_n = int(port_s)
-            except ValueError:
-                raise ValueError("SSH 端口必须是数字") from None
-            host = self.var_host.get().strip()
-            if not host:
-                raise ValueError("请填写主机")
+        port_s = self.var_port.get().strip() or "22"
+        try:
+            port_n = int(port_s)
+        except ValueError:
+            raise ValueError("SSH 端口必须是数字") from None
+        host = self.var_host.get().strip()
+        if not host:
+            raise ValueError("请填写主机")
         data: dict[str, Any] = {
             "host": host,
             "user": user,
@@ -2817,19 +3200,12 @@ class SSHChatGUI:
     def _connect_clicked(self) -> None:
         if self._connecting.is_set():
             return
-        if self._bundle:
-            try:
-                port = int(self._bundle.get("ssh_port", 22))
-            except (TypeError, ValueError):
-                port = 22
-            host = str(self._bundle["host"]).strip()
-        else:
-            try:
-                port = int(self.var_port.get().strip() or "22")
-            except ValueError:
-                messagebox.showwarning("SSHChat", "SSH 端口必须是数字")
-                return
-            host = self.var_host.get().strip()
+        try:
+            port = int(self.var_port.get().strip() or "22")
+        except ValueError:
+            messagebox.showwarning("SSHChat", "SSH 端口必须是数字")
+            return
+        host = self.var_host.get().strip()
         user = self.var_user.get().strip()
         if not user:
             messagebox.showwarning("SSHChat", "请填写用户名")
@@ -2905,6 +3281,8 @@ class SSHChatGUI:
         self._expecting_names = False
         self._refresh_send_target_button()
         self.root.after(500, self._refresh_online_users)
+        if sys.platform == "darwin" and self._aqua_startup_nudge_done:
+            self.root.after(300, self._stabilize_initial_interaction)
 
     def _connect_failed(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
@@ -3147,8 +3525,78 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        self._open_native_canvas(url, key)
+        me = self.var_user.get().strip()
+        creator = str(self._pending_file_meta.get("sender") or "").strip()
+        own = self._expecting_own_canvas or (
+            bool(creator and me) and creator.lower() == me.lower()
+        )
+        self._expecting_own_canvas = False
+        if own:
+            self._open_native_canvas(url, key)
+        else:
+            self._offer_canvas_open(url, key)
         return True
+
+    def _try_handle_piano_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_PIANO_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        me = self.var_user.get().strip()
+        creator = str(self._pending_file_meta.get("sender") or "").strip()
+        own = self._expecting_own_piano or (
+            bool(creator and me) and creator.lower() == me.lower()
+        )
+        self._expecting_own_piano = False
+        if own:
+            self._open_native_piano(url, key)
+        else:
+            self._offer_piano_open(url, key)
+        return True
+
+    def _offer_piano_open(self, url: str, key: str) -> None:
+        self._media_tag_seq += 1
+        tag = f"piano_id_{self._media_tag_seq}"
+        self._piano_open_targets[tag] = (url, key)
+        try:
+            self.log.configure(state=tk.NORMAL)
+            self.log.insert(tk.END, "[*] 收到房间钢琴邀请  ", ("notice",))
+            self.log.insert(tk.END, "打开钢琴", ("piano_open", tag))
+            self.log.insert(tk.END, "\n")
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            try:
+                self.log.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+            self._append_chat_line(
+                "[*] 收到房间钢琴邀请（点消息区「打开钢琴」）", local_sent=True
+            )
+        self._set_status("收到房间钢琴（未自动打开，可点「打开钢琴」）")
+        self._alert_beep()
+
+    def _offer_canvas_open(self, url: str, key: str) -> None:
+        self._media_tag_seq += 1
+        tag = f"canvas_id_{self._media_tag_seq}"
+        self._canvas_open_targets[tag] = (url, key)
+        try:
+            self.log.configure(state=tk.NORMAL)
+            self.log.insert(tk.END, "[*] 收到共享画布邀请  ", ("notice",))
+            self.log.insert(tk.END, "打开画布", ("canvas_open", tag))
+            self.log.insert(tk.END, "\n")
+            self.log.see(tk.END)
+            self.log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            try:
+                self.log.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+            self._append_chat_line(
+                f"[*] 收到共享画布邀请（点消息区「打开画布」）", local_sent=True
+            )
+        self._set_status("收到共享画布（未自动打开，可点「打开画布」）")
+        self._alert_beep()
 
     def _try_handle_download_invite(self, body: str) -> bool:
         m = _GUI_OPEN_DOWNLOAD_RE.match(body.strip())
@@ -3217,31 +3665,44 @@ class SSHChatGUI:
         # Excalidraw board is the web page; #k= autofills client-side only.
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
-            new_tok = ""
-            try:
-                new_tok = _canvas_token_from_url(url)[1]
-            except ValueError:
-                new_tok = ""
-            # Same room board: other clients joining re-send gui-open. Do not
-            # tear down an already-open window for the same token.
-            if self._canvas_win is not None and new_tok:
-                try:
-                    if self._canvas_win.win.winfo_exists():
-                        cur = _canvas_token_from_url(self._canvas_win.url)[1]
-                        if cur == new_tok:
-                            return
-                except (tk.TclError, ValueError):
-                    self._canvas_win = None
-            if self._canvas_win is not None:
-                try:
-                    self._canvas_win.close()
-                except Exception:
-                    pass
-                self._canvas_win = None
-            self._canvas_win = CanvasWebShell(self.root, target)  # type: ignore[assignment]
-            self._append_chat_line("[*] 已打开共享画布（可最大化）", local_sent=True)
+            if _open_canvas_app_window(target, maximized=True):
+                self._append_chat_line("[*] 已打开共享画布", local_sent=True)
+            else:
+                webbrowser.open(target)
+                self._append_chat_line("[*] 已在系统浏览器打开共享画布", local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
+
+    def _reachability_host(self) -> str:
+        if self._bundle:
+            h = str(self._bundle.get("host") or "").strip()
+            if h:
+                return h
+        try:
+            return self.var_host.get().strip()
+        except tk.TclError:
+            return ""
+
+    def _open_native_piano(self, url: str, key: str) -> None:
+        # Same as canvas: open the Cloudflare HTTPS page in Chromium --app=;
+        # #k= autofills client-side only (never sent to the server).
+        token = _piano_token_from_url(url)
+        if token and token in self._open_piano_tokens:
+            self._append_chat_line("[*] 房间钢琴已在浏览器中打开", local_sent=True)
+            return
+        try:
+            target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
+            if _open_canvas_app_window(target, maximized=True):
+                if token:
+                    self._open_piano_tokens.add(token)
+                self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
+            else:
+                webbrowser.open(target)
+                if token:
+                    self._open_piano_tokens.add(token)
+                self._append_chat_line("[*] 已在系统浏览器打开房间钢琴", local_sent=True)
+        except Exception as e:
+            self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 
     def _pick_and_send_file(self) -> None:
         path = filedialog.askopenfilename(title="选择要发送的文件")
@@ -3268,19 +3729,16 @@ class SSHChatGUI:
         self._start_paste_sendfile(path)
         return "break"
 
-    def _hide_suggestions(self) -> None:
-        if self._suggest_geom_job is not None:
-            try:
-                self.root.after_cancel(self._suggest_geom_job)
-            except (tk.TclError, ValueError):
-                pass
-            self._suggest_geom_job = None
-        if self._suggest_focus_job is not None:
-            try:
-                self.root.after_cancel(self._suggest_focus_job)
-            except (tk.TclError, ValueError):
-                pass
-            self._suggest_focus_job = None
+    def _cancel_suggestion_ui_job(self) -> None:
+        if self._suggest_ui_job is None:
+            return
+        try:
+            self.root.after_cancel(self._suggest_ui_job)
+        except (tk.TclError, ValueError):
+            pass
+        self._suggest_ui_job = None
+
+    def _destroy_suggestion_widgets(self) -> bool:
         had = self._suggest_win is not None
         if self._suggest_win is not None:
             try:
@@ -3289,48 +3747,48 @@ class SSHChatGUI:
                 pass
         self._suggest_win = None
         self._suggest_list = None
-        self._suggest_items = []
-        if had:
-            # Destroying an overlay can leave Aqua click maps stale.
-            self.root.after_idle(self._nudge_hit_testing)
+        return had
 
-    def _suggestion_place_box(self) -> tuple[int, int, int, int]:
-        self.entry.update_idletasks()
-        self.root.update_idletasks()
-        height = min(160, 20 * max(1, len(self._suggest_items)) + 4)
-        width = max(self.entry.winfo_width(), 220)
-        # Coordinates relative to root content (place), not screen — so the
-        # panel moves with the window and cannot orphan over the desktop.
-        x = self.entry.winfo_rootx() - self.root.winfo_rootx()
-        y_above = self.entry.winfo_rooty() - self.root.winfo_rooty() - height - 4
-        if y_above < 0:
-            y = self.entry.winfo_rooty() - self.root.winfo_rooty() + self.entry.winfo_height() + 2
-        else:
-            y = y_above
-        return x, y, width, height
-
-    def _reposition_or_hide_suggestions(self) -> None:
-        self._suggest_geom_job = None
-        if self._suggest_win is None:
+    def _apply_suggestion_ui(self) -> None:
+        self._suggest_ui_job = None
+        pending = self._suggest_ui_pending
+        self._suggest_ui_pending = _SUGGEST_UI_IDLE
+        if pending is _SUGGEST_UI_IDLE:
             return
-        try:
-            if not self._suggest_win.winfo_exists():
-                self._hide_suggestions()
-                return
-            x, y, width, height = self._suggestion_place_box()
-            self._suggest_win.place(x=x, y=y, width=width, height=height)
-            self._suggest_win.lift()
-        except tk.TclError:
-            self._hide_suggestions()
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_focus_job = None
 
-    def _show_suggestions(self, items: list[str]) -> None:
-        self._hide_suggestions()
+        self._destroy_suggestion_widgets()
+        if pending is None:
+            self._suggest_items = []
+            try:
+                self._suggest_slot.grid_remove()
+            except tk.TclError:
+                pass
+            return
+
+        items = pending
         if not items:
+            self._suggest_items = []
+            try:
+                self._suggest_slot.grid_remove()
+            except tk.TclError:
+                pass
             return
+
+        self._hide_send_target_picker()
         self._suggest_items = items
-        # In-window Frame (not overrideredirect Toplevel): floating popups on
-        # Aqua keep eating button clicks when their screen rect goes stale.
-        frame = ttk.Frame(self.root, relief=tk.SOLID, borderwidth=1)
+        # In-window slot (not place/overrideredirect): floating layers on Aqua keep
+        # eating button clicks when their screen rect goes stale.
+        try:
+            self._suggest_slot.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        except tk.TclError:
+            pass
+        frame = ttk.Frame(self._suggest_slot, relief=tk.SOLID, borderwidth=1)
         lst = tk.Listbox(frame, height=min(8, len(items)), exportselection=False)
         lst.pack(fill=tk.BOTH, expand=True)
         for item in items:
@@ -3338,16 +3796,53 @@ class SSHChatGUI:
         lst.selection_set(0)
         lst.activate(0)
         lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
-        x, y, width, height = self._suggestion_place_box()
-        frame.place(x=x, y=y, width=width, height=height)
-        try:
-            frame.lift()
-        except tk.TclError:
-            pass
+        frame.pack(fill=tk.BOTH, expand=True)
         self._suggest_win = frame
         self._suggest_list = lst
 
+    def _queue_suggestion_ui(self, items: list[str] | None) -> None:
+        self._suggest_ui_pending = items
+        self._cancel_suggestion_ui_job()
+        try:
+            self._suggest_ui_job = self.root.after_idle(self._apply_suggestion_ui)
+        except tk.TclError:
+            pass
+
+    def _flush_suggestion_ui(self) -> None:
+        if self._suggest_ui_pending is _SUGGEST_UI_IDLE and self._suggest_ui_job is None:
+            return
+        self._cancel_suggestion_ui_job()
+        self._apply_suggestion_ui()
+
+    def _hide_suggestions(self) -> None:
+        if self._suggest_focus_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_focus_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._suggest_focus_job = None
+        self._queue_suggestion_ui(None)
+
+    def _show_suggestions(self, items: list[str]) -> None:
+        self._queue_suggestion_ui(items)
+
+    def _selected_suggestion_index(self) -> int:
+        if not self._suggest_list or not self._suggest_items:
+            return 0
+        sel = self._suggest_list.curselection()
+        return int(sel[0]) if sel else 0
+
+    def _should_commit_suggestion_on_enter(self) -> bool:
+        if not self._suggest_list or not self._suggest_items:
+            return False
+        current = self.var_input.get().rstrip()
+        chosen = self._suggest_items[self._selected_suggestion_index()].rstrip()
+        # Only fill in a partial prefix (e.g. "/game m" → "/game move ").
+        # If the user already typed "/game move 5 12", Enter should send.
+        return len(current) < len(chosen) and chosen.startswith(current)
+
     def _apply_selected_suggestion(self) -> None:
+        self._flush_suggestion_ui()
         if not self._suggest_list or not self._suggest_items:
             return
         sel = self._suggest_list.curselection()
@@ -3361,9 +3856,27 @@ class SSHChatGUI:
         self._hide_suggestions()
         self.entry.focus_set()
 
+    def _completion_users(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for u in list(self._online_users) + list(self._recent_users):
+            n = (u or "").strip()
+            if not n:
+                continue
+            key = n.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(n)
+        return out
+
     def _refresh_command_suggestions(self) -> list[str]:
         text = self.var_input.get()
-        items = _command_completions(text)[:12]
+        items = _command_completions(
+            text,
+            rooms=list(self._rooms_order),
+            users=self._completion_users(),
+        )[:12]
         if text.startswith("/") and items:
             self._show_suggestions(items)
         else:
@@ -3390,10 +3903,19 @@ class SSHChatGUI:
             self._hide_suggestions()
 
     def _on_entry_tab(self, _event=None):
+        self._flush_suggestion_ui()
         text = self.var_input.get()
         if not text.startswith("/"):
             return "break"
-        items = _command_completions(text)
+        # Suggestions already open → Tab cycles the highlight (Enter applies).
+        if self._suggest_list is not None and self._suggest_items:
+            self._on_entry_down()
+            return "break"
+        items = _command_completions(
+            text,
+            rooms=list(self._rooms_order),
+            users=self._completion_users(),
+        )
         if not items:
             self._hide_suggestions()
             return "break"
@@ -3410,6 +3932,7 @@ class SSHChatGUI:
         return "break"
 
     def _on_entry_down(self, _event=None):
+        self._flush_suggestion_ui()
         if not self._suggest_list:
             return None
         size = self._suggest_list.size()
@@ -3424,6 +3947,7 @@ class SSHChatGUI:
         return "break"
 
     def _on_entry_up(self, _event=None):
+        self._flush_suggestion_ui()
         if not self._suggest_list:
             return None
         size = self._suggest_list.size()
@@ -3444,6 +3968,10 @@ class SSHChatGUI:
         return None
 
     def _on_entry_return(self, _event=None):
+        self._flush_suggestion_ui()
+        if self._should_commit_suggestion_on_enter():
+            self._apply_selected_suggestion()
+            return "break"
         self._hide_suggestions()
         self._send_clicked()
         return "break"
@@ -3451,6 +3979,7 @@ class SSHChatGUI:
     def _send_clicked(self) -> None:
         if not self._chan or self._chan.closed:
             return
+        self._flush_suggestion_ui()
         line = self.var_input.get()
         self.var_input.set("")
         self._hide_suggestions()
@@ -3523,6 +4052,8 @@ class SSHChatGUI:
         self.btn_disconnect.configure(state=tk.DISABLED)
         self._online_users = []
         self._expecting_names = False
+        self._expecting_own_piano = False
+        self._open_piano_tokens.clear()
         if clear_log:
             self._rooms_order = ["default"]
             self._active_room = "default"
@@ -3535,7 +4066,7 @@ class SSHChatGUI:
         self._refresh_send_target_button()
 
     def _on_close(self) -> None:
-        self._hide_suggestions()
+        self._flush_suggestion_ui()
         self._disconnect(clear_log=False)
         self.root.destroy()
 
