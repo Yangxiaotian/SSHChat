@@ -23,12 +23,13 @@ function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
   if (t.includes('doushou') || t.includes('jungle') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
   if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
+  // These ids contain the generic "chess" token; resolve them first.
+  if (t.includes('darkchess') || t.includes('dark chess') || t.includes('flipchess') || t.includes('暗棋') || t.includes('翻翻棋')) return 'darkchess';
+  if (t.includes('junqi') || t.includes('army chess') || t.includes('landbattle') || t.includes('军棋')) return 'junqi';
   if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
   if (t.includes('reversi') || t.includes('othello') || t.includes('黑白棋')) return 'reversi';
-  if (t.includes('darkchess') || t.includes('dark chess') || t.includes('flipchess') || t.includes('暗棋') || t.includes('翻翻棋')) return 'darkchess';
   if (t.includes('battleship') || t.includes('战舰') || t.includes('海战棋')) return 'battleship';
-  if (t.includes('junqi') || t.includes('army chess') || t.includes('landbattle') || t.includes('军棋')) return 'junqi';
   if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
@@ -57,7 +58,7 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'darkchess', '暗棋', '翻翻棋', 'battleship', '海战棋', 'junqi', '军棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
