@@ -1534,6 +1534,10 @@ def send_private_messages(conn, sender_name: str, target_nick: str, text: str) -
         return
     for peer_conn, peer_name in targets:
         send_line(peer_conn, f"[PM from {sender_name}] {text}\n")
+    # Echo the private message to the sender as a PM, not as room chat.
+    # Avoid duplicating it when the sender targets their own connection.
+    if not any(peer_conn is conn for peer_conn, _ in targets):
+        send_line(conn, f"[PM from {sender_name}] {text}\n")
     if remote_sent and not targets:
         send_line(conn, f"[*] PM → {target_nick} (federated)\n")
     elif len(targets) == 1 and not remote_sent:

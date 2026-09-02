@@ -1853,13 +1853,19 @@ class KataGoAnalysisService {
         initialStones.push([v === 1 ? 'B' : 'W', goUiToGtp(r + 1, c + 1)]);
       }
     }
-    const turn = payload.mySide === 1 ? 'B' : 'W';
-    const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
     const historyMoves = sanitizeKataGoMoves(payload.moves);
+    const turn = historyMoves.length > 0
+      ? historyMoves[0][0]
+      : payload.toMove === 2
+        ? 'W'
+        : payload.toMove === 1
+          ? 'B'
+          : (initialStones.filter(([player]) => player === 'B').length <= initialStones.filter(([player]) => player === 'W').length ? 'B' : 'W');
+    const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
     this.trace(
       `req#${reqId} start queueMs=${startedAt - queuedAt} stones=${initialStones.length} ` +
       `moves=${historyMoves.length} visits=${sanitizeKataGoVisits(payload.maxVisits)} ` +
-      `maxTime=${maxTime ?? -1} timeoutMs=${timeoutMs}`,
+      `toMove=${turn} maxTime=${maxTime ?? -1} timeoutMs=${timeoutMs}`,
     );
     const overrideSettings: Record<string, number> = {};
     if (maxTime) overrideSettings.maxTime = maxTime;

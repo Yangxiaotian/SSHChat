@@ -1,0 +1,1 @@
+"""SSHChat test package."""

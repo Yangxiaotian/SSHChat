@@ -65,6 +65,7 @@ export interface GomokuRapfiAnalyzeResponse {
 export interface GoKataGoAnalyzeRequest {
   board: number[][];
   mySide: 1 | 2;
+  toMove?: 1 | 2;
   komi?: number;
   moves?: Array<{ player: 'B' | 'W'; move: string }>;
   maxVisits?: number;

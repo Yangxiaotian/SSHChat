@@ -102,7 +102,7 @@ class RendererErrorBoundary extends Component<{ children: ReactNode; t: (key: st
 }
 
 export default function App() {
-  const { status, showLogin, theme, privacyMode, activeRoom, config, messages, rooms } = useChatStore();
+  const { status, showLogin, theme, privacyMode, activeRoom, config, messages, rooms, locale, toggleLocale } = useChatStore();
   const { t } = useTranslation();
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const loadedHistoryKey = React.useRef<string | null>(null);
@@ -287,6 +287,17 @@ export default function App() {
           <span className="titlebar-title">
             {privacyMode ? 'VsCodeEn' : `${t('app.title')}${status === 'connected' ? '' : ` (${t('status.disconnected')})`}`}
           </span>
+          <div className="titlebar-actions">
+            <button
+              type="button"
+              className="titlebar-language-button"
+              onClick={toggleLocale}
+              title={locale === 'zh' ? 'Switch to English' : '切换到中文'}
+              aria-label={locale === 'zh' ? 'Switch to English' : '切换到中文'}
+            >
+              {locale === 'zh' ? 'EN' : '中文'}
+            </button>
+          </div>
         </div>
 
         <div className="main-content">

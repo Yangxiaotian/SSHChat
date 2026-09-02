@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from '../../i18n';
 
 type Props = {
@@ -106,7 +106,7 @@ function parseMeta(boardText: string): string[] {
 }
 
 function parseKoPoint(boardText: string): { row: number; col: number } | null {
-  const line = boardText.split('\n').find((l) => l.includes('劫点'));
+  const line = [...boardText.split('\n')].reverse().find((l) => l.includes('劫点'));
   if (!line) return null;
   const m = line.match(/第\s*(\d{1,2})\s*行[，,\s]+第\s*(\d{1,2})\s*列/);
   if (!m) return null;
@@ -118,7 +118,7 @@ function parseKoPoint(boardText: string): { row: number; col: number } | null {
 }
 
 function parseKataGoMoves(boardText: string): KataGoHistoryMove[] {
-  const line = boardText.split('\n').find((l) => l.trim().startsWith('KataGo手顺：'));
+  const line = [...boardText.split('\n')].reverse().find((l) => l.trim().startsWith('KataGo手顺：'));
   if (!line) return [];
   const body = line.split('：').slice(1).join('：');
   const moves: KataGoHistoryMove[] = [];
@@ -130,6 +130,58 @@ function parseKataGoMoves(boardText: string): KataGoHistoryMove[] {
     moves.push({ player, move });
   }
   return moves;
+}
+
+function gtpToCell(move: string): [number, number] | null {
+  const match = move.match(/^([A-HJ-T])(\d{1,2})$/i);
+  if (!match) return null;
+  const col = 'ABCDEFGHJKLMNOPQRST'.indexOf(match[1].toUpperCase());
+  const row = 19 - Number(match[2]);
+  return col >= 0 && row >= 0 && col < BOARD_SIZE && row < BOARD_SIZE ? [row, col] : null;
+}
+
+function groupAndLiberties(board: number[][], row: number, col: number): { stones: [number, number][]; liberties: number } {
+  const color = board[row][col];
+  const stones: [number, number][] = [];
+  const seen = new Set<string>();
+  const liberties = new Set<string>();
+  const queue: [number, number][] = [[row, col]];
+  while (queue.length) {
+    const [r, c] = queue.pop()!;
+    const key = `${r},${c}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    stones.push([r, c]);
+    for (const [nr, nc] of [[r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]] as const) {
+      if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE) continue;
+      if (board[nr][nc] === 0) liberties.add(`${nr},${nc}`);
+      else if (board[nr][nc] === color && !seen.has(`${nr},${nc}`)) queue.push([nr, nc]);
+    }
+  }
+  return { stones, liberties: liberties.size };
+}
+
+function historyMatchesBoard(history: KataGoHistoryMove[], matrix: number[][]): boolean {
+  if (!history.length) return true;
+  const replay = Array.from({ length: BOARD_SIZE }, () => Array<number>(BOARD_SIZE).fill(0));
+  for (const item of history) {
+    if (item.move === 'pass') continue;
+    const cell = gtpToCell(item.move);
+    if (!cell) return false;
+    const [row, col] = cell;
+    const color = item.player === 'B' ? 1 : 2;
+    const opponent = color === 1 ? 2 : 1;
+    if (replay[row][col] !== 0) return false;
+    replay[row][col] = color;
+    for (const [nr, nc] of [[row - 1, col], [row + 1, col], [row, col - 1], [row, col + 1]] as const) {
+      if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE || replay[nr][nc] !== opponent) continue;
+      const group = groupAndLiberties(replay, nr, nc);
+      if (group.liberties !== 0) continue;
+      for (const [r, c] of group.stones) replay[r][c] = 0;
+    }
+    if (groupAndLiberties(replay, row, col).liberties === 0) return false;
+  }
+  return replay.every((row, r) => row.every((value, c) => value === matrix[r][c]));
 }
 
 function toMatrix(cells: Cell[][]): number[][] {
@@ -565,6 +617,10 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
     [katagoHistoryMoves],
   );
   const matrix = useMemo(() => toMatrix(cells), [cells]);
+  const katagoHistoryMatchesBoard = useMemo(
+    () => historyMatchesBoard(katagoHistoryMoves, matrix),
+    [katagoHistoryMoves, matrix],
+  );
   const sig = useMemo(() => boardSignature(matrix), [matrix]);
   const normalizedNickname = nickname.trim().toLowerCase();
   const mySide = normalizedNickname === seats.black.trim().toLowerCase()
@@ -590,6 +646,9 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
   const katagoEverOkRef = useRef(false);
   const katagoWarmupRef = useRef<{ started: boolean; ok: boolean }>({ started: false, ok: false });
   const katagoPendingKeyRef = useRef('');
+  const katagoDebounceKeyRef = useRef('');
+  const katagoDebounceTimerRef = useRef<number | null>(null);
+  const [katagoAnalysisWake, setKataGoAnalysisWake] = useState(0);
   const fallbackMoves = useMemo(
     () => (mySideNum ? fallbackGoSuggestions(matrix, mySideNum, koPoint) : []),
     [matrix, mySideNum, koPoint],
@@ -623,6 +682,13 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
         : katagoError
           ? `KataGo 暂不可用：${katagoError}`
           : '等待 KataGo 分析';
+
+  useEffect(() => () => {
+    if (katagoDebounceTimerRef.current !== null) {
+      window.clearTimeout(katagoDebounceTimerRef.current);
+      katagoDebounceTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     if (!katagoPending) return;
@@ -666,6 +732,14 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
       return;
     }
 
+    const stoneN = goStoneCount(matrix);
+    if (katagoHistoryMoves.length > 0 && stoneN === 0) {
+      // Do not analyze a transient snapshot whose board has not arrived yet.
+      setKataGoMoves([]);
+      setKataGoError('等待棋盘与手顺同步');
+      return;
+    }
+
     const koSig = koPoint ? `${koPoint.row},${koPoint.col}` : '-';
     const key = `${sig}|${mySideNum}|${katagoHistorySig}|ko:${koSig}`;
     const likelyMyTurn = myTurn || (!turn.name && isGoSideTurnByMatrix(matrix, mySideNum));
@@ -678,6 +752,16 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
       setKataGoError('');
       katagoPendingKeyRef.current = '';
       setKataGoStartedAt(0);
+      return;
+    }
+
+    if (katagoDebounceKeyRef.current !== key) {
+      katagoDebounceKeyRef.current = key;
+      if (katagoDebounceTimerRef.current !== null) window.clearTimeout(katagoDebounceTimerRef.current);
+      katagoDebounceTimerRef.current = window.setTimeout(() => {
+        katagoDebounceTimerRef.current = null;
+        setKataGoAnalysisWake((value) => value + 1);
+      }, 250);
       return;
     }
 
@@ -699,7 +783,7 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
     }
 
     if (katagoOkKeyRef.current === key) return;
-    if (katagoPending && katagoPendingKeyRef.current === key) return;
+    if (katagoPendingKeyRef.current === key) return;
     if (katagoFailCooldownRef.current.key === key && Date.now() < katagoFailCooldownRef.current.until) return;
 
     const seq = katagoSeqRef.current + 1;
@@ -710,7 +794,6 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
     setKataGoStatusTick(Date.now());
     setKataGoError('');
 
-    const stoneN = goStoneCount(matrix);
     const maxVisits = stoneN <= 80 ? 64 : stoneN <= 180 ? 96 : 128;
     const maxTimeSec = stoneN <= 80 ? 8 : stoneN <= 180 ? 10 : 12;
     const firstColdStart = !katagoEverOkRef.current;
@@ -723,8 +806,9 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
       window.api.analyzeGoKataGo({
         board: matrix,
         mySide: mySideNum,
+        toMove: mySideNum,
         komi: 6.5,
-        moves: katagoHistoryMoves,
+        moves: katagoHistoryMatchesBoard ? katagoHistoryMoves : [],
         maxVisits,
         maxTimeSec,
         timeoutMs,
@@ -786,7 +870,7 @@ export default function GoPanel({ assistantVisible, disabled, nickname, boardTex
           setKataGoStartedAt(0);
         }
       });
-  }, [isHiddenMaster, mySideNum, sig, matrix, koPoint, katagoHistoryMoves, katagoHistorySig, disabled, myTurn, turn.name, katagoPending]);
+  }, [isHiddenMaster, mySideNum, sig, matrix, koPoint, katagoHistoryMoves, katagoHistorySig, katagoHistoryMatchesBoard, disabled, myTurn, turn.name, katagoAnalysisWake]);
   return (
     <div className="game-interaction-panel">
       <div className="game-interaction-title">围棋棋盘（19 路，点击交叉点落子）</div>

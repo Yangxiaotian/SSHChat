@@ -235,6 +235,36 @@ html, body, #root {
   font-size: 16px;
 }
 
+.titlebar-actions {
+  position: absolute;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-language-button {
+  min-width: 44px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 3px;
+  background: var(--vscode-button-secondary);
+  color: var(--vscode-fg);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.titlebar-language-button:hover {
+  background: var(--vscode-button-secondary-hover, var(--vscode-button-secondary));
+}
+
+.titlebar-language-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
 /* ============================================================
    Activity Bar - Left Icon Strip
    ============================================================ */
@@ -725,6 +755,299 @@ html, body, #root {
   margin-bottom: 6px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
+}
+
+.reversi-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 38px);
+  grid-template-rows: repeat(8, 38px);
+  gap: 1px;
+  width: max-content;
+  margin: 8px 0 10px;
+  padding: 6px;
+  border: 1px solid #3c4b43;
+  border-radius: 6px;
+  background: #1e3a2c;
+}
+
+.reversi-cell {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid rgba(164, 205, 176, 0.32);
+  background: #286044;
+  cursor: pointer;
+}
+
+.reversi-cell:disabled {
+  cursor: default;
+}
+
+.reversi-cell.legal:not(:disabled) {
+  box-shadow: inset 0 0 0 2px rgba(221, 187, 109, 0.72);
+}
+
+.reversi-cell.legal:not(:disabled)::after {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border-radius: 50%;
+  background: rgba(221, 187, 109, 0.8);
+}
+
+.reversi-cell.last {
+  box-shadow: inset 0 0 0 2px rgba(116, 170, 211, 0.9);
+}
+
+.reversi-stone {
+  position: absolute;
+  inset: 4px;
+  z-index: 1;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.reversi-stone.black {
+  background: radial-gradient(circle at 32% 28%, #59616c, #171a1f 68%);
+}
+
+.reversi-stone.white {
+  background: radial-gradient(circle at 32% 28%, #ffffff, #aeb8c1 70%);
+}
+
+.darkchess-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 44px);
+  grid-template-rows: repeat(4, 44px);
+  gap: 2px;
+  width: max-content;
+  margin: 8px 0 10px;
+  padding: 7px;
+  border: 1px solid #4b4437;
+  border-radius: 6px;
+  background: #302b22;
+}
+
+.darkchess-cell {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid #625a4c;
+  border-radius: 4px;
+  background: #665c4b;
+  color: #f0e5ca;
+  font-size: 19px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.darkchess-cell.hidden-piece {
+  background: linear-gradient(135deg, #4d5360, #282d35);
+  color: #d2b878;
+}
+
+.darkchess-cell.last {
+  box-shadow: inset 0 0 0 2px rgba(112, 165, 208, 0.9);
+}
+
+.darkchess-cell.selected {
+  outline: 2px solid #d79554;
+  outline-offset: -2px;
+}
+
+.battleship-setup-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 760px;
+  margin: 6px 0 8px;
+}
+
+.battleship-labels,
+.battleship-grids {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.battleship-labels {
+  margin: 8px 0 3px;
+  color: var(--vscode-text-secondary);
+  font-size: 11px;
+}
+
+.battleship-labels span,
+.battleship-grid {
+  width: 266px;
+}
+
+.battleship-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 25px);
+  grid-template-rows: repeat(10, 25px);
+  gap: 1px;
+  padding: 5px;
+  border: 1px solid #3d4650;
+  background: #24303a;
+}
+
+.battleship-cell {
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border: 1px solid #43515d;
+  background: #2d3a45;
+  color: #d8e0e7;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.battleship-cell:disabled {
+  cursor: default;
+}
+
+.battleship-cell.own-s {
+  background: #52616d;
+}
+
+.battleship-cell.own-x,
+.battleship-cell.enemy-x {
+  background: #784c4c;
+  color: #ffd5b3;
+}
+
+.battleship-cell.enemy-o {
+  background: #1f4a59;
+  color: #a4d1d9;
+}
+
+.battleship-cell.enemy-\? {
+  background: #24313a;
+}
+
+.junqi-setup-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 640px;
+  margin: 6px 0 8px;
+}
+
+.junqi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 48px);
+  grid-template-rows: repeat(12, 38px);
+  gap: 2px;
+  width: max-content;
+  margin: 8px 0 10px;
+  padding: 7px;
+  border: 1px solid #3d4650;
+  border-radius: 6px;
+  background: #20262d;
+}
+
+.junqi-cell {
+  width: 48px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid #43515d;
+  border-radius: 4px;
+  background: #2d3a45;
+  color: #d8e0e7;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.junqi-cell.hidden-piece {
+  background: linear-gradient(135deg, #4d5360, #282d35);
+  color: #d2b878;
+}
+
+.junqi-cell.last {
+  box-shadow: inset 0 0 0 2px rgba(112, 165, 208, 0.9);
+}
+
+.junqi-cell.selected {
+  outline: 2px solid #d79554;
+  outline-offset: -2px;
+}
+
+.game-lobby {
+  margin: 8px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--vscode-border);
+  border-radius: 6px;
+  background: rgba(31, 35, 40, 0.72);
+}
+
+.game-lobby-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.game-lobby-title {
+  color: var(--vscode-text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.game-lobby-search {
+  width: 180px;
+  min-height: 28px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-border);
+  border-radius: 4px;
+  background: #181a1f;
+  color: var(--vscode-text-primary);
+}
+
+.game-lobby-category {
+  margin-top: 9px;
+}
+
+.game-lobby-category-title {
+  margin-bottom: 5px;
+  color: var(--vscode-text-secondary);
+  font-size: 11px;
+}
+
+.game-lobby-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 6px;
+}
+
+.game-lobby-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-height: 52px;
+  padding: 7px 8px;
+  border: 1px solid #3d4650;
+  border-radius: 5px;
+  background: #252b32;
+  color: var(--vscode-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.game-lobby-card:hover:not(:disabled) {
+  border-color: #6d9fc7;
+  background: #2b3742;
+}
+
+.game-lobby-card span {
+  color: var(--vscode-text-secondary);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
 }
 
 .poker-section {

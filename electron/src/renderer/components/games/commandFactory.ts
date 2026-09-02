@@ -19,6 +19,10 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       m('newGomoku', '/game new gomoku'),
       m('gomokuAi', '/game new gomoku ai normal'),
       m('newGo', '/game new go'),
+      { label: locale === 'zh' ? '新开黑白棋' : 'New Reversi', cmd: '/game new reversi' },
+      { label: locale === 'zh' ? '新开暗棋' : 'New Dark Chess', cmd: '/game new darkchess' },
+      { label: locale === 'zh' ? '新开海战棋' : 'New Battleship', cmd: '/game new battleship' },
+      { label: locale === 'zh' ? '新开军棋' : 'New Junqi', cmd: '/game new junqi' },
       m('newXiangqi', '/game new xiangqi'),
       m('xiangqiAi', '/game new xiangqi ai normal'),
       { label: locale === 'zh' ? '新开斗兽棋' : 'New Jungle', cmd: '/game new doushou' },
@@ -59,6 +63,42 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       move('pass', 'pass', 'go'),
       m('undo', '/game undo'),
       m('undoAccept', '/game undo accept'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    reversi: [
+      m('show', '/game show'),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating reversi' },
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    darkchess: [
+      m('show', '/game show'),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating darkchess' },
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    battleship: [
+      m('show', '/game show'),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating battleship' },
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      m('resign', '/game resign'),
+      m('abort', '/game abort'),
+      m('end', '/game end'),
+    ],
+    junqi: [
+      m('show', '/game show'),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating junqi' },
+      m('join', '/game join'),
+      m('seats', '/game seats'),
       m('resign', '/game resign'),
       m('abort', '/game abort'),
       m('end', '/game end'),
@@ -150,6 +190,9 @@ export const GameCommandFactory = {
   },
   goMove(row: number, col: number, locale: Locale): string {
     return GameCommandFactory.move(`${row} ${col}`, locale, 'go');
+  },
+  reversiMove(row: number, col: number, locale: Locale): string {
+    return GameCommandFactory.move(`${row} ${col}`, locale, 'reversi');
   },
   xiangqiCoordMove(fr: number, fc: number, tr: number, tc: number, locale: Locale): string {
     return GameCommandFactory.move(`coord ${fr} ${fc} ${tr} ${tc}`, locale, 'xiangqi');

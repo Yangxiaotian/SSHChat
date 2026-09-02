@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { SHAKE_TOKEN } from '../../shared/protocol';
+import type { ChatMessage } from '../../shared/protocol';
 import { useTranslation } from '../i18n';
 import {
   clearPasteUpload,
@@ -34,7 +35,7 @@ const COMMAND_KEYS = [
   { name: '/announce', key: 'input.commands.announce' },
 ] as const;
 
-type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' };
+type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' | 'mention' };
 
 function longestCommonPrefix(values: string[]): string {
   if (!values.length) return '';
@@ -91,6 +92,30 @@ function buildSuggestions(
     }));
 }
 
+function buildMentionSuggestions(value: string, users: string[], nickname: string): SuggestionItem[] {
+  const match = value.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!match) return [];
+  const query = match[1].toLowerCase();
+  const prefix = value.slice(0, value.length - match[1].length);
+  return users
+    .filter((user) => user && user.toLowerCase() !== nickname.toLowerCase())
+    .filter((user) => !query || user.toLowerCase().startsWith(query))
+    .slice(0, 10)
+    .map((user) => ({
+      value: `${prefix}${user} `,
+      desc: '私聊对象',
+      source: 'mention' as const,
+    }));
+}
+
+function toPrivateCommand(value: string): string {
+  const mention = value.trim().match(/^@([^\s@]+)\s+(.+)$/s);
+  if (mention) return `/msg ${mention[1]} ${mention[2].trim()}`;
+  const command = value.trim().match(/^\/msg\s+([^\s]+)\s+(.+)$/is);
+  if (command) return `/msg ${command[1]} ${command[2].trim()}`;
+  return value.trim();
+}
+
 export default function InputBar() {
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -103,7 +128,7 @@ export default function InputBar() {
   }));
   const inputRef = useRef<HTMLInputElement>(null);
   const sendingRef = useRef(false);
-  const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
+  const { status, activeRoom, users, nickname, composerText, setComposerText, clearMessages, addMessage } = useChatStore();
   const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
 
@@ -152,13 +177,16 @@ export default function InputBar() {
   };
 
   const refreshSuggestions = (value: string) => {
-    const merged = buildSuggestions(value, commands, history, t('common.recentInput')).slice(0, 10);
+    const mentions = buildMentionSuggestions(value, users, nickname);
+    const merged = (mentions.length > 0
+      ? mentions
+      : buildSuggestions(value, commands, history, t('common.recentInput'))).slice(0, 10);
     setSuggestions(merged);
     setActiveSuggestion(0);
     const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
     const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
     setShowSuggestions(
-      isTopLevelCommand || isGameUndoCommand
+      mentions.length > 0 || isTopLevelCommand || isGameUndoCommand
         ? merged.length > 0
         : merged.length > 0 && value.trim().length > 0,
     );
@@ -247,8 +275,21 @@ export default function InputBar() {
     sendingRef.current = true;
     setIsSending(true);
     try {
-      const ok = await window.api.sendMessage(trimmed);
+      const outbound = toPrivateCommand(trimmed);
+      const ok = await window.api.sendMessage(outbound);
       if (!ok) return;
+      const privateMatch = outbound.match(/^\/msg\s+([^\s]+)\s+(.+)$/is);
+      if (privateMatch && !privateMatch[1].startsWith('#')) {
+        const localEcho: ChatMessage = {
+          id: `local-pm-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          room: activeRoom,
+          sender: nickname,
+          content: privateMatch[2].trim(),
+          timestamp: Date.now(),
+          type: 'pm',
+        };
+        addMessage(localEcho);
+      }
       const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);
       persistHistory(next);
       setComposerText('');
@@ -259,7 +300,7 @@ export default function InputBar() {
     }
   };
 
-  const handleSuggestionClick = (value: string, source: 'command' | 'history') => {
+  const handleSuggestionClick = (value: string, source: SuggestionItem['source']) => {
     applySuggestion({ value, desc: '', source });
   };
 

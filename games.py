@@ -2347,6 +2347,1286 @@ class GoGame(BoardUndoMixin):
         return ([], [], False)
 
 
+REVERSI_SIZE = 8
+_REVERSI_DIRS = tuple(
+    (dr, dc)
+    for dr in (-1, 0, 1)
+    for dc in (-1, 0, 1)
+    if dr or dc
+)
+
+
+def _reversi_flips(
+    board: list[list[int]], row: int, col: int, player: int
+) -> list[tuple[int, int]]:
+    if not (0 <= row < REVERSI_SIZE and 0 <= col < REVERSI_SIZE):
+        return []
+    if board[row][col] != 0:
+        return []
+    other = 3 - player
+    flips: list[tuple[int, int]] = []
+    for dr, dc in _REVERSI_DIRS:
+        nr, nc = row + dr, col + dc
+        line: list[tuple[int, int]] = []
+        while 0 <= nr < REVERSI_SIZE and 0 <= nc < REVERSI_SIZE:
+            cell = board[nr][nc]
+            if cell != other:
+                if cell == player:
+                    flips.extend(line)
+                break
+            line.append((nr, nc))
+            nr += dr
+            nc += dc
+    return flips
+
+
+def _reversi_legal_moves(board: list[list[int]], player: int) -> list[tuple[int, int]]:
+    return [
+        (row, col)
+        for row in range(REVERSI_SIZE)
+        for col in range(REVERSI_SIZE)
+        if _reversi_flips(board, row, col, player)
+    ]
+
+
+def _reversi_render(
+    board: list[list[int]], *, last: Optional[tuple[int, int]] = None
+) -> list[str]:
+    lines = ["    " + " ".join(str(i) for i in range(1, REVERSI_SIZE + 1))]
+    for row, cells in enumerate(board):
+        tokens = []
+        for col, cell in enumerate(cells):
+            token = "#" if cell == 1 else "o" if cell == 2 else "."
+            if last == (row, col):
+                token = f"!{token}"
+            tokens.append(token)
+        lines.append(f"{row + 1:>2}  " + " ".join(tokens))
+    lines.append("Legend: # Black  o White  . Empty  ! Last move")
+    return lines
+
+
+class ReversiGame:
+    """Standard 8x8 Reversi. Creator is black; joiner is white."""
+
+    name = "reversi"
+    first_seat_desc = "Black (first)"
+    second_seat_desc = "White"
+    send_view_on_move = True
+
+    def __init__(
+        self,
+        black_conn,
+        black_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
+        self.board: list[list[int]] = [[0] * REVERSI_SIZE for _ in range(REVERSI_SIZE)]
+        self.board[3][3] = 2
+        self.board[3][4] = 1
+        self.board[4][3] = 1
+        self.board[4][4] = 2
+        self.black_conn = black_conn
+        self.black_name = black_name
+        self.white_conn = None
+        self.white_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self.turn = 1
+        self._passes = 0
+        self._last: Optional[tuple[int, int]] = None
+        self.join_blurb = "Waiting for another player to join with /game join."
+
+    def who_of(self, conn) -> Optional[int]:
+        if conn is self.black_conn:
+            return 1
+        if conn is self.white_conn:
+            return 2
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _name_of(self, player: int) -> str:
+        return self.black_name if player == 1 else self.white_name or "White"
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store, self.name, [self.black_name, self.white_name]
+        )
+
+    def _settle_ratings(self, score_black: float) -> list[str]:
+        if not self.white_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.black_name,
+            self.white_name,
+            score_black,
+            ranked=True,
+        )
+
+    def _turn_line(self) -> str:
+        return f"Turn: {'Black' if self.turn == 1 else 'White'} {self._name_of(self.turn)}"
+
+    def _score(self) -> tuple[int, int]:
+        black = sum(cell == 1 for row in self.board for cell in row)
+        white = sum(cell == 2 for row in self.board for cell in row)
+        return black, white
+
+    def _finish(self) -> list[str]:
+        self.state = "ended"
+        black, white = self._score()
+        lines = [f"Reversi game over: Black {black}, White {white}."]
+        if black > white:
+            lines.append(f"Result: Black {self.black_name} wins.")
+            lines.extend(self._settle_ratings(1.0))
+        elif white > black:
+            lines.append(f"Result: White {self.white_name} wins.")
+            lines.extend(self._settle_ratings(0.0))
+        else:
+            lines.append("Result: draw.")
+            lines.extend(self._settle_ratings(0.5))
+        return lines
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return ([f"Game ended; start a new {self.name} game."], [], False)
+        if conn is self.black_conn:
+            return (["You are already Black."], [], False)
+        if conn is self.white_conn:
+            return (["You are already White."], [], False)
+        if self.white_conn is not None:
+            return ([f"White seat is occupied by {self.white_name}."], [], False)
+        self.white_conn = conn
+        self.white_name = name
+        self.state = "playing"
+        return (
+            [],
+            [
+                f"{name} joined Reversi as White; game started.",
+                f"Black: {self.black_name}  White: {self.white_name}",
+                "Move with /game move <row> <col>; pass only when no legal move exists.",
+                self._turn_line(),
+            ],
+            False,
+        )
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["Game has not started; wait for White to join."], [], False)
+        if self.state != "playing":
+            return (["Game has ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        if player != self.turn:
+            return (["It is not your turn."], [], False)
+
+        token = raw.strip().lower()
+        legal = _reversi_legal_moves(self.board, player)
+        if token in {"pass", "skip", "过", "停", "停一手"}:
+            if legal:
+                return (["You have a legal move; passing is not allowed."], [], False)
+            self._passes += 1
+            self._last = None
+            name = self._name_of(player)
+            lines = [f"{name} passes."]
+            if self._passes >= 2:
+                lines.extend(self._finish())
+                return ([], lines, True)
+            self.turn = 3 - player
+            lines.append(self._turn_line())
+            return ([], lines, False)
+
+        match = re.fullmatch(r"(\d+)\s*[, ]\s*(\d+)", token)
+        if not match:
+            return (["Usage: /game move <row> <col> (1-8), or pass when blocked."], [], False)
+        row, col = int(match.group(1)) - 1, int(match.group(2)) - 1
+        flips = _reversi_flips(self.board, row, col, player)
+        if not flips:
+            return (["Illegal Reversi move: the move must flip at least one piece."], [], False)
+
+        self.board[row][col] = player
+        for fr, fc in flips:
+            self.board[fr][fc] = player
+        self._last = (row, col)
+        self._passes = 0
+        self.turn = 3 - player
+        lines = [
+            f"{self._name_of(player)} plays ({row + 1}, {col + 1}) and flips {len(flips)}.",
+        ]
+        if not _reversi_legal_moves(self.board, self.turn):
+            lines.append(f"{self._name_of(self.turn)} has no legal move and must pass.")
+        if not any(cell == 0 for row_cells in self.board for cell in row_cells):
+            lines.extend(self._finish())
+            return ([], lines, True)
+        lines.append(self._turn_line())
+        return ([], lines, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["Game has not started or has already ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        self.state = "ended"
+        winner = 3 - player
+        return (
+            [],
+            [
+                f"{name} resigns; {self._name_of(winner)} wins.",
+                *self._settle_ratings(1.0 if winner == 1 else 0.0),
+            ],
+            True,
+        )
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        if self.who_of(conn) is None:
+            return (["You are not one of the players."], [], False)
+        if self.state == "playing":
+            return (["A started game must be resigned, not aborted."], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted the Reversi game."], True)
+
+    def seats(self) -> list[str]:
+        black, white = self._score()
+        return [
+            f"reversi game state: {self.state}",
+            f"Black: {self.black_name}",
+            f"White: {self.white_name or '(empty; /game join)'}",
+            f"Score: Black {black}, White {white}",
+            *self._rating_lines(),
+        ]
+
+    def show(self, conn=None) -> list[str]:
+        black, white = self._score()
+        lines = [
+            f"reversi game ({self.state})  Black: {self.black_name}  White: {self.white_name or 'empty'}",
+            f"Score: Black {black}, White {white}",
+            *self._rating_lines(),
+            *_reversi_render(self.board, last=self._last),
+        ]
+        if self.state == "playing":
+            lines.append(self._turn_line())
+        elif self.state == "waiting":
+            lines.append("Waiting for White: /game join")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        player = self.who_of(conn)
+        if player is None:
+            return ([], [], False)
+        if conn is self.black_conn:
+            self.black_conn = None
+        if conn is self.white_conn:
+            self.white_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} left; Reversi game cancelled."], True)
+        if self.state == "playing":
+            self.state = "ended"
+            winner = 3 - player
+            return (
+                [],
+                [
+                    f"{name} left; {self._name_of(winner)} wins.",
+                    *self._settle_ratings(1.0 if winner == 1 else 0.0),
+                ],
+                True,
+            )
+        return ([], [], False)
+
+
+DARKCHESS_ROWS = 4
+DARKCHESS_COLS = 8
+_DARKCHESS_PIECES = (
+    ("red", 1, "G"), ("red", 2, "A"), ("red", 2, "A"),
+    ("red", 3, "E"), ("red", 3, "E"), ("red", 4, "R"),
+    ("red", 4, "R"), ("red", 5, "H"), ("red", 5, "H"),
+    ("red", 6, "C"), ("red", 6, "C"), ("red", 7, "S"),
+    ("red", 7, "S"), ("red", 7, "S"), ("red", 7, "S"),
+    ("red", 7, "S"), ("black", 1, "G"), ("black", 2, "A"),
+    ("black", 2, "A"), ("black", 3, "E"), ("black", 3, "E"),
+    ("black", 4, "R"), ("black", 4, "R"), ("black", 5, "H"),
+    ("black", 5, "H"), ("black", 6, "C"), ("black", 6, "C"),
+    ("black", 7, "S"), ("black", 7, "S"), ("black", 7, "S"),
+    ("black", 7, "S"), ("black", 7, "S"),
+)
+_DARKCHESS_DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+
+def _darkchess_index(row: int, col: int) -> int:
+    return (row - 1) * DARKCHESS_COLS + col - 1
+
+
+class DarkchessGame:
+    """Two-player Chinese Dark Chess with private face-down pieces."""
+
+    name = "darkchess"
+    first_seat_desc = "Player 1"
+    second_seat_desc = "Player 2"
+    send_view_on_move = True
+
+    def __init__(
+        self,
+        first_conn,
+        first_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
+        self.first_conn = first_conn
+        self.first_name = first_name
+        self.second_conn = None
+        self.second_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self.turn = 1
+        self.board: list[Optional[int]] = list(range(32))
+        self.pieces = [
+            {"side": side, "rank": rank, "label": label}
+            for side, rank, label in _DARKCHESS_PIECES
+        ]
+        random.shuffle(self.board)
+        self.face_up: set[int] = set()
+        self.player_side: dict[int, Optional[str]] = {1: None, 2: None}
+        self._last: Optional[tuple[int, int]] = None
+        self.join_blurb = "Waiting for another player to join with /game join."
+
+    def who_of(self, conn) -> Optional[int]:
+        if conn is self.first_conn:
+            return 1
+        if conn is self.second_conn:
+            return 2
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _player_name(self, player: int) -> str:
+        return self.first_name if player == 1 else self.second_name or "Player 2"
+
+    def _piece(self, cell: int) -> dict:
+        return self.pieces[cell]
+
+    def _side_for_player(self, player: int) -> Optional[str]:
+        return self.player_side.get(player)
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store, self.name, [self.first_name, self.second_name]
+        )
+
+    def _settle_ratings(self, winner: int) -> list[str]:
+        if not self.second_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.first_name,
+            self.second_name,
+            1.0 if winner == 1 else 0.0,
+            ranked=True,
+        )
+
+    def _turn_line(self) -> str:
+        return f"Turn: {self._player_name(self.turn)} (player {self.turn})"
+
+    def _adjacent(self, fr: int, fc: int, tr: int, tc: int) -> bool:
+        return abs(fr - tr) + abs(fc - tc) == 1
+
+    def _can_capture(self, attacker: dict, defender: dict) -> bool:
+        if attacker["label"] == "C":
+            return False
+        if attacker["label"] == "S" and defender["label"] == "G":
+            return True
+        if attacker["label"] == "G" and defender["label"] == "S":
+            return False
+        return attacker["rank"] <= defender["rank"]
+
+    def _cannon_screen(self, fr: int, fc: int, tr: int, tc: int) -> Optional[int]:
+        if fr != tr and fc != tc:
+            return None
+        step_r = 0 if fr == tr else (1 if tr > fr else -1)
+        step_c = 0 if fc == tc else (1 if tc > fc else -1)
+        r, c = fr + step_r, fc + step_c
+        screen = None
+        while (r, c) != (tr, tc):
+            cell = self.board[_darkchess_index(r, c)]
+            if cell is not None:
+                if screen is not None:
+                    return None
+                screen = cell
+            r += step_r
+            c += step_c
+        return screen
+
+    def _has_side_piece(self, side: str) -> bool:
+        return any(cell is not None and self._piece(cell)["side"] == side for cell in self.board)
+
+    def _finish_if_needed(self) -> Optional[tuple[int, list[str]]]:
+        if self.player_side[1] is None or self.player_side[2] is None:
+            return None
+        next_side = self.player_side[self.turn]
+        if next_side and self._has_side_piece(next_side):
+            return None
+        winner = 3 - self.turn
+        self.state = "ended"
+        return winner, [
+            f"{self._player_name(winner)} wins: the opponent has no pieces left.",
+            *self._settle_ratings(winner),
+        ]
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game ended; start a new darkchess game."], [], False)
+        if conn is self.first_conn:
+            return (["You are already Player 1."], [], False)
+        if conn is self.second_conn:
+            return (["You are already Player 2."], [], False)
+        if self.second_conn is not None:
+            return ([f"Player 2 seat is occupied by {self.second_name}."], [], False)
+        self.second_conn = conn
+        self.second_name = name
+        self.state = "playing"
+        return (
+            [],
+            [
+                f"{name} joined darkchess; flip a piece to determine sides.",
+                f"Player 1: {self.first_name}  Player 2: {self.second_name}",
+                "Use /game move flip <row> <col> or /game move move <from row> <from col> <to row> <to col>.",
+                self._turn_line(),
+            ],
+            False,
+        )
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["Game has not started; wait for Player 2 to join."], [], False)
+        if self.state != "playing":
+            return (["Game has ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        if player != self.turn:
+            return (["It is not your turn."], [], False)
+
+        parts = raw.strip().split()
+        if not parts:
+            return (["Usage: flip row col or move from_row from_col to_row to_col."], [], False)
+        verb = parts[0].lower()
+        if verb in {"flip", "翻", "翻子"}:
+            if len(parts) != 3 or not all(part.isdigit() for part in parts[1:]):
+                return (["Usage: /game move flip <row> <col> (1-4, 1-8)."], [], False)
+            row, col = int(parts[1]), int(parts[2])
+            if not (1 <= row <= DARKCHESS_ROWS and 1 <= col <= DARKCHESS_COLS):
+                return (["Coordinates must be row 1-4 and column 1-8."], [], False)
+            pos = _darkchess_index(row, col)
+            cell = self.board[pos]
+            if cell is None or cell in self.face_up:
+                return (["That square has no face-down piece."], [], False)
+            self.face_up.add(cell)
+            if self.player_side[1] is None:
+                self.player_side[player] = self._piece(cell)["side"]
+                self.player_side[3 - player] = "black" if self.player_side[player] == "red" else "red"
+            self._last = (row, col)
+            self.turn = 3 - player
+            p = self._piece(cell)
+            lines = [f"{self._player_name(player)} flips {'+' if p['side'] == 'red' else '-'}{p['label']}." ]
+            lines.append(self._turn_line())
+            return ([], lines, False)
+
+        if verb not in {"move", "走", "移动"} or len(parts) != 5 or not all(part.isdigit() for part in parts[1:]):
+            return (["Usage: /game move move <from row> <from col> <to row> <to col>."], [], False)
+        fr, fc, tr, tc = (int(value) for value in parts[1:])
+        if not (1 <= fr <= 4 and 1 <= tr <= 4 and 1 <= fc <= 8 and 1 <= tc <= 8):
+            return (["Coordinates must be row 1-4 and column 1-8."], [], False)
+        source_pos, target_pos = _darkchess_index(fr, fc), _darkchess_index(tr, tc)
+        source, target = self.board[source_pos], self.board[target_pos]
+        side = self._side_for_player(player)
+        if side is None:
+            return (["Flip the first piece before moving."], [], False)
+        if source is None or source not in self.face_up or self._piece(source)["side"] != side:
+            return (["You can move only your own face-up piece."], [], False)
+        if target is not None and target not in self.face_up:
+            return (["A face-down piece must be flipped before it can be captured."], [], False)
+        if target is None:
+            if not self._adjacent(fr, fc, tr, tc):
+                return (["A normal piece moves one adjacent square."], [], False)
+        else:
+            attacker, defender = self._piece(source), self._piece(target)
+            if attacker["side"] == defender["side"]:
+                return (["You cannot capture your own piece."], [], False)
+            if attacker["label"] == "C":
+                if self._cannon_screen(fr, fc, tr, tc) is None:
+                    return (["A cannon capture needs exactly one screen in a row or column."], [], False)
+            elif not self._adjacent(fr, fc, tr, tc) or not self._can_capture(attacker, defender):
+                return (["Illegal capture under darkchess rank rules."], [], False)
+        self.board[source_pos] = None
+        self.board[target_pos] = source
+        self._last = (tr, tc)
+        self.turn = 3 - player
+        lines = [f"{self._player_name(player)} moves from ({fr}, {fc}) to ({tr}, {tc})."]
+        finished = self._finish_if_needed()
+        if finished:
+            _, finish_lines = finished
+            lines.extend(finish_lines)
+            return ([], lines, True)
+        lines.append(self._turn_line())
+        return ([], lines, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state != "playing":
+            return (["Game has not started or has already ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        winner = 3 - player
+        self.state = "ended"
+        return ([], [f"{name} resigns; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        if self.who_of(conn) is None:
+            return (["You are not one of the players."], [], False)
+        if self.state == "playing":
+            return (["A started game must be resigned, not aborted."], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted the darkchess game."], True)
+
+    def seats(self) -> list[str]:
+        return [
+            f"darkchess game state: {self.state}",
+            f"Player 1: {self.first_name} side={self.player_side[1] or 'unknown'}",
+            f"Player 2: {self.second_name or '(empty; /game join)'} side={self.player_side[2] or 'unknown'}",
+            *self._rating_lines(),
+        ]
+
+    def show(self, conn=None) -> list[str]:
+        lines = [
+            f"darkchess game ({self.state})  Player 1: {self.first_name}  Player 2: {self.second_name or 'empty'}",
+            f"Sides: P1 {self.player_side[1] or 'unknown'}  P2 {self.player_side[2] or 'unknown'}",
+            *self._rating_lines(),
+        ]
+        for row in range(1, DARKCHESS_ROWS + 1):
+            tokens = []
+            for col in range(1, DARKCHESS_COLS + 1):
+                cell = self.board[_darkchess_index(row, col)]
+                if cell is None:
+                    tokens.append(".")
+                elif cell not in self.face_up:
+                    tokens.append("?")
+                else:
+                    piece = self._piece(cell)
+                    tokens.append(f"{'+' if piece['side'] == 'red' else '-'}{piece['label']}")
+            lines.append(f"{row:>2}  " + " ".join(tokens))
+        lines.append("Legend: + red  - black  ? face-down  . empty")
+        if self.state == "playing":
+            lines.append(self._turn_line())
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        player = self.who_of(conn)
+        if player is None:
+            return ([], [], False)
+        if conn is self.first_conn:
+            self.first_conn = None
+        if conn is self.second_conn:
+            self.second_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} left; darkchess game cancelled."], True)
+        if self.state == "playing":
+            self.state = "ended"
+            winner = 3 - player
+            return ([], [f"{name} left; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+        return ([], [], False)
+
+
+BATTLESHIP_SIZE = 10
+_BATTLESHIP_FLEET = {
+    "carrier": 5,
+    "battleship": 4,
+    "cruiser": 3,
+    "submarine": 3,
+    "destroyer": 2,
+}
+
+
+class BattleshipGame:
+    """Two-player Battleship with private fleet layouts."""
+
+    name = "battleship"
+    first_seat_desc = "Player 1"
+    second_seat_desc = "Player 2"
+    send_view_on_move = True
+
+    def __init__(
+        self,
+        first_conn,
+        first_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
+        self.first_conn = first_conn
+        self.first_name = first_name
+        self.second_conn = None
+        self.second_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self.turn = 1
+        self.fleets: dict[int, dict[str, set[tuple[int, int]]]] = {1: {}, 2: {}}
+        self.shots: dict[int, set[tuple[int, int]]] = {1: set(), 2: set()}
+        self.hit_shots: dict[int, set[tuple[int, int]]] = {1: set(), 2: set()}
+        self.incoming_hits: dict[int, set[tuple[int, int]]] = {1: set(), 2: set()}
+        self.ready: set[int] = set()
+        self._last: Optional[tuple[int, int]] = None
+        self.join_blurb = "Waiting for another player to join with /game join."
+
+    def who_of(self, conn) -> Optional[int]:
+        if conn is self.first_conn:
+            return 1
+        if conn is self.second_conn:
+            return 2
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _player_name(self, player: int) -> str:
+        return self.first_name if player == 1 else self.second_name or "Player 2"
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store, self.name, [self.first_name, self.second_name]
+        )
+
+    def _settle_ratings(self, winner: int) -> list[str]:
+        if not self.second_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.first_name,
+            self.second_name,
+            1.0 if winner == 1 else 0.0,
+            ranked=True,
+        )
+
+    def _all_ship_cells(self, player: int) -> set[tuple[int, int]]:
+        return set().union(*(cells for cells in self.fleets[player].values())) if self.fleets[player] else set()
+
+    def _ship_cells(self, row: int, col: int, length: int, orientation: str) -> set[tuple[int, int]]:
+        dr, dc = (0, 1) if orientation == "h" else (1, 0)
+        return {(row + dr * offset, col + dc * offset) for offset in range(length)}
+
+    def _fleet_complete(self, player: int) -> bool:
+        return set(self.fleets[player]) == set(_BATTLESHIP_FLEET)
+
+    def _sunk_ship(self, player: int, cell: tuple[int, int]) -> Optional[str]:
+        for name, cells in self.fleets[player].items():
+            if cell in cells and cells <= self.incoming_hits[player]:
+                return name
+        return None
+
+    def _finish(self, winner: int, reason: str) -> list[str]:
+        self.state = "ended"
+        return [
+            f"{self._player_name(winner)} wins Battleship ({reason}).",
+            *self._settle_ratings(winner),
+        ]
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game ended; start a new Battleship game."], [], False)
+        if conn is self.first_conn:
+            return (["You are already Player 1."], [], False)
+        if conn is self.second_conn:
+            return (["You are already Player 2."], [], False)
+        if self.second_conn is not None:
+            return ([f"Player 2 seat is occupied by {self.second_name}."], [], False)
+        self.second_conn = conn
+        self.second_name = name
+        self.state = "setup"
+        return (
+            [],
+            [
+                f"{name} joined Battleship; both players must place their fleet.",
+                "Use /game move place <ship> <row> <col> <h|v>, then /game move ready.",
+            ],
+            False,
+        )
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["Game has not started; wait for Player 2 to join."], [], False)
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        parts = raw.strip().lower().split()
+        if not parts:
+            return (["Usage: place <ship> <row> <col> <h|v>, ready, or fire <row> <col>."], [], False)
+
+        if parts[0] == "place":
+            if self.state != "setup":
+                return (["Fleet placement is over."], [], False)
+            if len(parts) != 5 or parts[1] not in _BATTLESHIP_FLEET or parts[4] not in {"h", "v"}:
+                return (["Usage: place carrier|battleship|cruiser|submarine|destroyer row col h|v."], [], False)
+            ship, row_raw, col_raw, orientation = parts[1:]
+            if not row_raw.isdigit() or not col_raw.isdigit():
+                return (["Ship coordinates must be numbers from 1 to 10."], [], False)
+            if ship in self.fleets[player]:
+                return ([f"You already placed the {ship}."], [], False)
+            row, col = int(row_raw) - 1, int(col_raw) - 1
+            cells = self._ship_cells(row, col, _BATTLESHIP_FLEET[ship], orientation)
+            if any(r < 0 or r >= BATTLESHIP_SIZE or c < 0 or c >= BATTLESHIP_SIZE for r, c in cells):
+                return (["The ship must fit inside the 10x10 board."], [], False)
+            occupied = self._all_ship_cells(player)
+            adjacent = {
+                (r + dr, c + dc)
+                for r, c in cells
+                for dr in (-1, 0, 1)
+                for dc in (-1, 0, 1)
+                if dr or dc
+            }
+            if cells & occupied or adjacent & occupied:
+                return (["Ships may not overlap or touch, including diagonally."], [], False)
+            self.fleets[player][ship] = cells
+            return ([], [f"{self._player_name(player)} placed {ship}."], False)
+
+        if parts[0] == "ready":
+            if self.state != "setup":
+                return (["The game is already playing."], [], False)
+            if not self._fleet_complete(player):
+                return (["Place all five ships before ready."], [], False)
+            self.ready.add(player)
+            if self.ready != {1, 2}:
+                return ([], [f"{self._player_name(player)} is ready; waiting for the other fleet."], False)
+            self.state = "playing"
+            self.turn = 1
+            return ([], ["Both fleets are ready. Battleship begins.", f"Turn: {self._player_name(self.turn)}"], False)
+
+        if parts[0] != "fire" or len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            return (["Usage: fire <row> <col> (1-10)."], [], False)
+        if self.state != "playing":
+            return (["Both players must be ready before firing."], [], False)
+        if player != self.turn:
+            return (["It is not your turn."], [], False)
+        row, col = int(parts[1]) - 1, int(parts[2]) - 1
+        if not (0 <= row < BATTLESHIP_SIZE and 0 <= col < BATTLESHIP_SIZE):
+            return (["Firing coordinates must be from 1 to 10."], [], False)
+        shot = (row, col)
+        if shot in self.shots[player]:
+            return (["You already fired at that coordinate."], [], False)
+        self.shots[player].add(shot)
+        opponent = 3 - player
+        target_ship = next((name for name, cells in self.fleets[opponent].items() if shot in cells), None)
+        lines = [f"{self._player_name(player)} fires at ({row + 1}, {col + 1}): {'HIT' if target_ship else 'MISS'}." ]
+        self._last = (row, col)
+        if target_ship:
+            self.hit_shots[player].add(shot)
+            self.incoming_hits[opponent].add(shot)
+            sunk = self._sunk_ship(opponent, shot)
+            if sunk:
+                lines.append(f"Sunk: {sunk}.")
+            if self._all_ship_cells(opponent) <= self.incoming_hits[opponent]:
+                lines.extend(self._finish(player, "all enemy ships sunk"))
+                return ([], lines, True)
+        self.turn = opponent
+        lines.append(f"Turn: {self._player_name(self.turn)}")
+        return ([], lines, False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state not in {"setup", "playing"}:
+            return (["Game has not started or has already ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        winner = 3 - player
+        self.state = "ended"
+        return ([], [f"{name} resigns; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        if self.who_of(conn) is None:
+            return (["You are not one of the players."], [], False)
+        if self.state == "playing":
+            return (["A started game must be resigned, not aborted."], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted the Battleship game."], True)
+
+    def seats(self) -> list[str]:
+        return [
+            f"battleship game state: {self.state}",
+            f"Player 1: {self.first_name} {'ready' if 1 in self.ready else 'not ready'}",
+            f"Player 2: {self.second_name or '(empty; /game join)'} {'ready' if 2 in self.ready else 'not ready'}",
+            *self._rating_lines(),
+        ]
+
+    def _render_grid(self, player: Optional[int], opponent: Optional[int]) -> list[str]:
+        own_cells = self._all_ship_cells(player) if player else set()
+        own_hits = self.incoming_hits[player] if player else set()
+        fired = self.shots[player] if player else set()
+        hit = self.hit_shots[player] if player else set()
+        lines = []
+        for row in range(BATTLESHIP_SIZE):
+            own_tokens = []
+            enemy_tokens = []
+            for col in range(BATTLESHIP_SIZE):
+                cell = (row, col)
+                own_tokens.append("X" if cell in own_hits else "S" if cell in own_cells else ".")
+                enemy_tokens.append("X" if cell in hit else "o" if cell in fired else "?")
+            lines.append(f"{row + 1:>2} " + " ".join(own_tokens) + "    " + " ".join(enemy_tokens))
+        return lines
+
+    def show(self, conn=None) -> list[str]:
+        player = self.who_of(conn)
+        opponent = 3 - player if player else None
+        lines = [
+            f"battleship game ({self.state})  Player 1: {self.first_name}  Player 2: {self.second_name or 'empty'}",
+            "Own fleet / opponent waters (S=ship, X=hit, o=miss, ?=unknown).",
+            *self._rating_lines(),
+        ]
+        lines.extend(self._render_grid(player, opponent))
+        if self.state == "playing":
+            lines.append(f"Turn: {self._player_name(self.turn)}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        player = self.who_of(conn)
+        if player is None:
+            return ([], [], False)
+        if conn is self.first_conn:
+            self.first_conn = None
+        if conn is self.second_conn:
+            self.second_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} left; Battleship game cancelled."], True)
+        if self.state in {"setup", "playing"}:
+            self.state = "ended"
+            winner = 3 - player
+            return ([], [f"{name} left; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+        return ([], [], False)
+
+
+JUNQI_ROWS = 12
+JUNQI_COLS = 5
+_JUNQI_PIECE_COUNTS = {
+    "flag": 1,
+    "commander": 1,
+    "army": 1,
+    "division": 2,
+    "brigade": 2,
+    "regiment": 2,
+    "battalion": 2,
+    "company": 3,
+    "platoon": 3,
+    "engineer": 3,
+    "mine": 3,
+    "bomb": 2,
+}
+_JUNQI_PIECE_CODES = {
+    "flag": "F",
+    "commander": "C",
+    "army": "A",
+    "division": "D",
+    "brigade": "B",
+    "regiment": "R",
+    "battalion": "T",
+    "company": "N",
+    "platoon": "P",
+    "engineer": "E",
+    "mine": "M",
+    "bomb": "O",
+}
+_JUNQI_RANKS = {
+    "commander": 10,
+    "army": 9,
+    "division": 8,
+    "brigade": 7,
+    "regiment": 6,
+    "battalion": 5,
+    "company": 4,
+    "platoon": 3,
+    "engineer": 2,
+}
+_JUNQI_CAMPS = {
+    (0, 1), (0, 3), (1, 2),
+    (4, 1), (4, 3), (5, 2),
+    (6, 2), (7, 1), (7, 3),
+    (10, 1), (10, 3), (11, 2),
+}
+_JUNQI_RAIL_ROWS = {0, 4, 5, 7, 11}
+_JUNQI_RAIL_COLS = {0, 2, 4}
+
+
+class JunqiGame:
+    """Two-player Chinese Army Chess with private piece identities."""
+
+    name = "junqi"
+    first_seat_desc = "Red"
+    second_seat_desc = "Blue"
+    send_view_on_move = True
+
+    def __init__(
+        self,
+        first_conn,
+        first_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
+        self.first_conn = first_conn
+        self.first_name = first_name
+        self.second_conn = None
+        self.second_name: Optional[str] = None
+        self.rating_store = rating_store
+        self.state = "waiting"
+        self.turn = 1
+        self.board: list[list[Optional[dict[str, object]]]] = [
+            [None] * JUNQI_COLS for _ in range(JUNQI_ROWS)
+        ]
+        self.ready: set[int] = set()
+        self._last: Optional[tuple[tuple[int, int], tuple[int, int]]] = None
+        self.join_blurb = "Waiting for another player to join with /game join."
+
+    def who_of(self, conn) -> Optional[int]:
+        if conn is self.first_conn:
+            return 1
+        if conn is self.second_conn:
+            return 2
+        return None
+
+    def is_seated(self, conn) -> bool:
+        return self.who_of(conn) is not None
+
+    def _player_name(self, player: int) -> str:
+        return self.first_name if player == 1 else self.second_name or "Blue"
+
+    def _rating_lines(self) -> list[str]:
+        return _format_rating_lines(
+            self.rating_store, self.name, [self.first_name, self.second_name]
+        )
+
+    def _settle_ratings(self, winner: int) -> list[str]:
+        if not self.second_name:
+            return []
+        return _format_rating_result_lines(
+            self.rating_store,
+            self.name,
+            self.first_name,
+            self.second_name,
+            1.0 if winner == 1 else 0.0,
+            ranked=True,
+        )
+
+    def _side_rows(self, player: int) -> range:
+        return range(0, 5) if player == 1 else range(7, 12)
+
+    def _in_bounds(self, row: int, col: int) -> bool:
+        return 0 <= row < JUNQI_ROWS and 0 <= col < JUNQI_COLS
+
+    def _parse_position(self, raw_row: str, raw_col: str) -> Optional[tuple[int, int]]:
+        if not raw_row.isdigit() or not raw_col.isdigit():
+            return None
+        row, col = int(raw_row) - 1, int(raw_col) - 1
+        return (row, col) if self._in_bounds(row, col) else None
+
+    def _side_complete(self, player: int) -> bool:
+        counts = {kind: 0 for kind in _JUNQI_PIECE_COUNTS}
+        for row in self.board:
+            for piece in row:
+                if piece and piece["side"] == player:
+                    counts[str(piece["kind"])] += 1
+        return counts == _JUNQI_PIECE_COUNTS
+
+    def _side_piece_count(self, player: int, kind: str) -> int:
+        return sum(
+            1
+            for row in self.board
+            for piece in row
+            if piece and piece["side"] == player and piece["kind"] == kind
+        )
+
+    def _has_flag(self, player: int) -> bool:
+        return any(
+            piece and piece["side"] == player and piece["kind"] == "flag"
+            for row in self.board
+            for piece in row
+        )
+
+    def _rail_neighbours(self, row: int, col: int) -> list[tuple[int, int]]:
+        result = []
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = row + dr, col + dc
+            if not self._in_bounds(nr, nc):
+                continue
+            if (row == nr and row not in _JUNQI_RAIL_ROWS) or (
+                col == nc and col not in _JUNQI_RAIL_COLS
+            ):
+                continue
+            result.append((nr, nc))
+        return result
+
+    def _can_reach(self, source: tuple[int, int], target: tuple[int, int], piece: dict) -> bool:
+        sr, sc = source
+        tr, tc = target
+        distance = abs(sr - tr) + abs(sc - tc)
+        if distance == 1:
+            return True
+        if source in _JUNQI_CAMPS or target in _JUNQI_CAMPS:
+            return distance == 1 or (abs(sr - tr) == 1 and abs(sc - tc) == 1)
+        if sr == tr or sc == tc:
+            step_r = 0 if sr == tr else (1 if tr > sr else -1)
+            step_c = 0 if sc == tc else (1 if tc > sc else -1)
+            row, col = sr + step_r, sc + step_c
+            if any(self.board[row][col] for _ in [0] if (row, col) != (tr, tc)):
+                return False
+            while (row, col) != (tr, tc):
+                if self.board[row][col] is not None:
+                    return False
+                row += step_r
+                col += step_c
+            return sr in _JUNQI_RAIL_ROWS if sr == tr else sc in _JUNQI_RAIL_COLS
+        if piece["kind"] != "engineer":
+            return False
+        queue = [source]
+        seen = {source}
+        while queue:
+            current = queue.pop(0)
+            for neighbour in self._rail_neighbours(*current):
+                if neighbour in seen or neighbour == target:
+                    if neighbour == target:
+                        return True
+                    continue
+                if self.board[neighbour[0]][neighbour[1]] is None:
+                    seen.add(neighbour)
+                    queue.append(neighbour)
+        return False
+
+    def _capture(self, attacker: dict, target: dict) -> tuple[str, Optional[int]]:
+        attacker_kind = str(attacker["kind"])
+        target_kind = str(target["kind"])
+        target_side = int(target["side"])
+        if target_kind == "flag":
+            return "flag", int(attacker["side"])
+        if attacker_kind == "bomb" or target_kind == "bomb":
+            return "both", None
+        if target_kind == "mine":
+            return ("attacker", None) if attacker_kind == "engineer" else ("target", None)
+        if _JUNQI_RANKS.get(attacker_kind, 0) >= _JUNQI_RANKS.get(target_kind, 0):
+            return "attacker", None
+        return "target", None
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game ended; start a new Junqi game."], [], False)
+        if conn is self.first_conn:
+            return (["You are already Red."], [], False)
+        if conn is self.second_conn:
+            return (["You are already Blue."], [], False)
+        if self.second_conn is not None:
+            return ([f"Blue seat is occupied by {self.second_name}."], [], False)
+        self.second_conn = conn
+        self.second_name = name
+        self.state = "setup"
+        return (
+            [],
+            [
+                f"{name} joined Junqi; both players must place 25 pieces.",
+                "Use /game move setup <piece> <row> <col>, then /game move ready.",
+            ],
+            False,
+        )
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        if self.state == "waiting":
+            return (["Game has not started; wait for Blue to join."], [], False)
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        parts = raw.strip().lower().split()
+        if not parts:
+            return (["Usage: setup <piece> <row> <col>, ready, or move <fr> <fc> <tr> <tc>."], [], False)
+
+        if parts[0] == "setup":
+            if self.state != "setup":
+                return (["Setup is over."], [], False)
+            if len(parts) != 4 or parts[1] not in _JUNQI_PIECE_COUNTS:
+                return (["Usage: setup flag|commander|... <row> <col>."], [], False)
+            kind = parts[1]
+            position = self._parse_position(parts[2], parts[3])
+            if position is None or position[0] not in self._side_rows(player):
+                return (["Your pieces must be placed in your five setup rows."], [], False)
+            row, col = position
+            if self.board[row][col] is not None:
+                return (["That position is occupied."], [], False)
+            if self._side_piece_count(player, kind) >= _JUNQI_PIECE_COUNTS[kind]:
+                return ([f"You already placed all {kind} pieces."], [], False)
+            if kind == "flag" and position not in (
+                {(0, 1), (0, 3)} if player == 1 else {(11, 1), (11, 3)}
+            ):
+                return (["The flag must be placed in headquarters."], [], False)
+            if kind == "mine" and row not in ((3, 4) if player == 1 else (7, 8)):
+                return (["Mines must be placed in the last two rows of your camp."], [], False)
+            if kind == "bomb" and row == (0 if player == 1 else 11):
+                return (["Bombs cannot be placed in the first row."], [], False)
+            self.board[row][col] = {"side": player, "kind": kind, "revealed": False}
+            return ([], [f"{self._player_name(player)} placed {kind} at {row + 1},{col + 1}."], False)
+
+        if parts[0] == "ready":
+            if self.state != "setup":
+                return (["The game is already playing."], [], False)
+            if not self._side_complete(player):
+                return (["Place exactly all 25 pieces before ready."], [], False)
+            self.ready.add(player)
+            if self.ready != {1, 2}:
+                return ([], [f"{self._player_name(player)} is ready; waiting for the other army."], False)
+            self.state = "playing"
+            self.turn = 1
+            return ([], ["Both armies are ready. Junqi begins.", f"Turn: {self._player_name(self.turn)}"], False)
+
+        if parts[0] != "move" or len(parts) != 5:
+            return (["Usage: move <from row> <from col> <to row> <to col>."], [], False)
+        if self.state != "playing":
+            return (["Both players must be ready before moving."], [], False)
+        if player != self.turn:
+            return (["It is not your turn."], [], False)
+        source = self._parse_position(parts[1], parts[2])
+        target = self._parse_position(parts[3], parts[4])
+        if source is None or target is None or source == target:
+            return (["Coordinates must be two different board positions from 1-based rows and columns."], [], False)
+        attacker = self.board[source[0]][source[1]]
+        target_piece = self.board[target[0]][target[1]]
+        if attacker is None or attacker["side"] != player:
+            return (["起点无己方棋子。"], [], False)
+        if attacker["kind"] == "flag" or attacker["kind"] == "mine":
+            return (["Flags and mines cannot move."], [], False)
+        if target_piece is not None and target_piece["side"] == player:
+            return (["You cannot capture your own piece."], [], False)
+        if not self._can_reach(source, target, attacker):
+            return (["That piece cannot reach the destination."], [], False)
+
+        message = f"{self._player_name(player)} moved {source[0] + 1},{source[1] + 1} to {target[0] + 1},{target[1] + 1}."
+        if target_piece is not None:
+            attacker["revealed"] = True
+            target_piece["revealed"] = True
+            result, winner = self._capture(attacker, target_piece)
+            if result == "flag":
+                self.board[source[0]][source[1]] = None
+                self.board[target[0]][target[1]] = attacker
+                self.state = "ended"
+                return ([], [message, f"{self._player_name(winner or player)} captured the flag and wins.", *self._settle_ratings(winner or player)], True)
+            if result == "both":
+                self.board[source[0]][source[1]] = None
+                self.board[target[0]][target[1]] = None
+                message += " Bombs exploded; both pieces were removed."
+            elif result == "attacker":
+                self.board[source[0]][source[1]] = None
+                self.board[target[0]][target[1]] = attacker
+                message += " Capture succeeded."
+            else:
+                self.board[source[0]][source[1]] = None
+                message += " The attacker was lost."
+        else:
+            self.board[source[0]][source[1]] = None
+            self.board[target[0]][target[1]] = attacker
+        opponent = 3 - player
+        if not self._has_flag(opponent) or not any(
+            piece and piece["side"] == opponent
+            for row in self.board
+            for piece in row
+        ):
+            self.state = "ended"
+            return ([], [message, f"{self._player_name(player)} wins Junqi.", *self._settle_ratings(player)], True)
+        self._last = (source, target)
+        self.turn = opponent
+        return ([], [message, f"Turn: {self._player_name(self.turn)}"], False)
+
+    def resign(self, conn, name: str) -> GameResult:
+        if self.state not in {"setup", "playing"}:
+            return (["Game has not started or has already ended."], [], False)
+        player = self.who_of(conn)
+        if player is None:
+            return (["You are not one of the players."], [], False)
+        winner = 3 - player
+        self.state = "ended"
+        return ([], [f"{name} resigns; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.state == "ended":
+            return (["Game has ended."], [], False)
+        if self.who_of(conn) is None:
+            return (["You are not one of the players."], [], False)
+        if self.state == "playing":
+            return (["A started game must be resigned, not aborted."], [], False)
+        self.state = "ended"
+        return ([], [f"{name} aborted the Junqi game."], True)
+
+    def seats(self) -> list[str]:
+        return [
+            f"junqi game state: {self.state}",
+            f"Red: {self.first_name} {'ready' if 1 in self.ready else 'not ready'}",
+            f"Blue: {self.second_name or '(empty; /game join)'} {'ready' if 2 in self.ready else 'not ready'}",
+            *self._rating_lines(),
+        ]
+
+    def show(self, conn=None) -> list[str]:
+        player = self.who_of(conn)
+        lines = [
+            f"junqi game ({self.state})  Red: {self.first_name}  Blue: {self.second_name or 'empty'}",
+            "Your pieces are shown; opponent pieces remain hidden until revealed by capture.",
+            "F flag C commander A army D division B brigade R regiment T battalion N company P platoon E engineer M mine O bomb.",
+            *self._rating_lines(),
+        ]
+        for row in range(JUNQI_ROWS):
+            tokens = []
+            for col in range(JUNQI_COLS):
+                piece = self.board[row][col]
+                if piece is None:
+                    token = "."
+                elif player is not None and piece["side"] == player:
+                    token = ("+" if player == 1 else "-") + _JUNQI_PIECE_CODES[str(piece["kind"])]
+                elif piece.get("revealed"):
+                    token = ("+" if piece["side"] == 1 else "-") + _JUNQI_PIECE_CODES[str(piece["kind"])]
+                elif self.state == "setup":
+                    token = "?"
+                else:
+                    token = "?"
+                if self._last and (row, col) in self._last:
+                    token = "!" + token
+                tokens.append(token)
+            lines.append(f"{row + 1:>2} " + " ".join(tokens))
+        if self.state == "playing":
+            lines.append(f"Turn: {self._player_name(self.turn)}")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        player = self.who_of(conn)
+        if player is None:
+            return ([], [], False)
+        if conn is self.first_conn:
+            self.first_conn = None
+        if conn is self.second_conn:
+            self.second_conn = None
+        if self.state == "waiting":
+            self.state = "ended"
+            return ([], [f"{name} left; Junqi game cancelled."], True)
+        if self.state in {"setup", "playing"}:
+            self.state = "ended"
+            winner = 3 - player
+            return ([], [f"{name} left; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+        return ([], [], False)
+
+
 XIANGQI_ROWS = 10
 XIANGQI_COLS = 9
 _XQ_RED = 1
@@ -10587,6 +11867,38 @@ def create_game(
             creator_name,
             rating_store=rating_store,
         )
+    elif game_name == ReversiGame.name:
+        if options:
+            raise RuntimeError("reversi does not support opening options.")
+        game = ReversiGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
+    elif game_name == DarkchessGame.name:
+        if options:
+            raise RuntimeError("darkchess does not support opening options.")
+        game = DarkchessGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
+    elif game_name == BattleshipGame.name:
+        if options:
+            raise RuntimeError("battleship does not support opening options.")
+        game = BattleshipGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
+    elif game_name == JunqiGame.name:
+        if options:
+            raise RuntimeError("junqi does not support opening options.")
+        game = JunqiGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
     elif game_name == XiangqiGame.name:
         game = XiangqiGame(
             creator_conn,
@@ -10615,6 +11927,10 @@ GAMES = {
     ChessGame.name: ChessGame,
     GomokuGame.name: GomokuGame,
     GoGame.name: GoGame,
+    ReversiGame.name: ReversiGame,
+    DarkchessGame.name: DarkchessGame,
+    BattleshipGame.name: BattleshipGame,
+    JunqiGame.name: JunqiGame,
     XiangqiGame.name: XiangqiGame,
     DoushouGame.name: DoushouGame,
     SanguoshaGame.name: SanguoshaGame,
@@ -10629,6 +11945,21 @@ GAME_ALIASES = {
     "weiqi": GoGame.name,
     "baduk": GoGame.name,
     "围棋": GoGame.name,
+    "黑白棋": ReversiGame.name,
+    "othello": ReversiGame.name,
+    "reversi": ReversiGame.name,
+    "othello": ReversiGame.name,
+    "dark-chess": DarkchessGame.name,
+    "flipchess": DarkchessGame.name,
+    "暗棋": DarkchessGame.name,
+    "翻翻棋": DarkchessGame.name,
+    "battleship": BattleshipGame.name,
+    "战舰": BattleshipGame.name,
+    "海战棋": BattleshipGame.name,
+    "junqi": JunqiGame.name,
+    "army": JunqiGame.name,
+    "landbattle": JunqiGame.name,
+    "军棋": JunqiGame.name,
     "sgs": SanguoshaGame.name,
     "langrensha": WerewolfGame.name,
     "were-wolf": WerewolfGame.name,

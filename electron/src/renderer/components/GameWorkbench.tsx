@@ -3,6 +3,11 @@ import { useChatStore } from '../store/chatStore';
 import ChessPanel from './games/ChessPanel';
 import GomokuPanel from './games/GomokuPanel';
 import GoPanel from './games/GoPanel';
+import ReversiPanel from './games/ReversiPanel';
+import DarkchessPanel from './games/DarkchessPanel';
+import BattleshipPanel from './games/BattleshipPanel';
+import JunqiPanel from './games/JunqiPanel';
+import GameLobby from './games/GameLobby';
 import XiangqiPanel from './games/XiangqiPanel';
 import DoushouPanel from './games/DoushouPanel';
 import HoldemPanel from './games/HoldemPanel';
@@ -20,6 +25,10 @@ function detectGameKind(text: string): GameKind {
   if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
   if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
+  if (t.includes('reversi') || t.includes('othello') || t.includes('黑白棋')) return 'reversi';
+  if (t.includes('darkchess') || t.includes('dark chess') || t.includes('flipchess') || t.includes('暗棋') || t.includes('翻翻棋')) return 'darkchess';
+  if (t.includes('battleship') || t.includes('战舰') || t.includes('海战棋')) return 'battleship';
+  if (t.includes('junqi') || t.includes('army chess') || t.includes('landbattle') || t.includes('军棋')) return 'junqi';
   if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
@@ -33,6 +42,11 @@ const cnToGameKind: Record<string, GameKind> = {
   '国际象棋': 'chess',
   '五子棋': 'gomoku',
   '围棋': 'go',
+  '黑白棋': 'reversi',
+  '暗棋': 'darkchess',
+  '翻翻棋': 'darkchess',
+  '海战棋': 'battleship',
+  '军棋': 'junqi',
   '中国象棋': 'xiangqi',
   '斗兽棋': 'doushou',
   '三国杀': 'sanguo',
@@ -43,7 +57,7 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'darkchess', '暗棋', '翻翻棋', 'battleship', '海战棋', 'junqi', '军棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -100,6 +114,14 @@ function isLikelyGameLine(line: string): boolean {
   if (/^(红|黑|白)[:：]\s*\S+/.test(line.trim())) return true;
   if (/^红[:：]\s*\S+\s+黑[:：]\s*\S+/.test(line.trim())) return true;
   if (/^doushou\s+对局|斗兽棋棋盘/.test(line.trim())) return true;
+  if (/^reversi\s+game|黑白棋棋盘/.test(line.trim())) return true;
+  if (/^\s*\d+\s+(?:[#!o.])(?:\s+(?:[#!o.])){7}\s*$/.test(line)) return true;
+  if (/^darkchess\s+game|暗棋棋盘/.test(line.trim())) return true;
+  if (/^\s*[1-4]\s+(?:[+\-][GAERHCS]|\?|\.)(?:\s+(?:[+\-][GAERHCS]|\?|\.)){7}\s*$/.test(line)) return true;
+  if (/^battleship\s+game|海战棋棋盘/.test(line.trim())) return true;
+  if (/^\s*(?:[1-9]|10)\s+/.test(line) && line.includes('?') && line.includes('    ')) return true;
+  if (/^junqi\s+game|军棋棋盘/.test(line.trim())) return true;
+  if (/^\s*(?:[1-9]|1[0-2])\s+(?:[+\-][A-Z]|\?|\.)(?:\s+(?:[+\-][A-Z]|\?|\.)){4}\s*$/i.test(line)) return true;
   if (/^\s*[1-9]\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)(?:\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)){6}\s*$/.test(line)) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
@@ -195,16 +217,28 @@ function hasFreshNoActiveGame(allLines: string[]): boolean {
 
 function gameLabel(game: GameKind, locale: Locale): string {
   if (game === 'doushou') return locale === 'zh' ? '斗兽棋' : 'Jungle';
+  if (game === 'reversi') return locale === 'zh' ? '黑白棋' : 'Reversi';
+  if (game === 'darkchess') return locale === 'zh' ? '暗棋' : 'Dark Chess';
+  if (game === 'battleship') return locale === 'zh' ? '海战棋' : 'Battleship';
+  if (game === 'junqi') return locale === 'zh' ? '军棋' : 'Junqi';
   return translate(locale, `game.names.${game}`);
 }
 
 function gameMoveHint(game: GameKind, locale: Locale): string {
   if (game === 'doushou') return locale === 'zh' ? '先点自己的动物，再点目标格移动或吃子。' : 'Select your animal, then select a target square.';
+  if (game === 'reversi') return locale === 'zh' ? '点击高亮位置落子，棋子会翻转被夹住的对手棋子。' : 'Click a highlighted square to bracket and flip opponent pieces.';
+  if (game === 'darkchess') return locale === 'zh' ? '点击暗子翻开；点击己方棋子后再点击目标位置移动或吃子。' : 'Flip a hidden piece, or select your piece and then a destination.';
+  if (game === 'battleship') return locale === 'zh' ? '先选择舰船并点击己方海域布置，再确认布阵并攻击对手海域。' : 'Place each ship on your grid, ready up, then fire at the opponent.';
+  if (game === 'junqi') return locale === 'zh' ? '先选择棋子并点击己方五行布阵，再点击己方棋子和目标位置行棋。' : 'Place your army in the five setup rows, then select a piece and destination.';
   return translate(locale, `game.hints.${game}`);
 }
 
 function gameTip(game: GameKind, locale: Locale): string {
   if (game === 'doushou') return locale === 'zh' ? '斗兽棋：鼠可入河，狮虎可跳河，进入对方兽穴获胜。' : 'Jungle: rats enter rivers, lions/tigers jump rivers, entering enemy den wins.';
+  if (game === 'reversi') return locale === 'zh' ? '黑白棋：必须夹住对手棋子才能落子，无合法落点时停一手。' : 'Reversi: every move must flip a line; pass when no legal move exists.';
+  if (game === 'darkchess') return locale === 'zh' ? '暗棋：未翻开的棋子不会显示内容，炮吃子必须隔一个棋子。' : 'Dark Chess hides face-down pieces; cannons capture with exactly one screen.';
+  if (game === 'battleship') return locale === 'zh' ? '海战棋：舰船不能重叠或相邻，击沉全部敌舰即可获胜。' : 'Battleship: ships cannot overlap or touch; sink the full enemy fleet to win.';
+  if (game === 'junqi') return locale === 'zh' ? '军棋：对手棋子隐藏，军旗和地雷不能移动，炸弹相遇同归于尽。' : 'Junqi hides enemy ranks; flags and mines cannot move, while bombs remove both pieces.';
   return translate(locale, `game.tips.${game}`);
 }
 
@@ -536,9 +570,15 @@ export default function GameWorkbench() {
   }, [board, game, systemLines]);
   const goBoard = useMemo(() => {
     if (game !== 'go') return board;
-    const contextLines = systemLines
-      .filter((line) => /(?:轮到|黑方|白方|Black|White|to move|Last move|KataGo|棋盘)/i.test(line))
-      .slice(-40);
+    const contextLines: string[] = [];
+    const addLatest = (pattern: RegExp): void => {
+      const line = [...systemLines].reverse().find((item) => pattern.test(item));
+      if (line && !contextLines.includes(line)) contextLines.push(line);
+    };
+    addLatest(/^(?:轮到|turn[:：])\s+/i);
+    addLatest(/^(?:Black|White)\s+.+?\s+to\s+move$/i);
+    addLatest(/^(?:黑方|白方|Black|White)\s*[:：]/i);
+    addLatest(/KataGo手顺：/);
     return contextLines.length > 0 ? `${board}\n${contextLines.join('\n')}` : board;
   }, [board, game, systemLines]);
   const stableBoardRef = useRef<{ game: GameKind; board: string }>({ game: 'none', board: '' });
@@ -651,13 +691,17 @@ export default function GameWorkbench() {
 
       {showWorkbenchContent && (
         <>
-          <div className="game-workbench-quick">
-            {quickActions.map((q) => (
-              <button key={`${q.label}:${q.cmd}`} className="mini-btn" disabled={disabled} onClick={() => runAction(q.cmd)}>
-                {q.label}
-              </button>
-            ))}
-          </div>
+          {game === 'none' ? (
+            <GameLobby disabled={disabled} onCommand={(cmd) => { void runAction(cmd); }} />
+          ) : (
+            <div className="game-workbench-quick">
+              {quickActions.map((q) => (
+                <button key={`${q.label}:${q.cmd}`} className="mini-btn" disabled={disabled} onClick={() => runAction(q.cmd)}>
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          )}
           {actionHint && <div className="game-workbench-hint">{actionHint}</div>}
           <div className="game-workbench-hint">{gameTip(game, locale)}</div>
           {assistantVisible && (
@@ -682,6 +726,10 @@ export default function GameWorkbench() {
           {game === 'chess' && <ChessPanel disabled={disabled} nickname={nickname} boardText={board} sendMove={sendMove} />}
           {game === 'gomoku' && <GomokuPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={gomokuBoard} onPick={(r, c) => sendMove(GameCommandFactory.gomokuMove(r, c, locale))} onSoulDraft={setComposerText} />}
           {game === 'go' && <GoPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={goBoard} onPick={(r, c) => sendMove(GameCommandFactory.goMove(r, c, locale))} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'reversi' && <ReversiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(payload) => payload === 'pass' ? sendMove(GameCommandFactory.move(payload, locale, 'reversi')) : sendMove(GameCommandFactory.reversiMove(Number(payload.split(' ')[0]), Number(payload.split(' ')[1]), locale))} />}
+          {game === 'darkchess' && <DarkchessPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(payload) => sendMove(GameCommandFactory.move(payload, locale, 'darkchess'))} />}
+          {game === 'battleship' && <BattleshipPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(payload) => sendMove(GameCommandFactory.move(payload, locale, 'battleship'))} />}
+          {game === 'junqi' && <JunqiPanel disabled={disabled} nickname={nickname} boardText={board} onMove={(payload) => sendMove(GameCommandFactory.move(payload, locale, 'junqi'))} />}
           {game === 'xiangqi' && <XiangqiPanel assistantVisible={assistantVisible} disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.xiangqiCoordMove(fr, fc, tr, tc, locale))} />}
           {game === 'doushou' && <DoushouPanel disabled={disabled} nickname={nickname} boardText={cleanBoard} onMove={(fr, fc, tr, tc) => sendMove(GameCommandFactory.doushouCoordMove(fr, fc, tr, tc, locale))} />}
 
