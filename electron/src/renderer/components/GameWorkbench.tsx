@@ -618,7 +618,9 @@ export default function GameWorkbench() {
   const shouldRefreshAfter = (cmd: string): boolean => {
     const t = cmd.trim().toLowerCase();
     if (!t.startsWith('/game')) return false;
-    if (t === '/game show' || t === '/game help' || t === '/game list' || t.startsWith('/game rating')) return false;
+    // /game new sends the initial board itself. A second immediate /game show
+    // can race federation/session sync and only return a misleading no-game line.
+    if (t === '/game show' || t === '/game help' || t === '/game list' || t.startsWith('/game rating') || t.startsWith('/game new')) return false;
     return true;
   };
 
