@@ -29,7 +29,7 @@
 - Modify: none
 
 **Interfaces:**
-- Produces `DummyConn`, `make_two_player_game`, and assertions reused by later rule tests.
+- Produces `DummyConn` and shared assertions reused by later rule tests.
 
 - [ ] **Step 1: Write the helper module and baseline registration test**
 
@@ -109,9 +109,11 @@ class ReversiGameTests(unittest.TestCase):
 
     def test_two_consecutive_passes_end_as_score_result(self):
         self.game.board = [[1] * 8 for _ in range(8)]
-        self.game.board[0][0] = 0
-        self.game.turn = 2
-        self.assertTrue(self.game.try_move(self.white, "pass")[0])
+        self.game.turn = 1
+        _, _, first_done = self.game.try_move(self.black, "pass")
+        self.assertFalse(first_done)
+        _, _, second_done = self.game.try_move(self.white, "pass")
+        self.assertTrue(second_done)
 
 
 if __name__ == "__main__":
@@ -126,7 +128,7 @@ Expected: FAIL because `ReversiGame` and its board rules do not exist.
 
 - [ ] **Step 3: Implement the minimal authoritative rules**
 
-Implement an 8x8 integer board, legal-move generation in eight directions, line flipping, automatic pass when the current player has no move, double-pass/full-board scoring, turn checks, and idempotent ended-state rejection. Register the game in `create_game`, `GAMES`, aliases, help text, and rating metadata only if the existing rating policy includes it.
+Implement an 8x8 integer board, legal-move generation in eight directions, line flipping, automatic pass when the current player has no move, double-pass/full-board scoring, turn checks, and idempotent ended-state rejection. Register the game in `create_game`, `GAMES`, aliases, help text, and `ratings.py` with the same Elo configuration used by `doushou`.
 
 - [ ] **Step 4: Run the focused tests**
 
@@ -354,4 +356,3 @@ Expected: Python compilation succeeds, `git diff --check` has no whitespace erro
 Run from `electron`: `npm run build:portable`.
 
 Expected: Vite, TypeScript, electron-builder, and portable packaging all exit 0. Record the generated package path and do not include engine binaries unless the existing packaging policy requires them.
-
