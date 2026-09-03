@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from games import ChessGame, GoGame, GomokuGame, chess_available
+from games import ChessGame, GoGame, GomokuGame, chess_available, create_game
 import server
 from session_store import DisconnectedSeat, GameSessionStore
 from unittest.mock import patch
@@ -282,6 +282,33 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(restored, [])
         self.assertIs(server.room_games[room], active)
         self.assertIs(server.room_games_parked[room], parked)
+
+    def test_darkchess_with_socket_conns_persists(self) -> None:
+        import socket
+
+        room = "default"
+        first = socket.socket()
+        second = socket.socket()
+        try:
+            game = create_game("darkchess", first, "zouyu")
+            game.try_join(second, "yxt")
+            game.try_move(first, "flip 1 1")
+            server.room_games[room] = game
+            with server.lock:
+                payload = server._build_session_payload_locked()
+            self.assertIn(room, payload["room_games"])
+            server.session_store.save(payload)
+
+            server.room_games.clear()
+            server._load_persisted_sessions()
+            restored = server.room_games[room]
+            self.assertEqual(restored.name, "darkchess")
+            self.assertEqual(restored.state, "playing")
+            self.assertIsInstance(restored.first_conn, DisconnectedSeat)
+            self.assertIsInstance(restored.second_conn, DisconnectedSeat)
+        finally:
+            first.close()
+            second.close()
 
 
 if __name__ == "__main__":

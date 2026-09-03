@@ -737,6 +737,8 @@ def _game_seat_conn_by_name(game, nickname: str):
                 return conn
 
     for conn_attr, name_attr in (
+        ("first_conn", "first_name"),
+        ("second_conn", "second_name"),
         ("white_conn", "white_name"),
         ("black_conn", "black_name"),
         ("red_conn", "red_name"),
@@ -819,6 +821,8 @@ def _iter_game_conn_seats(game):
                     seen.add(id(conn))
                     yield conn, name
     for conn_attr, name_attr in (
+        ("first_conn", "first_name"),
+        ("second_conn", "second_name"),
         ("white_conn", "white_name"),
         ("black_conn", "black_name"),
         ("red_conn", "red_name"),
