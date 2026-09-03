@@ -34,6 +34,21 @@ class DoushouGameTests(unittest.TestCase):
         self.assertFalse(ended)
         self.assertTrue(any("黑方 Black 走 鼠" in line for line in bcast))
 
+    def test_black_view_is_flipped_with_global_coordinates(self):
+        game, red, black = self._started()
+        red_view = "\n".join(game.show(red))
+        black_view = "\n".join(game.show(black))
+
+        self.assertNotIn("己方在下方", red_view)
+        self.assertIn("己方在下方；坐标仍按全局 1,1 左上", black_view)
+        board_lines = [
+            line for line in black_view.splitlines()
+            if line[:2].strip().isdigit()
+        ]
+        self.assertTrue(board_lines[0].startswith(" 9 "))
+        self.assertTrue(board_lines[-1].startswith(" 1 "))
+        self.assertIn("-狮", board_lines[-1])
+
     def test_piece_name_move_command(self):
         game, red, _black = self._started()
         priv, bcast, ended = game.try_move(red, "鼠 6 7")

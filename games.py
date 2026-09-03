@@ -12267,12 +12267,27 @@ class DoushouGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def _board_render(self) -> list[str]:
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self.who_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.red_name:
+                side = "red"
+            elif vn == self.black_name:
+                side = "black"
+        return side == "black"
+
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = ["斗兽棋棋盘（7列×9行，+红 -黑，!上一步）"]
-        lines.append("    1    2    3    4    5    6    7")
-        for r in range(DOUSHOU_ROWS):
+        flip = self._viewer_flip(conn, viewer_name=viewer_name)
+        col_ix = range(DOUSHOU_COLS - 1, -1, -1) if flip else range(DOUSHOU_COLS)
+        row_ix = range(DOUSHOU_ROWS - 1, -1, -1) if flip else range(DOUSHOU_ROWS)
+        lines.append("    " + "".join(f"{c + 1:^4}" for c in col_ix))
+        if flip:
+            lines.append("  （己方在下方；坐标仍按全局 1,1 左上）")
+        for r in row_ix:
             cells = []
-            for c in range(DOUSHOU_COLS):
+            for c in col_ix:
                 piece = self.board[r][c]
                 token = _doushou_piece_token(piece, self._last == (r, c))
                 terrain = _doushou_terrain(r, c)
@@ -12285,10 +12300,10 @@ class DoushouGame(BoardUndoMixin):
             lines.append(f"上一步：({self._last[0] + 1}, {self._last[1] + 1})")
         return lines
 
-    def show(self, conn=None) -> list[str]:
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [f"doushou 对局（{self.state}）  红：{self.red_name}   黑：{self.black_name or '空席'}"]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render())
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             lines.append(self._undo_turn_line())
         elif self.state == "waiting":
