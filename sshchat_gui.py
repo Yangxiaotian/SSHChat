@@ -2740,7 +2740,9 @@ class SSHChatGUI:
         self._switch_room_local(room, send_switch=True)
 
     def _insert_log_fragment(self, text: str, tag: str) -> None:
-        if (
+        # 斗兽棋已用 +/- 区分红黑；「象」与象棋同字会误套 xq_*，dark theme 下几乎看不见
+        is_doushou = "斗兽棋" in text or any(ch in text for ch in "狮虎豹狼狗猫鼠")
+        if not is_doushou and (
             "{{R}}" in text
             or "{{B}}" in text
             or "【" in text
