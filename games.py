@@ -2656,18 +2656,114 @@ _DARKCHESS_PIECES = (
     ("black", 7, "S"), ("black", 7, "S"),
 )
 _DARKCHESS_DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+_DARKCHESS_LABEL_ZH = {
+    "G": "将",
+    "A": "士",
+    "E": "象",
+    "R": "车",
+    "H": "马",
+    "C": "炮",
+    "S": "卒",
+}
+_DARKCHESS_CELL_W = 4
 
 
 def _darkchess_index(row: int, col: int) -> int:
     return (row - 1) * DARKCHESS_COLS + col - 1
 
 
+def _darkchess_side_zh(side: Optional[str]) -> str:
+    if side == "red":
+        return "红"
+    if side == "black":
+        return "黑"
+    return "未定"
+
+
+def _darkchess_piece_mark(side: str, label: str) -> str:
+    """Board/broadcast mark, e.g. +马 / -车 (ASCII letter kept in piece data)."""
+    zh = _DARKCHESS_LABEL_ZH.get(label, label)
+    return f"{'+' if side == 'red' else '-'}{zh}"
+
+
+def _darkchess_disp_width(text: str) -> int:
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+    return width
+
+
+def _darkchess_pad(text: str, width: int = _DARKCHESS_CELL_W) -> str:
+    pad = width - _darkchess_disp_width(text)
+    return text if pad <= 0 else (" " * pad) + text
+
+
+def _darkchess_cell_token(
+    cell: Optional[int],
+    *,
+    face_up: set[int],
+    pieces: list[dict],
+    highlight: bool = False,
+) -> str:
+    """One cell, padded to a fixed terminal display width (汉字算双宽)."""
+    if cell is None:
+        token = "."
+    elif cell not in face_up:
+        token = "?"
+    else:
+        piece = pieces[cell]
+        token = _darkchess_piece_mark(piece["side"], piece["label"])
+    if highlight:
+        # Keep side mark; bang prefixes the cell (!+将 / !-马 / !?).
+        token = "!" + token
+    return _darkchess_pad(token)
+
+
+def _darkchess_render_board(
+    board: list[Optional[int]],
+    *,
+    face_up: set[int],
+    pieces: list[dict],
+    last: Optional[dict] = None,
+) -> list[str]:
+    header = "   " + "".join(
+        _darkchess_pad(str(c)) for c in range(1, DARKCHESS_COLS + 1)
+    )
+    highlight: set[tuple[int, int]] = set()
+    if isinstance(last, dict):
+        for key in ("at", "from", "to"):
+            pos = last.get(key)
+            if isinstance(pos, tuple) and len(pos) == 2:
+                highlight.add((int(pos[0]), int(pos[1])))
+    lines = [
+        "暗棋棋盘（4×8，+红 -黑，汉字子名，?未翻，.空，!上一步）",
+        header,
+    ]
+    for row in range(1, DARKCHESS_ROWS + 1):
+        tokens = [
+            _darkchess_cell_token(
+                board[_darkchess_index(row, col)],
+                face_up=face_up,
+                pieces=pieces,
+                highlight=(row, col) in highlight,
+            )
+            for col in range(1, DARKCHESS_COLS + 1)
+        ]
+        lines.append(f"{row:>2} " + "".join(tokens))
+    lines.append(
+        "图例：+红 -黑 将士象车马炮卒；?未翻开 .空位；!上一步相关格；坐标为 行 列（1 起算）。"
+    )
+    if isinstance(last, dict) and last.get("text"):
+        lines.append(f"上一步：{last['text']}")
+    return lines
+
+
 class DarkchessGame:
     """Two-player Chinese Dark Chess with private face-down pieces."""
 
     name = "darkchess"
-    first_seat_desc = "Player 1"
-    second_seat_desc = "Player 2"
+    first_seat_desc = "玩家1"
+    second_seat_desc = "玩家2"
     send_view_on_move = True
 
     def __init__(
@@ -2692,8 +2788,8 @@ class DarkchessGame:
         random.shuffle(self.board)
         self.face_up: set[int] = set()
         self.player_side: dict[int, Optional[str]] = {1: None, 2: None}
-        self._last: Optional[tuple[int, int]] = None
-        self.join_blurb = "Waiting for another player to join with /game join."
+        self._last: Optional[dict] = None
+        self.join_blurb = "等另一位玩家用 /game join 加入。"
 
     def who_of(self, conn) -> Optional[int]:
         if conn is self.first_conn:
@@ -2706,7 +2802,7 @@ class DarkchessGame:
         return self.who_of(conn) is not None
 
     def _player_name(self, player: int) -> str:
-        return self.first_name if player == 1 else self.second_name or "Player 2"
+        return self.first_name if player == 1 else self.second_name or "玩家2"
 
     def _piece(self, cell: int) -> dict:
         return self.pieces[cell]
@@ -2732,7 +2828,7 @@ class DarkchessGame:
         )
 
     def _turn_line(self) -> str:
-        return f"Turn: {self._player_name(self.turn)} (player {self.turn})"
+        return f"轮到：{self._player_name(self.turn)}（玩家{self.turn}）"
 
     def _adjacent(self, fr: int, fc: int, tr: int, tc: int) -> bool:
         return abs(fr - tr) + abs(fc - tc) == 1
@@ -2764,7 +2860,9 @@ class DarkchessGame:
         return screen
 
     def _has_side_piece(self, side: str) -> bool:
-        return any(cell is not None and self._piece(cell)["side"] == side for cell in self.board)
+        return any(
+            cell is not None and self._piece(cell)["side"] == side for cell in self.board
+        )
 
     def _finish_if_needed(self) -> Optional[tuple[int, list[str]]]:
         if self.player_side[1] is None or self.player_side[2] is None:
@@ -2775,28 +2873,29 @@ class DarkchessGame:
         winner = 3 - self.turn
         self.state = "ended"
         return winner, [
-            f"{self._player_name(winner)} wins: the opponent has no pieces left.",
+            f"{self._player_name(winner)} 获胜：对方无子可动。",
             *self._settle_ratings(winner),
         ]
 
     def try_join(self, conn, name: str) -> GameResult:
         if self.state == "ended":
-            return (["Game ended; start a new darkchess game."], [], False)
+            return (["对局已结束，请先 /game new darkchess 开新局。"], [], False)
         if conn is self.first_conn:
-            return (["You are already Player 1."], [], False)
+            return (["你已经是玩家1。"], [], False)
         if conn is self.second_conn:
-            return (["You are already Player 2."], [], False)
+            return (["你已经是玩家2。"], [], False)
         if self.second_conn is not None:
-            return ([f"Player 2 seat is occupied by {self.second_name}."], [], False)
+            return ([f"玩家2席位已被 {self.second_name} 占用。"], [], False)
         self.second_conn = conn
         self.second_name = name
         self.state = "playing"
         return (
             [],
             [
-                f"{name} joined darkchess; flip a piece to determine sides.",
-                f"Player 1: {self.first_name}  Player 2: {self.second_name}",
-                "Use /game move flip <row> <col> or /game move move <from row> <from col> <to row> <to col>.",
+                f"{name} 加入暗棋（darkchess）；请翻子决定红黑。",
+                f"玩家1：{self.first_name}  玩家2：{self.second_name}",
+                "指令：/game move 翻 <行> <列> 或 /game move 走 <起行> <起列> <终行> <终列>"
+                "（英文：flip / move）。",
                 self._turn_line(),
             ],
             False,
@@ -2804,71 +2903,112 @@ class DarkchessGame:
 
     def try_move(self, conn, raw: str) -> GameResult:
         if self.state == "waiting":
-            return (["Game has not started; wait for Player 2 to join."], [], False)
+            return (["对局尚未开始，请等待玩家2加入。"], [], False)
         if self.state != "playing":
-            return (["Game has ended."], [], False)
+            return (["对局已结束。"], [], False)
         player = self.who_of(conn)
         if player is None:
-            return (["You are not one of the players."], [], False)
+            return (["你不是对局双方。"], [], False)
         if player != self.turn:
-            return (["It is not your turn."], [], False)
+            return (["不是你的回合。"], [], False)
 
         parts = raw.strip().split()
         if not parts:
-            return (["Usage: flip row col or move from_row from_col to_row to_col."], [], False)
+            return (["用法：翻 行 列 或 走 起行 起列 终行 终列。"], [], False)
         verb = parts[0].lower()
         if verb in {"flip", "翻", "翻子"}:
             if len(parts) != 3 or not all(part.isdigit() for part in parts[1:]):
-                return (["Usage: /game move flip <row> <col> (1-4, 1-8)."], [], False)
+                return (["用法：/game move 翻 <行> <列>（1-4, 1-8）；英文 flip。"], [], False)
             row, col = int(parts[1]), int(parts[2])
             if not (1 <= row <= DARKCHESS_ROWS and 1 <= col <= DARKCHESS_COLS):
-                return (["Coordinates must be row 1-4 and column 1-8."], [], False)
+                return (["坐标须为行 1-4、列 1-8。"], [], False)
             pos = _darkchess_index(row, col)
             cell = self.board[pos]
             if cell is None or cell in self.face_up:
-                return (["That square has no face-down piece."], [], False)
+                return (["该格没有未翻开的棋子。"], [], False)
             self.face_up.add(cell)
             if self.player_side[1] is None:
                 self.player_side[player] = self._piece(cell)["side"]
-                self.player_side[3 - player] = "black" if self.player_side[player] == "red" else "red"
-            self._last = (row, col)
-            self.turn = 3 - player
+                self.player_side[3 - player] = (
+                    "black" if self.player_side[player] == "red" else "red"
+                )
             p = self._piece(cell)
-            lines = [f"{self._player_name(player)} flips {'+' if p['side'] == 'red' else '-'}{p['label']}." ]
+            mark = _darkchess_piece_mark(p["side"], p["label"])
+            summary = f"{self._player_name(player)} 翻开 {mark} 于 ({row},{col})"
+            self._last = {
+                "kind": "flip",
+                "text": summary,
+                "at": (row, col),
+                "to": (row, col),
+            }
+            self.turn = 3 - player
+            lines = [summary + "。"]
             lines.append(self._turn_line())
             return ([], lines, False)
 
-        if verb not in {"move", "走", "移动"} or len(parts) != 5 or not all(part.isdigit() for part in parts[1:]):
-            return (["Usage: /game move move <from row> <from col> <to row> <to col>."], [], False)
+        if verb not in {"move", "走", "移动"} or len(parts) != 5 or not all(
+            part.isdigit() for part in parts[1:]
+        ):
+            return (
+                ["用法：/game move 走 <起行> <起列> <终行> <终列>；英文 move。"],
+                [],
+                False,
+            )
         fr, fc, tr, tc = (int(value) for value in parts[1:])
         if not (1 <= fr <= 4 and 1 <= tr <= 4 and 1 <= fc <= 8 and 1 <= tc <= 8):
-            return (["Coordinates must be row 1-4 and column 1-8."], [], False)
+            return (["坐标须为行 1-4、列 1-8。"], [], False)
         source_pos, target_pos = _darkchess_index(fr, fc), _darkchess_index(tr, tc)
         source, target = self.board[source_pos], self.board[target_pos]
         side = self._side_for_player(player)
         if side is None:
-            return (["Flip the first piece before moving."], [], False)
-        if source is None or source not in self.face_up or self._piece(source)["side"] != side:
-            return (["You can move only your own face-up piece."], [], False)
+            return (["请先翻开第一枚棋子再走子。"], [], False)
+        if (
+            source is None
+            or source not in self.face_up
+            or self._piece(source)["side"] != side
+        ):
+            return (["只能移动己方已翻开的棋子。"], [], False)
         if target is not None and target not in self.face_up:
-            return (["A face-down piece must be flipped before it can be captured."], [], False)
+            return (["未翻开的棋子必须先翻开才能吃。"], [], False)
+        captured_mark = None
         if target is None:
             if not self._adjacent(fr, fc, tr, tc):
-                return (["A normal piece moves one adjacent square."], [], False)
+                return (["普通棋子只能走相邻一格。"], [], False)
         else:
             attacker, defender = self._piece(source), self._piece(target)
             if attacker["side"] == defender["side"]:
-                return (["You cannot capture your own piece."], [], False)
+                return (["不能吃己方棋子。"], [], False)
             if attacker["label"] == "C":
                 if self._cannon_screen(fr, fc, tr, tc) is None:
-                    return (["A cannon capture needs exactly one screen in a row or column."], [], False)
-            elif not self._adjacent(fr, fc, tr, tc) or not self._can_capture(attacker, defender):
-                return (["Illegal capture under darkchess rank rules."], [], False)
+                    return (["炮吃子须在同行/同列隔恰好一子（炮架）。"], [], False)
+            elif not self._adjacent(fr, fc, tr, tc) or not self._can_capture(
+                attacker, defender
+            ):
+                return (["按暗棋等级规则，该吃子不合法。"], [], False)
+            captured_mark = _darkchess_piece_mark(defender["side"], defender["label"])
+        mover = _darkchess_piece_mark(self._piece(source)["side"], self._piece(source)["label"])
         self.board[source_pos] = None
         self.board[target_pos] = source
-        self._last = (tr, tc)
+        if captured_mark:
+            summary = (
+                f"{self._player_name(player)} 用 {mover} 从 ({fr},{fc}) "
+                f"吃掉 {captured_mark} 至 ({tr},{tc})"
+            )
+            kind = "capture"
+        else:
+            summary = (
+                f"{self._player_name(player)} 用 {mover} 从 ({fr},{fc}) 走到 ({tr},{tc})"
+            )
+            kind = "move"
+        self._last = {
+            "kind": kind,
+            "text": summary,
+            "from": (fr, fc),
+            "to": (tr, tc),
+            "at": (tr, tc),
+        }
         self.turn = 3 - player
-        lines = [f"{self._player_name(player)} moves from ({fr}, {fc}) to ({tr}, {tc})."]
+        lines = [summary + "。"]
         finished = self._finish_if_needed()
         if finished:
             _, finish_lines = finished
@@ -2879,55 +3019,64 @@ class DarkchessGame:
 
     def resign(self, conn, name: str) -> GameResult:
         if self.state != "playing":
-            return (["Game has not started or has already ended."], [], False)
+            return (["对局尚未开始或已结束。"], [], False)
         player = self.who_of(conn)
         if player is None:
-            return (["You are not one of the players."], [], False)
+            return (["你不是对局双方。"], [], False)
         winner = 3 - player
         self.state = "ended"
-        return ([], [f"{name} resigns; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+        return (
+            [],
+            [
+                f"{name} 认负；{self._player_name(winner)} 获胜。",
+                *self._settle_ratings(winner),
+            ],
+            True,
+        )
 
     def abort(self, conn, name: str) -> GameResult:
         if self.state == "ended":
-            return (["Game has ended."], [], False)
+            return (["对局已结束。"], [], False)
         if self.who_of(conn) is None:
-            return (["You are not one of the players."], [], False)
+            return (["你不是对局双方。"], [], False)
         if self.state == "playing":
-            return (["A started game must be resigned, not aborted."], [], False)
+            return (["已开始的对局请用 /game resign 认负，不能 /game abort。"], [], False)
         self.state = "ended"
-        return ([], [f"{name} aborted the darkchess game."], True)
+        return ([], [f"{name} 终止了暗棋对局。"], True)
 
     def seats(self) -> list[str]:
         return [
-            f"darkchess game state: {self.state}",
-            f"Player 1: {self.first_name} side={self.player_side[1] or 'unknown'}",
-            f"Player 2: {self.second_name or '(empty; /game join)'} side={self.player_side[2] or 'unknown'}",
+            f"darkchess 对局状态：{self.state}",
+            f"玩家1：{self.first_name} 阵营={_darkchess_side_zh(self.player_side[1])}",
+            (
+                f"玩家2：{self.second_name or '(空席, 可 /game join)'} "
+                f"阵营={_darkchess_side_zh(self.player_side[2])}"
+            ),
             *self._rating_lines(),
         ]
 
     def show(self, conn=None) -> list[str]:
         lines = [
-            f"darkchess game ({self.state})  Player 1: {self.first_name}  Player 2: {self.second_name or 'empty'}",
-            f"Sides: P1 {self.player_side[1] or 'unknown'}  P2 {self.player_side[2] or 'unknown'}",
+            (
+                f"darkchess 对局（{self.state}）  玩家1：{self.first_name}  "
+                f"玩家2：{self.second_name or '空席'}"
+            ),
+            (
+                f"阵营：P1 {_darkchess_side_zh(self.player_side[1])}  "
+                f"P2 {_darkchess_side_zh(self.player_side[2])}"
+            ),
             *self._rating_lines(),
+            *_darkchess_render_board(
+                self.board,
+                face_up=self.face_up,
+                pieces=self.pieces,
+                last=self._last,
+            ),
         ]
-        for row in range(1, DARKCHESS_ROWS + 1):
-            tokens = []
-            for col in range(1, DARKCHESS_COLS + 1):
-                cell = self.board[_darkchess_index(row, col)]
-                if cell is None:
-                    tokens.append(".")
-                elif cell not in self.face_up:
-                    tokens.append("?")
-                else:
-                    piece = self._piece(cell)
-                    tokens.append(f"{'+' if piece['side'] == 'red' else '-'}{piece['label']}")
-            # Keep hidden and revealed pieces at the same width so terminal
-            # columns stay aligned after a flip.
-            lines.append(f"{row:>2}  " + " ".join(f"{token:>2}" for token in tokens))
-        lines.append("Legend: + red  - black  ? face-down  . empty")
         if self.state == "playing":
             lines.append(self._turn_line())
+        elif self.state == "waiting":
+            lines.append("等待玩家2加入：/game join")
         return lines
 
     def on_player_leave(self, conn, name: str) -> GameResult:
@@ -2940,11 +3089,18 @@ class DarkchessGame:
             self.second_conn = None
         if self.state == "waiting":
             self.state = "ended"
-            return ([], [f"{name} left; darkchess game cancelled."], True)
+            return ([], [f"{name} 离开，暗棋对局取消。"], True)
         if self.state == "playing":
             self.state = "ended"
             winner = 3 - player
-            return ([], [f"{name} left; {self._player_name(winner)} wins.", *self._settle_ratings(winner)], True)
+            return (
+                [],
+                [
+                    f"{name} 离开；{self._player_name(winner)} 获胜。",
+                    *self._settle_ratings(winner),
+                ],
+                True,
+            )
         return ([], [], False)
 
 
@@ -8822,6 +8978,297 @@ class SanguoshaGame:
         return self._maybe_end(bcast)
 
 
+# Simple nouns suitable for drawing (MVP word bank; Chinese-first).
+_DRAWGUESS_WORDS = (
+    "猫", "狗", "鱼", "鸟", "树", "花", "太阳", "月亮", "星星", "云",
+    "房子", "汽车", "飞机", "船", "火车", "自行车", "伞", "眼镜", "帽子", "鞋子",
+    "苹果", "香蕉", "西瓜", "冰淇淋", "蛋糕", "书", "电脑", "手机", "吉他", "钢琴",
+    "足球", "篮球", "雨伞", "雪人", "彩虹", "恐龙", "机器人", "火箭", "城堡", "桥",
+    "大象", "老虎", "兔子", "企鹅", "蝴蝶", "蜗牛", "钥匙", "门锁", "时钟", "蜡烛",
+    "咖啡杯", "茶壶", "面条", "寿司", "汉堡", "披萨", "相机", "望远镜", "风筝", "气球",
+)
+
+
+def _drawguess_norm(text: str) -> str:
+    s = unicodedata.normalize("NFKC", (text or "")).strip().lower()
+    return re.sub(r"\s+", "", s)
+
+
+class DrawGuessGame:
+    """你画我猜 MVP：画家在房间 /canvas 作画，其他人 /game move guess 猜词。"""
+
+    name = "drawguess"
+    first_seat_desc = "host"
+    second_seat_desc = "player"
+    send_view_on_move = True
+    join_blurb = (
+        "至少 2 人后房主 /game move start；"
+        "画家用 /canvas 画板作画，其他人 /game move guess <词> 猜。"
+    )
+
+    def __init__(self, owner_conn, owner_name: str) -> None:
+        self.players: list[tuple[object, str]] = [(owner_conn, owner_name)]
+        self.state = "waiting"
+        self.round = 0
+        self.total_rounds = 0
+        self.drawer_index = 0
+        self.drawer: Optional[str] = None
+        self.secret: Optional[str] = None
+        self.scores: dict[str, int] = {owner_name: 0}
+        self._used_words: set[str] = set()
+        self._extra_privates: list[tuple[object, list[str]]] = []
+        self._canvas_actions: list[str] = []
+
+    def _norm(self, s: str) -> str:
+        return s.strip().lower()
+
+    def _name_of(self, conn) -> Optional[str]:
+        for c, n in self.players:
+            if c is conn:
+                return n
+        return None
+
+    def _conn_of(self, name: str):
+        for c, n in self.players:
+            if n == name:
+                return c
+        return None
+
+    def _queue_private(self, conn, lines: list[str]) -> None:
+        if conn is not None and lines:
+            self._extra_privates.append((conn, lines))
+
+    def drain_extra_privates(self):
+        out = self._extra_privates
+        self._extra_privates = []
+        return out
+
+    def drain_canvas_actions(self) -> list[str]:
+        out = self._canvas_actions
+        self._canvas_actions = []
+        return out
+
+    def _score_line(self) -> str:
+        ranked = sorted(self.scores.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        return "积分：" + "，".join(f"{n} {pts}" for n, pts in ranked)
+
+    def _pick_word(self) -> str:
+        pool = [w for w in _DRAWGUESS_WORDS if w not in self._used_words]
+        if not pool:
+            self._used_words.clear()
+            pool = list(_DRAWGUESS_WORDS)
+        word = random.choice(pool)
+        self._used_words.add(word)
+        return word
+
+    def _begin_round(self) -> list[str]:
+        self.round += 1
+        self.drawer = self.players[self.drawer_index % len(self.players)][1]
+        self.secret = self._pick_word()
+        self.state = "drawing"
+        self._canvas_actions.append("clear")
+        drawer_conn = self._conn_of(self.drawer)
+        self._queue_private(
+            drawer_conn,
+            [
+                f"你是画家。本回合词：【{self.secret}】",
+                "请打开房间画板 /canvas 作画；忘记词语可 /game move word。",
+                "跳过本回合：/game move skip",
+            ],
+        )
+        return [
+            f"第 {self.round}/{self.total_rounds} 回合：画家是 {self.drawer}。",
+            "画家请在房间画板作画（/canvas）；其他人猜词：/game move guess <词>。",
+            "画家或房主可 /game move skip 跳过本回合。",
+        ]
+
+    def _advance_or_end(self, preface: list[str]) -> GameResult:
+        out = list(preface)
+        out.append(self._score_line())
+        if self.round >= self.total_rounds:
+            self.state = "ended"
+            self.secret = None
+            ranked = sorted(self.scores.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+            winner = ranked[0][0] if ranked else "?"
+            out.append(f"游戏结束！胜者：{winner}")
+            return ([], out, True)
+        self.drawer_index = (self.drawer_index + 1) % len(self.players)
+        out.extend(self._begin_round())
+        return ([], out, False)
+
+    def try_join(self, conn, name: str) -> GameResult:
+        if self.state != "waiting":
+            return (["对局已开始。"], [], False)
+        if any(c is conn for c, _ in self.players):
+            return (["你已在局中。"], [], False)
+        if any(self._norm(n) == self._norm(name) for _c, n in self.players):
+            return (["该昵称已在本局中。"], [], False)
+        if len(self.players) >= 12:
+            return (["你画我猜最多 12 人。"], [], False)
+        self.players.append((conn, name))
+        self.scores.setdefault(name, 0)
+        msg = [f"{name} 加入你画我猜（{len(self.players)} 人）。"]
+        if len(self.players) >= 2:
+            msg.append("房主可以开始：/game move start")
+        return ([], msg, False)
+
+    def _start_game(self) -> GameResult:
+        if len(self.players) < 2:
+            return (["至少需要 2 名玩家。"], [], False)
+        self.total_rounds = min(12, max(4, len(self.players) * 2))
+        self.round = 0
+        self.drawer_index = 0
+        self._used_words.clear()
+        for _c, n in self.players:
+            self.scores.setdefault(n, 0)
+        bcast = [f"你画我猜开始，共 {self.total_rounds} 回合。"]
+        bcast.extend(self._begin_round())
+        return ([], bcast, False)
+
+    def try_move(self, conn, raw: str) -> GameResult:
+        actor = self._name_of(conn)
+        if actor is None:
+            return (["你不在本局中。"], [], False)
+        text = raw.strip()
+        if not text:
+            return (["用法：/game move <start|guess|skip|word|scores>"], [], False)
+        parts = text.split(None, 1)
+        cmd = self._norm(parts[0])
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ("start", "开始"):
+            if self.state != "waiting":
+                return (["已经开始了。"], [], False)
+            if self.players[0][0] is not conn:
+                return (["只有房主可以开始。"], [], False)
+            return self._start_game()
+
+        if cmd in ("scores", "score", "积分"):
+            return ([self._score_line()], [], False)
+
+        if self.state == "waiting":
+            return (["尚未开始。房主：/game move start"], [], False)
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+
+        if cmd in ("word", "hint", "词语"):
+            if actor != self.drawer:
+                return (["只有当前画家可以查看词语。"], [], False)
+            return ([f"本回合词：【{self.secret}】"], [], False)
+
+        if cmd in ("skip", "跳过", "pass"):
+            if actor != self.drawer and self.players[0][0] is not conn:
+                return (["只有画家或房主可以跳过。"], [], False)
+            revealed = self.secret or "?"
+            return self._advance_or_end(
+                [f"{actor} 跳过本回合。答案是：【{revealed}】"]
+            )
+
+        if cmd in ("guess", "猜", "猜词"):
+            if actor == self.drawer:
+                return (["画家不能猜自己的词。"], [], False)
+            if not arg:
+                return (["用法：/game move guess <词>"], [], False)
+            if _drawguess_norm(arg) != _drawguess_norm(self.secret or ""):
+                return (["不对，再试试。"], [], False)
+            self.scores[actor] = self.scores.get(actor, 0) + 2
+            if self.drawer:
+                self.scores[self.drawer] = self.scores.get(self.drawer, 0) + 1
+            return self._advance_or_end(
+                [
+                    f"{actor} 猜对了！答案：【{self.secret}】"
+                    f"（+2；画家 {self.drawer} +1）"
+                ]
+            )
+
+        return (
+            ["指令：start / guess <词> / skip / word / scores"],
+            [],
+            False,
+        )
+
+    def resign(self, conn, name: str) -> GameResult:
+        return self.on_player_leave(conn, name)
+
+    def abort(self, conn, name: str) -> GameResult:
+        if self.players[0][0] is not conn:
+            return (["只有房主可以中止。"], [], False)
+        if self.state == "ended":
+            return (["对局已结束。"], [], False)
+        self.state = "ended"
+        self.secret = None
+        return ([], [f"{name} 中止了你画我猜。", self._score_line()], True)
+
+    def seats(self) -> list[str]:
+        lines = [
+            f"drawguess state: {self.state}",
+            f"players: {len(self.players)} (min 2)",
+            f"round: {self.round}/{self.total_rounds or '?'}",
+        ]
+        if self.drawer and self.state == "drawing":
+            lines.append(f"drawer: {self.drawer}")
+        for i, (_c, n) in enumerate(self.players):
+            host = " host" if i == 0 else ""
+            pts = self.scores.get(n, 0)
+            lines.append(f" - {n} ({pts} pts){host}")
+        if self.state == "waiting":
+            lines.append("Host start cmd: /game move start")
+        return lines
+
+    def show(self, conn=None, full: bool = False) -> list[str]:
+        lines = [
+            f"drawguess state: {self.state}",
+            f"host: {self.players[0][1]}",
+            f"round: {self.round}/{self.total_rounds or '?'}",
+            self._score_line(),
+        ]
+        if self.state == "waiting":
+            lines.append("等待玩家加入，房主 /game move start")
+        elif self.state == "drawing":
+            lines.append(f"drawer: {self.drawer}")
+            lines.append("猜词：/game move guess <词>；跳过：/game move skip")
+            lines.append("画板：/canvas（每回合开始会清板）")
+            actor = self._name_of(conn) if conn is not None else None
+            if actor == self.drawer and self.secret:
+                lines.append(f"（仅你可见）本回合词：【{self.secret}】")
+        return lines
+
+    def on_player_leave(self, conn, name: str) -> GameResult:
+        idx = None
+        for i, (c, _n) in enumerate(self.players):
+            if c is conn:
+                idx = i
+                break
+        if idx is None:
+            return ([], [], False)
+        _c, pname = self.players.pop(idx)
+        self.scores.pop(pname, None)
+        if not self.players:
+            self.state = "ended"
+            self.secret = None
+            return ([], [f"{name} 离开，无人在局，对局结束。"], True)
+        if self.state == "waiting":
+            return ([], [f"{name} 离开。等待中：{len(self.players)} 人"], False)
+        # Fix drawer rotation if needed.
+        if idx < self.drawer_index:
+            self.drawer_index -= 1
+        elif self.drawer_index >= len(self.players):
+            self.drawer_index = 0
+        out = [f"{name} 离开了对局。"]
+        if pname == self.drawer and self.state == "drawing":
+            revealed = self.secret or "?"
+            out.append(f"画家离开，本回合作废。答案是：【{revealed}】")
+            return self._advance_or_end(out)
+        if len(self.players) < 2:
+            self.state = "ended"
+            self.secret = None
+            out.append("人数不足，对局结束。")
+            out.append(self._score_line())
+            return ([], out, True)
+        out.append(self._score_line())
+        return ([], out, False)
+
+
 class WerewolfGame:
     name = "werewolf"
     first_seat_desc = "host"
@@ -11879,7 +12326,7 @@ def create_game(
         )
     elif game_name == DarkchessGame.name:
         if options:
-            raise RuntimeError("darkchess does not support opening options.")
+            raise RuntimeError("darkchess 暂不支持 AI 或额外开局参数。")
         game = DarkchessGame(
             creator_conn,
             creator_name,
@@ -11937,6 +12384,7 @@ GAMES = {
     DoushouGame.name: DoushouGame,
     SanguoshaGame.name: SanguoshaGame,
     WerewolfGame.name: WerewolfGame,
+    DrawGuessGame.name: DrawGuessGame,
     HoldemGame.name: HoldemGame,
     ZhaJinHuaGame.name: ZhaJinHuaGame,
     NiuTouWangGame.name: NiuTouWangGame,
@@ -11965,6 +12413,11 @@ GAME_ALIASES = {
     "sgs": SanguoshaGame.name,
     "langrensha": WerewolfGame.name,
     "were-wolf": WerewolfGame.name,
+    "drawguess": DrawGuessGame.name,
+    "draw-guess": DrawGuessGame.name,
+    "pictionary": DrawGuessGame.name,
+    "你画我猜": DrawGuessGame.name,
+    "画画猜词": DrawGuessGame.name,
     "poker": HoldemGame.name,
     "texas": HoldemGame.name,
     "texasholdem": HoldemGame.name,
@@ -12007,9 +12460,10 @@ def terminal_hint(name: str) -> str:
     """Give terminal players the first legal command after a game starts."""
     hints = {
         "reversi": "Terminal: /game move <row> <col>; use /game move pass only when no legal move exists.",
-        "darkchess": "Terminal: /game move flip <row> <col>, then /game move move <fr> <fc> <tr> <tc>.",
+        "darkchess": "暗棋终端：/game move 翻 <行> <列>；走子 /game move 走 <起行> <起列> <终行> <终列>（英文 flip / move）。",
         "battleship": "Terminal: place all five ships with /game move place <ship> <row> <col> <h|v>, then ready and fire <row> <col>.",
         "junqi": "Terminal: place pieces with /game move setup <piece> <row> <col>, then ready and move <fr> <fc> <tr> <tc>.",
+        "drawguess": "Terminal: host /game move start; drawer opens /canvas; others /game move guess <word>; skip with /game move skip.",
     }
     return hints.get(name, "")
 
@@ -12035,7 +12489,8 @@ HELP_LINES = (
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
     "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
     "[*] reversi（黑白棋）终端：/game move <行> <列>；无合法落点时 /game move pass。",
-    "[*] darkchess（暗棋/翻翻棋）终端：先 /game move flip <行> <列>，再 /game move move <起行> <起列> <终行> <终列>。",
+    "[*] darkchess（暗棋/翻翻棋）中英：翻 flip <行> <列> | 走 move <起行> <起列> <终行> <终列>；"
+    "4×8，翻子定红黑；炮吃隔一子；将可吃除卒外任意已翻棋，卒可吃将。",
     "[*] battleship（海战棋）终端：双方 place 五艘舰船后 ready，再 /game move fire <行> <列>。",
     "[*] junqi（军棋）终端：双方 setup 棋子后 ready，再 /game move move <起行> <起列> <终行> <终列>。",
     "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
@@ -12068,4 +12523,6 @@ HELP_LINES = (
     "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
     "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",
     "[*] 麻将支持中文出牌：二万、九筒、五条、东风、红中、发财、白板（也支持 m1/p9/s5/z3）。",
+    "[*] drawguess（你画我猜）至少 2 人：房主 start；画家用 /canvas 画板作画；"
+    "其他人 /game move guess <词>；跳过 skip；画家可 word 重看词语。",
 )

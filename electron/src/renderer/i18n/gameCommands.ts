@@ -15,6 +15,8 @@ const MOVE_VERBS: Record<string, Record<Locale, string>> = {
   pass: { zh: '过', en: 'pass' },
   passgo: { zh: '停一手', en: 'pass' },
   generals: { zh: '武将', en: 'generals' },
+  flip: { zh: '翻', en: 'flip' },
+  darkMove: { zh: '走', en: 'move' },
 };
 
 function resolvePassVerb(locale: Locale, game?: GameKind): string {
@@ -42,6 +44,17 @@ export function buildGameMove(locale: Locale, payload: string, game?: GameKind):
 
   if (headLower === 'pass') {
     parts[0] = resolvePassVerb(locale, game);
+    return `/game move ${parts.join(' ')}`;
+  }
+
+  // Darkchess uses "move" as a piece-move verb (not the generic /game move wrapper).
+  if (game === 'darkchess' && headLower === 'move') {
+    parts[0] = MOVE_VERBS.darkMove[locale];
+    return `/game move ${parts.join(' ')}`;
+  }
+
+  if (headLower === 'flip') {
+    parts[0] = MOVE_VERBS.flip[locale];
     return `/game move ${parts.join(' ')}`;
   }
 

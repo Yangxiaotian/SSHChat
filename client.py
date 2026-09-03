@@ -129,7 +129,7 @@ _DND_SUBCOMMANDS = {
 
 _GAME_NAMES = (
     "chess", "xiangqi", "gomoku", "go", "reversi", "darkchess", "battleship",
-    "junqi", "doushou", "sanguo", "werewolf", "holdem", "zjh", "niutou", "mahjong",
+    "junqi", "doushou", "sanguo", "werewolf", "drawguess", "holdem", "zjh", "niutou", "mahjong",
 )
 
 _TOP_COMMANDS = (
@@ -424,6 +424,7 @@ def _is_game_flood_line(payload: str) -> bool:
         "niutou",
         "sanguo",
         "werewolf",
+        "drawguess",
         "doushou",
         "斗兽棋",
         "国际象棋",
@@ -439,6 +440,7 @@ def _is_game_flood_line(payload: str) -> bool:
         "牛头王",
         "三国杀",
         "狼人杀",
+        "你画我猜",
         "对局",
         "开了一局",
         "上一步",
@@ -496,11 +498,11 @@ def _is_game_context_line(payload: str) -> bool:
     if re.match(r"^[a-h](?:\s+[a-h]){7}\s*$", t):
         return True
     if re.match(
-        r"^(go|chess|gomoku|xiangqi|doushou|reversi|darkchess|battleship|junqi|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b",
+        r"^(go|chess|gomoku|xiangqi|doushou|reversi|darkchess|battleship|junqi|holdem|zjh|niutou|sanguo|werewolf|drawguess|mahjong)\b",
         t,
     ):
         return True
-    if re.match(r"^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)", t):
+    if re.match(r"^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|你画我猜|麻将)", t):
         return True
     if t.startswith("劫点") or "闷牌" in t or "已弃牌" in t or "已看牌" in t:
         return True

@@ -64,7 +64,9 @@ MESSAGES: dict = {
         "[*] /game seats            显示双方与对局状态。",
         "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
         "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
-        "[*] 终端玩法：reversi 黑白棋用 /game move 行 列（无合法落点时 pass）；darkchess 暗棋先 /game move flip 行 列，再 /game move move 起行 起列 终行 终列。",
+        "[*] 终端玩法：reversi 黑白棋用 /game move 行 列（无合法落点时 pass）。",
+        "[*] darkchess（暗棋/翻翻棋）中英指令：翻 flip <行> <列> | 走 move <起行> <起列> <终行> <终列>；"
+        "4×8，翻子定红黑；炮吃须隔一子；将可吃除卒外任意已翻棋，卒可吃将。",
         "[*] 终端玩法：battleship 海战棋先 place 舰名 行 列 h|v，再 ready、fire 行 列；junqi 军棋先 setup 棋子 行 列，再 ready、move 起行 起列 终行 终列。",
         "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
         "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
@@ -97,6 +99,8 @@ MESSAGES: dict = {
         "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
         "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",
         "[*] 麻将支持中文出牌：二万、九筒、五条、东风、红中、发财、白板（也支持 m1/p9/s5/z3）。",
+        "[*] drawguess（你画我猜）至少 2 人：房主 start；画家用 /canvas 画板作画；"
+        "其他人 /game move guess <词>；跳过 skip；画家可 word 重看词语。",
     ],
     "server": {
         "announce_preview": "[#{room}] [*] 公告：{text}\n",

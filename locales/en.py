@@ -64,7 +64,9 @@ MESSAGES: dict = {
         "[*] /game seats            Show players and game state.",
         "[*] /game show             Redraw the board (you at the bottom; opponent view flips automatically).",
         "[*] /game rating [game] [nick]  Show persisted board-game rating/level; ratings are shared across rooms.",
-        "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked); darkchess = /game move flip <row> <col>, then /game move move <fr> <fc> <tr> <tc>.",
+        "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked).",
+        "[*] darkchess (Dark Chess / flip chess) EN/ZH: 翻 flip <row> <col> | 走 move <fr> <fc> <tr> <tc>; "
+        "4×8 board; first flip assigns red/black; cannon needs one screen; general beats all but soldier, soldier can take general.",
         "[*] Terminal: battleship = place carrier/battleship/cruiser/submarine/destroyer row col h|v, then ready; fire row col. Junqi = setup <piece> row col, then ready and move fr fc tr tc.",
         "[*] chess boards use Unicode pieces (♔♟ etc.); empty squares are ·; last move is marked with parentheses. "
         "Use a monospace font; if Black is hard to see on a dark theme, try a light terminal theme.",
@@ -101,6 +103,8 @@ MESSAGES: dict = {
         "after another's discard: chi/peng/gang/hu/pass.",
         "[*] Tile codes: m=man (万), p=pin (筒/饼), s=sou (条/索), z=honors (ESWN + dragons).",
         "[*] Chinese discard names work: 二万, 九筒, 五条, 东风, 红中, 发财, 白板 (also m1/p9/s5/z3).",
+        "[*] drawguess (Pictionary): need 2+ players; host start; drawer uses /canvas; "
+        "others /game move guess <word>; skip; drawer may word to re-read the secret.",
     ],
     "server": {
         "announce_preview": "[#{room}] [*] Announcement: {text}\n",

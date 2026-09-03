@@ -214,6 +214,37 @@ def _polish_en_game_line(line: str) -> str:
     out = out.replace("（1～15，左上为 1,1）", "(1–15, top-left is 1,1)")
     out = out.replace("<行> <列>", "<row> <col>")
     out = out.replace("行 列", "row col")
+    out = out.replace("side=红", "side=red")
+    out = out.replace("side=黑", "side=black")
+    out = out.replace("side=未定", "side=unknown")
+    out = out.replace("P1 红", "P1 red")
+    out = out.replace("P2 红", "P2 red")
+    out = out.replace("P1 黑", "P1 black")
+    out = out.replace("P2 黑", "P2 black")
+    out = out.replace("P1 未定", "P1 unknown")
+    out = out.replace("P2 未定", "P2 unknown")
+    # Darkchess board / flip marks: 将士象车马炮卒 → G A E R H C S
+    for en, zh in (
+        ("G", "将"),
+        ("A", "士"),
+        ("E", "象"),
+        ("R", "车"),
+        ("H", "马"),
+        ("C", "炮"),
+        ("S", "卒"),
+    ):
+        out = out.replace(f"+{zh}", f"+{en}")
+        out = out.replace(f"-{zh}", f"-{en}")
+    out = out.replace("将士象车马炮卒", "G/A/E/R/H/C/S")
+    out = out.replace("汉字子名，", "")
+    out = re.sub(r"（玩家(\d+)）", r" (player \1)", out)
+    # Re-pad darkchess board rows after 将→G shrinks display width.
+    m_board = re.match(r"^(\s*[1-4]\s+)(.*\S.*)$", out)
+    if m_board:
+        prefix, body = m_board.groups()
+        tokens = re.findall(r"!?[+-][GAERHCS]|!?[.?]", body)
+        if len(tokens) == 8:
+            out = prefix + "".join(f"{tok:>4}" for tok in tokens)
     try:
         from ratings import localize_levels_in_text
 

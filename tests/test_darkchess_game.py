@@ -18,11 +18,51 @@ class DarkchessGameTests(unittest.TestCase):
             {"side": "black", "rank": 7, "label": "S"},
         ] * 31
         self.game.board = list(range(32))
-        self.assertEqual(self.game.try_move(self.red, "flip 1 1")[0], [])
+        self.assertEqual(self.game.try_move(self.red, "翻 1 1")[0], [])
         self.assertEqual(self.game.player_side[1], "red")
         self.assertEqual(self.game.player_side[2], "black")
-        self.assertIn("+G", "\n".join(self.game.show(self.red)))
-        self.assertNotIn("-S", "\n".join(self.game.show(self.red)))
+        shown = "\n".join(self.game.show(self.red))
+        self.assertIn("+将", shown)
+        self.assertNotIn("-卒", shown)
+
+    def test_board_tokens_are_fixed_width(self):
+        self.game.face_up = {0}
+        self.game.board = [0] + [None] + list(range(2, 32))
+        self.game.pieces[0] = {"side": "red", "rank": 1, "label": "G"}
+        row = next(
+            line
+            for line in self.game.show(self.red)
+            if line.lstrip().startswith("1 ") and "+将" in line
+        )
+        from games import _darkchess_disp_width, _DARKCHESS_CELL_W
+
+        body = row[3:]  # after " 1 "
+        self.assertEqual(_darkchess_disp_width(body), _DARKCHESS_CELL_W * 8)
+        self.assertIn("+将", body)
+        self.assertIn(".", body)
+        self.assertIn("?", body)
+
+    def test_last_move_summary_describes_flip_and_capture(self):
+        self.game.pieces = [
+            {"side": "red", "rank": 4, "label": "R"},
+            {"side": "black", "rank": 7, "label": "S"},
+        ] + [{"side": "red", "rank": 7, "label": "S"}] * 30
+        self.game.board = list(range(32))
+        self.assertEqual(self.game.try_move(self.red, "翻 1 1")[0], [])
+        shown = "\n".join(self.game.show(self.red))
+        self.assertRegex(shown, r"上一步：red 翻开 \+车 于 \(1,1\)")
+        self.assertIn("!+车", shown.replace(" ", ""))
+
+        # Force sides and a capture setup after first flip assigned red to player1.
+        self.game.player_side = {1: "red", 2: "black"}
+        self.game.face_up = {0, 1}
+        self.game.board = [0, 1] + [None] * 30
+        self.game.turn = 1
+        err, bcast, _ = self.game.try_move(self.red, "走 1 1 1 2")
+        self.assertEqual(err, [])
+        self.assertTrue(any("吃掉" in line and "-卒" in line for line in bcast))
+        shown = "\n".join(self.game.show(self.red))
+        self.assertIn("上一步：red 用 +车 从 (1,1) 吃掉 -卒 至 (1,2)", shown)
 
     def test_rank_capture_and_cannon_screen_are_enforced(self):
         self.game.player_side = {1: "red", 2: "black"}
@@ -41,7 +81,7 @@ class DarkchessGameTests(unittest.TestCase):
             {"side": "black", "rank": 1, "label": "G"},
         ] + [{"side": "red", "rank": 7, "label": "S"}] * 27
         self.game.turn = 1
-        self.assertEqual(self.game.try_move(self.red, "move 1 1 1 2")[0], [])
+        self.assertEqual(self.game.try_move(self.red, "走 1 1 1 2")[0], [])
         self.game.turn = 1
         self.game.board[3] = None
         self.assertTrue(self.game.try_move(self.red, "move 1 3 1 5")[0])
@@ -64,11 +104,20 @@ class DarkchessGameTests(unittest.TestCase):
         self.game.board = list(range(32))
         self.game.face_up = {0}
 
-        rows = [line for line in self.game.show(self.red) if line.lstrip()[:1].isdigit()]
+        rows = [
+            line
+            for line in self.game.show(self.red)
+            if line.lstrip()[:1].isdigit() and ("?" in line or "+" in line or "-" in line or "." in line)
+        ]
 
         self.assertEqual(len(rows), 4)
-        self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
-        self.assertEqual(rows[0].split(), ["1", "+G", "?", "?", "?", "?", "?", "?", "?"])
+        self.assertEqual(rows[0].split(), ["1", "+将", "?", "?", "?", "?", "?", "?", "?"])
+        from games import _darkchess_disp_width
+
+        # Chinese piece names are one Unicode char but wider than ASCII; compare
+        # display width (terminal columns), not Python string length.
+        widths = {_darkchess_disp_width(row[3:]) for row in rows}
+        self.assertEqual(len(widths), 1)
 
 
 if __name__ == "__main__":
