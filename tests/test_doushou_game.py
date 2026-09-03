@@ -135,6 +135,31 @@ class DoushouGameTests(unittest.TestCase):
         self.assertEqual(game.board[4][3], {"side": "red", "kind": "rat"})
         self.assertEqual(game.board[3][3], {"side": "black", "kind": "elephant"})
 
+    def test_black_viewer_sees_flipped_board(self):
+        game, red, black = self._started()
+        red_view = "\n".join(game.show(red))
+        black_view = "\n".join(game.show(black))
+        self.assertNotIn("己方在下方", red_view)
+        self.assertIn("己方在下方", black_view)
+
+        def board_data_rows(text: str) -> list[str]:
+            # Real board rows look like " 1  -狮 ..." / " 9  +狮 ..." (label + cells).
+            return [
+                ln
+                for ln in text.splitlines()
+                if ln[:3].strip().isdigit() and ("+" in ln or "-" in ln or "河" in ln or "穴" in ln)
+            ]
+
+        red_rows = board_data_rows(red_view)
+        black_rows = board_data_rows(black_view)
+        self.assertTrue(red_rows[0].lstrip().startswith("1 "))
+        self.assertTrue(black_rows[0].lstrip().startswith("9 "))
+        # Absolute coords: black lion still on labeled row 1 (bottom when flipped).
+        self.assertIn("-狮", black_rows[-1])
+        # viewer_name overrides when conn is not the seated object (federation).
+        via_name = "\n".join(game.show(object(), viewer_name="Black"))
+        self.assertIn("己方在下方", via_name)
+
 
 if __name__ == "__main__":
     unittest.main()

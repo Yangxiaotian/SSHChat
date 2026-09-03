@@ -11976,6 +11976,36 @@ def _doushou_terrain(row: int, col: int) -> str:
     return ""
 
 
+def _doushou_render(
+    board: list[list[Optional[dict[str, str]]]],
+    *,
+    last: Optional[tuple[int, int]] = None,
+    flip: bool = False,
+) -> list[str]:
+    """Render board; flip=True puts black (己方) at the bottom. Labels stay absolute coords."""
+    lines = ["斗兽棋棋盘（7列×9行，+红 -黑，!上一步）"]
+    if flip:
+        lines.append("  （己方在下方）")
+    row_ix = list(range(DOUSHOU_ROWS - 1, -1, -1)) if flip else list(range(DOUSHOU_ROWS))
+    col_ix = list(range(DOUSHOU_COLS - 1, -1, -1)) if flip else list(range(DOUSHOU_COLS))
+    hdr = "    " + "".join(f"{c + 1:^4}" for c in col_ix)
+    lines.append(hdr)
+    for r in row_ix:
+        cells = []
+        for c in col_ix:
+            piece = board[r][c]
+            token = _doushou_piece_token(piece, last == (r, c))
+            terrain = _doushou_terrain(r, c)
+            if piece is None and terrain:
+                token = terrain
+            cells.append(f"{token:^4}")
+        lines.append(f"{r + 1:>2} " + "".join(cells))
+    lines.append("图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列（全局，左上仍为 1,1）。")
+    if last is not None:
+        lines.append(f"上一步：({last[0] + 1}, {last[1] + 1})")
+    return lines
+
+
 class DoushouGame(BoardUndoMixin):
     """斗兽棋：7x9，红方先手，无机器人。"""
 
@@ -12267,28 +12297,27 @@ class DoushouGame(BoardUndoMixin):
         lines.extend(self._rating_lines())
         return lines
 
-    def _board_render(self) -> list[str]:
-        lines = ["斗兽棋棋盘（7列×9行，+红 -黑，!上一步）"]
-        lines.append("    1    2    3    4    5    6    7")
-        for r in range(DOUSHOU_ROWS):
-            cells = []
-            for c in range(DOUSHOU_COLS):
-                piece = self.board[r][c]
-                token = _doushou_piece_token(piece, self._last == (r, c))
-                terrain = _doushou_terrain(r, c)
-                if piece is None and terrain:
-                    token = terrain
-                cells.append(f"{token:^4}")
-            lines.append(f"{r + 1:>2} " + "".join(cells))
-        lines.append("图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列，左上为 1,1。")
-        if self._last is not None:
-            lines.append(f"上一步：({self._last[0] + 1}, {self._last[1] + 1})")
-        return lines
+    def _viewer_flip(self, conn=None, *, viewer_name: Optional[str] = None) -> bool:
+        side = self.who_of(conn)
+        if side is None and viewer_name:
+            vn = viewer_name.strip()
+            if vn == self.red_name:
+                side = "red"
+            elif vn == self.black_name:
+                side = "black"
+        return side == "black"
 
-    def show(self, conn=None) -> list[str]:
+    def _board_render(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
+        return _doushou_render(
+            self.board,
+            last=self._last,
+            flip=self._viewer_flip(conn, viewer_name=viewer_name),
+        )
+
+    def show(self, conn=None, *, viewer_name: Optional[str] = None) -> list[str]:
         lines = [f"doushou 对局（{self.state}）  红：{self.red_name}   黑：{self.black_name or '空席'}"]
         lines.extend(self._rating_lines())
-        lines.extend(self._board_render())
+        lines.extend(self._board_render(conn, viewer_name=viewer_name))
         if self.state == "playing":
             lines.append(self._undo_turn_line())
         elif self.state == "waiting":
