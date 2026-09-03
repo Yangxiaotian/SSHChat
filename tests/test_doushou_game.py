@@ -110,6 +110,16 @@ class DoushouGameTests(unittest.TestCase):
         self.assertEqual(game.state, "ended")
         self.assertTrue(any("攻入对方兽穴获胜" in line for line in bcast))
 
+    def test_last_move_marks_capture_destination(self):
+        game, red, _black = self._started()
+        game.board = [[None for _ in range(7)] for _ in range(9)]
+        game.board[7][2] = {"side": "red", "kind": "cat"}
+        game.board[7][3] = {"side": "black", "kind": "dog"}
+        priv, _bcast, _ended = game.try_move(red, "8 3 8 4")
+        self.assertEqual(priv, [])
+        row = next(line for line in game.show(game.red_conn) if line.lstrip().startswith("8 "))
+        self.assertIn("!+猫", row)
+
     def test_undo_restores_capture(self):
         game, red, black = self._started()
         game.board = [[None for _ in range(7)] for _ in range(9)]

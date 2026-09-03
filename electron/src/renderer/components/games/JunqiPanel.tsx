@@ -53,7 +53,8 @@ function pieceSide(token: string): 'red' | 'blue' | null {
 }
 
 function sideForNickname(text: string, nickname: string): 'red' | 'blue' | null {
-  const match = text.match(/^junqi game \([^)]*\)\s+Red:\s+(.+?)\s+Blue:\s+(.+)$/im);
+  const match = text.match(/^junqi game \([^)]*\)\s+Red:\s+(.+?)\s+Blue:\s+(.+)$/im)
+    || text.match(/^军棋对局（[^）]+）\s*红方[:：]\s*(.+?)\s*蓝方[:：]\s*(.+)$/im);
   if (!match) return null;
   const wanted = nickname.trim().toLowerCase();
   if (match[1].trim().toLowerCase() === wanted) return 'red';
@@ -69,16 +70,39 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
   const mySide = useMemo(() => sideForNickname(boardText, nickname), [boardText, nickname]);
   const [piece, setPiece] = useState(PIECES[0][0]);
   const [selected, setSelected] = useState<Cell | null>(null);
+  const [actionHint, setActionHint] = useState('');
   const myTurn = !!nickname && currentTurn === nickname;
   const setup = state === 'setup';
 
+  const setupAllowed = (row: number): boolean => (
+    mySide === 'red' ? row >= 1 && row <= 5
+      : mySide === 'blue' ? row >= 8 && row <= 12
+        : false
+  );
+
   const pick = (cell: Cell) => {
-    if (disabled) return;
+    if (disabled) {
+      setActionHint(locale === 'zh' ? '当前连接已断开，暂时不能操作。' : 'The connection is offline.');
+      return;
+    }
     if (setup) {
+      if (!mySide) {
+        setActionHint(locale === 'zh' ? '暂未识别你的红蓝方席位，请先刷新棋盘。' : 'Your Red/Blue seat is not available yet.');
+        return;
+      }
+      if (!setupAllowed(cell.row)) {
+        setActionHint(locale === 'zh' ? '只能在标记为己方的五行内布阵。' : 'You can only place pieces in your five highlighted setup rows.');
+        return;
+      }
+      setActionHint('');
       onMove(`setup ${piece} ${cell.row} ${cell.col}`);
       return;
     }
-    if (!myTurn || state !== 'playing') return;
+    if (!myTurn || state !== 'playing') {
+      if (currentTurn) setActionHint(locale === 'zh' ? `当前轮到 ${currentTurn}，请等待对手行棋。` : `It is ${currentTurn}'s turn; please wait.`);
+      return;
+    }
+    setActionHint('');
     if (!selected) {
       if ((cell.token.startsWith('+') || cell.token.startsWith('-')) && (!mySide || pieceSide(cell.token) === mySide)) setSelected(cell);
       return;
@@ -99,7 +123,10 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
     <div className="game-interaction-panel">
       <div className="game-interaction-title">{locale === 'zh' ? '军棋（先布阵，再轮流行棋）' : 'Junqi (place your army, then move by turn)'}</div>
       <div className="game-workbench-hint">{locale === 'zh' ? '红方：暖红；蓝方：冷蓝；?：对手未揭示棋子' : 'Red: warm red · Blue: cool blue · ?: hidden opponent piece'}</div>
+      <div className="junqi-zone-title">{locale === 'zh' ? '红方阵地：1-5 行 · 中立通道：6-7 行 · 蓝方阵地：8-12 行' : 'Red zone: rows 1-5 · Neutral: rows 6-7 · Blue zone: rows 8-12'}</div>
       {setup && (
+        <>
+        <div className="game-workbench-hint">{locale === 'zh' ? '先选棋子，再点击高亮的己方阵地；不能点击对方阵地或中立通道。' : 'Choose a piece, then click a highlighted square in your zone; enemy and neutral rows are locked.'}</div>
         <div className="junqi-setup-controls">
           {PIECES.map(([name, zh, code]) => (
             <button type="button" key={name} className={`mini-btn ${piece === name ? 'selected' : ''}`} disabled={disabled} onClick={() => setPiece(name)}>
@@ -110,22 +137,34 @@ export default function JunqiPanel({ disabled, nickname, boardText, onMove }: Pr
             {locale === 'zh' ? '完成布阵' : 'Ready'}
           </button>
         </div>
+        </>
       )}
       {currentTurn && <div className="game-workbench-hint">{locale === 'zh' ? `当前回合：${currentTurn}` : `Turn: ${currentTurn}`}</div>}
       {!setup && !myTurn && currentTurn && <div className="game-workbench-hint">{locale === 'zh' ? `等待 ${currentTurn} 行棋` : `Waiting for ${currentTurn}`}</div>}
       {selected && <div className="game-workbench-hint">{locale === 'zh' ? `已选 ${selected.row},${selected.col}，再点目标位置` : `Selected ${selected.row},${selected.col}; choose a destination`}</div>}
+      {actionHint && <div className="game-workbench-hint junqi-action-hint" role="status">{actionHint}</div>}
+      <div className="junqi-column-labels" aria-hidden="true"><span />{[1, 2, 3, 4, 5].map((column) => <span key={column}>{column}</span>)}</div>
       <div className="junqi-grid" role="grid" aria-label={locale === 'zh' ? '军棋棋盘' : 'Junqi board'}>
-        {cells.map((cell) => (
+        {Array.from({ length: 12 }, (_, rowIndex) => (
+          <React.Fragment key={rowIndex + 1}>
+            <div className={`junqi-row-label ${rowIndex < 5 ? 'zone-red' : rowIndex < 7 ? 'zone-neutral' : 'zone-blue'}`}>{rowIndex + 1}</div>
+            {cells.slice(rowIndex * 5, rowIndex * 5 + 5).map((cell) => {
+              const zone = cell.row <= 5 ? 'zone-red' : cell.row <= 7 ? 'zone-neutral' : 'zone-blue';
+              const locked = setup && !setupAllowed(cell.row);
+              return (
           <button
             type="button"
             key={`${cell.row}-${cell.col}`}
-            className={`junqi-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''} ${pieceSide(cell.token) ? `piece-${pieceSide(cell.token)}` : ''}`}
-            disabled={disabled}
+            className={`junqi-cell ${zone} ${locked ? 'setup-locked' : ''} ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''} ${pieceSide(cell.token) ? `piece-${pieceSide(cell.token)}` : ''}`}
+            disabled={disabled || locked}
             onClick={() => pick(cell)}
-            aria-label={`${cell.row},${cell.col}`}
+            aria-label={`${cell.row},${cell.col} ${zone}`}
           >
             {cell.token === '?' ? '?' : cell.token === '.' ? '' : pieceLabel(cell.token, locale)}
           </button>
+              );
+            })}
+          </React.Fragment>
         ))}
       </div>
       <div className="game-workbench-hint">{locale === 'zh' ? '对手棋子保持隐藏；军旗、地雷不能移动，炸弹相遇同归于尽。' : 'Opponent pieces stay hidden; flags and mines cannot move, bombs remove both pieces.'}</div>

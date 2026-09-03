@@ -67,17 +67,19 @@ function parseBoard(board: string): Cell[][] {
 
     tokens.forEach((token, idx) => {
       const cell = cells[row - 1][idx];
-      cell.last = token === '!';
-      if (token.startsWith('+') || token.startsWith('-')) {
-        const label = token.slice(1);
+      const last = token.startsWith('!');
+      const visibleToken = last ? token.slice(1) : token;
+      cell.last = last;
+      if (visibleToken.startsWith('+') || visibleToken.startsWith('-')) {
+        const label = visibleToken.slice(1);
         if (PIECES.has(label)) {
-          cell.piece = { side: token.startsWith('+') ? 'red' : 'black', label };
+          cell.piece = { side: visibleToken.startsWith('+') ? 'red' : 'black', label };
           cell.terrain = '';
         }
-      } else if (TERRAIN.has(token)) {
-        cell.terrain = token;
+      } else if (TERRAIN.has(visibleToken)) {
+        cell.terrain = visibleToken;
         cell.piece = undefined;
-      } else if (EMPTY.has(token)) {
+      } else if (EMPTY.has(visibleToken)) {
         cell.terrain = '';
         cell.piece = undefined;
       }
@@ -132,8 +134,11 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
         你的身份：{sideLabel(mySide)}；当前轮到：{sideLabel(turn.side)} {turn.name || ''}
       </div>
       {!myTurn && <div className="game-workbench-hint">当前不是你的回合，棋盘已锁定。</div>}
+      <div className="doushou-column-labels" aria-hidden="true"><span />{[1, 2, 3, 4, 5, 6, 7].map((column) => <span key={column}>{column}</span>)}</div>
       <div className="doushou-board" role="grid" aria-label="斗兽棋棋盘">
-        {board.flat().map((cell) => {
+        {board.map((row, rowIndex) => <React.Fragment key={rowIndex + 1}>
+        <div className="doushou-row-label">{rowIndex + 1}</div>
+        {row.map((cell) => {
           const isSelected = selected?.row === cell.row && selected?.col === cell.col;
           const ownPiece = cell.piece?.side === mySide;
           const classes = [
@@ -157,6 +162,7 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
             </button>
           );
         })}
+        </React.Fragment>)}
       </div>
     </div>
   );

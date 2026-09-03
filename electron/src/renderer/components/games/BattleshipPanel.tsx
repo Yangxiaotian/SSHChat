@@ -95,14 +95,27 @@ export default function BattleshipPanel({ disabled, nickname, boardText, onMove 
         </div>
       )}
       {state === 'playing' && <div className="game-workbench-hint">{currentTurn ? (locale === 'zh' ? `当前回合：${currentTurn}` : `Turn: ${currentTurn}`) : ''}</div>}
-      <div className="battleship-labels"><span>{locale === 'zh' ? '己方海域' : 'Your fleet'}</span><span>{locale === 'zh' ? '对手海域' : 'Opponent waters'}</span></div>
       <div className="battleship-grids">
-        <div className="battleship-grid" role="grid" aria-label={locale === 'zh' ? '己方海域' : 'Your fleet'}>
-          {cells.map((cell) => <button type="button" key={`own-${cell.row}-${cell.col}`} className={`battleship-cell own-${cell.own.toLowerCase()} ${cell.ownLast ? 'last' : ''}`} disabled={!setup || disabled} onClick={() => clickCell(cell)}>{prettyToken(cell.own)}</button>)}
-        </div>
-        <div className="battleship-grid" role="grid" aria-label={locale === 'zh' ? '对手海域' : 'Opponent waters'}>
-          {cells.map((cell) => <button type="button" key={`enemy-${cell.row}-${cell.col}`} className={`battleship-cell enemy-${cell.enemy.toLowerCase()} ${cell.enemyLast ? 'last' : ''}`} disabled={disabled || state !== 'playing' || !myTurn || cell.enemy !== '?'} onClick={() => clickCell(cell)}>{prettyToken(cell.enemy)}</button>)}
-        </div>
+        {(['own', 'enemy'] as const).map((gridType) => {
+          const own = gridType === 'own';
+          const title = own ? (locale === 'zh' ? '己方海域' : 'Your fleet') : (locale === 'zh' ? '对手海域' : 'Opponent waters');
+          return (
+            <div className="battleship-grid-panel" key={gridType}>
+              <div className="battleship-grid-title">{title}</div>
+              <div className="battleship-axis-header" aria-hidden="true"><span />{Array.from({ length: 10 }, (_, index) => <span key={index + 1}>{index + 1}</span>)}</div>
+              <div className="battleship-grid" role="grid" aria-label={title}>
+                {Array.from({ length: 10 }, (_, rowIndex) => <React.Fragment key={rowIndex + 1}>
+                  <span className="battleship-row-label">{rowIndex + 1}</span>
+                  {cells.slice(rowIndex * 10, rowIndex * 10 + 10).map((cell) => own ? (
+                    <button type="button" key={`own-${cell.row}-${cell.col}`} className={`battleship-cell own-${cell.own.toLowerCase()} ${cell.ownLast ? 'last' : ''}`} disabled={!setup || disabled} onClick={() => clickCell(cell)}>{prettyToken(cell.own)}</button>
+                  ) : (
+                    <button type="button" key={`enemy-${cell.row}-${cell.col}`} className={`battleship-cell enemy-${cell.enemy.toLowerCase()} ${cell.enemyLast ? 'last' : ''}`} disabled={disabled || state !== 'playing' || !myTurn || cell.enemy !== '?'} onClick={() => clickCell(cell)}>{prettyToken(cell.enemy)}</button>
+                  ))}
+                </React.Fragment>)}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

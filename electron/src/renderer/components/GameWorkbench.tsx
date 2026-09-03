@@ -67,7 +67,7 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
     const line = systemLines[i].toLowerCase();
-    const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`));
+    const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`) || line.includes(`${h}棋盘`));
     if (hit) {
       start = i;
       game = cnToGameKind[hit] || (hit as GameKind);
@@ -136,7 +136,7 @@ function isLikelyGameLine(line: string): boolean {
   if (/^\s*(?:[1-9]|10)\s+/.test(line) && line.includes('?') && line.includes('    ')) return true;
   if (/^junqi\s+game|军棋棋盘/.test(line.trim())) return true;
   if (/^\s*(?:[1-9]|1[0-2])\s+(?:[+\-][A-Z]|\?|\.)(?:\s+(?:[+\-][A-Z]|\?|\.)){4}\s*$/i.test(line)) return true;
-  if (/^\s*[1-9]\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)(?:\s+(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·|!)){6}\s*$/.test(line)) return true;
+  if (/^\s*[1-9]\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·)|!)(?:\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·)|!)){6}\s*$/.test(line)) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
   if (/^上一步[:：]/.test(line.trim())) return true;

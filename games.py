@@ -3772,6 +3772,7 @@ class JunqiGame:
             f"junqi game ({self.state})  Red: {self.first_name}  Blue: {self.second_name or 'empty'}",
             "Your pieces are shown; opponent pieces remain hidden until revealed by capture.",
             "F flag C commander A army D division B brigade R regiment T battalion N company P platoon E engineer M mine O bomb.",
+            "Zones: Red setup rows 1-5; neutral rows 6-7; Blue setup rows 8-12.",
             *self._rating_lines(),
         ]
         for row in range(JUNQI_ROWS):
@@ -11957,7 +11958,7 @@ def _doushou_piece_token(piece: Optional[dict[str, str]], last: bool = False) ->
     if piece is None:
         return "!" if last else "·"
     prefix = "+" if piece["side"] == "red" else "-"
-    return prefix + DOUSHOU_CN[piece["kind"]]
+    return ("!" if last else "") + prefix + DOUSHOU_CN[piece["kind"]]
 
 
 def _doushou_terrain(row: int, col: int) -> str:
@@ -12492,7 +12493,7 @@ def terminal_hint(name: str) -> str:
         "reversi": "Terminal: /game move <row> <col>; use /game move pass only when no legal move exists.",
         "darkchess": "暗棋终端：/game move 翻 <行> <列>；走子 /game move 走 <起行> <起列> <终行> <终列>（英文 flip / move）。",
         "battleship": "Terminal: place all five ships with /game move place <ship> <row> <col> <h|v>, then ready and fire <row> <col>.",
-        "junqi": "Terminal: place pieces with /game move setup <piece> <row> <col>, then ready and move <fr> <fc> <tr> <tc>.",
+        "junqi": "Terminal: setup pieces in Red rows 1-5 or Blue rows 8-12 with /game move setup <piece> <row> <col>; rows 6-7 are neutral, then ready and move <fr> <fc> <tr> <tc>.",
         "drawguess": "Terminal: host /game move start; drawer opens /canvas; others /game move guess <word>; skip with /game move skip.",
     }
     return hints.get(name, "")

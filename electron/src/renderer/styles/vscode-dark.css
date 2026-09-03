@@ -423,7 +423,8 @@ html, body, #root {
 
 .game-pane {
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-bottom: 1px solid var(--vscode-border-light);
 }
 
@@ -900,25 +901,55 @@ html, body, #root {
   align-items: flex-start;
 }
 
-.battleship-labels {
+.battleship-grids {
+  flex-wrap: wrap;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.battleship-grid-panel {
+  flex: 0 0 auto;
+}
+
+.battleship-grid-title {
   margin: 8px 0 3px;
   color: var(--vscode-text-secondary);
   font-size: 11px;
 }
 
-.battleship-labels span,
+.battleship-axis-header,
 .battleship-grid {
-  width: 266px;
+  width: max-content;
+}
+
+.battleship-axis-header {
+  display: grid;
+  grid-template-columns: 22px repeat(10, 25px);
+  gap: 1px;
+  margin: 0 5px 3px;
+  color: var(--vscode-text-secondary);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
+  text-align: center;
 }
 
 .battleship-grid {
   display: grid;
-  grid-template-columns: repeat(10, 25px);
-  grid-template-rows: repeat(10, 25px);
+  grid-template-columns: 22px repeat(10, 25px);
   gap: 1px;
   padding: 5px;
   border: 1px solid #3d4650;
   background: #24303a;
+}
+
+.battleship-row-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-text-secondary);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
 }
 
 .battleship-cell {
@@ -969,7 +1000,7 @@ html, body, #root {
 
 .junqi-grid {
   display: grid;
-  grid-template-columns: repeat(5, 48px);
+  grid-template-columns: 28px repeat(5, 48px);
   grid-template-rows: repeat(12, 38px);
   gap: 2px;
   width: max-content;
@@ -978,6 +1009,37 @@ html, body, #root {
   border: 1px solid #3d4650;
   border-radius: 6px;
   background: #20262d;
+}
+
+.junqi-row-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8f9baa;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.junqi-column-labels {
+  display: grid;
+  grid-template-columns: 28px repeat(5, 48px);
+  gap: 2px;
+  width: max-content;
+  margin: 8px 0 -4px;
+  padding: 0 7px;
+  color: #8f9baa;
+  font-size: 11px;
+  text-align: center;
+}
+
+.junqi-zone-title {
+  display: inline-block;
+  margin: 5px 0 0;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #b9c1cb;
+  background: rgba(86, 156, 214, 0.12);
 }
 
 .junqi-cell {
@@ -991,6 +1053,28 @@ html, body, #root {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.junqi-cell.zone-red {
+  border-color: rgba(172, 100, 105, 0.72);
+}
+
+.junqi-cell.zone-neutral {
+  border-color: rgba(127, 139, 151, 0.58);
+  background: #252c33;
+}
+
+.junqi-cell.zone-blue {
+  border-color: rgba(100, 140, 175, 0.72);
+}
+
+.junqi-cell.setup-locked {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.junqi-action-hint {
+  color: #e0b36b;
 }
 
 .junqi-cell.hidden-piece {
@@ -1508,8 +1592,7 @@ html, body, #root {
 
 .doushou-board {
   display: grid;
-  grid-template-columns: repeat(7, 42px);
-  grid-template-rows: repeat(9, 42px);
+  grid-template-columns: 22px repeat(7, 42px);
   gap: 2px;
   width: max-content;
   margin: 8px 0 10px;
@@ -1518,6 +1601,28 @@ html, body, #root {
   border: 1px solid #343942;
   background: linear-gradient(180deg, #25292f, #202329);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.doushou-column-labels {
+  display: grid;
+  grid-template-columns: 22px repeat(7, 42px);
+  gap: 2px;
+  width: max-content;
+  margin: 8px 0 -4px;
+  padding: 0 7px;
+  color: var(--vscode-text-secondary);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
+  text-align: center;
+}
+
+.doushou-row-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-text-secondary);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
 }
 
 .doushou-cell {

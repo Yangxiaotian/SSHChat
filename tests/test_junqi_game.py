@@ -110,6 +110,12 @@ class JunqiGameTests(unittest.TestCase):
         self.assertIn("!.", red_view)
         self.assertNotIn("!.", black_view)
 
+    def test_show_explains_player_zones_for_client_and_terminal(self):
+        shown = "\n".join(self.game.show(self.red))
+        self.assertIn("Red setup rows 1-5", shown)
+        self.assertIn("neutral rows 6-7", shown)
+        self.assertIn("Blue setup rows 8-12", shown)
+
 
 if __name__ == "__main__":
     unittest.main()
