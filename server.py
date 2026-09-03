@@ -421,7 +421,7 @@ def _viewer_name_for_conn(conn) -> str | None:
 
 
 def _game_show_for_conn(game, conn) -> list[str]:
-    """Per-connection board view; chess/xiangqi flip by seated side, not conn identity."""
+    """Per-connection board view; chess/xiangqi/doushou flip by seated side, not conn identity."""
     viewer_name = _viewer_name_for_conn(conn)
     if viewer_name and getattr(game, "name", "") in {"chess", "xiangqi", "doushou"}:
         try:
@@ -435,7 +435,7 @@ def _game_show_for_conn(game, conn) -> list[str]:
 
 
 def send_oriented_boards(room: str, game) -> None:
-    """Send full board view; side-based games put the viewer's pieces at the bottom."""
+    """Send full board view; chess/xiangqi/doushou second seat sees flipped board (己方在下)."""
     with lock:
         targets = [c for c in list(rooms.get(room, ())) if c in clients]
     for conn in targets:

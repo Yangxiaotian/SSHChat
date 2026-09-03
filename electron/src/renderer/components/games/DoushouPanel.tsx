@@ -52,12 +52,8 @@ function parseTurn(board: string): { side: Side | null; name: string } {
   return { side: null, name: '' };
 }
 
-function isFlipped(board: string): boolean {
-  return board.split('\n').some((line) => line.includes('己方在下方') || line.toLowerCase().includes('you at bottom'));
-}
-
-function parseBoard(board: string): Cell[][] {
-  const flipped = isFlipped(board);
+function parseBoard(board: string): { cells: Cell[][]; flipped: boolean } {
+  const flipped = board.includes('己方在下方');
   const cells: Cell[][] = Array.from({ length: ROWS }, (_, r) =>
     Array.from({ length: COLS }, (_, c) => ({ row: r + 1, col: c + 1, terrain: '' })),
   );
@@ -71,8 +67,8 @@ function parseBoard(board: string): Cell[][] {
     if (tokens.length < COLS) continue;
 
     tokens.forEach((token, idx) => {
-      const col = flipped ? COLS - 1 - idx : idx;
-      const cell = cells[row - 1][col];
+      const col = flipped ? COLS - idx : idx + 1;
+      const cell = cells[row - 1][col - 1];
       const last = token.startsWith('!');
       const visibleToken = last ? token.slice(1) : token;
       cell.last = last;
@@ -92,9 +88,7 @@ function parseBoard(board: string): Cell[][] {
     });
   }
 
-  return flipped
-    ? [...cells].reverse().map((row) => [...row].reverse())
-    : cells;
+  return { cells, flipped };
 }
 
 function terrainClass(terrain: string): string {
@@ -111,12 +105,21 @@ function sideLabel(side: Side | null): string {
 }
 
 export default function DoushouPanel({ disabled, nickname, boardText, onMove }: Props) {
-  const board = useMemo(() => parseBoard(boardText), [boardText]);
-  const flipped = useMemo(() => isFlipped(boardText), [boardText]);
+  const { cells, flipped } = useMemo(() => parseBoard(boardText), [boardText]);
   const mySide = useMemo(() => parseSide(boardText, nickname), [boardText, nickname]);
   const turn = useMemo(() => parseTurn(boardText), [boardText]);
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
   const myTurn = !!mySide && turn.side === mySide;
+
+  const displayRows = useMemo(() => {
+    const rows = flipped ? [...cells].reverse() : cells;
+    return rows.map((row) => (flipped ? [...row].reverse() : row));
+  }, [cells, flipped]);
+
+  const colLabels = useMemo(
+    () => (flipped ? [7, 6, 5, 4, 3, 2, 1] : [1, 2, 3, 4, 5, 6, 7]),
+    [flipped],
+  );
 
   const pick = (cell: Cell) => {
     if (disabled || !myTurn) return;
@@ -141,12 +144,13 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
       <div className="game-interaction-title">斗兽棋棋盘（先点己方动物，再点目标格）</div>
       <div className="game-workbench-hint">
         你的身份：{sideLabel(mySide)}；当前轮到：{sideLabel(turn.side)} {turn.name || ''}
+        {flipped ? '（己方在下方）' : ''}
       </div>
       {!myTurn && <div className="game-workbench-hint">当前不是你的回合，棋盘已锁定。</div>}
-      <div className="doushou-column-labels" aria-hidden="true"><span />{(flipped ? [7, 6, 5, 4, 3, 2, 1] : [1, 2, 3, 4, 5, 6, 7]).map((column) => <span key={column}>{column}</span>)}</div>
+      <div className="doushou-column-labels" aria-hidden="true"><span />{colLabels.map((column) => <span key={column}>{column}</span>)}</div>
       <div className="doushou-board" role="grid" aria-label="斗兽棋棋盘">
-        {board.map((row, rowIndex) => <React.Fragment key={rowIndex + 1}>
-        <div className="doushou-row-label">{row[0]?.row ?? rowIndex + 1}</div>
+        {displayRows.map((row) => <React.Fragment key={row[0].row}>
+        <div className="doushou-row-label">{row[0].row}</div>
         {row.map((cell) => {
           const isSelected = selected?.row === cell.row && selected?.col === cell.col;
           const ownPiece = cell.piece?.side === mySide;
