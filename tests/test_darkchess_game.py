@@ -55,6 +55,21 @@ class DarkchessGameTests(unittest.TestCase):
         self.assertTrue(error)
         self.assertEqual(self.game.board, before)
 
+    def test_show_keeps_columns_aligned_after_a_piece_is_revealed(self):
+        self.game.pieces = [
+            {"side": "red", "rank": 1, "label": "G"},
+        ] + [
+            {"side": "black", "rank": 7, "label": "S"},
+        ] * 31
+        self.game.board = list(range(32))
+        self.game.face_up = {0}
+
+        rows = [line for line in self.game.show(self.red) if line.lstrip()[:1].isdigit()]
+
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
+        self.assertEqual(rows[0].split(), ["1", "+G", "?", "?", "?", "?", "?", "?", "?"])
+
 
 if __name__ == "__main__":
     unittest.main()

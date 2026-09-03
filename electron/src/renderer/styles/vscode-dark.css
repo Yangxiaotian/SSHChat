@@ -850,6 +850,11 @@ html, body, #root {
   cursor: pointer;
 }
 
+.darkchess-cell[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .darkchess-cell.hidden-piece {
   background: linear-gradient(135deg, #4d5360, #282d35);
   color: #d2b878;
@@ -874,6 +879,10 @@ html, body, #root {
 .darkchess-cell.selected {
   outline: 2px solid #d79554;
   outline-offset: -2px;
+}
+
+.darkchess-action-hint {
+  color: #e0b36b;
 }
 
 .battleship-setup-controls {

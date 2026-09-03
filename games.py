@@ -2922,7 +2922,9 @@ class DarkchessGame:
                 else:
                     piece = self._piece(cell)
                     tokens.append(f"{'+' if piece['side'] == 'red' else '-'}{piece['label']}")
-            lines.append(f"{row:>2}  " + " ".join(tokens))
+            # Keep hidden and revealed pieces at the same width so terminal
+            # columns stay aligned after a flip.
+            lines.append(f"{row:>2}  " + " ".join(f"{token:>2}" for token in tokens))
         lines.append("Legend: + red  - black  ? face-down  . empty")
         if self.state == "playing":
             lines.append(self._turn_line())

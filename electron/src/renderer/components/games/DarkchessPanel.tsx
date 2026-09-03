@@ -57,17 +57,41 @@ function sideForNickname(text: string, nickname: string): 'red' | 'black' | null
   return side === 'red' || side === 'black' ? side : null;
 }
 
+function sameNickname(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
 export default function DarkchessPanel({ disabled, nickname, boardText, onMove }: Props) {
   const { locale } = useTranslation();
   const cells = useMemo(() => parseBoard(boardText), [boardText]);
   const currentTurn = useMemo(() => turnName(boardText), [boardText]);
   const mySide = useMemo(() => sideForNickname(boardText, nickname), [boardText, nickname]);
   const [selected, setSelected] = useState<Cell | null>(null);
-  const myTurn = !!nickname && currentTurn === nickname;
+  const [actionHint, setActionHint] = useState('');
+  const myTurn = !!nickname && !!currentTurn && sameNickname(currentTurn, nickname);
   const canAct = !disabled && myTurn;
 
+  React.useEffect(() => {
+    setSelected(null);
+    setActionHint('');
+  }, [boardText]);
+
   const pick = (cell: Cell) => {
-    if (!canAct) return;
+    if (disabled) {
+      setActionHint(locale === 'zh' ? '当前连接已断开，暂时不能落子。' : 'The connection is offline; moves are disabled.');
+      return;
+    }
+    if (!nickname) {
+      setActionHint(locale === 'zh' ? '尚未识别当前用户，暂时不能落子。' : 'Your nickname is not available yet.');
+      return;
+    }
+    if (!currentTurn || !myTurn) {
+      setActionHint(currentTurn
+        ? (locale === 'zh' ? `当前轮到 ${currentTurn}，请等待对手操作。` : `It is ${currentTurn}'s turn; please wait.`)
+        : (locale === 'zh' ? '暂未识别当前回合，请先刷新局面。' : 'The current turn is not available; refresh the board.'));
+      return;
+    }
+    setActionHint('');
     if (!selected) {
       if (cell.token === '?') onMove(`flip ${cell.row} ${cell.col}`);
       else if (cell.token !== '.' && (!mySide || pieceSide(cell.token) === mySide)) setSelected(cell);
@@ -98,7 +122,7 @@ export default function DarkchessPanel({ disabled, nickname, boardText, onMove }
             type="button"
             key={`${cell.row}-${cell.col}`}
             className={`darkchess-cell ${cell.last ? 'last' : ''} ${selected?.row === cell.row && selected?.col === cell.col ? 'selected' : ''} ${cell.token === '?' ? 'hidden-piece' : ''} ${pieceSide(cell.token) ? `piece-${pieceSide(cell.token)}` : ''}`}
-            disabled={!canAct}
+            aria-disabled={!canAct}
             onClick={() => pick(cell)}
             aria-label={`${cell.row},${cell.col}`}
           >
@@ -106,6 +130,7 @@ export default function DarkchessPanel({ disabled, nickname, boardText, onMove }
           </button>
         ))}
       </div>
+      {actionHint && <div className="game-workbench-hint darkchess-action-hint" role="status">{actionHint}</div>}
       {selected && <div className="game-workbench-hint">{locale === 'zh' ? `已选 ${selected.row},${selected.col}，再点目标位置` : `Selected ${selected.row},${selected.col}; choose a destination`}</div>}
     </div>
   );
