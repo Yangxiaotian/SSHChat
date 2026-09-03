@@ -71,6 +71,17 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
     if (hit) {
       start = i;
       game = cnToGameKind[hit] || (hit as GameKind);
+      // Doushou prints its seat header before the separate board header.
+      // Keep both lines so the client can identify the viewer's side.
+      if (hit === '斗兽棋' && line.includes(`${hit}棋盘`)) {
+        for (let j = i - 1; j >= 0; j -= 1) {
+          const previous = stripGameProtocolPrefix(systemLines[j]).trim();
+          if (/^doushou\s+对局/i.test(previous)) {
+            start = j;
+            break;
+          }
+        }
+      }
       break;
     }
   }
