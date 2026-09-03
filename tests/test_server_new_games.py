@@ -84,6 +84,13 @@ class ServerNewGamesTests(unittest.TestCase):
         self.assertIn(name, output.lower())
         self.assertIn("Terminal:", "\n".join(self.first.out + self.second.out))
 
+    def test_same_game_card_joins_existing_waiting_game(self):
+        self._command(self.first, "first", "/game new darkchess")
+        output = self._command(self.second, "second", "/game new darkchess")
+        self.assertNotIn("already active", output.lower())
+        self.assertIs(server.room_games[self.room].second_conn, self.second)
+        self.assertIn("joined", output.lower())
+
     def test_reversi_move_uses_server_command_pipeline(self):
         self._start_and_join("reversi")
         output = self._command(self.first, "first", "/game move 3 4")

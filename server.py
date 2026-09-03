@@ -7062,6 +7062,20 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             return
         with lock:
             existing = room_games.get(room)
+            auto_join_existing = (
+                existing is not None
+                and existing.state != "ended"
+                and getattr(existing, "name", "") == game_name
+                and getattr(existing, "state", "") in {"waiting", "setup"}
+                and len(parts) == 1
+            )
+        if auto_join_existing:
+            # A game card is an entry point: join an open same-game seat when
+            # the room already has a waiting/setup game.
+            _handle_game(conn, name, room, "/game join")
+            return
+        with lock:
+            existing = room_games.get(room)
             if existing is not None and existing.state != "ended":
                 send_line(
                     conn,
