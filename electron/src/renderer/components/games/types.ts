@@ -11,6 +11,7 @@ export type GameKind =
   | 'doushou'
   | 'sanguo'
   | 'werewolf'
+  | 'drawguess'
   | 'holdem'
   | 'zjh'
   | 'niutou';

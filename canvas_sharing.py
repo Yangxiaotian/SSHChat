@@ -828,6 +828,33 @@ class CanvasStore:
                 return session
         return None
 
+    def clear_open_room_board(self, room: str) -> bool:
+        """Server-side clear for game orchestration (no participant ticket).
+
+        Only clears locally hosted boards. Federated remote mirrors are skipped.
+        """
+        room = (room or "").strip()
+        if not room:
+            return False
+        with self.lock:
+            for session in self.sessions.values():
+                if (
+                    not session.room
+                    or session.room != room
+                    or session.closed
+                    or session.parked
+                    or session.host_node
+                ):
+                    continue
+                session.elements = []
+                session.files = {}
+                session.strokes = []
+                session.rev += 1
+                session.next_seq = session.rev + 1
+                self._save()
+                return True
+        return False
+
     def find_parked_for_room(self, room: str) -> Optional[CanvasSession]:
         with self.lock:
             for session in self.sessions.values():

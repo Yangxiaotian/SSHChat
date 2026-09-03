@@ -137,9 +137,9 @@ room_enabled_games: dict[str, set[str]] = {}
 # The room catalog predates several games. Keep this separate from the
 # persisted session version so adding a game does not silently re-enable it
 # after the owner explicitly turns it off on a current server.
-ROOM_GAME_CATALOG_VERSION = 2
+ROOM_GAME_CATALOG_VERSION = 3
 ROOM_GAME_CATALOG_MIGRATION_IDS = frozenset(
-    {"doushou", "reversi", "darkchess", "battleship", "junqi"}
+    {"doushou", "reversi", "darkchess", "battleship", "junqi", "drawguess"}
 )
 # lower nickname -> last known rooms/current room for reconnect resume
 disconnected_sessions: dict[str, dict[str, object]] = {}
@@ -737,6 +737,8 @@ def _game_seat_conn_by_name(game, nickname: str):
                 return conn
 
     for conn_attr, name_attr in (
+        ("first_conn", "first_name"),
+        ("second_conn", "second_name"),
         ("white_conn", "white_name"),
         ("black_conn", "black_name"),
         ("red_conn", "red_name"),
@@ -819,6 +821,8 @@ def _iter_game_conn_seats(game):
                     seen.add(id(conn))
                     yield conn, name
     for conn_attr, name_attr in (
+        ("first_conn", "first_name"),
+        ("second_conn", "second_name"),
         ("white_conn", "white_name"),
         ("black_conn", "black_name"),
         ("red_conn", "red_name"),
@@ -5774,6 +5778,30 @@ def _fed_send_player_notice(
         hub.send_game_private_to(player_node, room, name, lines)
 
 
+def _apply_game_canvas_actions(room: str, game) -> None:
+    """Honor optional canvas orchestration hooks from social games (e.g. drawguess)."""
+    drain = getattr(game, "drain_canvas_actions", None)
+    if not callable(drain):
+        return
+    try:
+        actions = list(drain() or [])
+    except Exception:
+        print(f"game canvas drain failed: room={room!r}")
+        traceback.print_exc()
+        return
+    for action in actions:
+        if action != "clear":
+            continue
+        try:
+            cleared = canvas_sharing.canvas_store.clear_open_room_board(room)
+        except Exception:
+            print(f"game canvas clear failed: room={room!r}")
+            traceback.print_exc()
+            continue
+        if cleared:
+            broadcast_game(room, ["房间画板已清空，请画家重新作画。"])
+
+
 def _finish_game_action(
     room: str,
     game,
@@ -5793,6 +5821,11 @@ def _finish_game_action(
             _route_game_private(room, peer_conn, extra)
     if bcast:
         broadcast_game(room, bcast)
+    try:
+        _apply_game_canvas_actions(room, game)
+    except Exception:
+        print(f"game canvas actions failed: room={room!r}")
+        traceback.print_exc()
     # The move is committed before this function runs. Rendering, persistence,
     # and federation are follow-up services and must not turn it into a generic
     # command failure when one of them is temporarily unavailable.

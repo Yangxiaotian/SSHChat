@@ -17,6 +17,7 @@ const GAMES: GameEntry[] = [
   { id: 'battleship', zh: '海战棋', en: 'Battleship', category: 'strategy', command: '/game new battleship' },
   { id: 'sanguo', zh: '三国杀', en: 'Sanguosha', category: 'social', command: '/game new sanguo' },
   { id: 'werewolf', zh: '狼人杀', en: 'Werewolf', category: 'social', command: '/game new werewolf' },
+  { id: 'drawguess', zh: '你画我猜', en: 'Draw & Guess', category: 'social', command: '/game new drawguess' },
   { id: 'holdem', zh: '德州扑克', en: "Texas Hold'em", category: 'cards', command: '/game new holdem' },
   { id: 'zjh', zh: '炸金花', en: 'Three Card Poker', category: 'cards', command: '/game new zjh' },
   { id: 'niutou', zh: '牛头王', en: '6 nimmt!', category: 'cards', command: '/game new niutou' },

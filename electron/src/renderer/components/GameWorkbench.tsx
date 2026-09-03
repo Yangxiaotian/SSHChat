@@ -14,6 +14,7 @@ import HoldemPanel from './games/HoldemPanel';
 import ZjhPanel from './games/ZjhPanel';
 import SanguoPanel from './games/SanguoPanel';
 import WerewolfPanel from './games/WerewolfPanel';
+import DrawGuessPanel from './games/DrawGuessPanel';
 import NiuTouPanel from './games/NiuTouPanel';
 import { GameCommandFactory, getQuickByGame } from './games/commandFactory';
 import { GameKind } from './games/types';
@@ -33,6 +34,7 @@ function detectGameKind(text: string): GameKind {
   if (/\bgo\b/.test(t) || t.includes('weiqi') || t.includes('baduk') || t.includes('围棋')) return 'go';
   if (t.includes('sanguo') || t.includes('sgs')) return 'sanguo';
   if (t.includes('werewolf') || t.includes('langrensha') || t.includes('狼人')) return 'werewolf';
+  if (t.includes('drawguess') || t.includes('draw-guess') || t.includes('pictionary') || t.includes('你画我猜') || t.includes('画画猜词')) return 'drawguess';
   if (t.includes('holdem') || t.includes('texas') || t.includes('poker') || t.includes('德州')) return 'holdem';
   if (t.includes('zjh') || t.includes('zhajinhua') || t.includes('炸金花')) return 'zjh';
   if (t.includes('niutou') || t.includes('ntw') || t.includes('牛头王') || t.includes('6 nimmt')) return 'niutou';
@@ -52,13 +54,15 @@ const cnToGameKind: Record<string, GameKind> = {
   '斗兽棋': 'doushou',
   '三国杀': 'sanguo',
   '狼人杀': 'werewolf',
+  '你画我猜': 'drawguess',
+  '画画猜词': 'drawguess',
   '德州扑克': 'holdem',
   '炸金花': 'zjh',
   '牛头王': 'niutou',
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'drawguess', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '你画我猜', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
@@ -117,8 +121,17 @@ function isLikelyGameLine(line: string): boolean {
   if (/^doushou\s+对局|斗兽棋棋盘/.test(line.trim())) return true;
   if (/^reversi\s+game|黑白棋棋盘/.test(line.trim())) return true;
   if (/^\s*\d+\s+(?:[#!o.])(?:\s+(?:[#!o.])){7}\s*$/.test(line)) return true;
-  if (/^darkchess\s+game|暗棋棋盘/.test(line.trim())) return true;
-  if (/^\s*[1-4]\s+(?:[+\-][GAERHCS]|\?|\.)(?:\s+(?:[+\-][GAERHCS]|\?|\.)){7}\s*$/.test(line)) return true;
+  if (/^darkchess\s+game|darkchess\s+对局|暗棋棋盘/.test(line.trim())) return true;
+  // Darkchess rows: fixed-width or spaced; zh 将士… or en G/A/E…; optional ! last mark
+  if (
+    /^\s*[1-4]\s+/.test(line) &&
+    ((line.match(/!?[+-](?:[将士象车马炮卒]|[GAERHCS])/g) || []).length +
+      (line.match(/!?[.?]/g) || []).length >=
+      8)
+  ) {
+    return true;
+  }
+  if (/^阵营[:：]\s*P1\b/i.test(line.trim()) || /^Sides:\s+P1\b/i.test(line.trim())) return true;
   if (/^battleship\s+game|海战棋棋盘/.test(line.trim())) return true;
   if (/^\s*(?:[1-9]|10)\s+/.test(line) && line.includes('?') && line.includes('    ')) return true;
   if (/^junqi\s+game|军棋棋盘/.test(line.trim())) return true;
@@ -145,6 +158,7 @@ function isLikelyGameLine(line: string): boolean {
     'niutou',
     'sanguo',
     'werewolf',
+    'drawguess',
     'state:',
     '状态：',
     'turn:',
@@ -173,6 +187,7 @@ function isLikelyGameLine(line: string): boolean {
     '德州扑克',
     '炸金花',
     '牛头王',
+    '你画我猜',
     '当前房间正在进行',
     '可直接加入',
     '开了一局',
@@ -742,6 +757,7 @@ export default function GameWorkbench() {
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'drawguess' && <DrawGuessPanel disabled={disabled} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
 
           {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
           {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}

@@ -28,6 +28,7 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       { label: locale === 'zh' ? '新开斗兽棋' : 'New Jungle', cmd: '/game new doushou' },
       m('newSanguo', '/game new sanguo'),
       m('newWerewolf', '/game new werewolf'),
+      m('newDrawGuess', '/game new drawguess'),
       m('newHoldem', '/game new holdem'),
       m('newZjh', '/game new zjh'),
       m('newNiutou', '/game new niutou'),
@@ -140,6 +141,15 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       m('seats', '/game seats'),
       qa('game.quick.werewolfStart', buildGameMove(locale, 'start', 'werewolf'), locale),
       qa('game.quick.werewolfPass', buildGameMove(locale, 'pass', 'werewolf'), locale),
+      m('end', '/game end'),
+    ],
+    drawguess: [
+      m('show', '/game show'),
+      m('join', '/game join'),
+      m('seats', '/game seats'),
+      qa('game.quick.drawguessStart', buildGameMove(locale, 'start', 'drawguess'), locale),
+      qa('game.quick.drawguessSkip', buildGameMove(locale, 'skip', 'drawguess'), locale),
+      qa('game.quick.drawguessWord', buildGameMove(locale, 'word', 'drawguess'), locale),
       m('end', '/game end'),
     ],
     holdem: [

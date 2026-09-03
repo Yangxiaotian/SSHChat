@@ -41,8 +41,8 @@ function isGameFloodMessage(content: string): boolean {
     /等宽字体/.test(raw) ||
     /积分体系/.test(raw) ||
     /对局[（(]/.test(raw) ||
-    /^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b/.test(t) ||
-    /^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)/.test(raw) ||
+    /^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|drawguess|mahjong)\b/.test(t) ||
+    /^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|你画我猜|麻将)/.test(raw) ||
     /[♔♕♖♗♘♙♚♛♜♝♞♟]/.test(raw) ||
     /^\s+[a-h](?:\s+[a-h]){7}\s*$/i.test(raw) ||
     /方\s+\S+\s+落子/.test(raw) ||
@@ -87,11 +87,13 @@ function isGameFloodMessage(content: string): boolean {
     'niutou',
     'sanguo',
     'werewolf',
+    'drawguess',
     'doushou',
     '斗兽棋',
     '国际象棋',
     '五子棋',
     '中国象棋',
+    '你画我猜',
     '上一步',
     '己方在下方',
     '行棋',
