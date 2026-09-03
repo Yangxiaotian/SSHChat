@@ -31,6 +31,13 @@ class ReversiGameTests(unittest.TestCase):
         _, _, second_done = self.game.try_move(self.white, "pass")
         self.assertTrue(second_done)
 
+    def test_show_marks_only_the_opponents_last_action(self):
+        self.assertEqual(self.game.try_move(self.black, "3 4")[0], [])
+        black_view = "\n".join(self.game.show(self.black))
+        white_view = "\n".join(self.game.show(self.white))
+        self.assertNotIn("!#", black_view)
+        self.assertIn("!#", white_view)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2400,8 +2400,8 @@ def _reversi_render(
             if last == (row, col):
                 token = f"!{token}"
             tokens.append(token)
-        lines.append(f"{row + 1:>2}  " + " ".join(tokens))
-    lines.append("Legend: # Black  o White  . Empty  ! Last move")
+        lines.append(f"{row + 1:>2}  " + " ".join(f"{token:>2}" for token in tokens))
+    lines.append("Legend: # Black  o White  . Empty  ! opponent last")
     return lines
 
 
@@ -2434,6 +2434,7 @@ class ReversiGame:
         self.turn = 1
         self._passes = 0
         self._last: Optional[tuple[int, int]] = None
+        self._last_player: Optional[int] = None
         self.join_blurb = "Waiting for another player to join with /game join."
 
     def who_of(self, conn) -> Optional[int]:
@@ -2530,6 +2531,7 @@ class ReversiGame:
                 return (["You have a legal move; passing is not allowed."], [], False)
             self._passes += 1
             self._last = None
+            self._last_player = None
             name = self._name_of(player)
             lines = [f"{name} passes."]
             if self._passes >= 2:
@@ -2551,6 +2553,7 @@ class ReversiGame:
         for fr, fc in flips:
             self.board[fr][fc] = player
         self._last = (row, col)
+        self._last_player = player
         self._passes = 0
         self.turn = 3 - player
         lines = [
@@ -2603,11 +2606,13 @@ class ReversiGame:
 
     def show(self, conn=None) -> list[str]:
         black, white = self._score()
+        viewer = self.who_of(conn)
+        last = self._last if self._last is not None and (viewer is None or self._last_player != viewer) else None
         lines = [
             f"reversi game ({self.state})  Black: {self.black_name}  White: {self.white_name or 'empty'}",
             f"Score: Black {black}, White {white}",
             *self._rating_lines(),
-            *_reversi_render(self.board, last=self._last),
+            *_reversi_render(self.board, last=last),
         ]
         if self.state == "playing":
             lines.append(self._turn_line())
@@ -2693,6 +2698,7 @@ class DarkchessGame:
         self.face_up: set[int] = set()
         self.player_side: dict[int, Optional[str]] = {1: None, 2: None}
         self._last: Optional[tuple[int, int]] = None
+        self._last_player: Optional[int] = None
         self.join_blurb = "Waiting for another player to join with /game join."
 
     def who_of(self, conn) -> Optional[int]:
@@ -2832,6 +2838,7 @@ class DarkchessGame:
                 self.player_side[player] = self._piece(cell)["side"]
                 self.player_side[3 - player] = "black" if self.player_side[player] == "red" else "red"
             self._last = (row, col)
+            self._last_player = player
             self.turn = 3 - player
             p = self._piece(cell)
             lines = [f"{self._player_name(player)} flips {'+' if p['side'] == 'red' else '-'}{p['label']}." ]
@@ -2867,6 +2874,7 @@ class DarkchessGame:
         self.board[source_pos] = None
         self.board[target_pos] = source
         self._last = (tr, tc)
+        self._last_player = player
         self.turn = 3 - player
         lines = [f"{self._player_name(player)} moves from ({fr}, {fc}) to ({tr}, {tc})."]
         finished = self._finish_if_needed()
@@ -2906,6 +2914,8 @@ class DarkchessGame:
         ]
 
     def show(self, conn=None) -> list[str]:
+        viewer = self.who_of(conn)
+        last = self._last if self._last is not None and (viewer is None or self._last_player != viewer) else None
         lines = [
             f"darkchess game ({self.state})  Player 1: {self.first_name}  Player 2: {self.second_name or 'empty'}",
             f"Sides: P1 {self.player_side[1] or 'unknown'}  P2 {self.player_side[2] or 'unknown'}",
@@ -2922,10 +2932,12 @@ class DarkchessGame:
                 else:
                     piece = self._piece(cell)
                     tokens.append(f"{'+' if piece['side'] == 'red' else '-'}{piece['label']}")
+                if last == (row, col):
+                    tokens[-1] = "!" + tokens[-1]
             # Keep hidden and revealed pieces at the same width so terminal
             # columns stay aligned after a flip.
-            lines.append(f"{row:>2}  " + " ".join(f"{token:>2}" for token in tokens))
-        lines.append("Legend: + red  - black  ? face-down  . empty")
+            lines.append(f"{row:>2}  " + " ".join(f"{token:>3}" for token in tokens))
+        lines.append("Legend: + red  - black  ! opponent last  ? face-down  . empty")
         if self.state == "playing":
             lines.append(self._turn_line())
         return lines
@@ -2986,6 +2998,7 @@ class BattleshipGame:
         self.incoming_hits: dict[int, set[tuple[int, int]]] = {1: set(), 2: set()}
         self.ready: set[int] = set()
         self._last: Optional[tuple[int, int]] = None
+        self._last_player: Optional[int] = None
         self.join_blurb = "Waiting for another player to join with /game join."
 
     def who_of(self, conn) -> Optional[int]:
@@ -3130,6 +3143,7 @@ class BattleshipGame:
         target_ship = next((name for name, cells in self.fleets[opponent].items() if shot in cells), None)
         lines = [f"{self._player_name(player)} fires at ({row + 1}, {col + 1}): {'HIT' if target_ship else 'MISS'}." ]
         self._last = (row, col)
+        self._last_player = player
         if target_ship:
             self.hit_shots[player].add(shot)
             self.incoming_hits[opponent].add(shot)
@@ -3176,15 +3190,24 @@ class BattleshipGame:
         own_hits = self.incoming_hits[player] if player else set()
         fired = self.shots[player] if player else set()
         hit = self.hit_shots[player] if player else set()
+        opponent_last = self._last if player is not None and self._last_player not in {None, player} else None
         lines = []
         for row in range(BATTLESHIP_SIZE):
             own_tokens = []
             enemy_tokens = []
             for col in range(BATTLESHIP_SIZE):
                 cell = (row, col)
-                own_tokens.append("X" if cell in own_hits else "S" if cell in own_cells else ".")
+                own_token = "X" if cell in own_hits else "S" if cell in own_cells else "."
+                if cell == opponent_last:
+                    own_token = "!" + own_token
+                own_tokens.append(own_token)
                 enemy_tokens.append("X" if cell in hit else "o" if cell in fired else "?")
-            lines.append(f"{row + 1:>2} " + " ".join(own_tokens) + "    " + " ".join(enemy_tokens))
+            lines.append(
+                f"{row + 1:>2} "
+                + " ".join(f"{token:>2}" for token in own_tokens)
+                + "    "
+                + " ".join(f"{token:>2}" for token in enemy_tokens)
+            )
         return lines
 
     def show(self, conn=None) -> list[str]:
@@ -3296,6 +3319,7 @@ class JunqiGame:
         ]
         self.ready: set[int] = set()
         self._last: Optional[tuple[tuple[int, int], tuple[int, int]]] = None
+        self._last_player: Optional[int] = None
         self.join_blurb = "Waiting for another player to join with /game join."
 
     def who_of(self, conn) -> Optional[int]:
@@ -3525,6 +3549,8 @@ class JunqiGame:
             if result == "flag":
                 self.board[source[0]][source[1]] = None
                 self.board[target[0]][target[1]] = attacker
+                self._last = (source, target)
+                self._last_player = player
                 self.state = "ended"
                 return ([], [message, f"{self._player_name(winner or player)} captured the flag and wins.", *self._settle_ratings(winner or player)], True)
             if result == "both":
@@ -3550,6 +3576,7 @@ class JunqiGame:
             self.state = "ended"
             return ([], [message, f"{self._player_name(player)} wins Junqi.", *self._settle_ratings(player)], True)
         self._last = (source, target)
+        self._last_player = player
         self.turn = opponent
         return ([], [message, f"Turn: {self._player_name(self.turn)}"], False)
 
@@ -3583,6 +3610,7 @@ class JunqiGame:
 
     def show(self, conn=None) -> list[str]:
         player = self.who_of(conn)
+        show_last = self._last is not None and (player is None or self._last_player != player)
         lines = [
             f"junqi game ({self.state})  Red: {self.first_name}  Blue: {self.second_name or 'empty'}",
             "Your pieces are shown; opponent pieces remain hidden until revealed by capture.",
@@ -3603,10 +3631,11 @@ class JunqiGame:
                     token = "?"
                 else:
                     token = "?"
-                if self._last and (row, col) in self._last:
+                if show_last and self._last and (row, col) in self._last:
                     token = "!" + token
                 tokens.append(token)
-            lines.append(f"{row + 1:>2} " + " ".join(tokens))
+            lines.append(f"{row + 1:>2} " + " ".join(f"{token:>3}" for token in tokens))
+        lines.append("Legend: + red  - blue  ! opponent last  ? hidden  . empty")
         if self.state == "playing":
             lines.append(f"Turn: {self._player_name(self.turn)}")
         return lines
@@ -12012,6 +12041,18 @@ def terminal_hint(name: str) -> str:
         "junqi": "Terminal: place pieces with /game move setup <piece> <row> <col>, then ready and move <fr> <fc> <tr> <tc>.",
     }
     return hints.get(name, "")
+
+
+def game_rule_notice(name: str) -> list[str]:
+    """Short rules shown whenever one of the newer board games is opened."""
+    notices = {
+        "reversi": "游戏须知：黑白棋轮流落子，必须夹住并翻转对方棋子；无合法位置时停一手，双方连续停手结束。",
+        "darkchess": "游戏须知：暗棋按 将 > 士 > 象 > 车 > 马 > 卒；炮隔一子吃子，翻子决定阵营，轮到你时再翻或走。",
+        "battleship": "游戏须知：海战棋先布置五艘舰船且舰船不可重叠或相邻；双方准备后轮流开火，击沉全部舰船获胜。",
+        "junqi": "游戏须知：军棋先布阵再轮流行棋；军旗、地雷不能移动，炸弹同归于尽，工兵可排雷，吃掉军旗获胜。",
+    }
+    notice = notices.get(name)
+    return [notice] if notice else []
 
 
 def list_game_names(enabled: Optional[set[str]] = None) -> list[str]:

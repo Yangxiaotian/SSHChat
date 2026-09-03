@@ -7113,6 +7113,9 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             room,
             [f"{name} 开了一局 {game_name}（{seat}），{join_hint}"],
         )
+        rule_notice = games.game_rule_notice(game_name)
+        if rule_notice:
+            broadcast_game(room, rule_notice)
         terminal_hint = games.terminal_hint(game_name)
         if terminal_hint:
             broadcast_game(room, [terminal_hint])

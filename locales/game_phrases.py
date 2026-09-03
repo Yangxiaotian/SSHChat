@@ -7,6 +7,10 @@ Sanguosha gameplay strings are intentionally omitted.
 from __future__ import annotations
 
 EXACT_ZH_TO_EN: dict[str, str] = {
+    '游戏须知：黑白棋轮流落子，必须夹住并翻转对方棋子；无合法位置时停一手，双方连续停手结束。': 'Game notice: Reversi players take turns placing stones and must bracket and flip opponent stones; pass only when no legal move exists, and two consecutive passes end the game.',
+    '游戏须知：暗棋按 将 > 士 > 象 > 车 > 马 > 卒；炮隔一子吃子，翻子决定阵营，轮到你时再翻或走。': 'Game notice: Dark Chess ranks are General > Advisor > Elephant > Chariot > Horse > Pawn; cannons capture across exactly one screen, and turns allow a flip or move.',
+    '游戏须知：海战棋先布置五艘舰船且舰船不可重叠或相邻；双方准备后轮流开火，击沉全部舰船获胜。': 'Game notice: Battleship players place five non-overlapping, non-touching ships; after both are ready, take turns firing and sink the entire enemy fleet to win.',
+    '游戏须知：军棋先布阵再轮流行棋；军旗、地雷不能移动，炸弹同归于尽，工兵可排雷，吃掉军旗获胜。': 'Game notice: Junqi starts with hidden setup and alternating moves; flags and mines cannot move, bombs remove both pieces, engineers clear mines, and capturing the flag wins.',
     '专家': 'Expert',
     '困难': 'Hard',
     '房主': 'host',

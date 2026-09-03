@@ -91,6 +91,18 @@ class ServerNewGamesTests(unittest.TestCase):
         self.assertIs(server.room_games[self.room].second_conn, self.second)
         self.assertIn("joined", output.lower())
 
+    def test_new_game_broadcasts_rules_for_each_new_board_game(self):
+        notices = {
+            "reversi": "Game notice: Reversi",
+            "darkchess": "Game notice: Dark Chess",
+            "battleship": "Game notice: Battleship",
+            "junqi": "Game notice: Junqi",
+        }
+        for game_name, notice in notices.items():
+            output = self._command(self.first, "first", f"/game new {game_name}")
+            self.assertIn(notice, output)
+            self._command(self.first, "first", "/game end")
+
     def test_reversi_move_uses_server_command_pipeline(self):
         self._start_and_join("reversi")
         output = self._command(self.first, "first", "/game move 3 4")

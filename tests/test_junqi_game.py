@@ -101,6 +101,15 @@ class JunqiGameTests(unittest.TestCase):
         self.assertIn("+C", red_view)
         self.assertIn("+C", black_view)
 
+    def test_show_marks_only_the_opponents_last_action(self):
+        self.game.state = "playing"
+        self.game._last = ((0, 0), (0, 1))
+        self.game._last_player = 2
+        red_view = "\n".join(self.game.show(self.red))
+        black_view = "\n".join(self.game.show(self.black))
+        self.assertIn("!.", red_view)
+        self.assertNotIn("!.", black_view)
+
 
 if __name__ == "__main__":
     unittest.main()

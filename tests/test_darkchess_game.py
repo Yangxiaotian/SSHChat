@@ -70,6 +70,20 @@ class DarkchessGameTests(unittest.TestCase):
         self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
         self.assertEqual(rows[0].split(), ["1", "+G", "?", "?", "?", "?", "?", "?", "?"])
 
+    def test_show_marks_only_the_opponents_last_action(self):
+        self.game.pieces = [
+            {"side": "red", "rank": 1, "label": "G"},
+        ] + [
+            {"side": "black", "rank": 7, "label": "S"},
+        ] * 31
+        self.game.board = list(range(32))
+        self.assertEqual(self.game.try_move(self.red, "flip 1 1")[0], [])
+
+        red_view = "\n".join(self.game.show(self.red))
+        black_view = "\n".join(self.game.show(self.black))
+        self.assertNotIn("!+G", red_view)
+        self.assertIn("!+G", black_view)
+
 
 if __name__ == "__main__":
     unittest.main()

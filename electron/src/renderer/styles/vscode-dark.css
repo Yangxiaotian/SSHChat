@@ -804,7 +804,7 @@ html, body, #root {
 }
 
 .reversi-cell.last {
-  box-shadow: inset 0 0 0 2px rgba(116, 170, 211, 0.9);
+  box-shadow: inset 0 0 0 2px rgba(241, 180, 92, 0.78);
 }
 
 .reversi-stone {
@@ -873,7 +873,7 @@ html, body, #root {
 }
 
 .darkchess-cell.last {
-  box-shadow: inset 0 0 0 2px rgba(112, 165, 208, 0.9);
+  box-shadow: inset 0 0 0 2px rgba(241, 180, 92, 0.78);
 }
 
 .darkchess-cell.selected {
@@ -955,6 +955,10 @@ html, body, #root {
   background: #24313a;
 }
 
+.battleship-cell.last {
+  box-shadow: inset 0 0 0 2px rgba(241, 180, 92, 0.78);
+}
+
 .junqi-setup-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1007,7 +1011,7 @@ html, body, #root {
 }
 
 .junqi-cell.last {
-  box-shadow: inset 0 0 0 2px rgba(112, 165, 208, 0.9);
+  box-shadow: inset 0 0 0 2px rgba(241, 180, 92, 0.78);
 }
 
 .junqi-cell.selected {

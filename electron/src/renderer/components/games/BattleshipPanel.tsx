@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from '../../i18n';
 
-type Cell = { row: number; col: number; own: string; enemy: string };
+type Cell = { row: number; col: number; own: string; enemy: string; ownLast: boolean; enemyLast: boolean };
 type Props = { disabled: boolean; nickname: string; boardText: string; onMove: (payload: string) => void };
 
 const SHIPS: Array<[string, number]> = [
@@ -14,6 +14,8 @@ function parseBoard(text: string): Cell[] {
     col: index % 10 + 1,
     own: '.',
     enemy: '?',
+    ownLast: false,
+    enemyLast: false,
   }));
   for (const raw of text.split('\n')) {
     const match = raw.match(/^\s*(\d+)\s+(.+)$/);
@@ -27,8 +29,12 @@ function parseBoard(text: string): Cell[] {
     if (own.length !== 10 || enemy.length !== 10) continue;
     for (let col = 1; col <= 10; col += 1) {
       const cell = cells[(row - 1) * 10 + col - 1];
-      cell.own = own[col - 1];
-      cell.enemy = enemy[col - 1];
+      const ownToken = own[col - 1];
+      const enemyToken = enemy[col - 1];
+      cell.ownLast = ownToken.startsWith('!');
+      cell.enemyLast = enemyToken.startsWith('!');
+      cell.own = cell.ownLast ? ownToken.slice(1) : ownToken;
+      cell.enemy = cell.enemyLast ? enemyToken.slice(1) : enemyToken;
     }
   }
   return cells;
@@ -92,10 +98,10 @@ export default function BattleshipPanel({ disabled, nickname, boardText, onMove 
       <div className="battleship-labels"><span>{locale === 'zh' ? '己方海域' : 'Your fleet'}</span><span>{locale === 'zh' ? '对手海域' : 'Opponent waters'}</span></div>
       <div className="battleship-grids">
         <div className="battleship-grid" role="grid" aria-label={locale === 'zh' ? '己方海域' : 'Your fleet'}>
-          {cells.map((cell) => <button type="button" key={`own-${cell.row}-${cell.col}`} className={`battleship-cell own-${cell.own.toLowerCase()}`} disabled={!setup || disabled} onClick={() => clickCell(cell)}>{prettyToken(cell.own)}</button>)}
+          {cells.map((cell) => <button type="button" key={`own-${cell.row}-${cell.col}`} className={`battleship-cell own-${cell.own.toLowerCase()} ${cell.ownLast ? 'last' : ''}`} disabled={!setup || disabled} onClick={() => clickCell(cell)}>{prettyToken(cell.own)}</button>)}
         </div>
         <div className="battleship-grid" role="grid" aria-label={locale === 'zh' ? '对手海域' : 'Opponent waters'}>
-          {cells.map((cell) => <button type="button" key={`enemy-${cell.row}-${cell.col}`} className={`battleship-cell enemy-${cell.enemy.toLowerCase()}`} disabled={disabled || state !== 'playing' || !myTurn || cell.enemy !== '?'} onClick={() => clickCell(cell)}>{prettyToken(cell.enemy)}</button>)}
+          {cells.map((cell) => <button type="button" key={`enemy-${cell.row}-${cell.col}`} className={`battleship-cell enemy-${cell.enemy.toLowerCase()} ${cell.enemyLast ? 'last' : ''}`} disabled={disabled || state !== 'playing' || !myTurn || cell.enemy !== '?'} onClick={() => clickCell(cell)}>{prettyToken(cell.enemy)}</button>)}
         </div>
       </div>
     </div>

@@ -60,6 +60,13 @@ class BattleshipGameTests(unittest.TestCase):
         self.assertNotIn("enemy carrier", red_view.lower())
         self.assertNotIn("enemy carrier", white_view.lower())
 
+    def test_show_marks_an_opponent_shot_on_my_fleet(self):
+        self.game.state = "playing"
+        self.game._last = (0, 0)
+        self.game._last_player = 2
+        row = next(line for line in self.game.show(self.black) if line.lstrip().startswith("1 "))
+        self.assertIn("!.", row)
+
 
 if __name__ == "__main__":
     unittest.main()
