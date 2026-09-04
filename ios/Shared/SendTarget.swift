@@ -329,6 +329,8 @@ enum ChatLineParsers {
     ) -> Bool {
         let t = normalizeForParse(line)
         if t.isEmpty { return false }
+        if isLaterDeliverLine(t) { return true }
+        if isPollAlertLine(t) { return true }
         if parsePm(t) != nil { return true }
 
         guard let chat = parseChat(t) else {
@@ -352,6 +354,7 @@ enum ChatLineParsers {
         if ignoredSenders.contains(sender.uppercased()) { return false }
         if systemSenders.contains(sender) {
             if sender == "+" || sender == "-" { return true }
+            if sender == "*" { return isLaterDeliverBody(body) || isPollAlertBody(body) }
             if sender == "!" {
                 let lower = body.lowercased()
                 return lower.contains(" joined ") || lower.contains(" left ")
@@ -372,6 +375,51 @@ enum ChatLineParsers {
             return false
         }
         return true
+    }
+
+    /// Personal /later reminder from the server.
+    static func isLaterDeliverLine(_ line: String) -> Bool {
+        let t = normalizeForParse(line)
+        if t.isEmpty { return false }
+        if let body = parseGameStarBody(t) {
+            return isLaterDeliverBody(body)
+        }
+        return isLaterDeliverBody(t)
+    }
+
+    private static func isLaterDeliverBody(_ body: String) -> Bool {
+        let b = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if b.isEmpty { return false }
+        let low = b.lowercased()
+        return low.hasPrefix("time capsule:")
+            || low.hasPrefix("time capsule：")
+            || b.hasPrefix("时间胶囊:")
+            || b.hasPrefix("时间胶囊：")
+    }
+
+    /// Room poll opened / closed / join-preview.
+    static func isPollAlertLine(_ line: String) -> Bool {
+        let t = normalizeForParse(line)
+        if t.isEmpty { return false }
+        if let body = parseGameStarBody(t) {
+            return isPollAlertBody(body)
+        }
+        return isPollAlertBody(t)
+    }
+
+    private static func isPollAlertBody(_ body: String) -> Bool {
+        let b = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if b.isEmpty { return false }
+        let low = b.lowercased()
+        return low.contains("started a poll:")
+            || low.contains("poll closed:")
+            || low.hasPrefix("open poll:")
+            || b.contains("发起投票：")
+            || b.contains("发起投票:")
+            || b.contains("投票已结束：")
+            || b.contains("投票已结束:")
+            || b.hasPrefix("进行中投票：")
+            || b.hasPrefix("进行中投票:")
     }
 
     /// UI classification for bubble / system / board cards.

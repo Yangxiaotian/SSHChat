@@ -924,8 +924,48 @@ def _parse_chat_line(line: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _line_is_later_deliver(line: str) -> bool:
+    """Personal /later reminder line from the server."""
+    t = line.strip()
+    if not t:
+        return False
+    # [#room] [*] Time capsule: …  or  [*] 时间胶囊：…
+    return bool(
+        re.search(
+            r"(?:^|\[\*\]\s+)(?:Time capsule|时间胶囊)\s*[:：]",
+            t,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _line_is_poll_alert(line: str) -> bool:
+    """Room poll opened / closed / join-preview system lines."""
+    t = line.strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"(?:started a poll|poll closed|Open poll)\s*[:：]"
+            r"|发起投票\s*[:：]"
+            r"|投票已结束\s*[:：]"
+            r"|进行中投票\s*[:：]",
+            t,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _line_is_peer_chat(line: str, my_name: str) -> tuple[bool, str, str]:
     """Return (is_peer_chat, sender, preview) for a single line without trailing \\n."""
+    if _line_is_later_deliver(line):
+        _room, sender, payload = _parse_chat_line(line)
+        preview = payload or line.strip()
+        return True, "later", preview
+    if _line_is_poll_alert(line):
+        _room, sender, payload = _parse_chat_line(line)
+        preview = payload or line.strip()
+        return True, "poll", preview
     _room, sender, payload = _parse_chat_line(line)
     if not sender:
         return False, "", ""

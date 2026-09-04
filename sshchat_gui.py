@@ -3084,6 +3084,22 @@ class SSHChatGUI:
             if not local_sent:
                 if role_tag == "peer":
                     self._alert_beep()
+                elif sender == "*" and (
+                    body.startswith("Time capsule:")
+                    or body.startswith("Time capsule：")
+                    or body.startswith("时间胶囊:")
+                    or body.startswith("时间胶囊：")
+                    or "started a poll:" in body.lower()
+                    or "poll closed:" in body.lower()
+                    or body.lower().startswith("open poll:")
+                    or "发起投票：" in body
+                    or "发起投票:" in body
+                    or "投票已结束：" in body
+                    or "投票已结束:" in body
+                    or body.startswith("进行中投票：")
+                    or body.startswith("进行中投票:")
+                ):
+                    self._alert_beep()
                 elif sender in {"+", "-"} or (
                     sender == "!" and (" left " in body or " joined " in body)
                 ):

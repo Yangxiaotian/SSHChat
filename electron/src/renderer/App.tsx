@@ -142,9 +142,26 @@ export default function App() {
       if (message.type === 'system') {
         tryHandleUploadInviteLine(message.content);
       }
+      const laterBody = message.content.trim();
+      const isLaterDeliver =
+        message.type === 'system' &&
+        (/^time capsule\s*[:：]/i.test(laterBody) ||
+          laterBody.startsWith('时间胶囊:') ||
+          laterBody.startsWith('时间胶囊：'));
+      const isPollAlert =
+        message.type === 'system' &&
+        (/started a poll\s*[:：]/i.test(laterBody) ||
+          /poll closed\s*[:：]/i.test(laterBody) ||
+          /^open poll\s*[:：]/i.test(laterBody) ||
+          laterBody.includes('发起投票：') ||
+          laterBody.includes('发起投票:') ||
+          laterBody.includes('投票已结束：') ||
+          laterBody.includes('投票已结束:') ||
+          laterBody.startsWith('进行中投票：') ||
+          laterBody.startsWith('进行中投票:'));
       const isPeerMessage = message.sender !== me && (message.type === 'chat' || message.type === 'pm' || message.type === 'game');
       const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());
-      if (needAttention) {
+      if (isLaterDeliver || isPollAlert || needAttention) {
         window.api.notifyAttention();
         playNotificationSound();
       }

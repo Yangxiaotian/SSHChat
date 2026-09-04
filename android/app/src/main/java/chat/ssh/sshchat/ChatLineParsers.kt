@@ -143,6 +143,8 @@ object ChatLineParsers {
     ): Boolean {
         val t = normalizeForParse(line)
         if (t.isEmpty()) return false
+        if (isLaterDeliverLine(t)) return true
+        if (isPollAlertLine(t)) return true
         if (parsePm(t) != null) return true
 
         val chat = parseChat(t)
@@ -156,6 +158,7 @@ object ChatLineParsers {
         if (sender.uppercase() in ignoredSenders) return false
         if (sender in systemSenders) {
             if (sender == "+" || sender == "-") return true
+            if (sender == "*") return isLaterDeliverBody(body) || isPollAlertBody(body)
             if (sender == "!") {
                 val lower = body.lowercase()
                 return " joined " in lower || " left " in lower
@@ -173,6 +176,49 @@ object ChatLineParsers {
             return false
         }
         return true
+    }
+
+    /** Personal /later reminder from the server. */
+    fun isLaterDeliverLine(line: String): Boolean {
+        val t = normalizeForParse(line)
+        if (t.isEmpty()) return false
+        val body = parseGameStarBody(t)
+        if (body != null) return isLaterDeliverBody(body)
+        return isLaterDeliverBody(t)
+    }
+
+    private fun isLaterDeliverBody(body: String): Boolean {
+        val b = body.trim()
+        if (b.isEmpty()) return false
+        val low = b.lowercase()
+        return low.startsWith("time capsule:") ||
+            low.startsWith("time capsule：") ||
+            b.startsWith("时间胶囊:") ||
+            b.startsWith("时间胶囊：")
+    }
+
+    /** Room poll opened / closed / join-preview. */
+    fun isPollAlertLine(line: String): Boolean {
+        val t = normalizeForParse(line)
+        if (t.isEmpty()) return false
+        val body = parseGameStarBody(t)
+        if (body != null) return isPollAlertBody(body)
+        return isPollAlertBody(t)
+    }
+
+    private fun isPollAlertBody(body: String): Boolean {
+        val b = body.trim()
+        if (b.isEmpty()) return false
+        val low = b.lowercase()
+        return "started a poll:" in low ||
+            "poll closed:" in low ||
+            low.startsWith("open poll:") ||
+            "发起投票：" in b ||
+            "发起投票:" in b ||
+            "投票已结束：" in b ||
+            "投票已结束:" in b ||
+            b.startsWith("进行中投票：") ||
+            b.startsWith("进行中投票:")
     }
 
     /** UI classification for bubble / system / board cards. */
