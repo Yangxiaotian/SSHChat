@@ -2,9 +2,10 @@
 name: sshchat-feature-docs
 description: >-
   Checklist for shipping user-facing SSHChat features: bilingual /help and
-  server UI strings (zh+en), beginner 小白说明书, and Tab command completion in
-  client.py / sshchat_gui.py. Use when adding or changing chat commands,
-  /help text, locales, README command tables, or user-facing docs.
+  server UI strings (zh+en), beginner 小白说明书, and command completion across
+  terminal (client.py), Tk (sshchat_gui.py), Electron, Android, and iOS. Use
+  when adding or changing chat commands, /help text, locales, README command
+  tables, or user-facing docs.
 ---
 
 # SSHChat 新功能文档与补全
@@ -15,7 +16,7 @@ description: >-
 
 ```
 - [ ] 1. locales 双语 /help + 运行时文案
-- [ ] 2. 命令补全（终端 + GUI）
+- [ ] 2. 命令补全（全部客户端）
 - [ ] 3. 小白说明书（若影响普通用户操作）
 - [ ] 4. README 命令表（若有新顶层命令）
 - [ ] 5. 欢迎行 / 入口提示（若有）
@@ -39,21 +40,27 @@ description: >-
 
 子命令很多时：主 `/help` 一行摘要 + 实现 `/cmd help`（文案仍进 locales，不要硬编码中文在 `server.py`）。
 
-## 2. 命令补全
+## 2. 命令补全（全部客户端）
 
-新**顶层**命令（如 `/poll`）必须加入：
+新**顶层**命令（如 `/poll`、`/later`）必须在下列**每一处**补齐，漏一端不算完：
 
-- `client.py` → `_TOP_COMMANDS`
-- `sshchat_gui.py` → `_TOP_COMMANDS`
+| 客户端 | 顶层列表 | 子命令（若有） |
+|--------|----------|----------------|
+| 终端 `client.py` | `_TOP_COMMANDS` | `_SUBCOMMANDS_BY_CMD`（可先定义 `_POLL_SUBCOMMANDS` 等） |
+| Tk `sshchat_gui.py` | `_TOP_COMMANDS` | `_SUBCOMMANDS_BY_CMD` |
+| Electron | `electron/src/renderer/components/InputBar.tsx` → `COMMAND_KEYS` | 若该文件已有子命令表则同步；并在 `electron/src/renderer/i18n/messages/{en,zh}.ts` 的 `input.commands.*` 加描述 |
+| Android | `android/.../CommandCompletions.kt` → `TOP` | `SUBS` |
+| iOS | `ios/SSHChat/CommandCompletions.swift` → `top` | `subs` |
 
-有子命令时同时加入：
+嵌套子命令（如 `/game undo accept`）：
 
-- `client.py` → `_SUBCOMMANDS_BY_CMD`（可先定义 `_POLL_SUBCOMMANDS` 一类集合）
-- `sshchat_gui.py` → `_SUBCOMMANDS_BY_CMD`
-
-嵌套子命令（如 `/game undo accept`）→ `_NESTED_SUBCOMMANDS`。
+- Python：`_NESTED_SUBCOMMANDS`
+- Android：`NESTED`
+- iOS：`nested`
 
 客户端底部/欢迎提示里若罗列常用命令，同步加上（如 `client.py` 的提示串、`server.py` 进房欢迎行）。
+
+改完 Android 功能后，按 `android-update-export` skill 导出升级包（若本次动了 `android/`）。
 
 ## 3. 小白说明书
 
@@ -78,7 +85,8 @@ description: >-
 ## 5. 自检
 
 - 中英文 `/help` 都能看到新命令
-- 终端输入 `/` + Tab 能补出新命令；有子命令时第二段也能补
+- 终端 / Tk：`/` + Tab 能补出新命令；有子命令时第二段也能补
+- Electron / Android / iOS：输入 `/` 能看到新命令建议（有子命令时同样）
 - 需要面向小白时，说明书里有一句怎么用
 - 未新增无英译的 `server.*` key
 
@@ -86,5 +94,6 @@ description: >-
 
 - 只在 `server.py` 里写死中文提示
 - 只改 `locales/zh.py`
-- 实现了 `/foo` 却忘记 `_TOP_COMMANDS`
+- 只改了 `client.py` / `sshchat_gui.py`，忘记 Electron / Android / iOS
+- 实现了 `/foo` 却忘记任一端的顶层命令表
 - 把联邦/部署细节塞进小白说明书

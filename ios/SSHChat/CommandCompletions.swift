@@ -44,8 +44,8 @@ enum CommandCompletions {
     private static let top = [
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/leave", "/unmsg", "/announce", "/game",
-        "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
+        "/canvas", "/board", "/piano", "/leave", "/unmsg", "/announce", "/poll", "/later",
+        "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
     ]
 
     private static let subs: [String: [String]] = [
@@ -66,6 +66,8 @@ enum CommandCompletions {
         "/dnd": ["on", "off"],
         "/lang": ["en", "zh", "english", "chinese", "中文", "英文"],
         "/language": ["en", "zh", "english", "chinese", "中文", "英文"],
+        "/poll": ["new", "close", "help", "show"],
+        "/later": ["list", "ls", "show", "cancel", "help"],
     ]
 
     private static let nested: [String: [String]] = [

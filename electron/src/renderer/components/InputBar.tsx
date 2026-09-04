@@ -34,6 +34,8 @@ const COMMAND_KEYS = [
   { name: '/lang', key: 'input.commands.lang' },
   { name: '/dict', key: 'input.commands.dict' },
   { name: '/announce', key: 'input.commands.announce' },
+  { name: '/poll', key: 'input.commands.poll' },
+  { name: '/later', key: 'input.commands.later' },
 ] as const;
 
 type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' | 'mention' };
