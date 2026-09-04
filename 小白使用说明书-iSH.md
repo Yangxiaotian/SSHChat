@@ -91,6 +91,7 @@ Are you sure you want to continue connecting (yes/no)?
 | 进图书馆 | `/library` 或 `/lib` |
 | 开画板一起画 | `/canvas` |
 | 房间投票 | `/poll new 今晚吃啥 \| 火锅 \| 烧烤`，再 `/poll 1` 投票；`/poll close` 结束 |
+| 时间胶囊 | `/later 30m 记得带伞`（到期只提醒你自己）；`/later list` 查看；`/later cancel 1` 取消 |
 | 小游戏说明 | `/game help` |
 
 注意：

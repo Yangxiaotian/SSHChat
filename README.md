@@ -34,6 +34,9 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/poll new Q \| A \| B` | Start a poll (`\|`-separated options) |
 | `/poll <n>` | Vote (may change) |
 | `/poll close` | Close poll (creator or room owner) |
+| `/later 30m <text>` | Personal reminder (only you; also `2h`/`1d`, `09:30`, `tomorrow 09:00`) |
+| `/later list` | List your pending reminders |
+| `/later cancel <n>` | Cancel one |
 | `/game help` | Mini-game help |
 | `/news` | RSS headlines |
 | `/library` | Browse books |

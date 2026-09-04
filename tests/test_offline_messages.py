@@ -135,6 +135,7 @@ class OfflineMessageServerTests(unittest.TestCase):
         server.room_owners.clear()
         server.room_announcements.clear()
         server.room_polls.clear()
+        server.room_capsules.clear()
         server.room_games.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()

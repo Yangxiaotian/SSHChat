@@ -55,6 +55,8 @@ Type plain text to chat. Try `/help`, `/names`, `/lang zh` (Chinese UI), `/lang 
 
 Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; `/poll close` to end (creator or room owner).
 
+Personal reminder: `/later 30m bring an umbrella` (only you see it); `/later list`; `/later cancel 1`.
+
 ## 4. Common tips
 
 - **Chinese input:** use the system Chinese keyboard from the iSH keyboard icon.

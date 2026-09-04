@@ -22,6 +22,7 @@ class ServerRestartResumeTests(unittest.TestCase):
         server.room_owners.clear()
         server.room_announcements.clear()
         server.room_polls.clear()
+        server.room_capsules.clear()
         server.room_games.clear()
         server.room_games_parked.clear()
         server.room_game_authority.clear()

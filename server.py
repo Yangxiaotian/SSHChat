@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from collections import OrderedDict, defaultdict
 from html import unescape
@@ -119,6 +120,11 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> active poll {"question", "options", "votes", "creator"}
 room_polls: dict[str, dict] = {}
+# pending room time capsules (sorted loosely; deliver loop scans)
+room_capsules: list[dict] = []
+_capsule_next_id = 1
+_capsule_stop = threading.Event()
+_capsule_thread: Optional[threading.Thread] = None
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
 # room -> parked (inactive) game kept across federation merge/partition
@@ -181,6 +187,11 @@ MAX_POLL_QUESTION_LEN = 120
 MAX_POLL_OPTION_LEN = 60
 MAX_POLL_OPTIONS = 8
 MIN_POLL_OPTIONS = 2
+MAX_LATER_TEXT_LEN = 400
+MAX_LATER_PER_USER = 20
+MAX_LATER_DELAY_SECONDS = 30 * 24 * 3600
+MIN_LATER_DELAY_SECONDS = 10
+_LATER_OFFLINE_SENDER = "later"
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 SESSION_RESUME_TTL_SECONDS = int(
     # 0 = never expire. Default 30d so "last room" survives typical reconnects.
@@ -531,6 +542,243 @@ def _handle_poll(conn, name: str, room: str, payload: str) -> None:
         )
     for line in _poll_body_lines(conn, room, snapshot):
         send_line(conn, line)
+
+
+_LATER_REL_RE = re.compile(
+    r"^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|day|days|秒|分|分钟|小时|天)\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_LATER_TOMORROW_RE = re.compile(
+    r"^(?:明天|tomorrow)\s*(\d{1,2}):(\d{2})\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_LATER_CLOCK_RE = re.compile(
+    r"^(\d{1,2}):(\d{2})\s+(.+)$",
+    re.DOTALL,
+)
+_LATER_DATE_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s+(.+)$",
+    re.DOTALL,
+)
+
+
+def _later_unit_seconds(unit: str) -> Optional[int]:
+    u = unit.lower()
+    if u in ("s", "sec", "secs", "秒"):
+        return 1
+    if u in ("m", "min", "mins", "分", "分钟"):
+        return 60
+    if u in ("h", "hr", "hrs", "小时"):
+        return 3600
+    if u in ("d", "day", "days", "天"):
+        return 86400
+    return None
+
+
+def _parse_later_when(raw: str) -> Optional[tuple[float, str]]:
+    """Parse leading when + message. Returns (unix_ts, text) or None."""
+    rest = raw.strip()
+    if not rest:
+        return None
+    now = time.time()
+    m = _LATER_REL_RE.match(rest)
+    if m:
+        n = int(m.group(1))
+        mult = _later_unit_seconds(m.group(2))
+        text = m.group(3).strip()
+        if mult is None or not text:
+            return None
+        return now + n * mult, text
+    m = _LATER_TOMORROW_RE.match(rest)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        text = m.group(3).strip()
+        if not text or hh > 23 or mm > 59:
+            return None
+        base = datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        when = base.replace(hour=hh, minute=mm)
+        return when.timestamp(), text
+    m = _LATER_DATE_RE.match(rest)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh, mm = int(m.group(4)), int(m.group(5))
+        text = m.group(6).strip()
+        if not text or hh > 23 or mm > 59:
+            return None
+        try:
+            when = datetime(y, mo, d, hh, mm)
+        except ValueError:
+            return None
+        return when.timestamp(), text
+    m = _LATER_CLOCK_RE.match(rest)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        text = m.group(3).strip()
+        if not text or hh > 23 or mm > 59:
+            return None
+        when = datetime.now().replace(second=0, microsecond=0).replace(
+            hour=hh, minute=mm
+        )
+        if when.timestamp() <= now:
+            when += timedelta(days=1)
+        return when.timestamp(), text
+    return None
+
+
+def _format_later_when(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _user_capsules_locked(nickname: str) -> list[dict]:
+    key = (nickname or "").strip().lower()
+    return [
+        c
+        for c in room_capsules
+        if str(c.get("creator") or "").strip().lower() == key
+    ]
+
+
+def _deliver_due_capsules() -> None:
+    global room_capsules
+    now = time.time()
+    due: list[dict] = []
+    with lock:
+        keep: list[dict] = []
+        for cap in room_capsules:
+            try:
+                when = float(cap.get("deliver_at") or 0)
+            except (TypeError, ValueError):
+                continue
+            if when <= now:
+                due.append(cap)
+            else:
+                keep.append(cap)
+        if not due:
+            return
+        room_capsules = keep
+    for cap in due:
+        creator = str(cap.get("creator") or "").strip()
+        text = str(cap.get("text") or "").strip()
+        if not creator or not text:
+            continue
+        loc = locale_store.get(creator)
+        line = i18n.t("server.later_deliver", loc, text=text)
+        targets = find_clients_by_nickname(creator, local_only=True)
+        if targets:
+            for peer_conn, _ in targets:
+                send_line(peer_conn, line)
+        else:
+            offline_messages.leave(creator, _LATER_OFFLINE_SENDER, text)
+    _mark_sessions_dirty()
+
+
+def _capsule_loop() -> None:
+    while not _capsule_stop.wait(2.0):
+        try:
+            _deliver_due_capsules()
+        except Exception as e:
+            print(f"time capsule deliver error: {e!r}")
+
+
+def _handle_later(conn, name: str, room: str, payload: str) -> None:
+    """Personal time capsule: /later <when> <text> | list | cancel <n>."""
+    global _capsule_next_id
+    raw = payload[len("/later") :].strip()
+    if not raw:
+        raw = "help"
+    first = raw.split(None, 1)[0].lower()
+
+    if first in ("help", "?"):
+        send_line(conn, _ts(conn, "later_usage"))
+        return
+
+    if first in ("list", "ls", "show"):
+        with lock:
+            caps = _user_capsules_locked(name)
+        if not caps:
+            send_line(conn, _ts(conn, "later_none"))
+            return
+        send_line(conn, _ts(conn, "later_list_header", n=len(caps)))
+        for i, cap in enumerate(caps, start=1):
+            send_line(
+                conn,
+                _ts(
+                    conn,
+                    "later_list_item",
+                    index=i,
+                    when=_format_later_when(float(cap["deliver_at"])),
+                    text=cap.get("text", ""),
+                ),
+            )
+        send_line(conn, _ts(conn, "later_cancel_hint"))
+        return
+
+    if first == "cancel":
+        parts = raw.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            send_line(conn, _ts(conn, "later_usage"))
+            return
+        idx = int(parts[1].strip())
+        with lock:
+            caps = _user_capsules_locked(name)
+            if idx < 1 or idx > len(caps):
+                send_line(conn, _ts(conn, "later_bad_index", max_n=len(caps) or 0))
+                return
+            target = caps[idx - 1]
+            room_capsules[:] = [c for c in room_capsules if c is not target]
+        _mark_sessions_dirty()
+        send_line(conn, _ts(conn, "later_cancelled", index=idx))
+        return
+
+    parsed = _parse_later_when(raw)
+    if not parsed:
+        send_line(conn, _ts(conn, "later_usage"))
+        return
+    deliver_at, text = parsed
+    text = " ".join(text.split())
+    if not text:
+        send_line(conn, _ts(conn, "later_usage"))
+        return
+    if len(text) > MAX_LATER_TEXT_LEN:
+        send_line(
+            conn,
+            _ts(conn, "later_text_too_long", max_len=MAX_LATER_TEXT_LEN),
+        )
+        return
+    delay = deliver_at - time.time()
+    if delay < MIN_LATER_DELAY_SECONDS:
+        send_line(
+            conn,
+            _ts(conn, "later_too_soon", min_sec=MIN_LATER_DELAY_SECONDS),
+        )
+        return
+    if delay > MAX_LATER_DELAY_SECONDS:
+        send_line(conn, _ts(conn, "later_too_far"))
+        return
+    with lock:
+        if len(_user_capsules_locked(name)) >= MAX_LATER_PER_USER:
+            send_line(
+                conn,
+                _ts(conn, "later_user_full", max_n=MAX_LATER_PER_USER),
+            )
+            return
+        cap = {
+            "id": _capsule_next_id,
+            "room": room,
+            "creator": name,
+            "text": text,
+            "deliver_at": deliver_at,
+        }
+        _capsule_next_id += 1
+        room_capsules.append(cap)
+        room_capsules.sort(key=lambda c: float(c.get("deliver_at") or 0))
+    _mark_sessions_dirty()
+    send_line(
+        conn,
+        _ts(conn, "later_scheduled", when=_format_later_when(deliver_at)),
+    )
 
 
 def _format_game_lines(room: str, lines) -> bytes:
@@ -1151,6 +1399,20 @@ def _build_session_payload_locked() -> dict[str, object]:
         },
         "room_enabled_games_version": ROOM_GAME_CATALOG_VERSION,
         "room_announcements": dict(room_announcements),
+        "room_capsules": [
+            {
+                "id": int(c.get("id") or 0),
+                "room": str(c.get("room") or ""),
+                "creator": str(c.get("creator") or ""),
+                "text": str(c.get("text") or ""),
+                "deliver_at": float(c.get("deliver_at") or 0),
+            }
+            for c in room_capsules
+            if isinstance(c, dict)
+            and str(c.get("creator") or "").strip()
+            and str(c.get("text") or "").strip()
+            and float(c.get("deliver_at") or 0) > 0
+        ],
         "room_game_authority": {
             room: auth
             for room, auth in room_game_authority.items()
@@ -1234,6 +1496,40 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
         for room, text in announcements.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_announcements[room] = text
+    capsules = payload.get("room_capsules")
+    if isinstance(capsules, list):
+        restored: list[dict] = []
+        max_id = 0
+        for item in capsules:
+            if not isinstance(item, dict):
+                continue
+            room = str(item.get("room") or "").strip()
+            text = str(item.get("text") or "").strip()
+            creator = str(item.get("creator") or "").strip() or "?"
+            try:
+                deliver_at = float(item.get("deliver_at") or 0)
+                cap_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not text or deliver_at <= 0:
+                continue
+            restored.append(
+                {
+                    "id": cap_id or 0,
+                    "room": room,
+                    "creator": creator,
+                    "text": text,
+                    "deliver_at": deliver_at,
+                }
+            )
+            if cap_id > max_id:
+                max_id = cap_id
+        room_capsules.clear()
+        room_capsules.extend(restored)
+        room_capsules.sort(key=lambda c: float(c.get("deliver_at") or 0))
+        global _capsule_next_id
+        if max_id >= _capsule_next_id:
+            _capsule_next_id = max_id + 1
     authority = payload.get("room_game_authority")
     if isinstance(authority, dict):
         for room, auth in authority.items():
@@ -7100,6 +7396,10 @@ def handle_command(conn, payload: str) -> None:
         _handle_poll(conn, name, current_room, payload)
         return
 
+    if cmd == "/later":
+        _handle_later(conn, name, current_room, payload)
+        return
+
     if cmd == "/game":
         try:
             _handle_game(conn, name, current_room, payload)
@@ -7718,7 +8018,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /poll /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -7781,8 +8081,17 @@ def handle_client(conn, addr) -> None:
 
 def run_server() -> int:
     global _listen_socket, _shutdown_requested, _shutting_down, file_http
+    global _capsule_thread
     _load_persisted_sessions()
     _ensure_federation_hub()
+    _capsule_stop.clear()
+    if _capsule_thread is None or not _capsule_thread.is_alive():
+        _capsule_thread = threading.Thread(
+            target=_capsule_loop,
+            name="time-capsule",
+            daemon=True,
+        )
+        _capsule_thread.start()
     
     # Start file HTTP server
     file_enabled = os.environ.get("SSHCHAT_FILE_TRANSFER_ENABLED", "1") != "0"
@@ -7859,6 +8168,7 @@ def run_server() -> int:
         
         # Stop library watch thread
         _library_watch_stop.set()
+        _capsule_stop.set()
         
         if file_http is not None:
             try:

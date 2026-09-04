@@ -194,6 +194,7 @@ _TOP_COMMANDS = (
     "/unmsg",
     "/announce",
     "/poll",
+    "/later",
     "/game",
     "/news",
     "/library",
@@ -264,6 +265,7 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
     "/lang": ("en", "zh", "english", "chinese", "中文", "英文"),
     "/language": ("en", "zh", "english", "chinese", "中文", "英文"),
     "/poll": ("new", "close", "help", "show"),
+    "/later": ("list", "ls", "show", "cancel", "help"),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
