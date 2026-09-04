@@ -90,6 +90,7 @@ Are you sure you want to continue connecting (yes/no)?
 | 看新闻 | `/news` |
 | 进图书馆 | `/library` 或 `/lib` |
 | 开画板一起画 | `/canvas` |
+| 房间投票 | `/poll new 今晚吃啥 \| 火锅 \| 烧烤`，再 `/poll 1` 投票；`/poll close` 结束 |
 | 小游戏说明 | `/game help` |
 
 注意：

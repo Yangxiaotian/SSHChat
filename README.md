@@ -30,6 +30,10 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/sendfile <nick>` | File to a user |
 | `/canvas` | Shared drawing board (current room) |
 | `/canvas <nick>` | Private board with one user |
+| `/poll` | Show room poll |
+| `/poll new Q \| A \| B` | Start a poll (`\|`-separated options) |
+| `/poll <n>` | Vote (may change) |
+| `/poll close` | Close poll (creator or room owner) |
 | `/game help` | Mini-game help |
 | `/news` | RSS headlines |
 | `/library` | Browse books |

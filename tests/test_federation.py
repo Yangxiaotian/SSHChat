@@ -35,6 +35,7 @@ class FederationProtocolTests(unittest.TestCase):
         server.rooms.clear()
         server.room_owners.clear()
         server.room_announcements.clear()
+        server.room_polls.clear()
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()

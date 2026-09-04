@@ -150,6 +150,7 @@ _TOP_COMMANDS = (
     "/leave",
     "/unmsg",
     "/announce",
+    "/poll",
     "/game",
     "/news",
     "/library",
@@ -169,6 +170,13 @@ _LANG_SUBCOMMANDS = {
     "英文": None,
 }
 
+_POLL_SUBCOMMANDS = {
+    "new": None,
+    "close": None,
+    "help": None,
+    "show": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -178,6 +186,7 @@ _SUBCOMMANDS_BY_CMD = {
     "/dnd": sorted(_DND_SUBCOMMANDS),
     "/lang": sorted(_LANG_SUBCOMMANDS),
     "/language": sorted(_LANG_SUBCOMMANDS),
+    "/poll": sorted(_POLL_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -1176,7 +1185,7 @@ def main():
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/canvas | /canvas <nick> | /canvas #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/announce  /poll  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")

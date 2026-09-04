@@ -21,6 +21,7 @@ MESSAGES: dict = {
         "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
         "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
         "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
+        "[*] /poll          房间投票：/poll new 问题 | 选项A | 选项B；/poll <序号> 投票；/poll close 结束。\n",
         "[*] /lang [en|zh]   切换界面语言（默认英文；偏好按昵称保存）。\n",
         "[*]\n",
         "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
@@ -112,6 +113,34 @@ MESSAGES: dict = {
         "announce_too_long": "[*] 公告过长（最多 {max_len} 字符）。\n",
         "announce_updated": "[*] 已更新 #{room} 的公告。\n",
         "announce_set_bcast": "[#{room}] [*] 公告：{text}\n",
+        "poll_usage": (
+            "[*] 用法：/poll new 问题 | 选项A | 选项B [| …]\n"
+            "[*]         /poll <序号>   投票（可改投）\n"
+            "[*]         /poll          查看当前投票\n"
+            "[*]         /poll close    结束（发起人或房主）\n"
+        ),
+        "poll_preview": (
+            "[#{room}] [*] 进行中投票：{question}（{n_votes} 票 / {n_opts} 项，/poll 查看）\n"
+        ),
+        "poll_none": "[*] #{room} 当前没有进行中的投票。\n",
+        "poll_header": (
+            "[*] #{room} 投票：{question}（发起人 {creator}，{n_votes} 人已投）\n"
+        ),
+        "poll_closed_header": (
+            "[*] #{room} 投票已结束：{question}（发起人 {creator}，共 {n_votes} 票）\n"
+        ),
+        "poll_option_line": "[*]   {index}. {text}  ({count})\n",
+        "poll_vote_hint": "[*] 投票：/poll <序号>   结束：/poll close\n",
+        "poll_need_options": "[*] 至少需要问题 + {min_opts} 个选项（用 | 分隔）。\n",
+        "poll_too_many_options": "[*] 选项过多（最多 {max_opts} 个）。\n",
+        "poll_question_too_long": "[*] 问题过长（最多 {max_len} 字符）。\n",
+        "poll_option_too_long": "[*] 选项过长（最多 {max_len} 字符）。\n",
+        "poll_already": "[*] #{room} 已有进行中的投票，先 /poll close 再开新的。\n",
+        "poll_opened_bcast": "[#{room}] [*] {creator} 发起投票：{question}\n",
+        "poll_bad_choice": "[*] 选项序号须为 1～{max_n}。\n",
+        "poll_voted": "[*] 已投给 {index}. {text}\n",
+        "poll_changed": "[*] 已改投为 {index}. {text}\n",
+        "poll_close_denied": "[*] 只有发起人或房主可以结束投票。\n",
         "offline_header": "[*] 你有 {n} 条留言（离线期间收到，按时间顺序）：\n",
         "offline_file_meta": "[*] （离线文件 {when}，来自 {sender}）\n",
         "offline_file_pm": "[PM from {sender}] (离线文件 {when}) {text}\n",

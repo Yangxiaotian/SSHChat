@@ -53,6 +53,8 @@ You should see an active-room tip, for example:
 
 Type plain text to chat. Try `/help`, `/names`, `/lang zh` (Chinese UI), `/lang en` (English UI).
 
+Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; `/poll close` to end (creator or room owner).
+
 ## 4. Common tips
 
 - **Chinese input:** use the system Chinese keyboard from the iSH keyboard icon.

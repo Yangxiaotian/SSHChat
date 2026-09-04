@@ -21,6 +21,7 @@ MESSAGES: dict = {
         "[*] /clear or /cls  Clear screen (terminal clears; GUI clients clear the current room history).\n",
         "[*] /announce      Show this room's announcement; owner may /announce <text> to set, /announce clear to clear.\n",
         "[*]              Owner: #default is the first user on the server; other rooms, the first /join to that room.\n",
+        "[*] /poll          Room poll: /poll new Q | A | B; /poll <n> to vote; /poll close to end.\n",
         "[*] /lang [en|zh]   Switch UI language (default English; preference saved per nickname).\n",
         "[*]\n",
         "[*] /game ...      Room games (chess, gomoku, xiangqi, sanguo). /game list /new /join …; owner /game on|off.\n",
@@ -116,6 +117,34 @@ MESSAGES: dict = {
         "announce_too_long": "[*] Announcement too long (max {max_len} characters).\n",
         "announce_updated": "[*] Updated the announcement for #{room}.\n",
         "announce_set_bcast": "[#{room}] [*] Announcement: {text}\n",
+        "poll_usage": (
+            "[*] Usage: /poll new question | optionA | optionB [| …]\n"
+            "[*]         /poll <n>     vote (may change)\n"
+            "[*]         /poll         show current poll\n"
+            "[*]         /poll close   end (creator or room owner)\n"
+        ),
+        "poll_preview": (
+            "[#{room}] [*] Open poll: {question} ({n_votes} vote(s) / {n_opts} options; /poll)\n"
+        ),
+        "poll_none": "[*] #{room} has no open poll.\n",
+        "poll_header": (
+            "[*] #{room} poll: {question} (by {creator}, {n_votes} voted)\n"
+        ),
+        "poll_closed_header": (
+            "[*] #{room} poll closed: {question} (by {creator}, {n_votes} vote(s))\n"
+        ),
+        "poll_option_line": "[*]   {index}. {text}  ({count})\n",
+        "poll_vote_hint": "[*] Vote: /poll <n>   Close: /poll close\n",
+        "poll_need_options": "[*] Need a question plus at least {min_opts} options (separated by |).\n",
+        "poll_too_many_options": "[*] Too many options (max {max_opts}).\n",
+        "poll_question_too_long": "[*] Question too long (max {max_len} characters).\n",
+        "poll_option_too_long": "[*] Option too long (max {max_len} characters).\n",
+        "poll_already": "[*] #{room} already has an open poll; /poll close it first.\n",
+        "poll_opened_bcast": "[#{room}] [*] {creator} started a poll: {question}\n",
+        "poll_bad_choice": "[*] Choice must be 1–{max_n}.\n",
+        "poll_voted": "[*] Voted for {index}. {text}\n",
+        "poll_changed": "[*] Changed vote to {index}. {text}\n",
+        "poll_close_denied": "[*] Only the creator or room owner can close the poll.\n",
         "offline_header": "[*] You have {n} leave-message(s) (received while offline, oldest first):\n",
         "offline_file_meta": "[*] (offline file {when}, from {sender})\n",
         "offline_file_pm": "[PM from {sender}] (offline file {when}) {text}\n",

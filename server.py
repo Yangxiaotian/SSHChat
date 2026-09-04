@@ -117,6 +117,8 @@ rooms = defaultdict(set)
 room_owners: dict[str, object] = {}
 # room -> announcement text (shown to everyone entering the room)
 room_announcements: dict[str, str] = {}
+# room -> active poll {"question", "options", "votes", "creator"}
+room_polls: dict[str, dict] = {}
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
 # room -> parked (inactive) game kept across federation merge/partition
@@ -175,6 +177,10 @@ PERSIST_DEBOUNCE_SECONDS = float(
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
+MAX_POLL_QUESTION_LEN = 120
+MAX_POLL_OPTION_LEN = 60
+MAX_POLL_OPTIONS = 8
+MIN_POLL_OPTIONS = 2
 _DISCONNECT_ERRNOS = {32, 54, 57, 104}
 SESSION_RESUME_TTL_SECONDS = int(
     # 0 = never expire. Default 30d so "last room" survives typical reconnects.
@@ -329,6 +335,202 @@ def send_room_announcement_preview(conn, room: str) -> None:
     if not text:
         return
     send_line(conn, _ts(conn, "announce_preview", room=room, text=text))
+
+
+def send_room_poll_preview(conn, room: str) -> None:
+    """If the room has an open poll, show a one-line teaser after join/switch."""
+    with lock:
+        poll = room_polls.get(room)
+        if not poll:
+            return
+        question = poll["question"]
+        n_votes = len(poll["votes"])
+        n_opts = len(poll["options"])
+    send_line(
+        conn,
+        _ts(
+            conn,
+            "poll_preview",
+            room=room,
+            question=question,
+            n_votes=n_votes,
+            n_opts=n_opts,
+        ),
+    )
+
+
+def _poll_counts(poll: dict) -> list[int]:
+    counts = [0] * len(poll["options"])
+    for idx in poll["votes"].values():
+        if 0 <= idx < len(counts):
+            counts[idx] += 1
+    return counts
+
+
+def _poll_body_lines(conn, room: str, poll: dict, *, closed: bool = False) -> list[str]:
+    counts = _poll_counts(poll)
+    total = sum(counts)
+    key = "poll_closed_header" if closed else "poll_header"
+    lines = [
+        _ts(
+            conn,
+            key,
+            room=room,
+            question=poll["question"],
+            creator=poll["creator"],
+            n_votes=total,
+        )
+    ]
+    for i, (opt, n) in enumerate(zip(poll["options"], counts), start=1):
+        lines.append(_ts(conn, "poll_option_line", index=i, text=opt, count=n))
+    if not closed:
+        lines.append(_ts(conn, "poll_vote_hint"))
+    return lines
+
+
+def _handle_poll(conn, name: str, room: str, payload: str) -> None:
+    """Room poll: /poll new Q | A | B … ; /poll <n> ; /poll close ; /poll."""
+    raw = payload[len("/poll") :].strip()
+    low = raw.lower()
+
+    if not raw or low in ("help", "?", "show", "status"):
+        if low in ("help", "?"):
+            send_line(conn, _ts(conn, "poll_usage"))
+            return
+        with lock:
+            poll = room_polls.get(room)
+        if not poll:
+            send_line(conn, _ts(conn, "poll_none", room=room))
+            send_line(conn, _ts(conn, "poll_usage"))
+            return
+        for line in _poll_body_lines(conn, room, poll):
+            send_line(conn, line)
+        return
+
+    if low == "close" or low.startswith("close "):
+        with lock:
+            poll = room_polls.get(room)
+            if not poll:
+                send_line(conn, _ts(conn, "poll_none", room=room))
+                return
+            owner_conn = room_owners.get(room)
+            owner_name = ""
+            if owner_conn in clients:
+                owner_name = (clients[owner_conn].get("name") or "").strip()
+            is_creator = poll["creator"].strip().lower() == name.strip().lower()
+            is_owner = owner_name.strip().lower() == name.strip().lower()
+            if not is_creator and not is_owner:
+                send_line(conn, _ts(conn, "poll_close_denied"))
+                return
+            closed = dict(poll)
+            room_polls.pop(room, None)
+        for line in _poll_body_lines(conn, room, closed, closed=True):
+            broadcast_room(room, line.encode("utf-8"))
+        return
+
+    if low == "new" or low.startswith("new "):
+        body = raw[3:].strip() if low.startswith("new") else ""
+        if not body:
+            send_line(conn, _ts(conn, "poll_usage"))
+            return
+        parts = [p.strip() for p in body.split("|")]
+        parts = [p for p in parts if p]
+        if len(parts) < 1 + MIN_POLL_OPTIONS:
+            send_line(
+                conn,
+                _ts(conn, "poll_need_options", min_opts=MIN_POLL_OPTIONS),
+            )
+            return
+        question, options = parts[0], parts[1:]
+        if len(options) > MAX_POLL_OPTIONS:
+            send_line(
+                conn,
+                _ts(conn, "poll_too_many_options", max_opts=MAX_POLL_OPTIONS),
+            )
+            return
+        if len(question) > MAX_POLL_QUESTION_LEN:
+            send_line(
+                conn,
+                _ts(conn, "poll_question_too_long", max_len=MAX_POLL_QUESTION_LEN),
+            )
+            return
+        for opt in options:
+            if len(opt) > MAX_POLL_OPTION_LEN:
+                send_line(
+                    conn,
+                    _ts(conn, "poll_option_too_long", max_len=MAX_POLL_OPTION_LEN),
+                )
+                return
+        with lock:
+            if room in room_polls:
+                send_line(conn, _ts(conn, "poll_already", room=room))
+                return
+            room_polls[room] = {
+                "question": question,
+                "options": options,
+                "votes": {},
+                "creator": name,
+            }
+            poll = dict(room_polls[room])
+            poll["options"] = list(options)
+            poll["votes"] = {}
+        broadcast_room(
+            room,
+            _ts(
+                conn,
+                "poll_opened_bcast",
+                room=room,
+                creator=name,
+                question=question,
+            ).encode("utf-8"),
+        )
+        for line in _poll_body_lines(conn, room, poll):
+            broadcast_room(room, line.encode("utf-8"))
+        return
+
+    # /poll <n> — cast or change vote
+    token = raw.split(None, 1)[0]
+    if not token.isdigit():
+        send_line(conn, _ts(conn, "poll_usage"))
+        return
+    choice = int(token)
+    with lock:
+        poll = room_polls.get(room)
+        if not poll:
+            send_line(conn, _ts(conn, "poll_none", room=room))
+            return
+        if choice < 1 or choice > len(poll["options"]):
+            send_line(
+                conn,
+                _ts(conn, "poll_bad_choice", max_n=len(poll["options"])),
+            )
+            return
+        nick_key = name.strip().lower()
+        prev = poll["votes"].get(nick_key)
+        poll["votes"][nick_key] = choice - 1
+        snapshot = {
+            "question": poll["question"],
+            "options": list(poll["options"]),
+            "votes": dict(poll["votes"]),
+            "creator": poll["creator"],
+        }
+    if prev is None:
+        send_line(
+            conn,
+            _ts(conn, "poll_voted", index=choice, text=snapshot["options"][choice - 1]),
+        )
+    else:
+        send_line(
+            conn,
+            _ts(
+                conn,
+                "poll_changed",
+                index=choice,
+                text=snapshot["options"][choice - 1],
+            ),
+        )
+    for line in _poll_body_lines(conn, room, snapshot):
+        send_line(conn, line)
 
 
 def _format_game_lines(room: str, lines) -> bytes:
@@ -6622,6 +6824,7 @@ def handle_command(conn, payload: str) -> None:
                 f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
             )
             send_room_announcement_preview(conn, new_room)
+            send_room_poll_preview(conn, new_room)
             with lock:
                 active_game = room_games.get(new_room)
                 if active_game is not None:
@@ -6635,6 +6838,7 @@ def handle_command(conn, payload: str) -> None:
         else:
             send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
             send_room_announcement_preview(conn, new_room)
+            send_room_poll_preview(conn, new_room)
         return
 
     if cmd == "/switch":
@@ -6666,6 +6870,7 @@ def handle_command(conn, payload: str) -> None:
             hub.notify_switch(name, target_room)
         send_line(conn, f"[*] Switched from #{active} to #{target_room}\n")
         send_room_announcement_preview(conn, target_room)
+        send_room_poll_preview(conn, target_room)
         return
 
     if cmd == "/msg":
@@ -6889,6 +7094,10 @@ def handle_command(conn, payload: str) -> None:
             _ts(conn, "announce_set_bcast", room=room, text=one_line).encode("utf-8"),
         )
         send_line(conn, _ts(conn, "announce_updated", room=room))
+        return
+
+    if cmd == "/poll":
+        _handle_poll(conn, name, current_room, payload)
         return
 
     if cmd == "/game":
@@ -7509,7 +7718,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /poll /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -7529,6 +7738,7 @@ def handle_client(conn, addr) -> None:
             deliver_offline_messages(conn, name)
         _mark_sessions_dirty()
         send_room_announcement_preview(conn, active_room)
+        send_room_poll_preview(conn, active_room)
         if active_game_lines:
             send_game_private(conn, active_room, active_game_lines)
             if resumed_game_rooms:
