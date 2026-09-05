@@ -49,6 +49,30 @@ from sshchat_client_util import (
     save_client_config,
 )
 
+
+def _macos_osascript_activate() -> None:
+    """Non-blocking activate by bundle id (no System Events / Accessibility).
+
+    Do NOT create NSApplication via ctypes before tk.Tk() — that crashes Tk Aqua
+    in GetRGBA (unrecognized selector on NSApplication) on macOS 15.
+    """
+    if sys.platform != "darwin":
+        return
+    for script in (
+        'tell application id "chat.ssh.SSHChat" to activate',
+        'tell application "SSHChat" to activate',
+    ):
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+
 # Strip common ANSI/OSC sequences so Tk Text stays readable (prompt_toolkit may emit CSI).
 _CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -775,17 +799,30 @@ def _pil_to_photoimage(im: Any) -> tk.PhotoImage | None:
         return None
 
 
-class _HoverTip:
-    """Compact tooltip for icon toolbar buttons."""
+class _StatusTip:
+    """Toolbar tip that writes into an in-window Label — never a Toplevel.
 
-    def __init__(self, widget: tk.Misc, text: str = "") -> None:
+    Aqua macOS drops ButtonRelease when a topmost/overrideredirect tip is
+    destroyed on ButtonPress, which makes ttk.Button look "dead" until resize.
+    """
+
+    _DEFAULT = "提示: 菜单「会话→连接」或 ⌘↩ 可立即连接；悬停图标看说明"
+
+    def __init__(
+        self,
+        widget: tk.Misc,
+        text: str,
+        status_var: tk.StringVar,
+        *,
+        default: str | None = None,
+    ) -> None:
         self.widget = widget
         self.text = text
-        self._tip: tk.Toplevel | None = None
+        self.status_var = status_var
+        self.default = default if default is not None else self._DEFAULT
         self._after: str | None = None
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<ButtonPress>", self._hide, add="+")
 
     def set_text(self, text: str) -> None:
         self.text = text
@@ -793,7 +830,7 @@ class _HoverTip:
     def _schedule(self, _event=None) -> None:
         self._cancel()
         try:
-            self._after = self.widget.after(400, self._show)
+            self._after = self.widget.after(280, self._show)
         except tk.TclError:
             self._after = None
 
@@ -807,45 +844,20 @@ class _HoverTip:
 
     def _show(self) -> None:
         self._after = None
-        if not self.text or self._tip is not None:
+        if not self.text:
             return
         try:
-            if not self.widget.winfo_ismapped():
-                return
-            x = self.widget.winfo_rootx() + 8
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
-        except tk.TclError:
-            return
-        tip = tk.Toplevel(self.widget)
-        tip.wm_overrideredirect(True)
-        tip.wm_geometry(f"+{x}+{y}")
-        try:
-            tip.attributes("-topmost", True)
+            self.status_var.set(self.text)
         except tk.TclError:
             pass
-        lbl = tk.Label(
-            tip,
-            text=self.text,
-            justify=tk.LEFT,
-            background="#ffffe0",
-            foreground="#222",
-            relief=tk.SOLID,
-            borderwidth=1,
-            padx=6,
-            pady=3,
-            font=("TkDefaultFont", 10),
-        )
-        lbl.pack()
-        self._tip = tip
 
     def _hide(self, _event=None) -> None:
         self._cancel()
-        if self._tip is not None:
-            try:
-                self._tip.destroy()
-            except tk.TclError:
-                pass
-            self._tip = None
+        try:
+            if self.status_var.get() == self.text:
+                self.status_var.set(self.default)
+        except tk.TclError:
+            pass
 
 
 def _place_toplevel_near_widget(
@@ -1994,7 +2006,15 @@ class SSHChatGUI:
         self.config_path = config_path.expanduser().resolve()
         self._bundle = None if force_full_ui else load_bundled_site_config()
         self.root = tk.Tk()
+        # Do not withdraw/alpha-hide on macOS — both break Aqua hit-testing for seconds.
+        # Do not touch NSApplication before/during Tk() — crashes GetRGBA on macOS 15.
         self.root.minsize(520, 420)
+        try:
+            sw = max(int(self.root.winfo_screenwidth()), 780)
+            sh = max(int(self.root.winfo_screenheight()), 560)
+            self.root.geometry(f"780x560+{(sw - 780) // 2}+{(sh - 560) // 2}")
+        except tk.TclError:
+            pass
 
         self._ssh: paramiko.SSHClient | None = None
         self._chan: paramiko.Channel | None = None
@@ -2025,10 +2045,15 @@ class SSHChatGUI:
         self._suggest_ui_job: str | int | None = None
         self._suggest_ui_pending: list[str] | None | object = _SUGGEST_UI_IDLE
         self._suggest_focus_job: str | int | None = None
+        self._suggest_dismiss_job: str | int | None = None
+        self._input_trace_id: str | None = None
         self._click_refresh_job: str | int | None = None
         self._room_list_refresh_job: str | int | None = None
         self._aqua_last_geometry_nudge_at = 0.0
         self._aqua_startup_nudge_done = False
+        self._aqua_btn_guard = None
+        self._aqua_click_targets: list[tuple[tk.Misc, Any]] = []
+        self._aqua_startup_grace_until = 0.0
         self._target_picker_frame: tk.Misc | None = None
         self._target_picker_list: tk.Listbox | None = None
         self._target_picker_items: list[tuple[str, str, str]] = []
@@ -2052,9 +2077,10 @@ class SSHChatGUI:
         self.root.bind("<Map>", self._on_window_mapped, add="+")
         self.root.bind("<Unmap>", self._on_window_unmapped, add="+")
         self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
-        # bind_all: root-only ButtonPress never fires for ttk.Button children, so
-        # orphaned suggestion chrome would keep eating clicks until the window moves.
-        self.root.bind_all("<ButtonPress-1>", self._on_any_button_press, add="+")
+        # Button-1 + ButtonRelease: on Aqua, Press often arrives (on the wrong
+        # widget) while Release is dropped until hit maps heal — fire by coords.
+        self.root.bind_all("<Button-1>", self._on_any_button_press_aqua, add="+")
+        self.root.bind_all("<ButtonRelease-1>", self._on_any_button_release, add="+")
         self.root.bind("<<Paste>>", self._on_paste_file, add="+")
         self.root.bind("<Command-v>", self._on_paste_file, add="+")
         self.root.bind("<Control-v>", self._on_paste_file, add="+")
@@ -2093,34 +2119,63 @@ class SSHChatGUI:
 
         ttk.Label(top, text="主机").grid(row=0, column=0, sticky="w")
         self.var_host = tk.StringVar(value=bh)
-        ttk.Entry(top, textvariable=self.var_host, width=22).grid(
-            row=0, column=1, sticky="ew", padx=(4, 8)
-        )
+        self.entry_host = ttk.Entry(top, textvariable=self.var_host, width=22)
+        self.entry_host.grid(row=0, column=1, sticky="ew", padx=(4, 8))
 
         ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w")
         self.var_user = tk.StringVar()
-        ttk.Entry(top, textvariable=self.var_user, width=14).grid(
-            row=0, column=3, sticky="ew", padx=(4, 8)
-        )
+        self.entry_user = ttk.Entry(top, textvariable=self.var_user, width=14)
+        self.entry_user.grid(row=0, column=3, sticky="ew", padx=(4, 8))
 
         ttk.Label(top, text="SSH 端口").grid(row=0, column=4, sticky="w")
         self.var_port = tk.StringVar(value=str(bp))
-        ttk.Entry(top, textvariable=self.var_port, width=6).grid(
-            row=0, column=5, sticky="w", padx=(4, 8)
-        )
+        self.entry_port = ttk.Entry(top, textvariable=self.var_port, width=6)
+        self.entry_port.grid(row=0, column=5, sticky="w", padx=(4, 8))
 
         top.columnconfigure(1, weight=1)
         for var in (self.var_host, self.var_port, self.var_user):
             var.trace_add("write", self._on_endpoint_fields_changed)
+        for ent in (self.entry_host, self.entry_user, self.entry_port):
+            ent.bind("<Return>", self._on_connect_shortcut, add="+")
 
-        bar = ttk.Frame(self.root)
+        # macOS: classic tk.Button (Canvas chips look odd); primary path is
+        # auto-connect + menu「会话→连接」/ ⌘↩ because Aqua hit-maps stay flaky.
+        if sys.platform == "darwin":
+            bar = tk.Frame(self.root)
+        else:
+            bar = ttk.Frame(self.root)
         bar.pack(fill=tk.X, padx=6, pady=(0, 4))
-        self.btn_connect = ttk.Button(bar, text="连接", command=self._connect_clicked)
+        self._toolbar_bar = bar
+        if sys.platform == "darwin":
+            self.btn_connect = tk.Button(
+                bar,
+                text="连接",
+                command=self._connect_clicked,
+                padx=14,
+                pady=4,
+            )
+            self.btn_disconnect = tk.Button(
+                bar,
+                text="断开",
+                command=self._disconnect,
+                state=tk.DISABLED,
+                padx=14,
+                pady=4,
+            )
+        else:
+            self.btn_connect = ttk.Button(
+                bar, text="连接", command=self._connect_clicked
+            )
+            self.btn_disconnect = ttk.Button(
+                bar, text="断开", command=self._disconnect, state=tk.DISABLED
+            )
         self.btn_connect.pack(side=tk.LEFT)
-        self.btn_disconnect = ttk.Button(
-            bar, text="断开", command=self._disconnect, state=tk.DISABLED
-        )
         self.btn_disconnect.pack(side=tk.LEFT, padx=(8, 0))
+        self._bind_aqua_button_release(self.btn_connect, self._connect_clicked)
+        self._bind_aqua_button_release(self.btn_disconnect, self._disconnect)
+        if sys.platform == "darwin":
+            bar.bind("<Button-1>", self._on_toolbar_bar_press, add="+")
+            bar.bind("<ButtonRelease-1>", self._on_toolbar_bar_press, add="+")
 
         self.var_status = tk.StringVar(value="就绪")
         ttk.Label(self.root, textvariable=self.var_status).pack(
@@ -2175,13 +2230,26 @@ class SSHChatGUI:
         self._target_picker_slot = ttk.Frame(bot)
         ttk.Label(self._target_row, text="发送至").pack(side=tk.LEFT)
         self.var_send_target = tk.StringVar(value=self._send_target_label())
-        self.btn_send_target = ttk.Button(
-            self._target_row,
-            textvariable=self.var_send_target,
-            command=self._show_send_target_picker,
-        )
+        if sys.platform == "darwin":
+            self.btn_send_target = tk.Button(
+                self._target_row,
+                textvariable=self.var_send_target,
+                command=self._show_send_target_picker,
+                anchor="w",
+                padx=8,
+                pady=2,
+            )
+        else:
+            self.btn_send_target = ttk.Button(
+                self._target_row,
+                textvariable=self.var_send_target,
+                command=self._show_send_target_picker,
+            )
         self.btn_send_target.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        # No HoverTip here — topmost tooltip Toplevels break Aqua hit-testing on macOS.
+        self._bind_aqua_button_release(
+            self.btn_send_target, self._show_send_target_picker
+        )
+        # No floating tip — topmost Toplevels break Aqua hit-testing on macOS.
         self._send_target_tip = None
         self._input_row = ttk.Frame(bot)
         self._input_row.grid(row=3, column=0, sticky="ew")
@@ -2198,6 +2266,27 @@ class SSHChatGUI:
         self.entry.bind("<<Paste>>", self._on_paste_file, add="+")
         self.entry.bind("<Command-v>", self._on_paste_file, add="+")
         self.entry.bind("<Control-v>", self._on_paste_file, add="+")
+        # StringVar trace catches IME / paste paths that skip KeyRelease on Aqua.
+        try:
+            self._input_trace_id = self.var_input.trace_add(
+                "write", self._on_input_var_write
+            )
+        except tk.TclError:
+            self._input_trace_id = None
+        # Persistent suggestion list (update in place — destroy/recreate thrashes Aqua).
+        self._suggest_frame = ttk.Frame(
+            self._suggest_slot, relief=tk.SOLID, borderwidth=1
+        )
+        self._suggest_list = tk.Listbox(
+            self._suggest_frame, height=1, exportselection=False
+        )
+        self._suggest_list.pack(fill=tk.BOTH, expand=True)
+        self._suggest_list.bind(
+            "<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion()
+        )
+        self._suggest_frame.pack(fill=tk.BOTH, expand=True)
+        self._suggest_win = None
+        self.var_status_tip = tk.StringVar(value=_StatusTip._DEFAULT)
         self.btn_send, _ = self._pack_icon_btn(
             self._input_row, "➤", "发送", self._send_clicked
         )
@@ -2218,46 +2307,260 @@ class SSHChatGUI:
         )
         hint = ttk.Label(
             self.root,
-            text="提示: 悬停图标看说明；点「发送至」可选私聊/房间；指定用户可留言或发文件",
+            textvariable=self.var_status_tip,
             foreground="#666",
         )
         hint.pack(anchor="w", padx=10, pady=(0, 6))
         self._refresh_room_list()
+        if sys.platform == "darwin":
+            self._install_macos_session_menu()
+
+    def _install_macos_session_menu(self) -> None:
+        """Menu-bar 连接 always works on Aqua even when content hit-maps are dead."""
+        menubar = tk.Menu(self.root)
+        session = tk.Menu(menubar, tearoff=0)
+        session.add_command(
+            label="连接",
+            command=self._connect_clicked,
+            accelerator="Command-Return",
+        )
+        session.add_command(label="断开", command=self._disconnect)
+        menubar.add_cascade(label="会话", menu=session)
+        self.root.config(menu=menubar)
+        self.root.bind_all("<Command-Return>", self._on_connect_shortcut, add="+")
+
+    def _on_connect_shortcut(self, _event=None):
+        if self._connecting.is_set():
+            return "break"
+        try:
+            if not self._button_is_disabled(self.btn_connect):
+                self._connect_clicked()
+        except tk.TclError:
+            self._connect_clicked()
+        return "break"
+
+    def _on_toolbar_bar_press(self, event) -> None:
+        """Bar-level fallback when Aqua delivers the click to the toolbar frame."""
+        self._try_aqua_coord_click(event)
+
+    def _on_any_button_press_aqua(self, event) -> None:
+        """Fire toolbar actions on Press — Release is often dropped while hits are stale."""
+        if sys.platform != "darwin":
+            return
+        self._try_aqua_coord_click(event)
 
     def _on_window_mapped(self, _event=None) -> None:
-        # One delayed refresh on first map; avoid repeated 1px resizes (visible shake).
         self._is_minimized = False
-        if not self._aqua_startup_nudge_done:
-            self.root.after(450, self._stabilize_initial_interaction)
         self.root.after(60, self._render_active_room)
+
+    def _make_aqua_chip(self, parent: tk.Misc, text: str, *, enabled: bool) -> tk.Canvas:
+        """Canvas 'button' — on Aqua, Canvas hit-testing stays live when ttk/Label do not."""
+        c = tk.Canvas(
+            parent,
+            width=72,
+            height=30,
+            highlightthickness=1,
+            highlightbackground="#8a8a8a",
+            cursor="hand2" if enabled else "arrow",
+        )
+        fill = "#ececec" if enabled else "#f5f5f5"
+        fg = "#111111" if enabled else "#9a9a9a"
+        c.create_rectangle(1, 1, 71, 29, fill=fill, outline="#6e6e6e", tags=("bg",))
+        c.create_text(36, 15, text=text, fill=fg, tags=("label",))
+        c._aqua_chip_enabled = enabled  # type: ignore[attr-defined]
+        c._aqua_chip_text = text  # type: ignore[attr-defined]
+        return c
+
+    def _set_aqua_chip_enabled(self, chip: tk.Misc, enabled: bool) -> None:
+        if not isinstance(chip, tk.Canvas):
+            return
+        try:
+            chip._aqua_chip_enabled = enabled  # type: ignore[attr-defined]
+            fill = "#ececec" if enabled else "#f5f5f5"
+            fg = "#111111" if enabled else "#9a9a9a"
+            chip.itemconfigure("bg", fill=fill)
+            chip.itemconfigure("label", fill=fg)
+            chip.configure(cursor="hand2" if enabled else "arrow")
+        except tk.TclError:
+            pass
+
+    def _macos_request_frontmost(self) -> None:
+        """Bring this .app forward without System Events (no Accessibility prompt)."""
+        _macos_osascript_activate()
+
+    def _macos_force_clickable(self) -> None:
+        """Bring the window forward once — never geometry-nudge (that Unmaps ~5s)."""
+        if sys.platform != "darwin":
+            return
+        if self._aqua_startup_nudge_done:
+            return
+        self._aqua_startup_nudge_done = True
+        try:
+            self.root.lift()
+            try:
+                self.root.focus_force()
+            except tk.TclError:
+                pass
+            self._macos_request_frontmost()
+        except tk.TclError:
+            pass
+
+    def _bind_aqua_button_release(self, btn: tk.Misc, action) -> None:
+        """Register *btn* for Aqua click recovery (widget bind + screen-coord fallback)."""
+        if sys.platform != "darwin":
+            return
+        self._aqua_click_targets.append((btn, action))
+
+        def _on_press(event, button=btn, cb=action) -> str | None:
+            try:
+                if str(event.widget) != str(button):
+                    return None
+                if self._button_is_disabled(button):
+                    return None
+            except tk.TclError:
+                return None
+            if not self._fire_aqua_button(button, cb):
+                return None
+            return "break"
+
+        try:
+            btn.bind("<Button-1>", _on_press, add="+")
+            btn.bind("<ButtonRelease-1>", _on_press, add="+")
+        except tk.TclError:
+            pass
+
+    def _fire_aqua_button(self, button: tk.Misc, action) -> bool:
+        """Invoke *action* once; returns False if this click was already handled."""
+        key = str(button)
+        if getattr(self, "_aqua_btn_guard", None) == key:
+            return False
+        self._aqua_btn_guard = key
+        try:
+            action()
+        finally:
+            try:
+                self.root.after(200, self._clear_aqua_btn_guard)
+            except tk.TclError:
+                self._aqua_btn_guard = None
+        return True
+
+    def _pointer_hits_widget(self, event, widget: tk.Misc) -> bool:
+        try:
+            x = int(event.x_root)
+            y = int(event.y_root)
+            x0 = int(widget.winfo_rootx())
+            y0 = int(widget.winfo_rooty())
+            w = int(widget.winfo_width())
+            h = int(widget.winfo_height())
+            if w <= 1 or h <= 1:
+                return False
+            return x0 <= x < x0 + w and y0 <= y < y0 + h
+        except (tk.TclError, TypeError, ValueError, AttributeError):
+            return False
+
+    def _try_aqua_coord_click(self, event) -> bool:
+        """Fire the toolbar action under the pointer even when Aqua hit maps are wrong."""
+        if sys.platform != "darwin":
+            return False
+        for btn, action in self._aqua_click_targets:
+            try:
+                if self._button_is_disabled(btn):
+                    continue
+            except tk.TclError:
+                continue
+            if not self._pointer_hits_widget(event, btn):
+                continue
+            return self._fire_aqua_button(btn, action)
+        return False
+
+    def _clear_aqua_btn_guard(self) -> None:
+        self._aqua_btn_guard = None
+
+    def _set_connect_buttons_state(
+        self, *, connect_enabled: bool, disconnect_enabled: bool
+    ) -> None:
+        """Enable/disable connect row for ttk.Button and macOS Canvas chips."""
+        try:
+            if isinstance(self.btn_connect, tk.Canvas):
+                self._set_aqua_chip_enabled(self.btn_connect, connect_enabled)
+            elif connect_enabled:
+                self.btn_connect.configure(state=tk.NORMAL)
+                if isinstance(self.btn_connect, tk.Label):
+                    self.btn_connect.configure(fg="#000000")
+            else:
+                self.btn_connect.configure(state=tk.DISABLED)
+                if isinstance(self.btn_connect, tk.Label):
+                    self.btn_connect.configure(fg="#999999")
+        except tk.TclError:
+            pass
+        try:
+            if isinstance(self.btn_disconnect, tk.Canvas):
+                self._set_aqua_chip_enabled(self.btn_disconnect, disconnect_enabled)
+            elif disconnect_enabled:
+                self.btn_disconnect.configure(state=tk.NORMAL)
+                if isinstance(self.btn_disconnect, tk.Label):
+                    self.btn_disconnect.configure(fg="#000000")
+            else:
+                self.btn_disconnect.configure(state=tk.DISABLED)
+                if isinstance(self.btn_disconnect, tk.Label):
+                    self.btn_disconnect.configure(fg="#999999")
+        except tk.TclError:
+            pass
+
+    def _button_is_disabled(self, btn: tk.Misc) -> bool:
+        if isinstance(btn, tk.Canvas):
+            return not bool(getattr(btn, "_aqua_chip_enabled", True))
+        try:
+            if hasattr(btn, "instate") and btn.instate(("disabled",)):
+                return True
+        except tk.TclError:
+            pass
+        try:
+            return str(btn.cget("state")).lower() == "disabled"
+        except tk.TclError:
+            return False
 
     def _on_window_unmapped(self, _event=None) -> None:
         try:
-            self._is_minimized = self.root.state() == "iconic"
+            state = str(self.root.state())
         except tk.TclError:
-            self._is_minimized = False
-        self._hide_suggestions()
+            return
+        # Aqua geometry nudges briefly Unmap the root; that is NOT minimize.
+        # Only treat iconic/withdrawn as real hide — otherwise suggestions and
+        # click targets get torn down mid-interaction.
+        self._is_minimized = state == "iconic"
+        if state in ("iconic", "withdrawn"):
+            self._hide_suggestions()
+            self._hide_send_target_picker()
 
     def _widget_in_suggestions(self, w) -> bool:
+        if self._suggest_win is None:
+            return w is self.entry
         if (
             w is self.entry
             or w is self._suggest_list
             or w is self._suggest_win
             or w is self._suggest_slot
+            or w is getattr(self, "_suggest_frame", None)
         ):
             return True
-        if self._suggest_win is None:
-            return False
         try:
-            return str(w).startswith(str(self._suggest_win))
+            base = str(self._suggest_slot)
+            path = str(w)
+            # Require a path boundary — startswith(".!frame4.!frame") wrongly
+            # matches sibling ".!frame4.!frame3.!button".
+            return path == base or path.startswith(base + ".")
         except tk.TclError:
             return False
 
-    def _on_any_button_press(self, event) -> None:
+    def _on_any_button_release(self, event) -> None:
+        """Dismiss popups after the click finishes — never on Press (Aqua)."""
+        # Coordinate fallback first: stale Aqua hits deliver the release to the
+        # parent/root, not the Button — still activate「连接」etc by screen pos.
+        self._try_aqua_coord_click(event)
         w = event.widget
         if self._target_picker_visible() and not self._widget_in_target_picker(w):
-            self.root.after_idle(self._hide_send_target_picker)
-        # Dismiss in-window completion when clicking elsewhere in the main window.
+            self._schedule_popup_dismiss(self._hide_send_target_picker)
         if self._suggest_win is None:
             return
         try:
@@ -2267,7 +2570,28 @@ class SSHChatGUI:
             return
         if self._widget_in_suggestions(w):
             return
-        self.root.after_idle(self._hide_suggestions)
+        self._schedule_popup_dismiss(self._hide_suggestions)
+
+    def _schedule_popup_dismiss(self, action) -> None:
+        """Run dismiss after the current click's command has had a chance to fire."""
+        if self._suggest_dismiss_job is not None:
+            try:
+                self.root.after_cancel(self._suggest_dismiss_job)
+            except (tk.TclError, ValueError):
+                pass
+
+        def _run() -> None:
+            self._suggest_dismiss_job = None
+            try:
+                action()
+            except tk.TclError:
+                pass
+
+        try:
+            # Short delay keeps ttk.Button command ahead of layout mutation.
+            self._suggest_dismiss_job = self.root.after(1, _run)
+        except tk.TclError:
+            pass
 
     def _on_root_focus_in(self, event=None) -> None:
         if event is not None and event.widget is not self.root:
@@ -2301,31 +2625,18 @@ class SSHChatGUI:
             pass
 
     def _nudge_aqua_geometry(self, *, force: bool = False) -> None:
-        """1px resize tricks Aqua into rebuilding stale click targets."""
-        if sys.platform != "darwin":
-            return
-        now = time.monotonic()
-        elapsed = now - self._aqua_last_geometry_nudge_at
-        if not force and elapsed < 0.35:
-            return
-        self._aqua_last_geometry_nudge_at = now
-        w = max(int(self.root.winfo_width()), 1)
-        h = max(int(self.root.winfo_height()), 1)
-        x = int(self.root.winfo_x())
-        y = int(self.root.winfo_y())
-        self.root.geometry(f"{w}x{h + 1}+{x}+{y}")
-        self.root.update_idletasks()
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        """Intentionally a no-op on macOS.
+
+        1px resize Unmap/Map leaves Aqua unable to deliver clicks for ~3–5s —
+        worse than the stale-hit problem it tried to fix. Click recovery uses
+        Canvas chips + screen-coordinate fallback instead.
+        """
+        return
 
     def _refresh_click_targets(self, *, force: bool = False) -> None:
-        """Refresh hit-testing; geometry nudge is a last resort and only when forced."""
+        """Idle refresh only — never geometry-nudge on Aqua."""
         try:
             self.root.update_idletasks()
-            if sys.platform == "darwin":
-                if force:
-                    self._nudge_aqua_geometry(force=True)
-                return
-            self.root.geometry(self.root.winfo_geometry())
         except tk.TclError:
             pass
 
@@ -2355,14 +2666,14 @@ class SSHChatGUI:
             self.root.update_idletasks()
         except tk.TclError:
             return
-        if sys.platform == "darwin" and not self._aqua_startup_nudge_done:
-            self._aqua_startup_nudge_done = True
-            self._refresh_click_targets(force=True)
-        else:
-            self._refresh_click_targets(force=False)
         try:
-            if self.btn_connect.instate(("disabled",)):
-                self.btn_connect.state(("!disabled",))
+            if self._button_is_disabled(self.btn_connect):
+                if not self._connecting.is_set() and (
+                    not self._chan or self._chan.closed
+                ):
+                    self._set_connect_buttons_state(
+                        connect_enabled=True, disconnect_enabled=False
+                    )
         except tk.TclError:
             pass
         try:
@@ -2502,9 +2813,16 @@ class SSHChatGUI:
         return "/piano"
 
     def _pack_icon_btn(self, parent, icon: str, tip: str, command):
-        btn = ttk.Button(parent, text=icon, width=3, command=command)
+        # macOS: ttk.Button hit-testing dies after connect/log redraws; tk.Button
+        # plus ButtonRelease stays clickable without geometry nudges.
+        if sys.platform == "darwin":
+            btn = tk.Button(parent, text=icon, command=command, padx=6, pady=2)
+        else:
+            btn = ttk.Button(parent, text=icon, width=3, command=command)
         btn.pack(side=tk.LEFT, padx=(4, 0))
-        return btn, _HoverTip(btn, tip)
+        self._bind_aqua_button_release(btn, command)
+        tip_obj = _StatusTip(btn, tip, self.var_status_tip)
+        return btn, tip_obj
 
     def _outbound_text(self, draft: str) -> str:
         t = draft.strip()
@@ -2551,7 +2869,9 @@ class SSHChatGUI:
         if self._target_picker_frame is None:
             return False
         try:
-            return str(w).startswith(str(self._target_picker_frame))
+            base = str(self._target_picker_frame)
+            path = str(w)
+            return path == base or path.startswith(base + ".")
         except tk.TclError:
             return False
 
@@ -3253,7 +3573,7 @@ class SSHChatGUI:
             return
 
         self._connecting.set()
-        self.btn_connect.configure(state=tk.DISABLED)
+        self._set_connect_buttons_state(connect_enabled=False, disconnect_enabled=False)
         self._set_status("正在连接…")
 
         def worker() -> None:
@@ -3302,7 +3622,7 @@ class SSHChatGUI:
 
     def _connect_succeeded(self) -> None:
         self._save_profile(warn_on_error=False)
-        self.btn_disconnect.configure(state=tk.NORMAL)
+        self._set_connect_buttons_state(connect_enabled=False, disconnect_enabled=True)
         self._set_status("已连接（SSH 会话）")
         self._rooms_order = ["default"]
         self._active_room = "default"
@@ -3320,11 +3640,13 @@ class SSHChatGUI:
         self._refresh_send_target_button()
         self._refresh_window_title()
         self.root.after(500, self._refresh_online_users)
-        if sys.platform == "darwin" and self._aqua_startup_nudge_done:
-            self.root.after(300, self._stabilize_initial_interaction)
+        if sys.platform == "darwin":
+            # Log/room redraw after connect often leaves toolbar hits stale once.
+            self.root.after(80, lambda: self._refresh_click_targets(force=True))
+            self.root.after(350, self._stabilize_initial_interaction)
 
     def _connect_failed(self, msg: str) -> None:
-        self.btn_connect.configure(state=tk.NORMAL)
+        self._set_connect_buttons_state(connect_enabled=True, disconnect_enabled=False)
         self._ssh = None
         self._chan = None
         self._session_user = ""
@@ -3779,14 +4101,13 @@ class SSHChatGUI:
         self._suggest_ui_job = None
 
     def _destroy_suggestion_widgets(self) -> bool:
+        """Hide suggestion chrome without destroying the persistent Listbox."""
         had = self._suggest_win is not None
-        if self._suggest_win is not None:
-            try:
-                self._suggest_win.destroy()
-            except tk.TclError:
-                pass
         self._suggest_win = None
-        self._suggest_list = None
+        try:
+            self._suggest_slot.grid_remove()
+        except tk.TclError:
+            pass
         return had
 
     def _apply_suggestion_ui(self) -> None:
@@ -3802,24 +4123,21 @@ class SSHChatGUI:
                 pass
             self._suggest_focus_job = None
 
-        self._destroy_suggestion_widgets()
-        if pending is None:
+        if pending is None or not pending:
             self._suggest_items = []
+            self._suggest_win = None
+            try:
+                if self._suggest_list is not None:
+                    self._suggest_list.delete(0, tk.END)
+            except tk.TclError:
+                pass
             try:
                 self._suggest_slot.grid_remove()
             except tk.TclError:
                 pass
             return
 
-        items = pending
-        if not items:
-            self._suggest_items = []
-            try:
-                self._suggest_slot.grid_remove()
-            except tk.TclError:
-                pass
-            return
-
+        items = list(pending)
         self._hide_send_target_picker()
         self._suggest_items = items
         # In-window slot (not place/overrideredirect): floating layers on Aqua keep
@@ -3827,18 +4145,22 @@ class SSHChatGUI:
         try:
             self._suggest_slot.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         except tk.TclError:
-            pass
-        frame = ttk.Frame(self._suggest_slot, relief=tk.SOLID, borderwidth=1)
-        lst = tk.Listbox(frame, height=min(8, len(items)), exportselection=False)
-        lst.pack(fill=tk.BOTH, expand=True)
-        for item in items:
-            lst.insert(tk.END, item)
-        lst.selection_set(0)
-        lst.activate(0)
-        lst.bind("<ButtonRelease-1>", lambda _e: self._apply_selected_suggestion())
-        frame.pack(fill=tk.BOTH, expand=True)
-        self._suggest_win = frame
-        self._suggest_list = lst
+            return
+        lst = self._suggest_list
+        if lst is None:
+            return
+        try:
+            lst.delete(0, tk.END)
+            for item in items:
+                lst.insert(tk.END, item)
+            lst.configure(height=min(8, max(1, len(items))))
+            lst.selection_clear(0, tk.END)
+            lst.selection_set(0)
+            lst.activate(0)
+            lst.see(0)
+        except tk.TclError:
+            return
+        self._suggest_win = self._suggest_frame
 
     def _queue_suggestion_ui(self, items: list[str] | None) -> None:
         self._suggest_ui_pending = items
@@ -3866,6 +4188,16 @@ class SSHChatGUI:
     def _show_suggestions(self, items: list[str]) -> None:
         self._queue_suggestion_ui(items)
 
+    def _on_input_var_write(self, *_args) -> None:
+        try:
+            text = self.var_input.get()
+        except tk.TclError:
+            return
+        if text.startswith("/"):
+            self._refresh_command_suggestions()
+        else:
+            self._hide_suggestions()
+
     def _selected_suggestion_index(self) -> int:
         if not self._suggest_list or not self._suggest_items:
             return 0
@@ -3873,7 +4205,7 @@ class SSHChatGUI:
         return int(sel[0]) if sel else 0
 
     def _should_commit_suggestion_on_enter(self) -> bool:
-        if not self._suggest_list or not self._suggest_items:
+        if self._suggest_win is None or not self._suggest_items:
             return False
         current = self.var_input.get().rstrip()
         chosen = self._suggest_items[self._selected_suggestion_index()].rstrip()
@@ -3883,7 +4215,7 @@ class SSHChatGUI:
 
     def _apply_selected_suggestion(self) -> None:
         self._flush_suggestion_ui()
-        if not self._suggest_list or not self._suggest_items:
+        if self._suggest_win is None or not self._suggest_list or not self._suggest_items:
             return
         sel = self._suggest_list.curselection()
         idx = int(sel[0]) if sel else 0
@@ -3948,7 +4280,7 @@ class SSHChatGUI:
         if not text.startswith("/"):
             return "break"
         # Suggestions already open → Tab cycles the highlight (Enter applies).
-        if self._suggest_list is not None and self._suggest_items:
+        if self._suggest_win is not None and self._suggest_items:
             self._on_entry_down()
             return "break"
         items = _command_completions(
@@ -3973,7 +4305,7 @@ class SSHChatGUI:
 
     def _on_entry_down(self, _event=None):
         self._flush_suggestion_ui()
-        if not self._suggest_list:
+        if self._suggest_win is None or not self._suggest_list or not self._suggest_items:
             return None
         size = self._suggest_list.size()
         if size <= 0:
@@ -3988,7 +4320,7 @@ class SSHChatGUI:
 
     def _on_entry_up(self, _event=None):
         self._flush_suggestion_ui()
-        if not self._suggest_list:
+        if self._suggest_win is None or not self._suggest_list or not self._suggest_items:
             return None
         size = self._suggest_list.size()
         if size <= 0:
@@ -4088,8 +4420,7 @@ class SSHChatGUI:
             except Exception:
                 pass
 
-        self.btn_connect.configure(state=tk.NORMAL)
-        self.btn_disconnect.configure(state=tk.DISABLED)
+        self._set_connect_buttons_state(connect_enabled=True, disconnect_enabled=False)
         self._refresh_window_title()
         self._online_users = []
         self._expecting_names = False
@@ -4111,8 +4442,63 @@ class SSHChatGUI:
         self._disconnect(clear_log=False)
         self.root.destroy()
 
+    def _center_root_window(self) -> None:
+        """Place the main window in the middle of the primary screen."""
+        try:
+            self.root.update_idletasks()
+            # Comfortable default; grow if the laid-out UI asks for more.
+            w = max(int(self.root.winfo_reqwidth()), 780)
+            h = max(int(self.root.winfo_reqheight()), 560)
+            sw = max(int(self.root.winfo_screenwidth()), w)
+            sh = max(int(self.root.winfo_screenheight()), h)
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+
     def run(self) -> None:
+        self._aqua_startup_grace_until = time.monotonic() + 3.0
+        self._center_root_window()
+        try:
+            self.root.lift()
+            try:
+                self.root.focus_force()
+            except tk.TclError:
+                pass
+            if sys.platform == "darwin":
+                self._macos_force_clickable()
+                # Aqua often drops the first seconds of content clicks; don't wait
+                # on「连接」— auto-connect when profile already has host+user.
+                self.root.after(120, self._macos_launch_connect)
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
         self.root.mainloop()
+
+    def _macos_launch_connect(self) -> None:
+        """Connect immediately on open so a dead Aqua hit-map cannot block login."""
+        if sys.platform != "darwin":
+            return
+        if self._connecting.is_set():
+            return
+        try:
+            if self._chan and not self._chan.closed:
+                return
+        except Exception:
+            pass
+        host = (self.var_host.get() or "").strip()
+        user = (self.var_user.get() or "").strip()
+        if host and user:
+            self._set_status("自动连接中…")
+            self._connect_clicked()
+            return
+        try:
+            self.entry_user.focus_set()
+        except tk.TclError:
+            pass
+        self._set_status("填写用户名后按回车，或用菜单「会话 → 连接」")
 
 
 def main() -> None:
