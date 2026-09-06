@@ -147,6 +147,7 @@ _TOP_COMMANDS = (
     "/file",
     "/canvas",
     "/board",
+    "/piano",
     "/leave",
     "/unmsg",
     "/announce",
@@ -1234,6 +1235,7 @@ def main():
         "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/canvas | /canvas <nick> | /canvas #<room>  "
+        "/piano | /piano <nick> | /piano #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
