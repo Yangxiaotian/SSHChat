@@ -74,6 +74,8 @@ final class ChatViewModel: ObservableObject {
         options: [.caseInsensitive]
     )
     private var pendingFileMeta = SecureInvite.FileMeta()
+    private var expectingOwnCanvas = false
+    private var expectingOwnPiano = false
     private let ansiClear = try! NSRegularExpression(pattern: #"\u001B\[[0-9;]*[HJKjk]"#)
 
     struct WebInvitePayload: Identifiable {
@@ -396,12 +398,14 @@ final class ChatViewModel: ObservableObject {
     func startCanvas() {
         guard connected else { toast = "请先连接"; return }
         appendText("[*] 正在创建共享画板…（/canvas）")
+        expectingOwnCanvas = true
         Task { try? await session.send("/canvas") }
     }
 
     func startPiano() {
         guard connected else { toast = "请先连接"; return }
         appendText("[*] 正在开启房间钢琴…（/piano）")
+        expectingOwnPiano = true
         Task { try? await session.send("/piano") }
     }
 
@@ -680,22 +684,50 @@ final class ChatViewModel: ObservableObject {
                 }
                 startDownload(url: open.url, key: open.key, sender: from)
             case .canvas:
-                appendText("[*] 打开共享画布…")
-                webInvite = WebInvitePayload(
-                    title: "共享画布",
-                    url: open.url,
-                    key: open.key,
-                    isCanvas: true
-                )
+                let own = expectingOwnCanvas
+                expectingOwnCanvas = false
+                let me = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                let creator = (pendingFileMeta.sender ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                pendingFileMeta.reset()
+                let sameNickOtherDevice = !own && !creator.isEmpty && !me.isEmpty
+                    && creator.caseInsensitiveCompare(me) == .orderedSame
+                if sameNickOtherDevice {
+                    appendText("[*] 同账号另一端已打开画布（本机不重复打开）")
+                    appendText("[*] \(open.url)")
+                    appendText("[*] 密钥: \(open.key)")
+                } else {
+                    appendText("[*] 打开共享画布…")
+                    webInvite = WebInvitePayload(
+                        title: "共享画布",
+                        url: open.url,
+                        key: open.key,
+                        isCanvas: true
+                    )
+                }
             case .piano:
-                appendText("[*] 打开房间钢琴…")
-                webInvite = WebInvitePayload(
-                    title: "房间钢琴",
-                    url: open.url,
-                    key: open.key,
-                    isCanvas: true,
-                    allowLandscape: true
-                )
+                let own = expectingOwnPiano
+                expectingOwnPiano = false
+                let me = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                let creator = (pendingFileMeta.sender ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                pendingFileMeta.reset()
+                let sameNickOtherDevice = !own && !creator.isEmpty && !me.isEmpty
+                    && creator.caseInsensitiveCompare(me) == .orderedSame
+                if sameNickOtherDevice {
+                    appendText("[*] 同账号另一端已打开钢琴（本机不重复打开）")
+                    appendText("[*] \(open.url)")
+                    appendText("[*] 密钥: \(open.key)")
+                } else {
+                    appendText("[*] 打开房间钢琴…")
+                    webInvite = WebInvitePayload(
+                        title: "房间钢琴",
+                        url: open.url,
+                        key: open.key,
+                        isCanvas: true,
+                        allowLandscape: true
+                    )
+                }
             case .upload:
                 if let pending = pendingUpload {
                     cancelUploadWait()

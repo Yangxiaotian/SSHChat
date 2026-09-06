@@ -171,9 +171,9 @@ class SshChatClient(
         private val CSI = Regex("""\u001B\[[0-9;?]*[ -/]*[@-~]""")
         private val OSC = Regex("""\u001B\][^\u0007]*\u0007""")
         private val MANGLED_CSI = Regex("""\?\[[0-9;?]*[A-Za-z@-~]""")
-        /** ESC fully lost: leftover `[2K` / `[K` / `[9;1H` (not `[*]` / `[#room]` / `[root]`). */
+        /** ESC fully lost: leftover `[2K` / `[K` / `[9;1H` (not `[*]` / `[#room]` / `[TXT]`). */
         private val BARE_CSI_FRAGMENT =
-            Regex("""\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\])""")
+            Regex("""\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![A-Za-z0-9_]*\])""")
 
         fun errText(e: Throwable): String {
             val msg = e.message?.trim().orEmpty()

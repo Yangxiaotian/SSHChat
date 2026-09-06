@@ -3887,11 +3887,7 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        me = self.var_user.get().strip()
-        creator = str(self._pending_file_meta.get("sender") or "").strip()
-        own = self._expecting_own_canvas or (
-            bool(creator and me) and creator.lower() == me.lower()
-        )
+        own = self._expecting_own_canvas
         self._expecting_own_canvas = False
         if own:
             self._open_native_canvas(url, key)
@@ -3904,11 +3900,9 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
-        me = self.var_user.get().strip()
-        creator = str(self._pending_file_meta.get("sender") or "").strip()
-        own = self._expecting_own_piano or (
-            bool(creator and me) and creator.lower() == me.lower()
-        )
+        # Only auto-open if THIS client just clicked 钢琴 — same nick on another
+        # device (e.g. iOS) must not reopen a second window here.
+        own = self._expecting_own_piano
         self._expecting_own_piano = False
         if own:
             self._open_native_piano(url, key)

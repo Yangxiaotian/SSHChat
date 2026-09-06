@@ -62,6 +62,8 @@ class MainActivity : AppCompatActivity() {
     private var onlineUsers: List<String> = emptyList()
     private var knownRooms: List<String> = emptyList()
     private var expectingNames = false
+    @Volatile private var expectingOwnCanvas = false
+    @Volatile private var expectingOwnPiano = false
 
     private val requestNotifyPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -453,6 +455,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         appendLine("[*] 正在创建共享画板…（/canvas）")
+        expectingOwnCanvas = true
         client?.send("/canvas")
     }
 
@@ -462,6 +465,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         appendLine("[*] 正在开启房间钢琴…（/piano）")
+        expectingOwnPiano = true
         client?.send("/piano")
     }
 
@@ -1033,12 +1037,40 @@ class MainActivity : AppCompatActivity() {
                     startDownload(open.url, open.key, from)
                 }
                 SecureInvite.Kind.CANVAS -> {
-                    appendLine("[*] 打开共享画布…")
-                    startActivity(WebInviteActivity.canvas(this, open.url, open.key))
+                    val own = expectingOwnCanvas
+                    expectingOwnCanvas = false
+                    val me = binding.etUsername.text?.toString()?.trim().orEmpty()
+                    val creator = pendingFileMeta.sender?.trim().orEmpty()
+                    pendingFileMeta.reset()
+                    val sameNickOtherDevice =
+                        !own && creator.isNotEmpty() && me.isNotEmpty() &&
+                            creator.equals(me, ignoreCase = true)
+                    if (sameNickOtherDevice) {
+                        appendLine("[*] 同账号另一端已打开画布（本机不重复打开）")
+                        appendLine("[*] ${open.url}")
+                        appendLine("[*] 密钥: ${open.key}")
+                    } else {
+                        appendLine("[*] 打开共享画布…")
+                        startActivity(WebInviteActivity.canvas(this, open.url, open.key))
+                    }
                 }
                 SecureInvite.Kind.PIANO -> {
-                    appendLine("[*] 打开房间钢琴…")
-                    startActivity(WebInviteActivity.piano(this, open.url, open.key))
+                    val own = expectingOwnPiano
+                    expectingOwnPiano = false
+                    val me = binding.etUsername.text?.toString()?.trim().orEmpty()
+                    val creator = pendingFileMeta.sender?.trim().orEmpty()
+                    pendingFileMeta.reset()
+                    val sameNickOtherDevice =
+                        !own && creator.isNotEmpty() && me.isNotEmpty() &&
+                            creator.equals(me, ignoreCase = true)
+                    if (sameNickOtherDevice) {
+                        appendLine("[*] 同账号另一端已打开钢琴（本机不重复打开）")
+                        appendLine("[*] ${open.url}")
+                        appendLine("[*] 密钥: ${open.key}")
+                    } else {
+                        appendLine("[*] 打开房间钢琴…")
+                        startActivity(WebInviteActivity.piano(this, open.url, open.key))
+                    }
                 }
                 SecureInvite.Kind.UPLOAD -> {
                     val pending = pendingUpload

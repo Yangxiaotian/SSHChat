@@ -238,8 +238,8 @@ enum ChatLineParsers {
     ]
 
     /// Bare CSI fragment (params optional: `[K` as well as `[2K` / `[9;1H`). Not `[*]`/`[#`.
-    /// Lookahead avoids eating chat nicks like `[root]` (`[r` is a valid CSI final).
-    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![a-z0-9_]*\]))"#
+    /// Lookahead avoids eating bracket tags like `[root]` / `[TXT]` (`[T` is a valid CSI final).
+    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"#
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
         pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
