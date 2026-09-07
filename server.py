@@ -6208,6 +6208,7 @@ def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
         return
     greq = _greq_outstanding(room)
     token = (token or "").strip()
+    keep_local = False
     with lock:
         if token:
             _remember_ended_game_locked(room, token)
@@ -6219,22 +6220,32 @@ def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
         )
         same_game = bool(token) and local_token == token
         provisional = room in room_game_provisional
-        # A replica must not gend-wipe a live game we host. Honor the real
-        # host's receipt for this session id, a provisional claim, or greq.
+        # Live local host of a different session must not be wiped by a peer's
+        # room-name tombstone. Outstanding greq is not enough: peers often send
+        # empty-token gend for the same room after ending an unrelated game
+        # (e.g. local 斗兽棋 vanishes when linking a node that ended chess).
+        # Honor only a matching session id or a provisional reclaim.
         if (
             local_auth == local
             and local_active
-            and not greq
             and not same_game
             and not provisional
         ):
-            return
-        room_games.pop(room, None)
-        room_game_authority.pop(room, None)
-        room_game_tokens.pop(room, None)
-        room_games_parked.pop(room, None)
-        room_game_provisional.discard(room)
+            keep_local = True
+        else:
+            room_games.pop(room, None)
+            room_game_authority.pop(room, None)
+            room_game_tokens.pop(room, None)
+            room_games_parked.pop(room, None)
+            room_game_provisional.discard(room)
     _clear_greq(room)
+    if keep_local:
+        if greq:
+            try:
+                _federation_push_game_snapshot(room)
+            except Exception as e:
+                print(f"federation: re-push after ignoring foreign gend: {e!r}")
+        return
     _persist_after_game_change()
 
 

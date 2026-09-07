@@ -595,12 +595,14 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(hub.ended, [("default", "mac-node", "")])
 
     def test_reconcile_clears_stale_game_when_peer_ended(self) -> None:
-        """WSL reconnect must drop a stale board when Mac already ended the game."""
+        """WSL reconnect must drop a stale board when Mac ended the same session."""
 
         class StaleGame:
             name = "chess"
             state = "playing"
             _history = [(1, 1)]
+
+        tok = "aaaa" + "0" * 28
 
         class FakeHub:
             enabled = True
@@ -608,14 +610,15 @@ class FedGameParkRestoreTests(unittest.TestCase):
             peer_count = 1
 
             def request_game(self, room: str) -> None:
-                server._fed_on_game_end(room, "mac-node")
+                # Matching session id — not an empty room-name tombstone.
+                server._fed_on_game_end(room, "mac-node", tok)
 
             def _link_toward(self, _dest):
                 return object()
 
         server.room_games["default"] = StaleGame()
         server.room_game_authority["default"] = "wsl-node"
-        server.room_game_tokens["default"] = "aaaa" + "0" * 28
+        server.room_game_tokens["default"] = tok
         pushed: list[str] = []
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server, "_persist_after_game_change"):
@@ -628,6 +631,65 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertNotIn("default", server.room_games)
         self.assertEqual(pushed, [])
 
+    def test_gend_empty_token_during_greq_keeps_local_host_game(self) -> None:
+        """Peer room-name tombstone must not erase an unrelated local host game."""
+
+        class LocalDoushou:
+            name = "doushou"
+            state = "playing"
+            _history = [(i, 0, 0) for i in range(44)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "Mathematics.local"
+
+        game = LocalDoushou()
+        server.room_games["default"] = game
+        server.room_game_authority["default"] = "Mathematics.local"
+        server.room_game_tokens["default"] = "ebc9" + "0" * 28
+        server._note_greq("default")
+        pushed: list[str] = []
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change") as persist:
+                with mock.patch.object(
+                    server,
+                    "_federation_push_game_snapshot",
+                    side_effect=lambda r: pushed.append(r),
+                ):
+                    server._fed_on_game_end("default", "chuanshi-K56CM", "")
+                    persist.assert_not_called()
+        self.assertIs(server.room_games["default"], game)
+        self.assertEqual(
+            server.room_game_authority["default"], "Mathematics.local"
+        )
+        self.assertEqual(pushed, ["default"])
+        self.assertFalse(server._greq_outstanding("default"))
+
+    def test_gend_mismatched_token_during_greq_keeps_local_host_game(self) -> None:
+        class LocalGame:
+            name = "doushou"
+            state = "playing"
+            _history = [(1, 1)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "Mathematics.local"
+
+        game = LocalGame()
+        server.room_games["default"] = game
+        server.room_game_authority["default"] = "Mathematics.local"
+        server.room_game_tokens["default"] = "local" + "0" * 28
+        server._note_greq("default")
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change"):
+                with mock.patch.object(server, "_federation_push_game_snapshot"):
+                    server._fed_on_game_end(
+                        "default", "peer-node", "other" + "0" * 28
+                    )
+        self.assertIs(server.room_games["default"], game)
+        self.assertEqual(
+            server.room_game_ended_ids.get("other" + "0" * 28), "default"
+        )
     def test_gsync_rejects_stale_revival_after_local_end(self) -> None:
         class StaleRemote:
             name = "chess"
