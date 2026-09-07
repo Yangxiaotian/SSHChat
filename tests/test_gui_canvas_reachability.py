@@ -34,8 +34,20 @@ def test_lan_ip_without_port_adds_8443() -> None:
     assert "https://192.168.0.202:8443" in bases
 
 
+def test_extract_fragment_key() -> None:
+    clean, key = gui._extract_fragment_key(
+        "https://files.example/canvas/tok#k=AB12CD"
+    )
+    assert key == "AB12CD"
+    assert clean == "https://files.example/canvas/tok"
+    clean2, key2 = gui._extract_fragment_key("https://files.example/canvas/tok")
+    assert key2 == ""
+    assert clean2 == "https://files.example/canvas/tok"
+
+
 if __name__ == "__main__":
     test_fallback_to_ssh_host_and_local_port()
     test_lan_ip_url_keeps_original_first()
     test_lan_ip_without_port_adds_8443()
+    test_extract_fragment_key()
     print("✅ gui canvas reachability ok")

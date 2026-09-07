@@ -401,6 +401,13 @@ export default function InputBar() {
     sendingRef.current = true;
     setIsSending(true);
     try {
+      const low = command.trim().toLowerCase();
+      if (low === '/canvas' || low.startsWith('/canvas ') || low === '/board' || low.startsWith('/board ')) {
+        useChatStore.getState().setExpectingOwnCanvas(true);
+      }
+      if (low === '/piano' || low.startsWith('/piano ')) {
+        useChatStore.getState().setExpectingOwnPiano(true);
+      }
       await window.api.sendMessage(command);
     } finally {
       sendingRef.current = false;

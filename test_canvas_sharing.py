@@ -254,6 +254,24 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertTrue(fresh)
 
+    def test_missing_rotation_timestamp_does_not_rotate_every_deliver(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="stamp"
+        )
+        token = session.tokens["Alice"]
+        old_key = session.keys["Alice"]
+        session.keys_rotated_at = 0.0
+        session.created_at = 0.0
+        self.assertFalse(self.store.rotate_keys_if_due(session.session_id))
+        self.assertEqual(session.keys["Alice"], old_key)
+        self.assertGreater(session.keys_rotated_at, 0)
+        # Second call within the interval still must not rotate.
+        self.assertFalse(self.store.rotate_keys_if_due(session.session_id))
+        self.assertEqual(session.keys["Alice"], old_key)
+        _, _, ticket, err = self.store.issue_access_ticket(token, old_key)
+        self.assertEqual(err, "")
+        self.assertTrue(ticket)
+
     def test_private_board_still_expires(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room=None, ttl_seconds=60
@@ -397,6 +415,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("cache: 'no-store'", page)
         self.assertIn("hashFragmentKey", page)
         self.assertIn("takeKey", page)
+        self.assertIn("sshchat-k:", page)
+        self.assertIn("window.name", page)
         self.assertIn("excalidraw-root", page)
         # Peers need BinaryFileData[]; passing the files map shows image placeholders.
         self.assertIn("Object.values(remoteFileMap)", page)

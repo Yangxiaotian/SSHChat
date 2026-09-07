@@ -495,7 +495,13 @@ class CanvasStore:
                 return False
             now = time.time()
             rotated_at = float(session.keys_rotated_at or session.created_at or 0)
-            if rotated_at and (now - rotated_at) < KEY_ROTATE_SECONDS:
+            # Missing timestamps must NOT rotate on every re-deliver (that made
+            # terminal's key work while a later Tk open got a different key).
+            if rotated_at <= 0:
+                session.keys_rotated_at = now
+                self._save()
+                return False
+            if (now - rotated_at) < KEY_ROTATE_SECONDS:
                 return False
             for name in list(session.tokens.keys()):
                 session.keys[name] = _generate_key()

@@ -117,6 +117,9 @@ interface ChatState {
   canvasMaximized: boolean;
   pianoSession: { url: string; key: string } | null;
   pianoMaximized: boolean;
+  /** True after this client clicked 画板/钢琴 — auto-open the next matching invite. */
+  expectingOwnCanvas: boolean;
+  expectingOwnPiano: boolean;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -158,6 +161,8 @@ interface ChatState {
   openPiano: (session: { url: string; key: string }) => void;
   closePiano: () => void;
   setPianoMaximized: (value: boolean) => void;
+  setExpectingOwnCanvas: (value: boolean) => void;
+  setExpectingOwnPiano: (value: boolean) => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -188,6 +193,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   canvasMaximized: false,
   pianoSession: null,
   pianoMaximized: false,
+  expectingOwnCanvas: false,
+  expectingOwnPiano: false,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -356,6 +363,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     canvasMaximized: false,
     pianoSession: null,
     pianoMaximized: false,
+    expectingOwnCanvas: false,
+    expectingOwnPiano: false,
   }),
 
   setUsers: (users) => set({ users }),
@@ -395,12 +404,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
-  openCanvas: (session) => set({ canvasSession: session, canvasMaximized: true, pianoSession: null, pianoMaximized: false }),
+  openCanvas: (session) => set({
+    canvasSession: session,
+    canvasMaximized: true,
+    pianoSession: null,
+    pianoMaximized: false,
+    expectingOwnCanvas: false,
+  }),
   closeCanvas: () => set({ canvasSession: null, canvasMaximized: false }),
   setCanvasMaximized: (value) => set({ canvasMaximized: value }),
-  openPiano: (session) => set({ pianoSession: session, pianoMaximized: true, canvasSession: null, canvasMaximized: false }),
+  openPiano: (session) => set({
+    pianoSession: session,
+    pianoMaximized: true,
+    canvasSession: null,
+    canvasMaximized: false,
+    expectingOwnPiano: false,
+  }),
   closePiano: () => set({ pianoSession: null, pianoMaximized: false }),
   setPianoMaximized: (value) => set({ pianoMaximized: value }),
+  setExpectingOwnCanvas: (value) => set({ expectingOwnCanvas: value }),
+  setExpectingOwnPiano: (value) => set({ expectingOwnPiano: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

@@ -783,6 +783,14 @@ def generate_piano_page(
             (function () {{
                 function takeKey() {{
                     try {{
+                        var wn = (window.name || '').toString();
+                        var wm = wn.match(/^sshchat-k:([A-Za-z0-9]{{6}})$/i);
+                        if (wm) {{
+                            try {{ window.name = ''; }} catch (_) {{}}
+                            return wm[1].toUpperCase();
+                        }}
+                    }} catch (_) {{}}
+                    try {{
                         var inj = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
                         if (/^[A-Z0-9]{{6}}$/.test(inj)) {{
                             try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
@@ -1258,6 +1266,14 @@ def generate_piano_page(
         }}
 
         function hashFragmentKey() {{
+            try {{
+                var wn = (window.name || '').toString();
+                var wm = wn.match(/^sshchat-k:([A-Za-z0-9]{{6}})$/i);
+                if (wm) {{
+                    try {{ window.name = ''; }} catch (_) {{}}
+                    return wm[1].toUpperCase();
+                }}
+            }} catch (_) {{}}
             const existing = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
             if (/^[A-Z0-9]{{6}}$/.test(existing)) {{
                 try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}

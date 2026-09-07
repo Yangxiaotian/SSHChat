@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   defaultSecureLinkAction,
   defaultSecureLinkTitle,
@@ -16,8 +16,13 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const loc = locale === 'zh' ? 'zh' : 'en';
   const openCanvas = useChatStore((s) => s.openCanvas);
   const openPiano = useChatStore((s) => s.openPiano);
+  const expectingOwnCanvas = useChatStore((s) => s.expectingOwnCanvas);
+  const expectingOwnPiano = useChatStore((s) => s.expectingOwnPiano);
+  const setExpectingOwnCanvas = useChatStore((s) => s.setExpectingOwnCanvas);
+  const setExpectingOwnPiano = useChatStore((s) => s.setExpectingOwnPiano);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [autoOpened, setAutoOpened] = useState(false);
 
   const title = payload.title || defaultSecureLinkTitle(payload.kind, loc);
   const action = defaultSecureLinkAction(payload.kind, loc);
@@ -57,6 +62,34 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       setBusy(false);
     }
   };
+
+  // Same as Tk: only auto-open on the client that just clicked 画板/钢琴.
+  useEffect(() => {
+    if (autoOpened || busy) return;
+    if (payload.kind === 'canvas' && expectingOwnCanvas) {
+      setAutoOpened(true);
+      setExpectingOwnCanvas(false);
+      openCanvas({ url: payload.url, key: payload.key });
+      return;
+    }
+    if (payload.kind === 'piano' && expectingOwnPiano) {
+      setAutoOpened(true);
+      setExpectingOwnPiano(false);
+      openPiano({ url: payload.url, key: payload.key });
+    }
+  }, [
+    autoOpened,
+    busy,
+    expectingOwnCanvas,
+    expectingOwnPiano,
+    openCanvas,
+    openPiano,
+    payload.key,
+    payload.kind,
+    payload.url,
+    setExpectingOwnCanvas,
+    setExpectingOwnPiano,
+  ]);
 
   return (
     <div className={`secure-link-card kind-${payload.kind}`}>

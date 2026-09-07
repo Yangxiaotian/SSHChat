@@ -274,10 +274,19 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 </div>
             </div>
             <script>
-            // Fill key ASAP (before Excalidraw CDN module resolves). Tk/Electron
-            // pass #k=XXXXXX; native WebViews may set window.__SSHCHAT_KEY.
+            // Fill key ASAP (before Excalidraw CDN module resolves). Tk trampoline
+            // sets window.name=sshchat-k:XXXXXX (survives --app= hash drops);
+            // Electron/hash still use #k=; native WebViews may set __SSHCHAT_KEY.
             (function () {{
                 function takeKey() {{
+                    try {{
+                        var wn = (window.name || '').toString();
+                        var wm = wn.match(/^sshchat-k:([A-Za-z0-9]{{6}})$/i);
+                        if (wm) {{
+                            try {{ window.name = ''; }} catch (_) {{}}
+                            return wm[1].toUpperCase();
+                        }}
+                    }} catch (_) {{}}
                     try {{
                         var inj = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
                         if (/^[A-Z0-9]{{6}}$/.test(inj)) {{
@@ -390,6 +399,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     function hashFragmentKey() {{
         // Prefer early classic-script fill; keep as fallback if module loads first.
+        try {{
+            var wn = (window.name || '').toString();
+            var wm = wn.match(/^sshchat-k:([A-Za-z0-9]{{6}})$/i);
+            if (wm) {{
+                try {{ window.name = ''; }} catch (_) {{}}
+                return wm[1].toUpperCase();
+            }}
+        }} catch (_) {{}}
         const existing = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
         if (/^[A-Z0-9]{{6}}$/.test(existing)) {{
             try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
@@ -459,8 +476,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         return Object.keys(byId).map((k) => byId[k]);
     }}
 
-    async function auth() {{
-        const key = (keyInput.value || '').trim().toUpperCase();
+    async function auth(explicitKey) {{
+        const key = (explicitKey || keyInput.value || '').trim().toUpperCase();
         if (key.length !== 6) {{
             alert(i18n.alertKey);
             return;
@@ -662,20 +679,21 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
     }});
 
-    unlockBtn.addEventListener('click', auth);
+    unlockBtn.addEventListener('click', () => {{ void auth(); }});
     keyInput.addEventListener('keydown', (e) => {{
-        if (e.key === 'Enter') auth();
+        if (e.key === 'Enter') void auth();
     }});
 
     // Prefer key injected by native WebView (set before this module finishes).
-    // Hash (#k=) remains for Electron/Tk. Do NOT unlock until listeners exist —
-    // early btn.click() from clients is a no-op while esm.sh is still loading.
+    // Hash (#k=) / window.name remain for Electron/Tk. Do NOT unlock until
+    // listeners exist — early btn.click() is a no-op while esm.sh is loading.
     const injected = (window.__SSHCHAT_KEY || '').toString().trim().toUpperCase();
     try {{ delete window.__SSHCHAT_KEY; }} catch (_) {{}}
     const autofill = (injected.length === 6 ? injected : '') || hashFragmentKey();
     if (autofill) {{
         keyInput.value = autofill;
-        setTimeout(() => {{ void auth(); }}, 50);
+        // Pass key explicitly so Chrome autofill cannot overwrite before POST.
+        setTimeout(() => {{ void auth(autofill); }}, 50);
     }}
 
     // Mobile WebView may call paintAll() on resume — no-op for Excalidraw.

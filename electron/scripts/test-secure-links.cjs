@@ -1,21 +1,31 @@
 #!/usr/bin/env node
 /**
  * Smoke test for secure-link invite collapsing (no vitest in this package).
+ * Mirrors electron/src/renderer/lib/secureLinks.ts grouping rules.
  */
 const assert = require('assert');
 
-// Minimal copy of grouping helpers for CI without building the renderer.
 const BANNER_START =
-  /^(=+\s*)?(共享画布|文件上传信息|收到新文件|Shared\s+canvas|File\s+upload|New\s+file)/i;
+  /^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)/i;
 const BANNER_END = /^=+/;
-const URL_LABEL = /(画布网址|上传网址|下载网址|Canvas\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$/i;
+const URL_LABEL = /(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$/i;
 const KEY_LINE =
   /^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*([A-Z0-9]{6})\s*$/i;
 const HTTP_URL = /^(https?:\/\/\S+)\s*$/i;
 const GUI_OPEN =
-  /^gui-open\s+(canvas|upload|download)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
+  /^gui-open\s+(canvas|piano|upload|download)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
 
-function parse(lines) {
+function normalizeInviteLine(line) {
+  return line
+    .replace(/\r/g, '')
+    .trim()
+    .replace(/^(?:\[[\d:.\sAPMapm/-]+]\s*)+/, '')
+    .replace(/^\[\*]\s*/, '')
+    .trim();
+}
+
+function parseBlockLines(rawLines) {
+  const lines = rawLines.map(normalizeInviteLine).filter(Boolean);
   for (const line of lines) {
     const gui = GUI_OPEN.exec(line);
     if (gui) {
@@ -54,10 +64,22 @@ const block = [
   '=====================================',
   'gui-open canvas https://example.com/canvas/tok ABC123',
 ];
-assert.ok(BANNER_START.test(block[0]));
-assert.ok(BANNER_END.test(block[5]));
-const parsed = parse(block);
+assert.ok(BANNER_START.test(normalizeInviteLine(block[0])));
+assert.ok(BANNER_END.test(normalizeInviteLine(block[5])));
+const parsed = parseBlockLines(block);
 assert.strictEqual(parsed.url, 'https://example.com/canvas/tok');
 assert.strictEqual(parsed.key, 'ABC123');
 assert.strictEqual(parsed.kind, 'canvas');
+
+// Star-prefixed lines (as seen before SYSTEM strip / fallback parse)
+const starred = block.map((l) => `[*] ${l}`);
+const parsedStar = parseBlockLines(starred);
+assert.strictEqual(parsedStar.key, 'ABC123');
+assert.strictEqual(parsedStar.url, 'https://example.com/canvas/tok');
+
+// Whole invite in one multi-line blob
+const blob = starred.join('\n');
+const parsedBlob = parseBlockLines(blob.split(/\n/));
+assert.strictEqual(parsedBlob.key, 'ABC123');
+
 console.log('secure-links smoke ok');

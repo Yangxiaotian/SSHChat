@@ -31,8 +31,10 @@ const HTTP_URL = /^(https?:\/\/\S+)\s*$/i;
 const GUI_OPEN =
   /^gui-open\s+(canvas|piano|upload|download)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
 
-function normalizeInviteLine(line: string): string {
+/** Strip timestamps / [*] so banner and gui-open match reliably. */
+export function normalizeInviteLine(line: string): string {
   return line
+    .replace(/\r/g, '')
     .trim()
     .replace(/^(?:\[[\d:.\sAPMapm/-]+]\s*)+/, '')
     .replace(/^\[\*]\s*/, '')
@@ -64,13 +66,12 @@ function extractMeta(lines: string[], kind: SecureLinkKind): Partial<SecureLinkP
   return meta;
 }
 
-function parseBlock(messages: ChatMessage[]): SecureLinkPayload | null {
-  const lines = messages.map((m) => m.content.trim()).filter(Boolean);
+function parseBlockLines(rawLines: string[]): SecureLinkPayload | null {
+  const lines = rawLines.map(normalizeInviteLine).filter(Boolean);
 
   // Prefer explicit machine helper line if present.
   for (const line of lines) {
-    const normalized = normalizeInviteLine(line);
-    const gui = GUI_OPEN.exec(normalized);
+    const gui = GUI_OPEN.exec(line);
     if (gui) {
       const kind = gui[1].toLowerCase() as SecureLinkKind;
       return {
@@ -89,8 +90,7 @@ function parseBlock(messages: ChatMessage[]): SecureLinkPayload | null {
   let url = '';
   let key = '';
   let expectUrl = false;
-  for (const raw of lines) {
-    const line = normalizeInviteLine(raw);
+  for (const line of lines) {
     if (URL_LABEL.test(line)) {
       expectUrl = true;
       continue;
@@ -116,8 +116,8 @@ function parseBlock(messages: ChatMessage[]): SecureLinkPayload | null {
   };
 }
 
-function isInviteNoise(content: string): boolean {
-  const t = content.trim();
+export function isInviteNoise(content: string): boolean {
+  const t = normalizeInviteLine(content);
   if (!t) return true;
   if (BANNER_START.test(t) || BANNER_END.test(t)) return true;
   if (URL_LABEL.test(t) || KEY_LINE.test(t) || HTTP_URL.test(t)) return true;
@@ -129,12 +129,22 @@ function isInviteNoise(content: string): boolean {
   }
   if (/^经联邦节点/.test(t)) return true;
   if (/图形客户端会折叠/.test(t)) return true;
+  // Bare 6-char key line (some clients echo only the key).
+  if (/^[A-Z0-9]{6}$/i.test(t)) return true;
   return false;
+}
+
+function messageLines(msg: ChatMessage): string[] {
+  // One ChatMessage may contain the whole invite if newlines survived.
+  return String(msg.content || '')
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd());
 }
 
 /**
  * Collapse consecutive system invite lines into secure-link cards.
  * Non-invite messages pass through unchanged.
+ * Invite noise without a parseable card is dropped (never show raw keys).
  */
 export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[] {
   const out: TimelineItem[] = [];
@@ -147,9 +157,9 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
       continue;
     }
 
-    const text = msg.content.trim();
-    const guiAlone = GUI_OPEN.exec(text);
-    if (guiAlone) {
+    const firstNorm = normalizeInviteLine(messageLines(msg)[0] || msg.content);
+    const guiAlone = GUI_OPEN.exec(firstNorm);
+    if (guiAlone && messageLines(msg).filter((l) => normalizeInviteLine(l)).length <= 1) {
       const kind = guiAlone[1].toLowerCase() as SecureLinkKind;
       out.push({
         type: 'secure-link',
@@ -165,7 +175,22 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
       continue;
     }
 
-    if (!BANNER_START.test(text)) {
+    const startsInvite =
+      BANNER_START.test(firstNorm) ||
+      GUI_OPEN.test(firstNorm) ||
+      // Whole multi-line blob in one message
+      (messageLines(msg).length > 1 &&
+        messageLines(msg).some((l) => {
+          const n = normalizeInviteLine(l);
+          return BANNER_START.test(n) || GUI_OPEN.test(n);
+        }));
+
+    if (!startsInvite) {
+      // Never paint raw key/url leftovers if a prior card failed to form.
+      if (isInviteNoise(msg.content)) {
+        i += 1;
+        continue;
+      }
       out.push({ type: 'message', message: msg });
       i += 1;
       continue;
@@ -176,19 +201,18 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
     while (j < messages.length) {
       const next = messages[j];
       if (next.type !== 'system') break;
-      // Stop if a new banner starts after we already have an end marker.
-      const nt = next.content.trim();
+      const nt = normalizeInviteLine(messageLines(next)[0] || next.content);
       if (block.length > 1 && BANNER_START.test(nt) && !BANNER_END.test(nt)) break;
-      if (!isInviteNoise(nt) && !BANNER_START.test(nt) && !BANNER_END.test(nt)) {
-        // Unrelated system line — end block before it.
+      if (!isInviteNoise(next.content) && !BANNER_START.test(nt) && !BANNER_END.test(nt)) {
         break;
       }
       block.push(next);
       j += 1;
       if (BANNER_END.test(nt) && block.length > 2) {
-        // Include a trailing gui-open helper line if the server sent one.
         if (j < messages.length && messages[j].type === 'system') {
-          const trailing = messages[j].content.trim();
+          const trailing = normalizeInviteLine(
+            messageLines(messages[j])[0] || messages[j].content,
+          );
           if (GUI_OPEN.test(trailing)) {
             block.push(messages[j]);
             j += 1;
@@ -196,9 +220,14 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
         }
         break;
       }
+      // Single multi-line message already holds the full invite.
+      if (block.length === 1 && messageLines(msg).length > 3) {
+        break;
+      }
     }
 
-    const payload = parseBlock(block);
+    const flatLines = block.flatMap(messageLines);
+    const payload = parseBlockLines(flatLines);
     if (payload) {
       out.push({
         type: 'secure-link',
@@ -206,9 +235,8 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
         payload,
         messages: block,
       });
-    } else {
-      for (const m of block) out.push({ type: 'message', message: m });
     }
+    // If parse failed, drop the block instead of leaking keys into chat.
     i = j;
   }
   return out;

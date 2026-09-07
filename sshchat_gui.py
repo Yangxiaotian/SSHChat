@@ -1268,37 +1268,70 @@ def _piano_open_url(url: str, key: str, *, fallback_host: str = "") -> str:
     raise RuntimeError(last_err)
 
 
+def _extract_fragment_key(url: str) -> tuple[str, str]:
+    """Split `…#k=XXXXXX` into (url_without_key_fragment, KEY)."""
+    target = (url or "").strip()
+    if not target:
+        return "", ""
+    parsed = urllib.parse.urlparse(target)
+    frag = parsed.fragment or ""
+    m = re.search(r"(?:^|&)k=([A-Za-z0-9]{6})(?:&|$)", frag)
+    if not m:
+        return target, ""
+    key = m.group(1).upper()
+    # Drop only the k= part; keep other fragments (e.g. boot=) if present.
+    parts = [p for p in frag.split("&") if p and not re.match(r"^k=", p, re.I)]
+    clean = urllib.parse.urlunparse(parsed._replace(fragment="&".join(parts)))
+    return clean, key
+
+
 def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
-    """Open Excalidraw in a dedicated Chromium app window (optionally maximized)."""
+    """Open Excalidraw/piano in a dedicated Chromium app window (optionally maximized)."""
     target = (url or "").strip()
     if not target:
         return False
-    # Chromium --app= often drops #fragments. Launch via a tiny file:// trampoline
-    # that location.replace()'s to the real URL so #k=XXXXXX survives.
+    # Chromium --app= often drops #fragments. Prefer window.name (survives
+    # file:// → https navigation) and still pass #k= as a secondary signal.
     launch = target
+    open_target = target
     trampoline_path: str | None = None
-    if "#" in target:
+    clean, key = _extract_fragment_key(target)
+    if key or "#" in target:
         try:
             fd, trampoline_path = tempfile.mkstemp(
                 prefix="sshchat-canvas-", suffix=".html"
             )
+            if key:
+                # Keep #k= for pages that only read the hash; window.name is the
+                # reliable path when --app= strips the fragment.
+                dest = f"{clean}#k={key}"
+                open_target = dest
+                script = (
+                    f"window.name={json.dumps('sshchat-k:' + key)};"
+                    f"location.replace({json.dumps(dest)});"
+                )
+            else:
+                open_target = target
+                script = f"location.replace({json.dumps(target)});"
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(
                     "<!DOCTYPE html><meta charset=utf-8>"
-                    f"<script>location.replace({json.dumps(target)});</script>"
-                    "<p>Opening SSHChat canvas…</p>\n"
+                    f"<script>{script}</script>"
+                    "<p>Opening SSHChat…</p>\n"
                 )
             launch = Path(trampoline_path).resolve().as_uri()
         except OSError:
             trampoline_path = None
             launch = target
+            open_target = target
     for binary in _chromium_app_binaries():
         if not binary or not os.path.isfile(binary):
             continue
         args = [binary, f"--app={launch}"]
         if maximized:
-            # Prefer true fullscreen fill; fall back still works if unsupported.
-            args.extend(["--start-fullscreen", "--start-maximized"])
+            # Maximized keeps window chrome (close/title). --start-fullscreen
+            # hides chrome and is hard to exit from an --app= window.
+            args.append("--start-maximized")
         try:
             popen_kwargs: dict[str, Any] = {
                 "stdout": subprocess.DEVNULL,
@@ -1316,7 +1349,7 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
         # Safari / default handler — pass the real URL (with hash), not file://.
         try:
             subprocess.Popen(
-                ["open", target],
+                ["open", open_target],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1326,7 +1359,7 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
     if sys.platform == "win32":
         # Last resort: default browser via os.startfile (no console).
         try:
-            os.startfile(target)  # type: ignore[attr-defined]
+            os.startfile(open_target)  # type: ignore[attr-defined]
             return True
         except OSError:
             pass
@@ -3177,6 +3210,18 @@ class SSHChatGUI:
                 return
             canvas = self._canvas_open_targets.get(tag)
             if canvas:
+                # Re-join so we get the latest key (keys may have rotated since
+                # the invite line was printed). Fall back to stored credentials.
+                if self._chan and not self._chan.closed:
+                    self._expecting_own_canvas = True
+                    self._append_chat_line("[*] 正在打开共享画布…", local_sent=True)
+                    try:
+                        self._chan_send_bytes(
+                            (self._canvas_command() + "\n").encode("utf-8")
+                        )
+                        return
+                    except Exception:
+                        self._expecting_own_canvas = False
                 self._open_native_canvas(canvas[0], canvas[1])
                 return
             piano = self._piano_open_targets.get(tag)
@@ -3892,6 +3937,7 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
+        self._refresh_canvas_open_keys(url, key)
         own = self._expecting_own_canvas
         self._expecting_own_canvas = False
         if own:
@@ -3899,6 +3945,21 @@ class SSHChatGUI:
         else:
             self._offer_canvas_open(url, key)
         return True
+
+    def _refresh_canvas_open_keys(self, url: str, key: str) -> None:
+        """Update older「打开画布」buttons when the server rotates keys."""
+        try:
+            tok = _canvas_token_from_url(url)[1]
+        except ValueError:
+            return
+        if not tok:
+            return
+        for tag, (u, _old) in list(self._canvas_open_targets.items()):
+            try:
+                if _canvas_token_from_url(u)[1] == tok:
+                    self._canvas_open_targets[tag] = (url, key)
+            except ValueError:
+                continue
 
     def _try_handle_piano_invite(self, body: str) -> bool:
         m = _GUI_OPEN_PIANO_RE.match(body.strip())
