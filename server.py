@@ -1664,9 +1664,35 @@ def _load_persisted_sessions() -> None:
         )
 
 
+# Bound blocking sends so one slow/stuck SSH client cannot stall every handler
+# that broadcasts into the same room (symptoms: /names and joins hang forever).
+_SEND_TIMEOUT_SECONDS = float(os.environ.get("SSHCHAT_SEND_TIMEOUT", "5") or "5")
+
+
+def _socket_send(conn, data: bytes) -> None:
+    """sendall with a temporary timeout; restore the prior socket timeout after."""
+    if not data:
+        return
+    old = None
+    try:
+        old = conn.gettimeout()
+    except Exception:
+        old = None
+    try:
+        timeout = _SEND_TIMEOUT_SECONDS
+        if timeout > 0:
+            conn.settimeout(timeout)
+        conn.sendall(data)
+    finally:
+        try:
+            conn.settimeout(old)
+        except Exception:
+            pass
+
+
 def send_line(conn, text: str) -> None:
     try:
-        conn.send(text.encode("utf-8"))
+        _socket_send(conn, text.encode("utf-8"))
     except Exception as e:
         print(f"send_line error: {e!r}")
         remove_client(conn)
@@ -6938,7 +6964,7 @@ def broadcast_room(
     dead = []
     for c in targets:
         try:
-            c.send(msg)
+            _socket_send(c, msg)
         except Exception as e:
             print(f"broadcast send error: {e!r}")
             dead.append(c)
@@ -8229,6 +8255,11 @@ def run_server() -> int:
             conn, addr = s.accept()
         except OSError:
             break
+        try:
+            # Keep recv blocking; _socket_send applies a per-write timeout.
+            conn.settimeout(None)
+        except OSError:
+            pass
         threading.Thread(
             target=handle_client,
             args=(conn, addr),
