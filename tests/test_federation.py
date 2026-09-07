@@ -859,6 +859,12 @@ class FederationServerIntegrationTests(unittest.TestCase):
             def sync_file_public(self, base_url=None):
                 return None
 
+            def request_game(self, room: str) -> None:
+                return None
+
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
+                return None
+
         class FakeGame:
             state = "playing"
 

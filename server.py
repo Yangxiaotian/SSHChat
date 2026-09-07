@@ -5793,19 +5793,20 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
     if hub is None or not hub.enabled or hub.peer_count < 1:
         return False
     with lock:
-        if room_games.get(room) is not None:
+        game = room_games.get(room)
+        if game is not None and getattr(game, "state", "ended") != "ended":
             return True
-        # Local authority with no board = ended tombstone. greq would only
-        # fetch a stale peer replica (WSL) and revive the finished game on
-        # /game show / join.
+        # Local authority with no board = ended tombstone. Still greq so a peer
+        # that started a *new* session in this room can push it; gsync rejects
+        # revival of the ended session id. Re-announce our tombstone so peers
+        # holding only the stale replica clear it.
         auth = (room_game_authority.get(room) or "").strip()
         local = hub.node_id
-        if auth == local:
+        if auth == local and game is None:
             try:
                 hub.end_game(room, local, _ended_token_for_room_locked(room))
             except Exception as e:
                 print(f"federation: tombstone gend failed room={room!r}: {e!r}")
-            return False
     try:
         _federation_ask_peers_for_game(room)
     except Exception as e:
@@ -5819,6 +5820,28 @@ def _federation_request_game_and_wait(room: str, timeout: float = 1.5) -> bool:
                 return True
         time.sleep(0.05)
     return False
+
+
+def _federation_greq_occupied_rooms() -> None:
+    """On link-up, ask peers for games in rooms that have local users but no board."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled or hub.peer_count < 1:
+        return
+    with lock:
+        occupied = [
+            room
+            for room, members in rooms.items()
+            if members
+            and (
+                room not in room_games
+                or getattr(room_games.get(room), "state", "ended") == "ended"
+            )
+        ]
+    for room in occupied:
+        try:
+            _federation_ask_peers_for_game(room)
+        except Exception as e:
+            print(f"federation: occupied-room greq failed room={room!r}: {e!r}")
 
 
 def _federation_broadcast_ended_tombstones() -> None:
@@ -6148,8 +6171,15 @@ def _fed_on_game_sync(
             # Offline replica of a finished session; never revive by ply count.
             return
         if not local_active and remote_active and we_host:
-            # Ended tombstone: ignore even if we greq'd (stale replica answering).
-            return
+            # Local host tombstone: reject only revival of *this* ended session.
+            # A peer starting a new game in the same room (different token) must
+            # be accepted — otherwise #default stays dark after we once hosted.
+            ended_tok = _ended_token_for_room_locked(room)
+            if ended_tok and conflict_token == ended_tok:
+                return
+            if not (conflict_token or "").strip():
+                return
+            # New session from a peer: drop our stale host claim and adopt below.
         if (
             local_active
             and remote_active
@@ -6687,6 +6717,12 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_push_all_game_snapshots()
             except Exception as e:
                 print(f"federation: peer-up game catch-up error: {e!r}")
+            try:
+                # Newcomer with no local board still needs the peer's in-progress
+                # game (push alone can lose a race with our own ended tombstone).
+                _federation_greq_occupied_rooms()
+            except Exception as e:
+                print(f"federation: peer-up occupied greq error: {e!r}")
             try:
                 _federation_sync_library_catalog()
             except Exception as e:

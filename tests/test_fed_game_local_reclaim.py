@@ -700,7 +700,9 @@ class FedGameParkRestoreTests(unittest.TestCase):
             enabled = True
             node_id = "mac-node"
 
+        ended = "aaaa" + "0" * 28
         server.room_game_authority["default"] = "mac-node"
+        server.room_game_ended_ids[ended] = "default"
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=StaleRemote()):
                 with mock.patch.object(server, "_rebind_game_services"):
@@ -710,20 +712,54 @@ class FedGameParkRestoreTests(unittest.TestCase):
                             "default",
                             "wsl-node",
                             "ZmFrZQ==",
-                            "aaaa" + "0" * 28,
+                            ended,
                         )
                         persist.assert_not_called()
         self.assertNotIn("default", server.room_games)
 
-    def test_greq_wait_skips_when_local_ended_tombstone(self) -> None:
-        """ /game show must not greq a finished local-authority room. """
+    def test_gsync_accepts_peer_new_game_after_local_tombstone(self) -> None:
+        """Ended local hostship must not block a peer's new session in #default."""
+
+        class RemoteNew:
+            name = "doushou"
+            state = "playing"
+            _history = [(1, 1)]
+
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+
+        ended = "oldg" + "0" * 28
+        new_tok = "newg" + "0" * 28
+        server.room_game_authority["default"] = "mac-node"
+        server.room_game_ended_ids[ended] = "default"
+        remote = RemoteNew()
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server.pickle, "loads", return_value=remote):
+                with mock.patch.object(server, "_rebind_game_services"):
+                    with mock.patch.object(server, "_persist_after_game_change"):
+                        with mock.patch.object(server, "send_oriented_boards"):
+                            with mock.patch.object(server, "send_sanguo_hand_views"):
+                                server._fed_on_game_sync(
+                                    "wsl-node",
+                                    "default",
+                                    "wsl-node",
+                                    "ZmFrZQ==",
+                                    new_tok,
+                                )
+        self.assertIs(server.room_games["default"], remote)
+        self.assertEqual(server.room_game_authority["default"], "wsl-node")
+        self.assertEqual(server.room_game_tokens["default"], new_tok)
+
+    def test_greq_wait_still_asks_when_local_ended_tombstone(self) -> None:
+        """ /game show must greq so a peer's newer session can replace our tombstone. """
 
         class FakeHub:
             enabled = True
             node_id = "mac-node"
             peer_count = 1
             requested: list[str] = []
-            ended: list[tuple[str, str]] = []
+            ended: list[tuple[str, str, str]] = []
 
             def request_game(self, room: str) -> None:
                 self.requested.append(room)
@@ -736,7 +772,7 @@ class FedGameParkRestoreTests(unittest.TestCase):
         with mock.patch.object(federation, "get_hub", return_value=hub):
             ok = server._federation_request_game_and_wait("default", timeout=0.2)
         self.assertFalse(ok)
-        self.assertEqual(hub.requested, [])
+        self.assertEqual(hub.requested, ["default"])
         self.assertEqual(hub.ended, [("default", "mac-node", "")])
 
     def test_reconcile_with_no_peers_keeps_remote_auth(self) -> None:
@@ -801,7 +837,9 @@ class FedGameParkRestoreTests(unittest.TestCase):
             enabled = True
             node_id = "mac-node"
 
+        ended = "aaaa" + "0" * 28
         server.room_game_authority["default"] = "mac-node"
+        server.room_game_ended_ids[ended] = "default"
         server._note_greq("default")
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=StaleRemote()):
@@ -812,7 +850,7 @@ class FedGameParkRestoreTests(unittest.TestCase):
                             "default",
                             "wsl-node",
                             "ZmFrZQ==",
-                            "aaaa" + "0" * 28,
+                            ended,
                         )
                         persist.assert_not_called()
         self.assertNotIn("default", server.room_games)

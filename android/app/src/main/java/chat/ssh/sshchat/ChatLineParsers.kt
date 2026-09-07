@@ -58,10 +58,10 @@ object ChatLineParsers {
     private val roomChatLoose = Regex("""\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
     private val timePrefix = Regex("""^(?:>?\s*)?(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?]|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+""")
     private val leadingGarbage = Regex("""^[\uFFFD\u25A1\uFEFF\u00A0\s]+""")
-    /** Bare CSI fragment (params optional: `[K` as well as `[2K`). Not `[*]`/`[#`. */
-    // Lookahead keeps tags like [root] / [TXT] ([T] is a valid CSI final).
+    /** Bare CSI fragment. No-param: ABCDHJK only. Tag-colliding finals (T/S/…) need digits. */
+    // Lookahead keeps tags like [root] / [TXT] / [HINT].
     private const val bareCsiFragment =
-        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"""
+        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"""
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private val ptyCrumbsBeforeTag =
         Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")

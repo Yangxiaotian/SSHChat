@@ -237,9 +237,9 @@ enum ChatLineParsers {
         "OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT",
     ]
 
-    /// Bare CSI fragment (params optional: `[K` as well as `[2K` / `[9;1H`). Not `[*]`/`[#`.
-    /// Lookahead avoids eating bracket tags like `[root]` / `[TXT]` (`[T` is a valid CSI final).
-    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"#
+    /// Bare CSI fragment. No-param: only `ABCDHJK`. Tag-colliding finals (`T`/`S`/…) need digits.
+    /// Lookahead keeps `[root]` / `[TXT]` / `[HINT]`.
+    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"#
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
         pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#

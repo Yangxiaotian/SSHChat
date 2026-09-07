@@ -1161,7 +1161,7 @@ struct ContentView: View {
             }
             .padding(.vertical, 3)
         case .system(_, let line):
-            Text(line)
+            Text(verbatim: line)
                 .font(.system(size: max(10, model.chatFont - 1)))
                 .foregroundStyle(Color(white: 0.45))
                 .multilineTextAlignment(.leading)
@@ -1171,7 +1171,7 @@ struct ContentView: View {
         case .board(_, let text):
             // Plain monospace like pre-bubble terminal — no rounded "bubble" chrome.
             ScrollView(.horizontal, showsIndicators: true) {
-                Text(text)
+                Text(verbatim: text)
                     .font(.system(size: model.chatFont, design: .monospaced))
                     .foregroundStyle(Color(white: 0.15))
                     .multilineTextAlignment(.leading)
@@ -1200,7 +1200,7 @@ struct ContentView: View {
                         .font(.system(size: max(10, model.chatFont - 2)))
                         .foregroundStyle(Color(white: 0.45))
                 }
-                Text(body)
+                Text(verbatim: body)
                     .font(.system(size: model.chatFont))
                     .foregroundStyle(Color(white: 0.12))
                     .multilineTextAlignment(.leading)

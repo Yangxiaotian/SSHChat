@@ -140,11 +140,12 @@ actor SSHSession {
         return false
     }
 
-    /// Bare CSI after ESC/`?` was eaten. Params optional so `[K` (EL default) matches;
-    /// finals restricted so `[*]` / `[#room]` / `[OK]` / `[TXT]` are never stripped.
-    /// Negative lookahead keeps tags like `[root]` / `[TXT]` (`[T` is a valid CSI final).
+    /// Bare CSI after ESC/`?` was eaten.
+    /// - No-param finals limited to cursor/erase (`ABCDHJK`) so `[TXT]` / `[EPUB]` stay intact.
+    /// - Letter finals that collide with tags (`T`, `S`, …) require at least one numeric param.
+    /// Negative lookahead still keeps tags like `[root]` / `[HINT]`.
     private static let bareCsiFragment = try! NSRegularExpression(
-        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)?[ABCDHJKSTfhlmnpqrstsu](?![A-Za-z0-9_]*\])"#
+        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\])"#
     )
 
     static func cleanLine(_ raw: String) -> String {
