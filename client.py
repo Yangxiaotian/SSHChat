@@ -1021,8 +1021,9 @@ def _expand_xiangqi_color(text: str) -> str:
     # Legacy markup → +/-/! prefix form.
     text = _XQ_RED_MARK.sub(r"+\1", text)
     text = _XQ_BLACK_MARK.sub(r"-\1", text)
-    text = re.sub(r"【(.*?)】", r"+\1", text)
-    text = re.sub(r"〔(.*?)〕", r"-\1", text)
+    # Only single xiangqi pieces — not words like 【相机】 (drawguess) or 【杀】 (sanguo).
+    text = re.sub(r"【([车马炮相仕帅将士象兵卒])】", r"+\1", text)
+    text = re.sub(r"〔([车马炮相仕帅将士象兵卒])〕", r"-\1", text)
     return text
 
 

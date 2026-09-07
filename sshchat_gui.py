@@ -3104,12 +3104,13 @@ class SSHChatGUI:
             or any(ch in text for ch in "狮虎豹狼狗猫鼠")
             or bool(re.search(r"[+\-!][RCDWPTLE](?:\s|$)", text))
         )
+        # 【相机】等普通中文括号不是象棋棋子；仅单字棋子括号或 +/-/! / {{R}} 才上色
         if not is_doushou and (
             "{{R}}" in text
             or "{{B}}" in text
-            or "【" in text
-            or "〔" in text
             or re.search(r"[+\-!][车马炮相仕帅将士象兵卒]", text)
+            or re.search(r"【[车马炮相仕帅将士象兵卒]】", text)
+            or re.search(r"〔[车马炮相仕帅将士象兵卒]〕", text)
         ):
             self._insert_xiangqi_colored(text, tag)
             return
