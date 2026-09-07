@@ -25,35 +25,50 @@ type Props = {
 const ROWS = 9;
 const COLS = 7;
 const EMPTY = new Set(['路', '.', '·', '*', '!']);
-const TERRAIN = new Set(['红穴', '黑穴', '红陷', '黑陷', '河']);
-const PIECES = new Set(['鼠', '猫', '狗', '狼', '豹', '虎', '狮', '象']);
+const TERRAIN = new Set(['红穴', '黑穴', '红陷', '黑陷', '河', 'rD', 'bD', 'rT', 'bT', 'RV']);
+const PIECES = new Set(['鼠', '猫', '狗', '狼', '豹', '虎', '狮', '象', 'R', 'C', 'D', 'W', 'P', 'T', 'L', 'E']);
+
+function isEnglishBoard(board: string): boolean {
+  return /Animal Chess|\br[DT]\b|\bb[DT]\b|\+[RCDWPTLE]\b/.test(board);
+}
 
 function parseSide(board: string, nickname: string): Side | null {
   const lines = board.split('\n');
   for (const line of lines) {
-    const both = line.match(/红(?:方)?(?:（[^）]+）)?[:：]\s*(\S+).*黑(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
-    if (both) {
-      if (both[1] === nickname) return 'red';
-      if (both[2] === nickname) return 'black';
+    const bothZh = line.match(/红(?:方)?(?:（[^）]+）)?[:：]\s*(\S+).*黑(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
+    if (bothZh) {
+      if (bothZh[1] === nickname) return 'red';
+      if (bothZh[2] === nickname) return 'black';
     }
-    const red = line.match(/红(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
-    if (red?.[1] === nickname) return 'red';
-    const black = line.match(/黑(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
-    if (black?.[1] === nickname) return 'black';
+    const bothEn = line.match(/Red(?:\s*\([^)]*\))?\s*:\s*(\S+).*Black(?:\s*\([^)]*\))?\s*:\s*(\S+)/i);
+    if (bothEn) {
+      if (bothEn[1] === nickname) return 'red';
+      if (bothEn[2] === nickname) return 'black';
+    }
+    const redZh = line.match(/红(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
+    if (redZh?.[1] === nickname) return 'red';
+    const blackZh = line.match(/黑(?:方)?(?:（[^）]+）)?[:：]\s*(\S+)/);
+    if (blackZh?.[1] === nickname) return 'black';
+    const redEn = line.match(/\bRed(?:\s*\([^)]*\))?\s*:\s*(\S+)/i);
+    if (redEn?.[1] === nickname) return 'red';
+    const blackEn = line.match(/\bBlack(?:\s*\([^)]*\))?\s*:\s*(\S+)/i);
+    if (blackEn?.[1] === nickname) return 'black';
   }
   return null;
 }
 
 function parseTurn(board: string): { side: Side | null; name: string } {
   for (const line of board.split('\n')) {
-    const m = line.trim().match(/^轮到\s+(红|黑)方?\s+(.+?)\s+(?:行棋|走棋|行动|移动)/);
-    if (m) return { side: m[1] === '红' ? 'red' : 'black', name: m[2].trim() };
+    const zh = line.trim().match(/^轮到\s+(红|黑)方?\s+(.+?)\s+(?:行棋|走棋|行动|移动|走子)/);
+    if (zh) return { side: zh[1] === '红' ? 'red' : 'black', name: zh[2].trim() };
+    const en = line.trim().match(/^(Red|Black)\s+(.+?)\s+to move/i);
+    if (en) return { side: en[1].toLowerCase() === 'red' ? 'red' : 'black', name: en[2].trim() };
   }
   return { side: null, name: '' };
 }
 
 function parseBoard(board: string): { cells: Cell[][]; flipped: boolean } {
-  const flipped = board.includes('己方在下方');
+  const flipped = board.includes('己方在下方') || /you are at the bottom|you at bottom/i.test(board);
   const cells: Cell[][] = Array.from({ length: ROWS }, (_, r) =>
     Array.from({ length: COLS }, (_, c) => ({ row: r + 1, col: c + 1, terrain: '' })),
   );
@@ -92,16 +107,16 @@ function parseBoard(board: string): { cells: Cell[][]; flipped: boolean } {
 }
 
 function terrainClass(terrain: string): string {
-  if (terrain === '河') return 'river';
-  if (terrain.endsWith('穴')) return 'den';
-  if (terrain.endsWith('陷')) return 'trap';
+  if (terrain === '河' || terrain === 'RV') return 'river';
+  if (terrain.endsWith('穴') || terrain === 'rD' || terrain === 'bD') return 'den';
+  if (terrain.endsWith('陷') || terrain === 'rT' || terrain === 'bT') return 'trap';
   return '';
 }
 
-function sideLabel(side: Side | null): string {
-  if (side === 'red') return '红方';
-  if (side === 'black') return '黑方';
-  return '未入座';
+function sideLabel(side: Side | null, en: boolean): string {
+  if (side === 'red') return en ? 'Red' : '红方';
+  if (side === 'black') return en ? 'Black' : '黑方';
+  return en ? 'Unseated' : '未入座';
 }
 
 export default function DoushouPanel({ disabled, nickname, boardText, onMove }: Props) {
@@ -110,6 +125,7 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
   const turn = useMemo(() => parseTurn(boardText), [boardText]);
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
   const myTurn = !!mySide && turn.side === mySide;
+  const en = useMemo(() => isEnglishBoard(boardText), [boardText]);
 
   const displayRows = useMemo(() => {
     const rows = flipped ? [...cells].reverse() : cells;
@@ -141,14 +157,21 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
 
   return (
     <div className="game-interaction-panel">
-      <div className="game-interaction-title">斗兽棋棋盘（先点己方动物，再点目标格）</div>
-      <div className="game-workbench-hint">
-        你的身份：{sideLabel(mySide)}；当前轮到：{sideLabel(turn.side)} {turn.name || ''}
-        {flipped ? '（己方在下方）' : ''}
+      <div className="game-interaction-title">
+        {en ? 'Animal Chess (select your piece, then a target)' : '斗兽棋棋盘（先点己方动物，再点目标格）'}
       </div>
-      {!myTurn && <div className="game-workbench-hint">当前不是你的回合，棋盘已锁定。</div>}
+      <div className="game-workbench-hint">
+        {en ? 'You: ' : '你的身份：'}{sideLabel(mySide, en)}
+        {en ? '; turn: ' : '；当前轮到：'}{sideLabel(turn.side, en)} {turn.name || ''}
+        {flipped ? (en ? ' (you at bottom)' : '（己方在下方）') : ''}
+      </div>
+      {!myTurn && (
+        <div className="game-workbench-hint">
+          {en ? 'Not your turn — board locked.' : '当前不是你的回合，棋盘已锁定。'}
+        </div>
+      )}
       <div className="doushou-column-labels" aria-hidden="true"><span />{colLabels.map((column) => <span key={column}>{column}</span>)}</div>
-      <div className="doushou-board" role="grid" aria-label="斗兽棋棋盘">
+      <div className="doushou-board" role="grid" aria-label={en ? 'Animal Chess board' : '斗兽棋棋盘'}>
         {displayRows.map((row) => <React.Fragment key={row[0].row}>
         <div className="doushou-row-label">{row[0].row}</div>
         {row.map((cell) => {
@@ -167,7 +190,7 @@ export default function DoushouPanel({ disabled, nickname, boardText, onMove }: 
             <button
               key={`${cell.row}-${cell.col}`}
               className={classes}
-              title={`${cell.row},${cell.col}${cell.terrain ? ` ${cell.terrain}` : ''}${cell.piece ? ` ${sideLabel(cell.piece.side)}${cell.piece.label}` : ''}`}
+              title={`${cell.row},${cell.col}${cell.terrain ? ` ${cell.terrain}` : ''}${cell.piece ? ` ${sideLabel(cell.piece.side, en)}${cell.piece.label}` : ''}`}
               disabled={disabled || !myTurn}
               onClick={() => pick(cell)}
             >

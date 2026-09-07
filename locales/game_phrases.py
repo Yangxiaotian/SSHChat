@@ -296,9 +296,10 @@ EXACT_ZH_TO_EN: dict[str, str] = {
     '[*] /game list             列出本房已上线、可玩的游戏。': '[*] /game list             List games enabled in this room.',
     '跟注 call                  跟平当前注（无需跟注时等同过牌）': 'call                         call the current bet (else like check)',
     '你可用：/game move discard <牌> | gang [牌] | hu': 'You can: /game move discard <tile> | gang [tile] | hu',
-    '图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列，左上为 1,1。': 'Legend: Red/Black den; traps; river. Coords are row col, top-left 1,1.',
+    '图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列，左上为 1,1。':
+        'Legend: rD/bD=den; rT/bT=trap; RV=river. Pieces R/C/D/W/P/T/L/E = rat/cat/dog/wolf/leopard/tiger/lion/elephant. Coords row col, top-left 1,1.',
     '图例：红穴/黑穴=兽穴；红陷/黑陷=陷阱；河=河流。坐标为 行 列（全局，左上仍为 1,1）。':
-        'Legend: Red/Black den; traps; river. Coords are global row col (top-left still 1,1).',
+        'Legend: rD/bD=den; rT/bT=trap; RV=river. Pieces R/C/D/W/P/T/L/E = rat/cat/dog/wolf/leopard/tiger/lion/elephant. Coords global row col (top-left still 1,1).',
     '悔棋：上一步走子方 /game undo，对方 /game undo accept。': 'Undo: last mover /game undo, opponent /game undo accept.',
     '用法：/game move start | pick <n> | row <1-4>': 'Usage: /game move start | pick <n> | row <1-4>',
     '  跟注 call                  跟平当前注（无需跟注时等同过牌）': '  call                         call the current bet (else like check)',

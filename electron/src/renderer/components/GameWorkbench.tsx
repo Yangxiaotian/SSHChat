@@ -22,7 +22,7 @@ import { buildGameMove, t as translate, type Locale } from '../i18n';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
-  if (t.includes('doushou') || t.includes('jungle') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
+  if (t.includes('doushou') || t.includes('jungle') || t.includes('animal chess') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
   if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
   // These ids contain the generic "chess" token; resolve them first.
   if (t.includes('darkchess') || t.includes('dark chess') || t.includes('flipchess') || t.includes('暗棋') || t.includes('翻翻棋')) return 'darkchess';
@@ -52,6 +52,7 @@ const cnToGameKind: Record<string, GameKind> = {
   '军棋': 'junqi',
   '中国象棋': 'xiangqi',
   '斗兽棋': 'doushou',
+  'animal chess': 'doushou',
   '三国杀': 'sanguo',
   '狼人杀': 'werewolf',
   '你画我猜': 'drawguess',
@@ -62,21 +63,21 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'drawguess', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '你画我猜', '德州扑克', '炸金花', '牛头王'];
+  const headers = ['animal chess', 'doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'drawguess', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '你画我猜', '德州扑克', '炸金花', '牛头王'];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
     const line = systemLines[i].toLowerCase();
-    const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`) || line.includes(`${h}棋盘`));
+    const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`) || line.includes(`${h}棋盘`) || line.includes(`${h} board`));
     if (hit) {
       start = i;
       game = cnToGameKind[hit] || (hit as GameKind);
       // Doushou prints its seat header before the separate board header.
       // Keep both lines so the client can identify the viewer's side.
-      if (hit === '斗兽棋' && line.includes(`${hit}棋盘`)) {
+      if ((hit === '斗兽棋' && line.includes(`${hit}棋盘`)) || (hit === 'animal chess' && line.includes('board'))) {
         for (let j = i - 1; j >= 0; j -= 1) {
           const previous = stripGameProtocolPrefix(systemLines[j]).trim();
-          if (/^doushou\s+对局/i.test(previous)) {
+          if (/^doushou\s+/i.test(previous)) {
             start = j;
             break;
           }
@@ -129,7 +130,7 @@ function isLikelyGameLine(line: string): boolean {
   if (/^#\d+\s+[^:：]+[:：]/.test(line.trim())) return true;
   if (/^(红|黑|白)[:：]\s*\S+/.test(line.trim())) return true;
   if (/^红[:：]\s*\S+\s+黑[:：]\s*\S+/.test(line.trim())) return true;
-  if (/^doushou\s+对局|斗兽棋棋盘/.test(line.trim())) return true;
+  if (/^doushou\s+|斗兽棋棋盘|Animal Chess board/i.test(line.trim())) return true;
   if (/^reversi\s+game|黑白棋棋盘/.test(line.trim())) return true;
   if (/^\s*\d+\s+(?:[#!o.])(?:\s+(?:[#!o.])){7}\s*$/.test(line)) return true;
   if (/^darkchess\s+game|darkchess\s+对局|暗棋棋盘/.test(line.trim())) return true;
@@ -147,7 +148,7 @@ function isLikelyGameLine(line: string): boolean {
   if (/^\s*(?:[1-9]|10)\s+/.test(line) && line.includes('?') && line.includes('    ')) return true;
   if (/^junqi\s+game|军棋棋盘/.test(line.trim())) return true;
   if (/^\s*(?:[1-9]|1[0-2])\s+(?:[+\-][A-Z]|\?|\.)(?:\s+(?:[+\-][A-Z]|\?|\.)){4}\s*$/i.test(line)) return true;
-  if (/^\s*[1-9]\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·)|!)(?:\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象]|红穴|黑穴|红陷|黑陷|河|·)|!)){6}\s*$/.test(line)) return true;
+  if (/^\s*[1-9]\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象RCDWPTLE]|红穴|黑穴|红陷|黑陷|河|rD|bD|rT|bT|RV|·)|!)(?:\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象RCDWPTLE]|红穴|黑穴|红陷|黑陷|河|rD|bD|rT|bT|RV|·)|!)){6}\s*$/.test(line)) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
   if (/^上一步[:：]/.test(line.trim())) return true;

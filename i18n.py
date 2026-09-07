@@ -223,6 +223,58 @@ def _polish_en_game_line(line: str) -> str:
     out = out.replace("P2 黑", "P2 black")
     out = out.replace("P1 未定", "P1 unknown")
     out = out.replace("P2 未定", "P2 unknown")
+    # Animal Chess / doushou board marks (before darkchess: 象→E shared).
+    # Letters: R rat C cat D dog W wolf P leopard T tiger L lion E elephant.
+    for en, zh in (
+        ("L", "狮"),
+        ("T", "虎"),
+        ("P", "豹"),
+        ("W", "狼"),
+        ("D", "狗"),
+        ("C", "猫"),
+        ("R", "鼠"),
+        ("E", "象"),
+    ):
+        out = out.replace(f"+{zh}", f"+{en}")
+        out = out.replace(f"-{zh}", f"-{en}")
+    out = out.replace("红穴", "rD")
+    out = out.replace("黑穴", "bD")
+    out = out.replace("红陷", "rT")
+    out = out.replace("黑陷", "bT")
+    out = out.replace("河流", "river")
+    # Protect xiangqi river banner before mapping Animal Chess river cells.
+    out = out.replace("楚河汉界", "Chu River Han Border")
+    # Board river cell; phrases containing 河 are EXACT-translated earlier.
+    out = out.replace("河", "RV")
+    # Move / error prose still using Chinese animal names.
+    out = out.replace("吃掉红方", "captures Red ")
+    out = out.replace("吃掉黑方", "captures Black ")
+    out = out.replace("不能吃", " cannot capture ")
+    for zh, en in (
+        ("狮", "Lion"),
+        ("虎", "Tiger"),
+        ("豹", "Leopard"),
+        ("狼", "Wolf"),
+        ("狗", "Dog"),
+        ("猫", "Cat"),
+        ("鼠", "Rat"),
+        ("象", "Elephant"),
+    ):
+        out = out.replace(zh, en)
+    out = out.replace("。", ".")
+    out = out.replace("：", ":")
+    out = out.replace("，", ", ")
+    # Re-pad Animal Chess rows after CJK terrain/pieces become ASCII.
+    m_ds = re.match(r"^(\s*[1-9]\s+)(.*\S.*)$", out)
+    if m_ds:
+        prefix, body = m_ds.groups()
+        tokens = body.split()
+        if len(tokens) == 7 and any(
+            tok in {"rD", "bD", "rT", "bT", "RV", "·"}
+            or re.fullmatch(r"!?[+-][RCDWPTLE]", tok)
+            for tok in tokens
+        ):
+            out = prefix + "".join(f"{tok:^4}" for tok in tokens)
     # Darkchess board / flip marks: 将士象车马炮卒 → G A E R H C S
     for en, zh in (
         ("G", "将"),

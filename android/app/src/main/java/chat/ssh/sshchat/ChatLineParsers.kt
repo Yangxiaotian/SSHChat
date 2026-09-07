@@ -322,8 +322,8 @@ object ChatLineParsers {
         val t = payload.trim()
         if (t.isEmpty()) return false
         if (t.any { it in "♔♕♖♗♘♙♚♛♜♝♞♟" }) return true
-        if ("楚河汉界" in t || "图例：" in t || "请用等宽" in t || "己方在下方" in t) return true
-        if ("←" in t && ("纵线" in t || "红方" in t || "黑方" in t || "白方" in t)) return true
+        if ("楚河汉界" in t || "Chu River Han Border" in t || "图例：" in t || "Legend:" in t || "请用等宽" in t || "己方在下方" in t || "you are at the bottom" in t || "you at bottom" in t) return true
+        if ("←" in t && ("纵线" in t || "红方" in t || "黑方" in t || "白方" in t || "Red" in t || "Black" in t || "White" in t)) return true
         if (("-车" in t || "+车" in t || "-将" in t || "+帅" in t || "-马" in t || "+马" in t)) return true
         if (Regex("""^[+\-!·]""").containsMatchIn(t) && t.length > 6) return true
         if (Regex("""^\d{1,2}\s+(?:[.#o●○·]\s*){4,}""").containsMatchIn(t)) return true
@@ -332,7 +332,7 @@ object ChatLineParsers {
         if (Regex("""^[一二三四五六七八九](?:\s+[一二三四五六七八九]){3,}""").containsMatchIn(t)) return true
         val keys = listOf(
             "轮到", "上一步", "对局", "gomoku", "chess", "xiangqi", "go ", "围棋",
-            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "积分=", "rating=", "W/L/D",
+            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "Animal Chess", "积分=", "rating=", "W/L/D",
             "将军", "停一手", "落子", "走子", "行棋", "空席",
         )
         if (keys.any { it in t || it.lowercase() in t.lowercase() }) return true

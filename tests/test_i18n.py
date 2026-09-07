@@ -120,6 +120,29 @@ class I18nTests(unittest.TestCase):
             "  Last move: (8, 6)  (row col, 1-based, top-left is 1,1)",
         )
 
+    def test_doushou_english_board_marks(self) -> None:
+        self.assertEqual(
+            i18n.localize_game_line("斗兽棋棋盘（7列×9行，+红 -黑，!上一步）", "en"),
+            "Animal Chess board (7×9, +Red -Black, !last move)",
+        )
+        row = i18n.localize_game_line(" 1  -狮 -虎 黑陷 黑穴 黑陷 -豹 -象", "en")
+        self.assertIn("-L", row)
+        self.assertIn("-T", row)
+        self.assertIn("-P", row)
+        self.assertIn("-E", row)
+        self.assertIn("bT", row)
+        self.assertIn("bD", row)
+        self.assertNotIn("狮", row)
+        self.assertNotIn("象", row)
+        self.assertEqual(
+            i18n.localize_game_line("象不能吃鼠。", "en"),
+            "Elephant cannot capture Rat.",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("红方 Alice 走 鼠：(7,7) -> (6,7)，吃掉黑方象", "en"),
+            "Red Alice plays Rat:(7,7) -> (6,7), captures Black Elephant",
+        )
+
     def test_env_default_override(self) -> None:
         old = os.environ.get("SSHCHAT_DEFAULT_LOCALE")
         try:

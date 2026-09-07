@@ -542,10 +542,10 @@ enum ChatLineParsers {
         if t.isEmpty { return false }
         let chessPieces = CharacterSet(charactersIn: "♔♕♖♗♘♙♚♛♜♝♞♟")
         if t.unicodeScalars.contains(where: { chessPieces.contains($0) }) { return true }
-        if t.contains("楚河汉界") || t.contains("图例：") || t.contains("请用等宽") || t.contains("己方在下方") {
+        if t.contains("楚河汉界") || t.contains("Chu River Han Border") || t.contains("图例：") || t.contains("Legend:") || t.contains("请用等宽") || t.contains("己方在下方") || t.contains("you are at the bottom") || t.contains("you at bottom") {
             return true
         }
-        if t.contains("←") && (t.contains("纵线") || t.contains("红方") || t.contains("黑方") || t.contains("白方")) {
+        if t.contains("←") && (t.contains("纵线") || t.contains("红方") || t.contains("黑方") || t.contains("白方") || t.contains("Red") || t.contains("Black") || t.contains("White")) {
             return true
         }
         if t.contains("-车") || t.contains("+车") || t.contains("-将") || t.contains("+帅")
@@ -568,7 +568,7 @@ enum ChatLineParsers {
         }
         let keys = [
             "轮到", "上一步", "对局", "gomoku", "chess", "xiangqi", "围棋",
-            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "积分=", "rating=", "W/L/D",
+            "五子棋", "中国象棋", "国际象棋", "斗兽棋", "Animal Chess", "积分=", "rating=", "W/L/D",
             "将军", "停一手", "落子", "走子", "行棋", "空席",
         ]
         let lower = t.lowercased()
