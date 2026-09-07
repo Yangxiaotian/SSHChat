@@ -36,7 +36,7 @@ MESSAGES: dict = {
         "[*] /library find <keyword>        Find by title; while reading, search in the current book (aliases: search / 搜索 / 查找).\n",
         "[*] /dict en|cn|hh <word>  Dictionary: EN→ZH, ZH→EN, Chinese gloss; /dict <word> auto-detects.\n",
         "[*]\n",
-        "[*] /sendfile      Send a file to the current room; you get an upload URL; the key is given separately.\n",
+        "[*] /sendfile      Send a file to the current room (ok when alone — same nick on another device can download); you get an upload URL; the key is given separately.\n",
         "[*] /sendfile <nick>    Send a file to a user (offline → leave-message on next login; /leave to list/recall).\n",
         "[*] /sendfile #<room>   Send a file to a room; each member gets a distinct download URL + key.\n",
         "[*]              Filename is whatever you upload; you need not put it in the command.\n",

@@ -5284,7 +5284,7 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
     
     if raw.lower() in ("help", "?", "帮助"):
         send_line(conn, "[*] 用法：\n")
-        send_line(conn, "[*]   /sendfile          - 发送到当前房间\n")
+        send_line(conn, "[*]   /sendfile          - 发送到当前房间（仅自己也可发，同名多端可下载）\n")
         send_line(conn, "[*]   /sendfile <昵称>   - 发送给某个用户\n")
         send_line(conn, "[*]   /sendfile #<房间>  - 发送到指定房间\n")
         send_line(conn, "[*] 文件名不用写，以你上传时选的文件为准。\n")
@@ -5321,8 +5321,8 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                 send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
                 return
             
-            # Everyone in the room except the sender (by nick, not just this SSH
-            # session — same user may be logged in on phone + desktop).
+            # Other nicks in the room (dedupe by nick). Same-nick other sessions
+            # share one download slot via notify fan-out when sender is a recipient.
             sender_lower = sender.lower()
             seen_names = {sender_lower}
             for c in rooms[room_name]:
@@ -5347,8 +5347,13 @@ def _handle_sendfile(conn, sender: str, payload: str) -> None:
                     seen.add(rk)
         
         if not recipients:
-            send_line(conn, f"[*] 房间 #{room_name} 中没有其他用户。\n")
-            return
+            # Alone (or only same-nick sessions): still allow upload so another
+            # device logged in as the same nick can download.
+            recipients = [sender]
+            send_line(
+                conn,
+                f"[*] 房间 #{room_name} 仅你在线；上传后同名多端可下载。\n",
+            )
     else:
         # Sending to specific user(s) — local online, federated online, or offline leave.
         target_lower = target.lower()

@@ -10,6 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 tmpdir = tempfile.mkdtemp(prefix="sshchat_cmd_")
 os.environ["SSHCHAT_FILE_STORAGE_DIR"] = os.path.join(tmpdir, "files")
 os.environ["SSHCHAT_FILE_TRANSFER_STORE"] = os.path.join(tmpdir, "transfers.json")
+# This script's assertions expect the Chinese strings used throughout (matching
+# the hardcoded /sendfile UI text), so pin the i18n default instead of relying
+# on whatever SSHCHAT_DEFAULT_LOCALE happens to be set to in the environment.
+os.environ["SSHCHAT_DEFAULT_LOCALE"] = "zh"
+os.environ["SSHCHAT_LOCALE_STORE"] = os.path.join(tmpdir, "user_locales.json")
 
 import server
 
@@ -78,12 +83,14 @@ t = latest()
 assert set(t.download_tokens) == {"bob"} and t.filename == ""
 print("4. 旧写法 /sendfile bob report.pdf 仍可用，多余文件名被忽略并提示")
 
-# 5. Room with nobody else
+# 5. Room with nobody else: still allow send (same-nick multi-device)
 server.clients[alice]["current_room"] = "quiet"
 out = run("/sendfile")
-assert "没有其他用户" in out, out
+assert "仅你在线" in out and "上传网址" in out, out
+t = latest()
+assert t.room == "quiet" and set(t.download_tokens) == {"alice"}, t
 server.clients[alice]["current_room"] = "dev"
-print("5. 空房间给出友好提示")
+print("5. 空房间允许发给自己（同名多端）")
 
 # 6. Room the sender is not in
 out = run("/sendfile #nosuch")
