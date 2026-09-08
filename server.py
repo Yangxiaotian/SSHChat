@@ -3218,6 +3218,41 @@ def _fed_on_file_host_request(
         except Exception as e:
             print(f"federation: reply_file_host (canvas_query) failed: {e!r}")
         return
+    if mode == "canvas_clear":
+        reply = {
+            "ok": False,
+            "cleared": False,
+            "error": "canvas unavailable",
+            "req_id": req_id,
+            "mode": "canvas_clear",
+        }
+        try:
+            room_name = str(payload.get("room") or "").strip()
+            if not room_name:
+                reply["error"] = "invalid room"
+            else:
+                cleared = canvas_sharing.canvas_store.clear_open_room_board(room_name)
+                reply = {
+                    "ok": True,
+                    "cleared": cleared,
+                    "req_id": req_id,
+                    "mode": "canvas_clear",
+                }
+        except Exception as e:
+            print(f"[Canvas] federated clear error: {e!r}")
+            traceback.print_exc()
+            reply = {
+                "ok": False,
+                "cleared": False,
+                "error": str(e),
+                "req_id": req_id,
+                "mode": "canvas_clear",
+            }
+        try:
+            hub.reply_file_host(requester, req_id, reply)
+        except Exception as e:
+            print(f"federation: reply_file_host (canvas_clear) failed: {e!r}")
+        return
 
     reply: dict = {"ok": False, "error": "file transfer unavailable", "req_id": req_id}
     try:
@@ -3341,6 +3376,23 @@ def _federation_request_canvas_join(
     )
 
 
+def _federation_request_canvas_clear(
+    host_node: str,
+    room: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
+    """Ask the node actually hosting a room board to clear it (game round-switch)."""
+    return _federation_request_file_host(
+        host_node,
+        "",
+        [],
+        room,
+        timeout=timeout,
+        mode="canvas_clear",
+    )
+
+
 def _federation_request_file_host(
     host_node: str,
     sender: str,
@@ -3391,6 +3443,11 @@ def _federation_request_file_host(
     elif mode == "canvas_query":
         payload = {
             "mode": "canvas_query",
+            "room": room,
+        }
+    elif mode == "canvas_clear":
+        payload = {
+            "mode": "canvas_clear",
             "room": room,
         }
     else:
@@ -6400,6 +6457,25 @@ def _apply_game_canvas_actions(room: str, game) -> None:
             print(f"game canvas clear failed: room={room!r}")
             traceback.print_exc()
             continue
+        if not cleared:
+            # Board may be hosted on a federation peer (local record is only a
+            # mirror, so clear_open_room_board skips it) — forward the clear.
+            try:
+                session = canvas_sharing.canvas_store.find_open_for_room(room)
+            except Exception:
+                session = None
+            host_node = getattr(session, "host_node", "") if session else ""
+            hub = federation.get_hub()
+            if host_node and hub is not None and hub.enabled:
+                try:
+                    reply = _federation_request_canvas_clear(host_node, room)
+                    cleared = bool(reply.get("ok")) and bool(reply.get("cleared"))
+                except Exception:
+                    print(
+                        f"federation canvas clear failed: room={room!r} "
+                        f"host={host_node!r}"
+                    )
+                    traceback.print_exc()
         if cleared:
             broadcast_game(room, ["房间画板已清空，请画家重新作画。"])
 
