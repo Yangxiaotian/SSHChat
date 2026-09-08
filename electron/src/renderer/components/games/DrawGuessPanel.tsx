@@ -6,6 +6,7 @@ type Props = {
   nickname: string;
   boardText: string;
   onCmd: (cmd: string) => void;
+  onOpenCanvas?: () => void;
 };
 
 function parseMeta(boardText: string): {
@@ -53,8 +54,10 @@ export default function DrawGuessPanel({
   nickname,
   boardText,
   onCmd,
+  onOpenCanvas,
 }: Props) {
   const [guess, setGuess] = useState('');
+  const [canvasRequested, setCanvasRequested] = useState(false);
   const { t, locale } = useTranslation();
   const meta = useMemo(() => parseMeta(boardText), [boardText]);
   const state = meta.state.toLowerCase();
@@ -92,8 +95,17 @@ export default function DrawGuessPanel({
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('scores')}>
           {t('game.drawguess.scores')}
         </button>
-        <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/canvas')}>
-          {t('game.drawguess.openCanvas')}
+        <button
+          className="mini-btn"
+          disabled={disabled || canvasRequested}
+          onClick={() => {
+            setCanvasRequested(true);
+            if (onOpenCanvas) onOpenCanvas();
+            else onCmd('/canvas');
+            window.setTimeout(() => setCanvasRequested(false), 8000);
+          }}
+        >
+          {canvasRequested ? (locale === 'zh' ? '正在打开画板...' : 'Opening canvas...') : t('game.drawguess.openCanvas')}
         </button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>
           {t('game.end')}

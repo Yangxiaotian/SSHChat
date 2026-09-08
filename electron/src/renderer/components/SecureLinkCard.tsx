@@ -17,6 +17,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const openCanvas = useChatStore((s) => s.openCanvas);
   const openPiano = useChatStore((s) => s.openPiano);
   const expectingOwnCanvas = useChatStore((s) => s.expectingOwnCanvas);
+  const canvasRequestAt = useChatStore((s) => s.canvasRequestAt);
   const expectingOwnPiano = useChatStore((s) => s.expectingOwnPiano);
   const setExpectingOwnCanvas = useChatStore((s) => s.setExpectingOwnCanvas);
   const setExpectingOwnPiano = useChatStore((s) => s.setExpectingOwnPiano);
@@ -66,7 +67,11 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   // Same as Tk: only auto-open on the client that just clicked 画板/钢琴.
   useEffect(() => {
     if (autoOpened || busy) return;
-    if (payload.kind === 'canvas' && expectingOwnCanvas) {
+    if (
+      payload.kind === 'canvas' &&
+      expectingOwnCanvas &&
+      (!payload.receivedAt || payload.receivedAt >= canvasRequestAt)
+    ) {
       setAutoOpened(true);
       setExpectingOwnCanvas(false);
       openCanvas({ url: payload.url, key: payload.key });
@@ -81,6 +86,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
     autoOpened,
     busy,
     expectingOwnCanvas,
+    canvasRequestAt,
     expectingOwnPiano,
     openCanvas,
     openPiano,

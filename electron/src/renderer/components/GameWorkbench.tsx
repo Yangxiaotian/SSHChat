@@ -19,6 +19,7 @@ import NiuTouPanel from './games/NiuTouPanel';
 import { GameCommandFactory, getQuickByGame } from './games/commandFactory';
 import { GameKind } from './games/types';
 import { buildGameMove, t as translate, type Locale } from '../i18n';
+import { isInviteNoise } from '../lib/secureLinks';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
@@ -118,6 +119,9 @@ function stripGameProtocolPrefix(line: string): string {
 
 function isLikelyGameLine(line: string): boolean {
   line = stripGameProtocolPrefix(line);
+  // Canvas/file invite lines can contain game ids in random URLs or keys.
+  // Keep them out of the game board parser; ChatArea renders them as cards.
+  if (isInviteNoise(line)) return false;
   if (isXiangqiBoardLine(line)) return true;
   // SSH/protocol normalization may remove the renderer's leading padding.
   // Keep a plain 1..15 Gomoku column header so the panel can parse the board.
@@ -525,7 +529,7 @@ function isCompleteXiangqiBoard(board: string): boolean {
 }
 
 export default function GameWorkbench() {
-  const { messages, activeRoom, privacyMode, status, users, nickname, locale, doNotDisturb, setComposerText } = useChatStore();
+  const { messages, activeRoom, privacyMode, status, users, nickname, locale, doNotDisturb, setComposerText, setExpectingOwnCanvas } = useChatStore();
   const tr = (key: string, vars?: Record<string, string | number>) => translate(locale, key, vars);
   const [moveText, setMoveText] = useState('');
   const [showBoard, setShowBoard] = useState(true);
@@ -569,7 +573,7 @@ export default function GameWorkbench() {
   const { board, game, systemLines } = useMemo(() => {
     const allLines = roomMessages
       .filter((m) => m.type === 'system' || m.type === 'game')
-      .map((m) => m.content);
+      .flatMap((m) => m.content.split(/\r?\n/));
 
     if (hasFreshNoActiveGame(allLines)) {
       return { board: '', game: 'none' as GameKind, systemLines: allLines };
@@ -769,7 +773,18 @@ export default function GameWorkbench() {
 
           {game === 'sanguo' && <SanguoPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
           {game === 'werewolf' && <WerewolfPanel disabled={disabled} users={users} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
-          {game === 'drawguess' && <DrawGuessPanel disabled={disabled} nickname={nickname} boardText={board} onCmd={(cmd) => sendMove(cmd)} />}
+          {game === 'drawguess' && (
+            <DrawGuessPanel
+              disabled={disabled}
+              nickname={nickname}
+              boardText={board}
+              onCmd={(cmd) => sendMove(cmd)}
+              onOpenCanvas={() => {
+                setExpectingOwnCanvas(true);
+                void runAction('/canvas');
+              }}
+            />
+          )}
 
           {game === 'holdem' && <HoldemPanel disabled={disabled} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
           {game === 'zjh' && <ZjhPanel disabled={disabled} users={users} nickname={nickname} onCmd={(cmd) => sendMove(cmd)} boardText={board} />}
@@ -786,7 +801,7 @@ export default function GameWorkbench() {
           <div className="game-workbench-toolbar">
             <span className="game-workbench-hint-inline">{tr('game.oneGameRule')}</span>
             <div className="game-workbench-toolbar-actions">
-              {hasBoard && (
+              {hasBoard && game !== 'drawguess' && (
                 <button className="mini-btn" disabled={disabled} onClick={() => setShowBoard((v) => !v)}>
                   {showBoard ? tr('game.advisor.collapseBoard') : tr('game.advisor.expandBoard')}
                 </button>
@@ -797,7 +812,7 @@ export default function GameWorkbench() {
             </div>
           </div>
 
-          {hasBoard && showBoard && <pre className="game-workbench-body">{cleanBoard}</pre>}
+          {hasBoard && showBoard && game !== 'drawguess' && <pre className="game-workbench-body">{cleanBoard}</pre>}
           {!hasBoard && <div className="game-workbench-empty">{tr('game.advisor.noBoard')}</div>}
 
           {showAdvanced ? (

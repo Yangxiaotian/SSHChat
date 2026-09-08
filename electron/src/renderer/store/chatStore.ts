@@ -119,6 +119,7 @@ interface ChatState {
   pianoMaximized: boolean;
   /** True after this client clicked 画板/钢琴 — auto-open the next matching invite. */
   expectingOwnCanvas: boolean;
+  canvasRequestAt: number;
   expectingOwnPiano: boolean;
 
   monitorEnabled: boolean;
@@ -194,6 +195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pianoSession: null,
   pianoMaximized: false,
   expectingOwnCanvas: false,
+  canvasRequestAt: 0,
   expectingOwnPiano: false,
 
   monitorEnabled: false,
@@ -364,6 +366,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     pianoSession: null,
     pianoMaximized: false,
     expectingOwnCanvas: false,
+    canvasRequestAt: 0,
     expectingOwnPiano: false,
   }),
 
@@ -422,7 +425,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   }),
   closePiano: () => set({ pianoSession: null, pianoMaximized: false }),
   setPianoMaximized: (value) => set({ pianoMaximized: value }),
-  setExpectingOwnCanvas: (value) => set({ expectingOwnCanvas: value }),
+  setExpectingOwnCanvas: (value) => set({
+    expectingOwnCanvas: value,
+    canvasRequestAt: value ? Date.now() : 0,
+  }),
   setExpectingOwnPiano: (value) => set({ expectingOwnPiano: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),

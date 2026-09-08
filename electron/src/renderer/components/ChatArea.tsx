@@ -7,7 +7,7 @@ import SecureLinkCard from './SecureLinkCard';
 import GameWorkbench from './GameWorkbench';
 import CanvasPanel from './CanvasPanel';
 import PianoPanel from './PianoPanel';
-import { groupSecureLinkMessages } from '../lib/secureLinks';
+import { groupSecureLinkMessages, isInviteNoise } from '../lib/secureLinks';
 import {
   extractFileFromDataTransfer,
   getPasteUploadState,
@@ -106,7 +106,23 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages, canvasSession, canvasMaximized, pianoSession, pianoMaximized } = useChatStore();
+  const {
+    messages,
+    activeRoom,
+    nickname,
+    status,
+    privacyMode,
+    doNotDisturb,
+    clearMessages,
+    canvasSession,
+    canvasMaximized,
+    pianoSession,
+    pianoMaximized,
+    expectingOwnCanvas,
+    canvasRequestAt,
+    openCanvas,
+    setExpectingOwnCanvas,
+  } = useChatStore();
   const mediaSession = canvasSession || pianoSession;
   const mediaMaximized = canvasSession ? canvasMaximized : pianoMaximized;
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -132,7 +148,7 @@ export default function ChatArea() {
       if (msg.hidden) return false;
       if (msg.type === 'chat' || msg.type === 'pm') return true;
       if (msg.type === 'game') return false;
-      if (msg.type === 'system') return !isGameFloodMessage(msg.content);
+      if (msg.type === 'system') return isInviteNoise(msg.content) || !isGameFloodMessage(msg.content);
       return false;
     });
   }, [roomMessages]);
@@ -141,6 +157,19 @@ export default function ChatArea() {
     () => groupSecureLinkMessages(visibleMessages),
     [visibleMessages],
   );
+
+  useEffect(() => {
+    if (!expectingOwnCanvas) return;
+    const latest = [...timelineItems].reverse().find(
+      (item) =>
+        item.type === 'secure-link' &&
+        item.payload.kind === 'canvas' &&
+        (!item.payload.receivedAt || item.payload.receivedAt >= canvasRequestAt),
+    );
+    if (!latest || latest.type !== 'secure-link') return;
+    setExpectingOwnCanvas(false);
+    openCanvas(latest.payload);
+  }, [canvasRequestAt, expectingOwnCanvas, openCanvas, setExpectingOwnCanvas, timelineItems]);
 
   useEffect(() => {
     if (!stickToBottom) return;

@@ -107,6 +107,35 @@ function buildGomokuPrefixedLines() {
   return buildGomokuEnglishSeatLines().map((line) => `[#default] [*] ${line}`);
 }
 
+function buildDrawGuessLines() {
+  return [
+    '你画我猜',
+    'drawguess state: drawing',
+    'host: zouyu',
+    'round: 1/4',
+    '积分：zouyu 0，R1 0',
+    'drawer: zouyu',
+    '猜词：/game move guess <词>；跳过：/game move skip',
+    '画板：/canvas（每回合开始会清板）',
+  ];
+}
+
+function buildCanvasInviteLines() {
+  const url = 'https://example.com/canvas/abc-zjh-token';
+  return [
+    '========== 共享画布 ==========',
+    '发起人: zouyu',
+    '范围: 房间 #default',
+    '画布网址:',
+    url,
+    '访问密钥: ABC123',
+    '说明:',
+    '1. 打开网址，在页面里输入上面的密钥',
+    '=====================================',
+    `gui-open canvas ${url} ABC123`,
+  ];
+}
+
 const viteCmd = process.platform === 'win32'
   ? 'npx vite --host 127.0.0.1 --port 5173'
   : 'npx vite --host 127.0.0.1 --port 5173';
@@ -293,6 +322,17 @@ try {
     }
     console.log(`[qa] board ready -> ${titleText}`);
   };
+
+  // 0) 你画我猜：点击后必须把最新邀请直接嵌入客户端，而不是展示 URL。
+  await openByLines(buildDrawGuessLines(), 'DRAW & GUESS');
+  await page.getByRole('button', { name: /打开画板|Open canvas/ }).click();
+  await page.evaluate((payload) => {
+    // @ts-ignore
+    window.__qa.emitSystemLines(payload.lines);
+  }, { lines: buildCanvasInviteLines() });
+  await page.locator('.canvas-panel-frame').waitFor({ state: 'visible', timeout: 10000 });
+  assert(!(await page.locator('.game-workbench-body').isVisible()), '你画我猜仍展示原始画板协议日志');
+  await page.locator('.canvas-panel-toolbar-actions .mini-btn').last().click();
 
   // 1) 五子棋
   await openByLines(buildGomokuLines(), '五子棋棋盘');

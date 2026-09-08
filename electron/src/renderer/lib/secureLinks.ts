@@ -15,6 +15,7 @@ export type SecureLinkPayload = {
   key: string;
   title?: string;
   subtitle?: string;
+  receivedAt?: number;
 };
 
 export type TimelineItem =
@@ -168,6 +169,7 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
           kind,
           url: guiAlone[2],
           key: guiAlone[3].toUpperCase(),
+          receivedAt: msg.timestamp,
         },
         messages: [msg],
       });
@@ -229,6 +231,10 @@ export function groupSecureLinkMessages(messages: ChatMessage[]): TimelineItem[]
     const flatLines = block.flatMap(messageLines);
     const payload = parseBlockLines(flatLines);
     if (payload) {
+      payload.receivedAt = block.reduce(
+        (latest, item) => Math.max(latest, item.timestamp || 0),
+        0,
+      );
       out.push({
         type: 'secure-link',
         id: `secure_${block[0].id}`,
