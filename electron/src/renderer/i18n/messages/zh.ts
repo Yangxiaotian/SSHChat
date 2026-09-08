@@ -81,6 +81,7 @@ export const zhMessages = {
       sendfile: '收发文件（当前房间 / 指定用户 / #房间）',
       canvas: '共享画布（当前房间 / 指定用户 / #房间）',
       piano: '房间钢琴（当前房间 / 指定用户 / #房间）',
+      clock: '棋钟（Kindle 网页，不用脚本）',
       leave: '查看/撤回未读留言',
       clear: '清空本地视图（当前房间）',
       game: '游戏命令',

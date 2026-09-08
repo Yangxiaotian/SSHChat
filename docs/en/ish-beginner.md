@@ -78,7 +78,11 @@ Host sshchat
 
 Then: `ssh sshchat`.
 
-## 6. Shared drawing board
+## 6. Chess clock (Kindle)
+
+Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). Copy the URL into the **Kindle browser**. The page uses no JavaScript: Red moves first; after you move, tap your own big button.
+
+## 7. Shared drawing board
 
 Type `/canvas` in chat. You get a **URL** and a **6-character key on a separate line**. Copy the URL into Safari (iSH cannot open the web page), enter the key, then draw. Strokes sync to everyone who unlocked the board.
 

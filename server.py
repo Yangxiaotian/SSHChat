@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import canvas_sharing
+import clock_sharing
 import dict_lookup
 import federation
 import games
@@ -5359,6 +5360,213 @@ def _handle_piano(conn, sender: str, payload: str) -> None:
     _deliver_piano_invites(session)
 
 
+def _clock_time_from_parts(parts: list[str]) -> tuple[int, int]:
+    for part in parts:
+        parsed = clock_sharing.parse_time_spec(part)
+        if parsed is not None:
+            return parsed
+    return clock_sharing.DEFAULT_BASE_MS, 0
+
+
+def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, lang: str) -> str:
+    if file_http is None:
+        return ""
+    url = f"{file_http.get_base_url().rstrip('/')}/clock/{session.token}"
+    minutes = session.base_ms // 60000
+    inc = session.inc_ms // 1000
+    where = f"#{session.room}" if session.room else "private"
+    if lang == "en":
+        lead = "Joined the existing clock." if rejoined else "Chess clock is ready."
+        return (
+            "[*] ========== Chess clock ==========\n"
+            f"[*] {lead}\n"
+            f"[*] Scope: {where}  Time: {minutes}m+{inc}s each\n"
+            "[*] Open this URL in the Kindle browser (no scripts):\n"
+            f"[*] {url}\n"
+            "[*] Red moves first. After you move, tap your own big button.\n"
+            "[*] =================================\n"
+        )
+    lead = "已加入现有棋钟。" if rejoined else "棋钟已准备好。"
+    return (
+        "[*] ========== 棋钟 ==========\n"
+        f"[*] {lead}\n"
+        f"[*] 范围: {where}  每方 {minutes} 分 + 每步 {inc} 秒\n"
+        "[*] 用 Kindle 浏览器打开下面的网址（本页不用脚本）：\n"
+        f"[*] {url}\n"
+        "[*] 红方先走。走完棋的一方点自己的大按钮。\n"
+        "[*] ===========================\n"
+    )
+
+
+def _deliver_clock_url(
+    session: clock_sharing.ClockSession,
+    *,
+    only_conn=None,
+    rejoined: bool = False,
+    extra_nicks: Optional[list[str]] = None,
+) -> None:
+    if file_http is None:
+        return
+    targets = []
+    if only_conn is not None:
+        targets.append(only_conn)
+    else:
+        with lock:
+            if session.room and session.room in rooms:
+                targets.extend(list(rooms[session.room]))
+            wanted = {n.lower() for n in (extra_nicks or [])}
+            if wanted:
+                for c, info in clients.items():
+                    if info.get("name", "").lower() in wanted and c not in targets:
+                        targets.append(c)
+    seen = set()
+    for c in targets:
+        if c in seen:
+            continue
+        seen.add(c)
+        try:
+            lang = conn_locale(c)
+            send_line(c, _clock_invite_text(session, rejoined=rejoined, lang=lang))
+        except Exception as e:
+            print(f"[Clock] notify failed: {e}")
+
+
+def _handle_clock(conn, sender: str, payload: str) -> None:
+    """Handle /clock — shared chess clock as a script-free web page."""
+    if file_http is None:
+        send_line(conn, "[*] 棋钟依赖文件网页服务，当前未启用。\n")
+        return
+
+    raw = payload[len("/clock") :].strip()
+    if raw.lower() in ("help", "?", "帮助"):
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(conn, "[*] Usage:\n")
+            send_line(conn, "[*]   /clock              - room clock, 10 minutes each\n")
+            send_line(conn, "[*]   /clock 10+5         - 10 minutes plus 5 seconds a move\n")
+            send_line(conn, "[*]   /clock #<room>      - clock for a room you are in\n")
+            send_line(conn, "[*]   /clock <nick>       - private clock with an online user\n")
+            send_line(conn, "[*]   /clock close        - creator closes the current room clock\n")
+            send_line(conn, "[*]   /clock new          - force a new clock\n")
+            send_line(conn, "[*] Open the URL on a Kindle. No JavaScript. Tap your side after you move.\n")
+        else:
+            send_line(conn, "[*] 用法：\n")
+            send_line(conn, "[*]   /clock              - 当前房间棋钟，每方 10 分钟\n")
+            send_line(conn, "[*]   /clock 10+5         - 每方 10 分钟，每步加 5 秒\n")
+            send_line(conn, "[*]   /clock #<房间>      - 指定房间棋钟（你必须在该房内）\n")
+            send_line(conn, "[*]   /clock <昵称>       - 与在线用户开私密棋钟\n")
+            send_line(conn, "[*]   /clock close        - 发起人关闭当前房间棋钟\n")
+            send_line(conn, "[*]   /clock new          - 强制新开\n")
+            send_line(conn, "[*] 把网址放到 Kindle 浏览器打开。不用脚本。走完后点自己的大按钮。\n")
+        return
+
+    parts = raw.split()
+    force_new = False
+    if parts and parts[0].lower() in ("new", "新建"):
+        force_new = True
+        parts = parts[1:]
+
+    target = ""
+    for part in parts:
+        if clock_sharing.parse_time_spec(part) is None:
+            target = part
+            break
+    base_ms, inc_ms = _clock_time_from_parts(parts)
+
+    if target.lower() in ("close", "关闭", "end"):
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+        session = clock_sharing.clock_store.find_open_for_room(room_name)
+        if session is None:
+            send_line(conn, f"[*] 房间 #{room_name} 当前没有进行中的棋钟。\n")
+            return
+        ok, err = clock_sharing.clock_store.close_session(session.session_id, sender)
+        if not ok:
+            send_line(conn, "[*] 只有发起人可以关闭棋钟。\n" if err == "not creator" else f"[*] {err}\n")
+            return
+        send_line(conn, f"[*] 已关闭房间 #{room_name} 的棋钟。\n")
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 关闭了棋钟。\n".encode("utf-8"),
+        )
+        return
+
+    room_name: Optional[str] = None
+    if not target:
+        with lock:
+            info = clients.get(conn)
+            room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    elif target.startswith("#"):
+        room_name = normalize_room(target[1:])
+        if not room_name:
+            send_line(conn, "[*] 无效的房间名。\n")
+            return
+
+    if room_name is not None:
+        with lock:
+            if room_name not in rooms:
+                send_line(conn, f"[*] 房间 #{room_name} 不存在。\n")
+                return
+            if conn not in rooms[room_name]:
+                send_line(conn, f"[*] 你不在房间 #{room_name} 中。\n")
+                return
+        if not force_new:
+            existing = clock_sharing.clock_store.find_open_for_room(room_name)
+            if existing is not None:
+                send_line(
+                    conn,
+                    f"[*] 房间 #{room_name} 已有棋钟，正在重发网址。（强制新开用 /clock new）\n",
+                )
+                _deliver_clock_url(existing, only_conn=conn, rejoined=True)
+                return
+        else:
+            old = clock_sharing.clock_store.find_open_for_room(room_name)
+            if old is not None:
+                clock_sharing.clock_store.close_session(old.session_id, old.creator)
+    else:
+        target_lower = target.lower()
+        with lock:
+            online = [
+                info["name"]
+                for info in clients.values()
+                if info["name"].lower() == target_lower
+            ]
+        if not online:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled and hub.has_remote_user(target):
+                online = [target]
+        if not online:
+            send_line(conn, f"[*] 用户 {target} 不在线。\n")
+            return
+        if target_lower == sender.lower():
+            send_line(conn, "[*] 私密棋钟请指定另一位在线用户。\n")
+            return
+
+    try:
+        session = clock_sharing.clock_store.create_session(
+            creator=sender,
+            room=room_name,
+            base_ms=base_ms,
+            inc_ms=inc_ms,
+            lang=conn_locale(conn),
+        )
+    except Exception as e:
+        print(f"[Clock] create failed: {e}")
+        traceback.print_exc()
+        send_line(conn, "[*] 创建棋钟失败，请稍后重试。\n")
+        return
+
+    if room_name:
+        broadcast_room(
+            room_name,
+            f"[*] {sender} 开启了棋钟。请打开下面的网址（可用 Kindle）。\n".encode("utf-8"),
+        )
+        _deliver_clock_url(session, rejoined=False)
+    else:
+        _deliver_clock_url(session, extra_nicks=[sender, target], rejoined=False)
+
+
 def _handle_sendfile(conn, sender: str, payload: str) -> None:
     """Handle /sendfile command for secure file sharing."""
     global file_http
@@ -7630,6 +7838,10 @@ def handle_command(conn, payload: str) -> None:
         _handle_piano(conn, name, payload)
         return
 
+    if cmd == "/clock":
+        _handle_clock(conn, name, payload)
+        return
+
     send_line(conn, "[*] Unknown command. Try /help\n")
 
 
@@ -8205,7 +8417,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /leave /part /announce /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -8338,6 +8550,7 @@ def run_server() -> int:
                             file_sharing.file_transfer_store.cleanup_expired()
                             canvas_sharing.canvas_store.cleanup_expired()
                             piano_sharing.piano_store.cleanup_expired()
+                            clock_sharing.clock_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

@@ -148,6 +148,7 @@ _TOP_COMMANDS = (
     "/canvas",
     "/board",
     "/piano",
+    "/clock",
     "/leave",
     "/unmsg",
     "/announce",
@@ -187,6 +188,12 @@ _LATER_SUBCOMMANDS = {
     "help": None,
 }
 
+_CLOCK_SUBCOMMANDS = {
+    "help": None,
+    "close": None,
+    "new": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -198,6 +205,7 @@ _SUBCOMMANDS_BY_CMD = {
     "/language": sorted(_LANG_SUBCOMMANDS),
     "/poll": sorted(_POLL_SUBCOMMANDS),
     "/later": sorted(_LATER_SUBCOMMANDS),
+    "/clock": sorted(_CLOCK_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -1242,6 +1250,7 @@ def main():
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/canvas | /canvas <nick> | /canvas #<room>  "
         "/piano | /piano <nick> | /piano #<room>  "
+        "/clock | /clock 10+5 | /clock #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
         "/lang en|zh  /dnd on|off  /clear  /help"

@@ -83,6 +83,7 @@ export const enMessages: MessageTree = {
       sendfile: 'Send a file (current room / nick / #room)',
       canvas: 'Shared canvas (current room / nick / #room)',
       piano: 'Room piano (current room / nick / #room)',
+      clock: 'Chess clock (Kindle web page, no scripts)',
       leave: 'List or recall unread leave-messages',
       clear: 'Clear local view (current room)',
       game: 'Game commands',

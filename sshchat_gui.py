@@ -214,6 +214,7 @@ _TOP_COMMANDS = (
     "/canvas",
     "/board",
     "/piano",
+    "/clock",
     "/leave",
     "/unmsg",
     "/announce",
@@ -290,6 +291,7 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
     "/language": ("en", "zh", "english", "chinese", "中文", "英文"),
     "/poll": ("new", "close", "help", "show"),
     "/later": ("list", "ls", "show", "cancel", "help"),
+    "/clock": ("help", "close", "new"),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
