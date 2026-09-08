@@ -3428,6 +3428,19 @@ def _federation_sync_file_public() -> None:
         print(f"federation: file public sync failed: {e!r}")
 
 
+def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
+    """Peer Cloudflare/public file URL changed — rewrite canvas mirror links."""
+    try:
+        n = canvas_sharing.canvas_store.refresh_host_base_url(node_id, base_url)
+    except Exception as e:
+        print(f"[Canvas] refresh_host_base_url error: {e!r}")
+        return
+    if n:
+        print(
+            f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
+        )
+
+
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
     with _library_page_waiters_lock:
         waiter = _library_page_waiters.get(req_id)
@@ -4388,12 +4401,23 @@ def _deliver_canvas_invites(
                 session.keys = dict(live.keys)
                 session.keys_rotated_at = live.keys_rotated_at
     base_url = (session.host_base_url or "").strip()
+    hub = federation.get_hub()
+    # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
+    # latest fpub so invites survive Quick Tunnel hostname churn.
+    if session.host_node and hub is not None and hub.enabled:
+        live = hub.get_remote_file_public(session.host_node)
+        if live:
+            base_url = live
+            if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
+                canvas_sharing.canvas_store.refresh_host_base_url(
+                    session.host_node, live
+                )
+                session.host_base_url = live
     if not base_url:
         if file_http is None:
             return
         base_url = file_http.get_base_url()
     base_url = base_url.rstrip("/")
-    hub = federation.get_hub()
     only_key = (only or "").strip().lower()
     for participant, token in session.tokens.items():
         if only_key and participant.lower() != only_key:
@@ -4608,6 +4632,14 @@ def _fed_on_canvas_sync(origin: str, announce: dict) -> None:
         _federation_adopt_remote_canvas(announce)
         return
     if local.session_id == sid:
+        # Same board: still refresh base_url / keys when the host's CF moves.
+        if local.host_node and canvas_sharing.canvas_store.apply_remote_announce_refresh(
+            announce
+        ):
+            print(
+                f"[Canvas] refreshed federated mirror {sid[:12]}… "
+                f"base_url={base_url}"
+            )
         return
 
     local_auth = (local.host_node or local_id).strip()
@@ -6948,6 +6980,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
     _fed_hub.on_offline_pm = _fed_on_offline_pm
     _fed_hub.on_canvas_sync = _fed_on_canvas_sync
+    _fed_hub.on_file_public_change = _fed_on_file_public_change
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _fed_hub.on_ratings = _fed_on_ratings
     _fed_hub.get_local_ratings = rating_store.export_entries
@@ -8200,6 +8233,15 @@ def run_server() -> int:
                         if cur != last:
                             last = cur
                             _federation_sync_file_public()
+                            # Room canvas invites embed the CF hostname; re-csync
+                            # so peers rewrite frozen host_base_url mirrors.
+                            try:
+                                _federation_push_all_canvas_announces()
+                            except Exception as e:
+                                print(
+                                    f"[FileTransfer] canvas announce refresh "
+                                    f"after CF change failed: {e}"
+                                )
                             if cur:
                                 print(f"[FileTransfer] federation file public -> {cur}")
                             else:

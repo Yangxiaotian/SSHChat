@@ -190,6 +190,8 @@ class FederationHub:
         self.get_local_file_public = get_local_file_public
         # origin_node, announce_dict — room canvas advertise / conflict merge
         self.on_canvas_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
+        # node_id, base_url — peer public file URL changed (refresh canvas mirrors)
+        self.on_file_public_change: Optional[Callable[[str, str], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -2050,6 +2052,15 @@ class FederationHub:
             f"{len(users)} user(s) → tracking {sum(1 for k in self._remote_users if k[0] == node_id)}"
         )
 
+    def get_remote_file_public(self, node_id: str) -> Optional[str]:
+        """Latest advertised public file base URL for *node_id*, if any."""
+        node_id = str(node_id or "").strip()
+        if not node_id:
+            return None
+        info = self._remote_file_pubs.get(node_id) or {}
+        url = str(info.get("base_url") or "").strip().rstrip("/")
+        return url or None
+
     def _remote_file_pub_set(self, node_id: str, base_url: str) -> None:
         if node_id == self.node_id:
             return
@@ -2057,11 +2068,18 @@ class FederationHub:
         if not url or url == "-":
             self._remote_file_pubs.pop(node_id, None)
             return
+        cleaned = url.rstrip("/")
+        prev = str((self._remote_file_pubs.get(node_id) or {}).get("base_url") or "").strip()
         self._remote_file_pubs[node_id] = {
-            "base_url": url.rstrip("/"),
+            "base_url": cleaned,
             "seen_at": time.time(),
         }
         print(f"federation: file public from {node_id}: {url}")
+        if prev != cleaned and self.on_file_public_change is not None:
+            try:
+                self.on_file_public_change(node_id, cleaned)
+            except Exception as e:
+                print(f"federation: on_file_public_change error: {e!r}")
 
     def _remote_library_bulk(self, node_id: str, b64: str) -> None:
         if node_id == self.node_id:

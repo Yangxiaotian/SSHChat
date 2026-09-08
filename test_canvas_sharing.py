@@ -190,6 +190,60 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found.session_id, "remote-sid")
 
+    def test_refresh_host_base_url_updates_mirrors(self) -> None:
+        self.store.register_remote_session(
+            session_id="remote-sid",
+            creator="Alice",
+            participants=["Bob"],
+            room="fed",
+            tokens={"Alice": "tok-a"},
+            keys={"Alice": "KEYAAA"},
+            host_node="node-b",
+            host_base_url="https://old.trycloudflare.com",
+        )
+        n = self.store.refresh_host_base_url(
+            "node-b", "https://new.trycloudflare.com"
+        )
+        self.assertEqual(n, 1)
+        found = self.store.find_open_for_room("fed")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.host_base_url, "https://new.trycloudflare.com")
+        # Idempotent when unchanged.
+        self.assertEqual(
+            self.store.refresh_host_base_url(
+                "node-b", "https://new.trycloudflare.com"
+            ),
+            0,
+        )
+
+    def test_apply_remote_announce_refresh(self) -> None:
+        self.store.register_remote_session(
+            session_id="remote-sid",
+            creator="Alice",
+            participants=["Bob"],
+            room="fed",
+            tokens={"Alice": "tok-a"},
+            keys={"Alice": "KEYAAA"},
+            host_node="node-b",
+            host_base_url="https://old.trycloudflare.com",
+        )
+        dirty = self.store.apply_remote_announce_refresh(
+            {
+                "session_id": "remote-sid",
+                "host_node": "node-b",
+                "base_url": "https://fresh.trycloudflare.com",
+                "tokens": {"Alice": "tok-a", "Bob": "tok-b"},
+                "keys": {"Alice": "NEWKEY", "Bob": "BOBKEY"},
+                "rev": 3,
+            }
+        )
+        self.assertTrue(dirty)
+        found = self.store.find_open_for_room("fed")
+        self.assertEqual(found.host_base_url, "https://fresh.trycloudflare.com")
+        self.assertEqual(found.keys["Alice"], "NEWKEY")
+        self.assertIn("Bob", found.tokens)
+        self.assertEqual(found.rev, 3)
+
     def test_reauth_keeps_recent_ticket_alive(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="lab"

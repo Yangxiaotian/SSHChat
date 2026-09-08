@@ -458,6 +458,75 @@ class CanvasStore:
                 return None
             return session
 
+    def refresh_host_base_url(self, host_node: str, base_url: str) -> int:
+        """Update frozen host_base_url on remote mirrors when a peer's CF URL moves.
+
+        Quick Tunnel hostnames change on deploy/restart; federation fpub / csync
+        must rewrite mirrors or invites keep pointing at a dead trycloudflare name.
+        """
+        host_node = (host_node or "").strip()
+        base = (base_url or "").strip().rstrip("/")
+        if not host_node or not base or base == "-":
+            return 0
+        changed = 0
+        with self.lock:
+            for session in self.sessions.values():
+                if session.closed or session.parked:
+                    continue
+                if (session.host_node or "").strip() != host_node:
+                    continue
+                prev = (session.host_base_url or "").strip().rstrip("/")
+                if prev == base:
+                    continue
+                session.host_base_url = base
+                changed += 1
+            if changed:
+                self._save()
+        return changed
+
+    def apply_remote_announce_refresh(self, announce: dict) -> bool:
+        """Refresh an existing remote mirror from csync (URL / keys / tokens)."""
+        session_id = str(announce.get("session_id") or "").strip()
+        if not session_id:
+            return False
+        base = str(announce.get("base_url") or "").strip().rstrip("/")
+        host_node = str(announce.get("host_node") or "").strip()
+        tokens = announce.get("tokens") or {}
+        keys = announce.get("keys") or {}
+        if not isinstance(tokens, dict):
+            tokens = {}
+        if not isinstance(keys, dict):
+            keys = {}
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or not session.host_node:
+                return False
+            dirty = False
+            if host_node and (session.host_node or "") != host_node:
+                session.host_node = host_node
+                dirty = True
+            if base and (session.host_base_url or "").rstrip("/") != base:
+                session.host_base_url = base
+                dirty = True
+            new_tokens = {str(k): str(v) for k, v in tokens.items() if str(k) and str(v)}
+            new_keys = {str(k): str(v) for k, v in keys.items() if str(k)}
+            if new_tokens and new_tokens != dict(session.tokens):
+                session.tokens = new_tokens
+                dirty = True
+            if new_keys and new_keys != dict(session.keys):
+                session.keys = new_keys
+                dirty = True
+            try:
+                rev = int(announce.get("rev") or 0)
+            except (TypeError, ValueError):
+                rev = 0
+            if rev > int(session.rev or 0):
+                session.rev = rev
+                dirty = True
+            if dirty:
+                self._save()
+            return dirty
+
     def participant_for_token(self, session: CanvasSession, token: str) -> Optional[str]:
         for name, t in session.tokens.items():
             if t == token:
