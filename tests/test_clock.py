@@ -49,6 +49,10 @@ class ClockTests(unittest.TestCase):
         self.assertNotIn("红方", page)
         self.assertNotIn("黑方", page)
         self.assertNotIn("http-equiv=\"refresh\"", page)
+        # Setup panel must include its own close control (mid bar used to be covered).
+        self.assertIn('id="setup"', page)
+        self.assertIn('class="close"', page)
+        self.assertIn("toggleSetup()", page)
 
 
 if __name__ == "__main__":

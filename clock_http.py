@@ -220,6 +220,8 @@ html, body {{
   text-align: center;
   font-size: 3vh;
   line-height: 8vh;
+  z-index: 3;
+  background: #fff;
 }}
 #mid a {{
   color: #000;
@@ -230,15 +232,24 @@ html, body {{
   position: absolute;
   left: 4%;
   right: 4%;
-  top: 38%;
+  top: 10%;
+  max-height: 34%;
+  overflow: auto;
   background: #fff;
   color: #000;
   border: 4px solid #000;
   padding: 2vh;
   font-size: 3.5vh;
   z-index: 2;
+  box-sizing: border-box;
 }}
 #setup a {{ color: #000; margin: 0 1vw; }}
+#setup .close {{
+  display: block;
+  text-align: center;
+  font-weight: bold;
+  margin-bottom: 1vh;
+}}
 </style>
 </head>
 <body>
@@ -260,7 +271,8 @@ html, body {{
     <div class="time" id="bottomTime">00:00</div>
     <div class="act" id="bottomAct"></div>
   </div>
-  <div id="setup">
+  <div id="setup" onclick="event.stopPropagation();">
+    <a href="#" class="close" onclick="return toggleSetup();">{html.escape(text['hide'])}</a>
     <p>{html.escape(text['note'])}</p>
     <p>{html.escape(text['base'])}: {' '.join(base_links)}</p>
     <p>{html.escape(text['inc'])}: {' '.join(inc_links)}</p>
