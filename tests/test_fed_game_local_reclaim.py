@@ -893,6 +893,87 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertNotIn("default", server.room_games)
         self.assertNotIn("default", server.room_game_provisional)
 
+    def test_fed_abort_drawguess_notifies_game_end(self) -> None:
+        """Remote /game abort must gend peers (ended flag was previously dropped)."""
+        from games import DrawGuessGame
+
+        room = "default"
+        host = DummyConn()
+        guest = DummyConn()
+        game = DrawGuessGame(host, "alice")
+        game.try_join(guest, "bob")
+        game.try_move(host, "start")
+        self.assertEqual(game.state, "drawing")
+        server.room_games[room] = game
+        server.room_game_authority[room] = "mac-node"
+        server.room_game_tokens[room] = "tok" + "0" * 29
+        server.clients[host] = {
+            "name": "alice",
+            "rooms": {room},
+            "current_room": room,
+        }
+        server.rooms[room] = {host}
+
+        ended: list[str] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "mac-node"
+            peer_count = 1
+
+            def end_game(self, r, authority, token=""):
+                ended.append((r, authority, token))
+
+            def sync_game(self, *a, **k):
+                raise AssertionError("ended abort must not gsync")
+
+            def send_game_private_to(self, *a, **k):
+                return None
+
+        with mock.patch.object(server, "_local_node_id", return_value="mac-node"), mock.patch.object(
+            federation, "get_hub", return_value=FakeHub()
+        ), mock.patch.object(server, "_persist_after_game_change"), mock.patch.object(
+            server, "broadcast_game"
+        ), mock.patch.object(server, "send_oriented_boards"), mock.patch.object(
+            server, "send_sanguo_hand_views"
+        ):
+            server._fed_execute_game_cmd(
+                "wsl-node", room, "wsl-node", "alice", "abort", ""
+            )
+        self.assertNotIn(room, server.room_games)
+        self.assertEqual(len(ended), 1)
+        self.assertEqual(ended[0][0], room)
+        self.assertEqual(ended[0][1], "mac-node")
+
+    def test_refresh_wait_settles_when_gend_clears_board(self) -> None:
+        """drawguess has no ply score; wait must accept board cleared by gend."""
+        room = "default"
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+            peer_count = 1
+
+            def request_game(self, *_a, **_k):
+                return None
+
+        class LiveGame:
+            state = "drawing"
+
+        server.room_games[room] = LiveGame()
+        server.room_game_authority[room] = "mac-node"
+
+        def clear_on_ask(_r):
+            server.room_games.pop(room, None)
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()), mock.patch.object(
+            server, "_federation_ask_peers_for_game", side_effect=clear_on_ask
+        ):
+            self.assertTrue(
+                server._federation_refresh_replica_and_wait(room, timeout=0.5)
+            )
+        self.assertNotIn(room, server.room_games)
+
 
 if __name__ == "__main__":
     unittest.main()

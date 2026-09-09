@@ -6296,6 +6296,9 @@ def _federation_refresh_replica_and_wait(
 
     Used before /game show on a non-authority node so a delayed/lost gsync after a
     forwarded move does not leave /game show on the previous ply.
+
+    Also treats gend (board cleared / ended) as settled — critical for forwarded
+    /game end and /game abort, and for games like drawguess with no ply counter.
     """
     hub = federation.get_hub()
     if hub is None or not hub.enabled or hub.peer_count < 1:
@@ -6307,6 +6310,7 @@ def _federation_refresh_replica_and_wait(
         if auth and auth == local:
             return True
         before = _game_progress_score(game)
+        prior_auth = auth
     try:
         _federation_ask_peers_for_game(room)
     except Exception as e:
@@ -6318,7 +6322,9 @@ def _federation_refresh_replica_and_wait(
         target = before + 1
     else:
         target = max(before + 1, int(min_progress))
-    return _federation_wait_game_progress(room, target, timeout=timeout)
+    return _federation_wait_after_greq(
+        room, min_progress=target, prior_auth=prior_auth, timeout=timeout
+    )
 
 def _federation_notify_game_end(room: str) -> None:
     hub = federation.get_hub()
@@ -6951,10 +6957,11 @@ def _fed_execute_game_cmd(
             return
         with lock:
             resumed = _resume_same_account_seat_locked(room, game, actor, name)
-            priv, bcast, _ = game.abort(actor, name)
+            priv, bcast, ended = game.abort(actor, name)
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + list(priv)
-        _finish_game_action(room, game, actor, priv, bcast, False, send_boards=False)
+        # Must honor ended=True so federation peers get gend (drawguess etc.).
+        _finish_game_action(room, game, actor, priv, bcast, ended, send_boards=False)
         return
 
     if sub == "end":
@@ -8308,10 +8315,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 send_line(conn, "[*] 本房没有进行中的对局。\n")
                 return
             resumed = _resume_same_account_seat_locked(room, game, conn, name)
-            priv, bcast, _ = game.abort(conn, name)
+            priv, bcast, ended = game.abort(conn, name)
         if resumed:
             priv = ["你已从其他终端续玩接管，以下是本次操作结果："] + priv
-        _finish_game_action(room, game, conn, priv, bcast, False, send_boards=False)
+        # Honor ended so room_games is cleared and federation peers get gend.
+        _finish_game_action(room, game, conn, priv, bcast, ended, send_boards=False)
         return
 
     if sub == "pgn":

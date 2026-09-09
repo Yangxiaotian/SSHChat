@@ -91,6 +91,15 @@ class ServerNewGamesTests(unittest.TestCase):
         self.assertIs(server.room_owners[self.room], self.second)
         self.assertIn(self.room, server.room_games)
 
+    def test_drawguess_host_abort_clears_room_and_notifies_federation(self):
+        ended_rooms: list[str] = []
+        server._federation_notify_game_end = ended_rooms.append
+        self._command(self.first, "first", "/game new drawguess")
+        self.assertIn(self.room, server.room_games)
+        self._command(self.first, "first", "/game abort")
+        self.assertNotIn(self.room, server.room_games)
+        self.assertEqual(ended_rooms, [self.room])
+
     def test_same_name_room_owner_can_end_after_disconnect(self):
         from session_store import DisconnectedSeat
 
