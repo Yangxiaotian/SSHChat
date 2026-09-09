@@ -664,15 +664,36 @@ def _deliver_due_capsules() -> None:
         text = str(cap.get("text") or "").strip()
         if not creator or not text:
             continue
-        loc = locale_store.get(creator)
-        line = i18n.t("server.later_deliver", loc, text=text)
-        targets = find_clients_by_nickname(creator, local_only=True)
-        if targets:
-            for peer_conn, _ in targets:
-                send_line(peer_conn, line)
-        else:
-            offline_messages.leave(creator, _LATER_OFFLINE_SENDER, text)
-    _mark_sessions_dirty()
+        local_targets = find_clients_by_nickname(creator)
+        for peer_conn, _ in local_targets:
+            line = i18n.t(
+                "server.later_deliver",
+                conn_locale(peer_conn),
+                text=text,
+            )
+            send_line(peer_conn, line)
+        remote_sent = False
+        hub = federation.get_hub()
+        if hub is not None and hub.enabled and hub.has_remote_user(creator):
+            try:
+                # Body only; peer formats with later_deliver (see _fed_on_pm).
+                remote_sent = hub.send_pm(creator, _LATER_OFFLINE_SENDER, text)
+            except Exception as e:
+                print(f"time capsule federation notify failed: {e!r}")
+        if not local_targets and not remote_sent:
+            stored = offline_messages.leave(creator, _LATER_OFFLINE_SENDER, text)
+            if stored is not None and hub is not None and hub.enabled:
+                try:
+                    hub.broadcast_offline_pm(
+                        creator,
+                        _LATER_OFFLINE_SENDER,
+                        text,
+                        leave_id=str(stored.get("id") or ""),
+                        ts=float(stored.get("ts") or 0) or None,
+                    )
+                except Exception as e:
+                    print(f"time capsule federation leave seed failed: {e!r}")
+    _safe_persist_sessions_now()
 
 
 def _capsule_loop() -> None:
@@ -729,7 +750,7 @@ def _handle_later(conn, name: str, room: str, payload: str) -> None:
                 return
             target = caps[idx - 1]
             room_capsules[:] = [c for c in room_capsules if c is not target]
-        _mark_sessions_dirty()
+        _safe_persist_sessions_now()
         send_line(conn, _ts(conn, "later_cancelled", index=idx))
         return
 
@@ -775,7 +796,7 @@ def _handle_later(conn, name: str, room: str, payload: str) -> None:
         _capsule_next_id += 1
         room_capsules.append(cap)
         room_capsules.sort(key=lambda c: float(c.get("deliver_at") or 0))
-    _mark_sessions_dirty()
+    _safe_persist_sessions_now()
     send_line(
         conn,
         _ts(conn, "later_scheduled", when=_format_later_when(deliver_at)),
@@ -1651,6 +1672,7 @@ def _load_persisted_sessions() -> None:
             if game is not None and getattr(game, "state", "ended") != "ended"
         )
         sessions = len(disconnected_sessions)
+        capsules = len(room_capsules)
     if parked_back:
         print(
             "promoted parked game(s) to active: "
@@ -1658,10 +1680,11 @@ def _load_persisted_sessions() -> None:
         )
     if parked_back or catalog_migrated:
         _persist_after_game_change()
-    if active or sessions:
+    if active or sessions or capsules:
         print(
-            f"restored {active} active room game(s) and "
-            f"{sessions} reconnect session(s) from {session_store.path}"
+            f"restored {active} active room game(s), "
+            f"{sessions} reconnect session(s), "
+            f"{capsules} time capsule(s) from {session_store.path}"
         )
 
 
@@ -1977,7 +2000,17 @@ def deliver_offline_messages(conn, recipient_name: str) -> int:
                       f"(from={sender}, to={recipient_name})")
             continue
         text = item.get("text") or ""
-        send_line(conn, _ts(conn, "offline_pm", sender=sender, when=when, text=text))
+        if (sender or "").strip().lower() == _LATER_OFFLINE_SENDER:
+            send_line(
+                conn,
+                i18n.t(
+                    "server.later_deliver",
+                    conn_locale(conn),
+                    text=text,
+                ),
+            )
+        else:
+            send_line(conn, _ts(conn, "offline_pm", sender=sender, when=when, text=text))
         lid = str(item.get("id") or "").strip()
         if lid:
             _federation_clear_offline_pm(recipient_name, lid)
@@ -7109,8 +7142,18 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     # Canvas invites are system blocks (gui-open canvas); keep them unwrapped
     # so GUI clients can auto-open. Regular PMs still get the PM prefix.
     canvas_invite = "gui-open canvas " in (text or "")
+    later_note = (from_name or "").strip().lower() == _LATER_OFFLINE_SENDER
     for peer_conn, _ in targets:
-        if canvas_invite:
+        if later_note:
+            send_line(
+                peer_conn,
+                i18n.t(
+                    "server.later_deliver",
+                    conn_locale(peer_conn),
+                    text=text,
+                ),
+            )
+        elif canvas_invite:
             payload = text if text.endswith("\n") else f"{text}\n"
             send_line(peer_conn, payload)
         else:

@@ -22,7 +22,8 @@ MESSAGES: dict = {
         "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
         "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
         "[*] /poll          房间投票：/poll new 问题 | 选项A | 选项B；/poll <序号> 投票；/poll close 结束。\n",
-        "[*] /later         私人时间胶囊（只提醒自己）：/later 30m 文本；/later 明天 09:00 文本；/later list；/later cancel <编号>。\n",
+        "[*] /later         私人时间胶囊（只提醒自己，重启后保留；联邦同名也会收到）："
+        "/later 30m 文本；/later 明天 09:00 文本；/later list；/later cancel <编号>。\n",
         "[*] /lang [en|zh]   切换界面语言（默认英文；偏好按昵称保存）。\n",
         "[*]\n",
         "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
@@ -147,12 +148,13 @@ MESSAGES: dict = {
         "poll_changed": "[*] 已改投为 {index}. {text}\n",
         "poll_close_denied": "[*] 只有发起人或房主可以结束投票。\n",
         "later_usage": (
-            "[*] 用法：/later 30m|2h|1d <文字>     （到期只提醒你自己）\n"
+            "[*] 用法：/later 30m|2h|1d <文字>     （到期只提醒你自己；重启后保留）\n"
             "[*]         /later 09:30 <文字>     （今天该时刻已过则明天）\n"
             "[*]         /later 明天 09:00 <文字>\n"
             "[*]         /later 2026-09-05 09:00 <文字>\n"
             "[*]         /later list             查看你的待提醒\n"
             "[*]         /later cancel <编号>    取消\n"
+            "[*] 联邦节点上同名账号也会收到提醒。\n"
         ),
         "later_none": "[*] 你没有待投递的时间胶囊。\n",
         "later_list_header": "[*] 你的待投递时间胶囊（{n}）：\n",
@@ -164,7 +166,7 @@ MESSAGES: dict = {
         "later_too_soon": "[*] 投递时间太近（至少 {min_sec} 秒以后）。\n",
         "later_too_far": "[*] 投递时间太远（最多 30 天以后）。\n",
         "later_user_full": "[*] 待提醒已满（最多 {max_n} 条）。\n",
-        "later_scheduled": "[*] 已设定提醒，将于 {when} 只发给你。\n",
+        "later_scheduled": "[*] 已设定提醒，将于 {when} 只发给你（重启后仍有效；联邦同名也会收到）。\n",
         "later_deliver": "[*] 时间胶囊：{text}\n",
         "offline_header": "[*] 你有 {n} 条留言（离线期间收到，按时间顺序）：\n",
         "offline_file_meta": "[*] （离线文件 {when}，来自 {sender}）\n",

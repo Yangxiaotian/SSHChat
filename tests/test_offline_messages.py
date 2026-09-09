@@ -15,6 +15,16 @@ class DummyConn:
     def __init__(self) -> None:
         self.sent: list[bytes] = []
         self.closed = False
+        self._timeout = None
+
+    def gettimeout(self):
+        return self._timeout
+
+    def settimeout(self, value) -> None:
+        self._timeout = value
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
 
     def send(self, data: bytes) -> None:
         self.sent.append(data)
