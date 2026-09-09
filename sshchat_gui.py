@@ -2334,6 +2334,9 @@ class SSHChatGUI:
         self.btn_piano, _ = self._pack_icon_btn(
             self._input_row, "🎹", "钢琴", self._start_piano
         )
+        self.btn_clock, _ = self._pack_icon_btn(
+            self._input_row, "⏱", "棋钟", self._start_clock
+        )
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
         )
@@ -2847,6 +2850,13 @@ class SSHChatGUI:
             return f"/piano #{self._send_target_value}"
         return "/piano"
 
+    def _clock_command(self) -> str:
+        if self._send_target_kind == "user" and self._send_target_value:
+            return f"/clock {self._send_target_value}"
+        if self._send_target_kind == "named_room" and self._send_target_value:
+            return f"/clock #{self._send_target_value}"
+        return "/clock"
+
     def _pack_icon_btn(self, parent, icon: str, tip: str, command):
         # macOS: ttk.Button hit-testing dies after connect/log redraws; tk.Button
         # plus ButtonRelease stays clickable without geometry nudges.
@@ -2931,6 +2941,17 @@ class SSHChatGUI:
         cmd = self._canvas_command()
         self._append_chat_line(f"[*] 正在创建共享画板…（{cmd}）", local_sent=True)
         self._expecting_own_canvas = True
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_clock(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        cmd = self._clock_command()
+        self._append_chat_line(f"[*] 正在开启棋钟…（{cmd}）", local_sent=True)
         try:
             self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:

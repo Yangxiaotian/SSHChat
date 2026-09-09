@@ -402,6 +402,12 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/canvas") }
     }
 
+    func startClock() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 正在开启棋钟…（/clock）")
+        Task { try? await session.send("/clock") }
+    }
+
     func startPiano() {
         guard connected else { toast = "请先连接"; return }
         appendText("[*] 正在开启房间钢琴…（/piano）")
@@ -1428,6 +1434,10 @@ struct ContentView: View {
             plusCell(title: "钢琴", system: "pianokeys") {
                 showPlusPanel = false
                 model.startPiano()
+            }
+            plusCell(title: "棋钟", system: "timer") {
+                showPlusPanel = false
+                model.startClock()
             }
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false

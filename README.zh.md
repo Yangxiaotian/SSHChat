@@ -484,7 +484,7 @@ npm run build:portable
 | `/canvas 昵称` | 与某位**在线**用户开私密画板 |
 | `/canvas #房间名` | 在指定房间开共享画板（你必须在该房间内） |
 | `/canvas close` / `/canvas new` | 发起人关闭当前房间画板；强制新开一局（即使房间已有） |
-| `/clock` | 当前房间棋钟（网页，不用脚本，可在 Kindle 打开） |
+| `/clock` | 当前房间棋钟（全屏网页，可在 Kindle 打开，设备上计时） |
 | `/clock 10+5` | 每方 10 分钟，每步加 5 秒 |
 | `/clock close` / `/clock new` | 发起人关闭当前房间棋钟；强制新开 |
 | `/leave` | 查看你发出、对方尚未阅读的留言 |

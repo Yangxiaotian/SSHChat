@@ -1,7 +1,7 @@
 """Shared chess-clock sessions for /clock.
 
-The web page is a Kindle-friendly form of links plus meta refresh.
-All timing happens here so the browser does not need JavaScript.
+The page ticks in the browser. This store only remembers the last
+reported times so a reload can resume.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ MIN_BASE_MS = 30 * 1000
 MAX_BASE_MS = 180 * 60 * 1000
 MAX_INC_MS = 60 * 1000
 DEFAULT_BASE_MS = 10 * 60 * 1000
-SIDES = ("red", "black")
+SIDES = ("top", "bottom")
 
 
 def _token() -> str:
@@ -78,8 +78,8 @@ class ClockSession:
     created_at: float
     base_ms: int
     inc_ms: int
-    red_ms: int
-    black_ms: int
+    top_ms: int
+    bottom_ms: int
     running: Optional[str]
     running_since: float
     flagged: Optional[str]
@@ -87,11 +87,11 @@ class ClockSession:
     closed: bool = False
 
     def other(self, side: str) -> str:
-        return "black" if side == "red" else "red"
+        return "bottom" if side == "top" else "top"
 
     def remaining_ms(self, side: str, now: Optional[float] = None) -> int:
         now = time.time() if now is None else now
-        stored = self.red_ms if side == "red" else self.black_ms
+        stored = self.top_ms if side == "top" else self.bottom_ms
         if self.running != side or self.flagged is not None:
             return max(0, stored)
         elapsed = int((now - self.running_since) * 1000)
@@ -105,10 +105,10 @@ class ClockSession:
             return
         side = self.running
         left = self.remaining_ms(side, now)
-        if side == "red":
-            self.red_ms = left
+        if side == "top":
+            self.top_ms = left
         else:
-            self.black_ms = left
+            self.bottom_ms = left
         if left <= 0:
             self.flagged = side
             self.running = None
@@ -120,8 +120,8 @@ class ClockSession:
         now = time.time() if now is None else now
         self.settle(now)
         return {
-            "red_ms": self.red_ms,
-            "black_ms": self.black_ms,
+            "top_ms": self.top_ms,
+            "bottom_ms": self.bottom_ms,
             "running": self.running,
             "flagged": self.flagged,
             "base_ms": self.base_ms,
@@ -158,16 +158,16 @@ class ClockSession:
             return self.start(side, now)
         if self.running != side:
             return "not your turn"
-        stored = self.red_ms if side == "red" else self.black_ms
+        stored = self.top_ms if side == "top" else self.bottom_ms
         if stored <= 0:
             self.flagged = side
             self.running = None
             return "flagged"
         stored += self.inc_ms
-        if side == "red":
-            self.red_ms = stored
+        if side == "top":
+            self.top_ms = stored
         else:
-            self.black_ms = stored
+            self.bottom_ms = stored
         other = self.other(side)
         if self.remaining_ms(other, now) <= 0:
             self.flagged = other
@@ -186,11 +186,36 @@ class ClockSession:
 
     def reset(self, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
-        self.red_ms = self.base_ms
-        self.black_ms = self.base_ms
+        self.top_ms = self.base_ms
+        self.bottom_ms = self.base_ms
         self.running = None
         self.running_since = 0.0
         self.flagged = None
+
+    def apply_report(
+        self,
+        *,
+        top_ms: int,
+        bottom_ms: int,
+        running: Optional[str],
+        flagged: Optional[str],
+        now: Optional[float] = None,
+    ) -> None:
+        now = time.time() if now is None else now
+        self.top_ms = max(0, int(top_ms))
+        self.bottom_ms = max(0, int(bottom_ms))
+        if flagged in SIDES:
+            self.flagged = flagged
+            self.running = None
+            self.running_since = 0.0
+            return
+        self.flagged = None
+        if running in SIDES:
+            self.running = running
+            self.running_since = now
+        else:
+            self.running = None
+            self.running_since = 0.0
 
     def set_times(self, base_ms: int, inc_ms: int, now: Optional[float] = None) -> str:
         now = time.time() if now is None else now
@@ -230,8 +255,8 @@ class ClockStore:
             created_at=time.time(),
             base_ms=base_ms,
             inc_ms=inc_ms,
-            red_ms=base_ms,
-            black_ms=base_ms,
+            top_ms=base_ms,
+            bottom_ms=base_ms,
             running=None,
             running_since=0.0,
             flagged=None,

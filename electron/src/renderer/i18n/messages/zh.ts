@@ -68,6 +68,8 @@ export const zhMessages = {
       canvasTitle: '开启当前房间共享画板（一键 /canvas）',
       piano: '🎹 钢琴',
       pianoTitle: '开启当前房间共享钢琴（一键 /piano）',
+      clock: '⏱ 棋钟',
+      clockTitle: '开启当前房间棋钟（一键 /clock）',
       pasteHint: '也可直接粘贴/拖入图片或文件',
     },
     commands: {

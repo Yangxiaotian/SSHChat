@@ -70,6 +70,8 @@ export const enMessages: MessageTree = {
       canvasTitle: 'Start a shared drawing board in this room (one-click /canvas)',
       piano: '🎹 Piano',
       pianoTitle: 'Start a shared room piano (one-click /piano)',
+      clock: '⏱ Clock',
+      clockTitle: 'Start a room chess clock (one-click /clock)',
       pasteHint: 'Or paste / drop an image or file',
     },
     commands: {

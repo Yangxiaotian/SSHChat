@@ -201,6 +201,10 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startPiano()
         }
+        binding.btnClock.setOnClickListener {
+            hidePlusPanel()
+            startClock()
+        }
         binding.btnClear.setOnClickListener {
             hidePlusPanel()
             clearScreen(announce = true)
@@ -457,6 +461,15 @@ class MainActivity : AppCompatActivity() {
         appendLine("[*] 正在创建共享画板…（/canvas）")
         expectingOwnCanvas = true
         client?.send("/canvas")
+    }
+
+    private fun startClock() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在开启棋钟…（/clock）")
+        client?.send("/clock")
     }
 
     private fun startPiano() {

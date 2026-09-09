@@ -1,6 +1,5 @@
 """Chess clock state machine used by the Kindle web page."""
 
-import time
 import unittest
 
 import clock_sharing
@@ -25,33 +24,31 @@ class ClockTests(unittest.TestCase):
     def test_hit_adds_increment_and_switches(self):
         session = self._session()
         now = 1_000.0
-        self.assertEqual(session.hit("red", now), "")
-        self.assertEqual(session.running, "red")
-        self.assertEqual(session.hit("red", now + 10), "")
-        self.assertEqual(session.running, "black")
-        self.assertEqual(session.red_ms, 50_000 + 5_000)
+        self.assertEqual(session.hit("top", now), "")
+        self.assertEqual(session.running, "top")
+        self.assertEqual(session.hit("top", now + 10), "")
+        self.assertEqual(session.running, "bottom")
+        self.assertEqual(session.top_ms, 50_000 + 5_000)
 
     def test_flag_on_timeout(self):
         session = self._session(base_ms=30_000, inc_ms=0)
         now = 2_000.0
-        session.start("black", now)
+        session.start("bottom", now)
         session.settle(now + 31)
-        self.assertEqual(session.flagged, "black")
+        self.assertEqual(session.flagged, "bottom")
         self.assertIsNone(session.running)
-        self.assertEqual(session.black_ms, 0)
+        self.assertEqual(session.bottom_ms, 0)
 
     def test_page_has_no_script(self):
         import clock_http
 
         session = self._session()
         page = clock_http.render_clock_page(session, "zh")
-        self.assertNotIn("<script", page.lower())
-        self.assertIn("红方 开始计时", page)
+        self.assertIn("setInterval", page)
+        self.assertIn("上方", page)
+        self.assertNotIn("红方", page)
+        self.assertNotIn("黑方", page)
         self.assertNotIn("http-equiv=\"refresh\"", page)
-        session.start("red", time.time())
-        page = clock_http.render_clock_page(session, "zh")
-        self.assertIn("http-equiv=\"refresh\"", page)
-        self.assertIn("红方 走完了", page)
 
 
 if __name__ == "__main__":

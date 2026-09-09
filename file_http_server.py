@@ -9,7 +9,7 @@ Provides:
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
-- Chess clock:     GET  /clock/<token>/...       - Kindle-friendly chess clock (no JavaScript)
+- Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
 - HTTPS support with auto-generated or provided certificates

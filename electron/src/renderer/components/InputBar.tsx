@@ -478,6 +478,15 @@ export default function InputBar() {
         >
           {t('input.quick.piano')}
         </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.clockTitle')}
+          onClick={() => void sendQuickCommand('/clock')}
+        >
+          {t('input.quick.clock')}
+        </button>
         <span className="quick-action-hint">{t('input.quick.pasteHint')}</span>
       </div>
       <div className="input-wrapper" style={{ position: 'relative' }}>

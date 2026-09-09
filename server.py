@@ -5383,7 +5383,7 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
             f"[*] Scope: {where}  Time: {minutes}m+{inc}s each\n"
             "[*] Open this URL in the Kindle browser (no scripts):\n"
             f"[*] {url}\n"
-            "[*] Red moves first. After you move, tap your own big button.\n"
+            "[*] After you move, tap your own side. Top and bottom, no color names.\n"
             "[*] =================================\n"
         )
     lead = "已加入现有棋钟。" if rejoined else "棋钟已准备好。"
@@ -5393,7 +5393,7 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
         f"[*] 范围: {where}  每方 {minutes} 分 + 每步 {inc} 秒\n"
         "[*] 用 Kindle 浏览器打开下面的网址（本页不用脚本）：\n"
         f"[*] {url}\n"
-        "[*] 红方先走。走完棋的一方点自己的大按钮。\n"
+        "[*] 走完棋的一方点自己这边。上方和下方，不写红黑或白黑。\n"
         "[*] ===========================\n"
     )
 
@@ -5448,7 +5448,7 @@ def _handle_clock(conn, sender: str, payload: str) -> None:
             send_line(conn, "[*]   /clock <nick>       - private clock with an online user\n")
             send_line(conn, "[*]   /clock close        - creator closes the current room clock\n")
             send_line(conn, "[*]   /clock new          - force a new clock\n")
-            send_line(conn, "[*] Open the URL on a Kindle. No JavaScript. Tap your side after you move.\n")
+            send_line(conn, "[*] Open the URL on a Kindle. The page fills the screen and ticks on the device. Tap your side after you move.\n")
         else:
             send_line(conn, "[*] 用法：\n")
             send_line(conn, "[*]   /clock              - 当前房间棋钟，每方 10 分钟\n")
@@ -5457,7 +5457,7 @@ def _handle_clock(conn, sender: str, payload: str) -> None:
             send_line(conn, "[*]   /clock <昵称>       - 与在线用户开私密棋钟\n")
             send_line(conn, "[*]   /clock close        - 发起人关闭当前房间棋钟\n")
             send_line(conn, "[*]   /clock new          - 强制新开\n")
-            send_line(conn, "[*] 把网址放到 Kindle 浏览器打开。不用脚本。走完后点自己的大按钮。\n")
+            send_line(conn, "[*] 把网址放到 Kindle 浏览器打开。页面全屏，计时在设备上走。走完后点自己这边。\n")
         return
 
     parts = raw.split()

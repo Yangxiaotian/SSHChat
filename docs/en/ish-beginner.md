@@ -80,7 +80,7 @@ Then: `ssh sshchat`.
 
 ## 6. Chess clock (Kindle)
 
-Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). Copy the URL into the **Kindle browser**. The page uses no JavaScript: Red moves first; after you move, tap your own big button.
+Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). Copy the URL into the **Kindle browser**. The page fills the screen and ticks on the device. Sides are top and bottom, not a color; after you move, tap your side.
 
 ## 7. Shared drawing board
 
