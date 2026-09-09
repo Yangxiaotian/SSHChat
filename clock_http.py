@@ -22,7 +22,7 @@ _TEXTS = {
         "title": "棋钟",
         "top": "上方",
         "bottom": "下方",
-        "note": "走完的一方点自己这边。不区分红黑或白黑。",
+        "note": "走完的一方点自己这边。不区分红黑或白黑。上方已倒置，对面可正着看。",
         "paused": "未开始",
         "running": "思考中",
         "waiting": "等待",
@@ -44,7 +44,7 @@ _TEXTS = {
         "title": "Chess clock",
         "top": "Top",
         "bottom": "Bottom",
-        "note": "After you move, tap your own side. No color names.",
+        "note": "After you move, tap your own side. No color names. Top is rotated for the player across the table.",
         "paused": "Not started",
         "running": "Thinking",
         "waiting": "Waiting",
@@ -193,7 +193,11 @@ html, body {{
   box-sizing: border-box;
   text-align: center;
 }}
-#top {{ top: 0; }}
+#top {{
+  top: 0;
+  /* Opposite player sits across the device; keep their half upright. */
+  transform: rotate(180deg);
+}}
 #bottom {{ bottom: 0; }}
 .on {{ background: #000; color: #fff; }}
 .name {{

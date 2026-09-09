@@ -53,6 +53,8 @@ class ClockTests(unittest.TestCase):
         self.assertIn('id="setup"', page)
         self.assertIn('class="close"', page)
         self.assertIn("toggleSetup()", page)
+        # Top half is rotated so the player across the table can read upright.
+        self.assertIn("rotate(180deg)", page)
 
 
 if __name__ == "__main__":
