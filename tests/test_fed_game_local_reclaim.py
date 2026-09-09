@@ -974,6 +974,80 @@ class FedGameParkRestoreTests(unittest.TestCase):
             )
         self.assertNotIn(room, server.room_games)
 
+    def test_notify_game_end_sends_gend_even_when_prior_auth_remote(self) -> None:
+        """Replica force-end must fan out gend (old code skipped when auth≠local)."""
+        ended: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+
+            def end_game(self, room, authority, token=""):
+                ended.append((room, authority, token))
+
+        tok = "dead" + "0" * 28
+        server.room_game_authority["default"] = "Mathematics.local"
+        server.room_game_tokens["default"] = tok
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "_persist_after_game_change"):
+                server._federation_notify_game_end("default")
+        self.assertEqual(ended, [("default", "wsl-node", tok)])
+        self.assertEqual(server.room_game_authority.get("default"), "wsl-node")
+        self.assertEqual(server.room_game_ended_ids.get(tok), "default")
+
+    def test_forward_end_falls_through_when_peer_does_not_clear(self) -> None:
+        """Room owner end must clear locally if forwarded gcmd leaves the replica."""
+        from games import DrawGuessGame
+
+        room = "default"
+        host = DummyConn()
+        guest = DummyConn()
+        game = DrawGuessGame(host, "alice")
+        game.try_join(guest, "bob")
+        game.try_move(host, "start")
+        server.room_games[room] = game
+        server.room_game_authority[room] = "Mathematics.local"
+        server.room_game_tokens[room] = "live" + "0" * 28
+        server.clients[host] = {
+            "name": "alice",
+            "rooms": {room},
+            "current_room": room,
+            "locale": "zh",
+        }
+        server.rooms[room] = {host}
+        server.room_owners[room] = host
+
+        ended: list[str] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "wsl-node"
+            peer_count = 1
+
+            def forward_game_cmd(self, *a, **k):
+                return True
+
+            def end_game(self, r, authority, token=""):
+                ended.append(r)
+
+            def sync_game(self, *a, **k):
+                return None
+
+        with mock.patch.object(server, "_local_node_id", return_value="wsl-node"), mock.patch.object(
+            federation, "get_hub", return_value=FakeHub()
+        ), mock.patch.object(
+            server, "_reclaim_game_authority_for_local_seats", return_value=False
+        ), mock.patch.object(
+            server, "_federation_refresh_replica_and_wait", return_value=False
+        ), mock.patch.object(server, "_persist_after_game_change"), mock.patch.object(
+            server, "broadcast_game"
+        ), mock.patch.object(server, "send_oriented_boards"), mock.patch.object(
+            server, "send_sanguo_hand_views"
+        ), mock.patch.object(server, "send_line"):
+            server._handle_game(host, "alice", room, "/game end")
+        self.assertNotIn(room, server.room_games)
+        self.assertEqual(ended, [room])
+
 
 if __name__ == "__main__":
     unittest.main()

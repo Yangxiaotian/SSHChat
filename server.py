@@ -6327,21 +6327,26 @@ def _federation_refresh_replica_and_wait(
     )
 
 def _federation_notify_game_end(room: str) -> None:
+    """Tombstone this room's game and fan out gend.
+
+    Always claim local authority and always send gend. Previously, a replica that
+    force-ended (room owner /game end after a dead forward) kept the remote auth
+    and skipped gend — peers never cleared. Claiming local lets greq answer with
+    gend after partition, and matching tokens still clear the real host.
+    """
     hub = federation.get_hub()
-    if hub is None or not hub.enabled:
-        return
+    local = hub.node_id if hub is not None else _local_node_id()
     with lock:
-        auth = (room_game_authority.get(room) or "").strip() or hub.node_id
         token = (room_game_tokens.pop(room, None) or "").strip()
         if token:
             _remember_ended_game_locked(room, token)
-        # Keep authority so greq can answer gend after partition (WSL missed gend).
-        room_game_authority[room] = auth
+        room_game_authority[room] = local
         room_game_provisional.discard(room)
         room_games_parked.pop(room, None)
     _persist_after_game_change()
-    if auth == hub.node_id:
-        hub.end_game(room, hub.node_id, token)
+    if hub is None or not hub.enabled:
+        return
+    hub.end_game(room, local, token)
 
 
 def _game_progress_score(game) -> int:
@@ -6841,8 +6846,23 @@ def _fed_execute_game_cmd(
     local = _local_node_id()
     sub = sub.lower()
     with lock:
-        if room_game_authority.get(room, local) != local:
-            return
+        auth_now = (room_game_authority.get(room) or local).strip() or local
+    if auth_now != local:
+        # Split-brain / stale route: do not silently black-hole the command.
+        print(
+            f"federation: drop gcmd /game {sub} for #{room} "
+            f"(not authority; auth={auth_now})"
+        )
+        _fed_send_player_notice(
+            player_node,
+            room,
+            name,
+            [
+                f"本房对局权威在节点 {auth_now}，"
+                f"本节点无法执行 /game {sub}；请在权威节点重试或 /game end。"
+            ],
+        )
+        return
 
     if sub == "join":
         with lock:
@@ -7979,18 +7999,44 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         auth = room_game_authority.get(room, "")
         with lock:
             progress_before = _game_progress_score(room_games.get(room))
-        if hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest):
+        forwarded = bool(
+            hub and auth and hub.forward_game_cmd(auth, room, hub.node_id, name, sub, rest)
+        )
+        if forwarded:
             # Authority applies then gsyncs; wait so replica board catches up.
             if sub == "move":
                 _federation_wait_game_progress(
                     room, progress_before + 1, timeout=1.5
                 )
+                return
+            _federation_refresh_replica_and_wait(room, timeout=1.5)
+            if sub in ("end", "abort"):
+                with lock:
+                    still = room_games.get(room)
+                    still_active = (
+                        still is not None
+                        and getattr(still, "state", "ended") != "ended"
+                    )
+                if still_active:
+                    # Peer dropped/ignored gcmd, or gend never arrived — do not
+                    # leave the room owner / game host stuck on a live replica.
+                    print(
+                        f"federation: forward /game {sub} did not clear "
+                        f"#{room} (auth={auth}); applying locally"
+                    )
+                else:
+                    return
             else:
-                _federation_refresh_replica_and_wait(room, timeout=1.5)
-            return
-        # Peer unreachable: if seats are all local, reclaim and handle here.
-        if _reclaim_game_authority_for_local_seats(room):
+                return
+        elif _reclaim_game_authority_for_local_seats(room):
             pass
+        elif sub in ("end", "abort"):
+            # Remote seats block reclaim, but owner/host must still be able to
+            # force-clear a stuck federated board when the peer is unreachable.
+            print(
+                f"federation: /game {sub} forward failed for #{room} "
+                f"(auth={auth}); applying locally"
+            )
         else:
             send_line(conn, _ts(conn, "game_forward_fail"))
             return
