@@ -343,6 +343,7 @@ export const enMessages: MessageTree = {
       start: 'Start',
       skip: 'Skip',
       word: 'Word',
+      yourWord: 'Your word: {word}',
       scores: 'Scores',
       openCanvas: 'Open canvas',
       guess: 'Guess',

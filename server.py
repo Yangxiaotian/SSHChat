@@ -329,6 +329,40 @@ def normalize_room(name: str) -> Optional[str]:
     return name
 
 
+def _same_nick(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
+
+
+def _owner_nick_locked(owner_conn) -> str:
+    """Nickname behind a room-owner handle, including a dead or remote seat."""
+    if owner_conn in clients:
+        return (clients[owner_conn].get("name") or "").strip()
+    nick = getattr(owner_conn, "nickname", None)
+    if isinstance(nick, str) and nick.strip():
+        return nick.strip()
+    return ""
+
+
+def _may_force_end_game_locked(room: str, conn, name: str, game) -> bool:
+    """Only the room owner may /game end, including another session of that nick.
+
+    Same nickname is the same account. After the owner disconnects mid-game the
+    stored handle is often a DisconnectedSeat (or already dropped from
+    clients), so comparing only live sockets rejects the returning owner.
+    """
+    _ = game
+    owner_conn = room_owners.get(room)
+    if owner_conn is None:
+        return False
+    if owner_conn is conn:
+        return True
+    if not _same_nick(_owner_nick_locked(owner_conn), name):
+        return False
+    if not isinstance(conn, (DisconnectedSeat, FederatedSeat)):
+        room_owners[room] = conn
+    return True
+
+
 def _reassign_room_owner_locked(room: str, departed: object) -> None:
     """Must hold lock. departed left this room or disconnected."""
     if room_owners.get(room) != departed:
@@ -1271,7 +1305,10 @@ def _resume_same_account_seat_locked(
         return False
 
     _updated, changed = _replace_conn_refs(game, old_conn, new_conn)
-    if changed and room_owners.get(room) is old_conn:
+    if changed and (
+        room_owners.get(room) is old_conn
+        or _same_nick(_owner_nick_locked(room_owners.get(room)), nickname)
+    ):
         room_owners[room] = new_conn
     return changed
 
@@ -6922,13 +6959,13 @@ def _fed_execute_game_cmd(
 
     if sub == "end":
         if game is None:
+            _fed_send_player_notice(
+                player_node, room, name, ["本房没有进行中的对局。"]
+            )
             return
         with lock:
-            owner_conn = room_owners.get(room)
-            owner_name = clients[owner_conn]["name"] if owner_conn in clients else ""
-            if owner_name.strip().lower() != name.strip().lower():
-                return
-        with lock:
+            # The player's node already required the same-name room owner.
+            # This node's room_owners handle is a different socket.
             room_games.pop(room, None)
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
         _federation_notify_game_end(room)
@@ -7434,7 +7471,7 @@ def remove_client(conn) -> None:
                             seat = DisconnectedSeat(name)
                             _replace_conn_refs(game, conn, seat)
                             if room_owners.get(room) is conn:
-                                room_owners.pop(room, None)
+                                room_owners[room] = seat
                             flush_now = True
                             game_notices.append(
                                 (
@@ -7449,7 +7486,7 @@ def remove_client(conn) -> None:
                         seat = DisconnectedSeat(name)
                         _replace_conn_refs(game, conn, seat)
                         if room_owners.get(room) is conn:
-                            room_owners.pop(room, None)
+                            room_owners[room] = seat
                         flush_now = True
                         game_notices.append(
                             (
@@ -7912,6 +7949,24 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     sub = sub.lower()
     rest = rest.strip()
 
+    if sub == "end" and _should_forward_game(room, sub):
+        # Ownership is local. The game authority's room_owners handle is not
+        # this session, so check the same-name owner here before forwarding.
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                deny = "none"
+            elif not _may_force_end_game_locked(room, conn, name, game):
+                deny = "host"
+            else:
+                deny = ""
+        if deny == "none":
+            send_line(conn, "[*] 本房没有进行中的对局。\n")
+            return
+        if deny == "host":
+            send_line(conn, "[*] 只有房主可以 /game end。\n")
+            return
+
     if _should_forward_game(room, sub):
         hub = federation.get_hub()
         auth = room_game_authority.get(room, "")
@@ -8272,21 +8327,21 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub == "end":
         with lock:
             game = room_games.get(room)
-            owner_conn = room_owners.get(room)
-            same_owner_account = (
-                owner_conn in clients
-                and clients[owner_conn]["name"].strip().lower() == name.strip().lower()
-            )
-            is_owner = owner_conn is conn or same_owner_account
             if game is None:
-                send_line(conn, "[*] 本房没有进行中的对局。\n")
-                return
-            if not is_owner:
-                send_line(conn, "[*] 只有房主可以 /game end。\n")
-                return
-            if same_owner_account and owner_conn is not conn:
-                room_owners[room] = conn
-            room_games.pop(room, None)
+                deny = "none"
+            else:
+                _resume_same_account_seat_locked(room, game, conn, name)
+                if not _may_force_end_game_locked(room, conn, name, game):
+                    deny = "host"
+                else:
+                    deny = ""
+                    room_games.pop(room, None)
+        if deny == "none":
+            send_line(conn, "[*] 本房没有进行中的对局。\n")
+            return
+        if deny == "host":
+            send_line(conn, "[*] 只有房主可以 /game end。\n")
+            return
         broadcast_game(room, [f"{name}（房主）结束了本房的对局。"])
         _federation_notify_game_end(room)
         _persist_after_game_change()

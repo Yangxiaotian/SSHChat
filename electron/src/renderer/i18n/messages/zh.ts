@@ -341,6 +341,7 @@ export const zhMessages = {
       start: '开始',
       skip: '跳过',
       word: '看词',
+      yourWord: '本回合词：{word}',
       scores: '积分',
       openCanvas: '打开画板',
       guess: '猜词',

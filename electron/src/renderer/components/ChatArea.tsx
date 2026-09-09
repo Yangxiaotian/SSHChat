@@ -19,10 +19,16 @@ const WORKBENCH_MIN_HEIGHT = 96;
 const CHAT_MIN_HEIGHT = 180;
 const DEFAULT_WORKBENCH_HEIGHT = 340;
 
+function isDrawGuessWordHint(content: string): boolean {
+  return /本回合词[:：]|你是画家/.test(content);
+}
+
 function isGameFloodMessage(content: string): boolean {
   const raw = content.trim();
   const t = raw.toLowerCase();
   if (!t) return false;
+  // Drawer-only word lines use 【】 and were hidden as xiangqi/sanguo flood.
+  if (isDrawGuessWordHint(raw)) return false;
 
   if (
     /^\d+\s*,\s*\d+$/.test(t) ||

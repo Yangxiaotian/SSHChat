@@ -155,6 +155,7 @@ function isLikelyGameLine(line: string): boolean {
   if (/^\s*[1-9]\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象RCDWPTLE]|红穴|黑穴|红陷|黑陷|河|rD|bD|rT|bT|RV|·)|!)(?:\s+(?:!?(?:[+\-][鼠猫狗狼豹虎狮象RCDWPTLE]|红穴|黑穴|红陷|黑陷|河|rD|bD|rT|bT|RV|·)|!)){6}\s*$/.test(line)) return true;
   if (/^-\s+\S+\s+\((alive|out)\)/i.test(line.trim())) return true;
   if (/^轮到\s+/.test(line.trim())) return true;
+  if (/本回合词[:：]|你是画家/.test(line)) return true;
   if (/^上一步[:：]/.test(line.trim())) return true;
   if (/^(alive|players|votes)[:：]/i.test(line.trim())) return true;
   const t = line.trim().toLowerCase();
@@ -632,6 +633,10 @@ export default function GameWorkbench() {
   const playerStats = useMemo(() => extractPlayerStats(cleanBoard, locale), [cleanBoard, locale]);
   const quickActions = useMemo(() => getQuickByGame(locale, game), [locale, game]);
   const myTurn = useMemo(() => isMyActiveTurn(game, board, nickname), [game, board, nickname]);
+  const drawGuessHint = useMemo(() => {
+    if (game !== 'drawguess') return '';
+    return systemLines.filter((line) => /本回合词[:：]|你是画家/.test(line)).slice(-8).join('\n');
+  }, [game, systemLines]);
 
   const send = async (cmd: string) => {
     if (status !== 'connected') return false;
@@ -778,6 +783,7 @@ export default function GameWorkbench() {
               disabled={disabled}
               nickname={nickname}
               boardText={board}
+              hintText={drawGuessHint}
               onCmd={(cmd) => sendMove(cmd)}
               onOpenCanvas={() => {
                 setExpectingOwnCanvas(true);

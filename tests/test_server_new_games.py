@@ -84,6 +84,22 @@ class ServerNewGamesTests(unittest.TestCase):
         self.assertIn(name, output.lower())
         self.assertIn("Terminal:", "\n".join(self.first.out + self.second.out))
 
+    def test_drawguess_opener_cannot_end_if_not_room_owner(self):
+        self._command(self.first, "first", "/game new drawguess")
+        server.room_owners[self.room] = self.second
+        self._command(self.first, "first", "/game end")
+        self.assertIs(server.room_owners[self.room], self.second)
+        self.assertIn(self.room, server.room_games)
+
+    def test_same_name_room_owner_can_end_after_disconnect(self):
+        from session_store import DisconnectedSeat
+
+        self._command(self.first, "first", "/game new drawguess")
+        server.room_owners[self.room] = DisconnectedSeat("first")
+        output = self._command(self.first, "first", "/game end")
+        self.assertNotIn("只有房主", output)
+        self.assertNotIn(self.room, server.room_games)
+
     def test_same_game_card_joins_existing_waiting_game(self):
         self._command(self.first, "first", "/game new darkchess")
         output = self._command(self.second, "second", "/game new darkchess")

@@ -9222,7 +9222,8 @@ class DrawGuessGame:
         return self.on_player_leave(conn, name)
 
     def abort(self, conn, name: str) -> GameResult:
-        if self.players[0][0] is not conn:
+        host_conn, host_name = self.players[0]
+        if host_conn is not conn and self._norm(host_name) != self._norm(name):
             return (["只有房主可以中止。"], [], False)
         if self.state == "ended":
             return (["对局已结束。"], [], False)

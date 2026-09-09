@@ -5,6 +5,7 @@ type Props = {
   disabled: boolean;
   nickname: string;
   boardText: string;
+  hintText?: string;
   onCmd: (cmd: string) => void;
   onOpenCanvas?: () => void;
 };
@@ -49,10 +50,17 @@ function parseMeta(boardText: string): {
   return { state, host, drawer, round, scores };
 }
 
+function parseSecret(text: string): string {
+  const matches = [...text.matchAll(/本回合词[:：]\s*【([^】]+)】/g)];
+  if (!matches.length) return '';
+  return matches[matches.length - 1][1].trim();
+}
+
 export default function DrawGuessPanel({
   disabled,
   nickname,
   boardText,
+  hintText = '',
   onCmd,
   onOpenCanvas,
 }: Props) {
@@ -60,6 +68,10 @@ export default function DrawGuessPanel({
   const [canvasRequested, setCanvasRequested] = useState(false);
   const { t, locale } = useTranslation();
   const meta = useMemo(() => parseMeta(boardText), [boardText]);
+  const secret = useMemo(
+    () => parseSecret(hintText) || parseSecret(boardText),
+    [hintText, boardText],
+  );
   const state = meta.state.toLowerCase();
   const waiting = state === 'waiting' || !state;
   const drawing = state === 'drawing';
@@ -81,6 +93,11 @@ export default function DrawGuessPanel({
         })}
       </div>
       {meta.scores ? <div className="game-workbench-hint">{meta.scores}</div> : null}
+      {secret && isDrawer ? (
+        <div className="game-workbench-hint">
+          {t('game.drawguess.yourWord', { word: secret })}
+        </div>
+      ) : null}
 
       <div className="game-chip-row">
         <button className="mini-btn" disabled={disabled || !canStart} onClick={() => onCmd('start')}>
