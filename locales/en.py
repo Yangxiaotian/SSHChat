@@ -22,7 +22,7 @@ MESSAGES: dict = {
         "[*] /announce      Show this room's announcement; owner may /announce <text> to set, /announce clear to clear.\n",
         "[*]              Owner: #default is the first user on the server; other rooms, the first /join to that room.\n",
         "[*] /poll          Room poll: /poll new Q | A | B; /poll <n> to vote; /poll close to end.\n",
-        "[*] /later         Personal reminder (only you; survives restart; same nick on federation peers also gets it): "
+        "[*] /later         Personal reminder (only you; survives restart; federation same-nick can list/cancel and gets delivery): "
         "/later 30m text; /later tomorrow 09:00 text; /later list; /later cancel <n>.\n",
         "[*] /lang [en|zh]   Switch UI language (default English; preference saved per nickname).\n",
         "[*]\n",
@@ -157,9 +157,9 @@ MESSAGES: dict = {
             "[*]         /later tomorrow 09:00 <text>\n"
             "[*]         /later 明天 09:00 <text>\n"
             "[*]         /later 2026-09-05 09:00 <text>\n"
-            "[*]         /later list                  your pending reminders\n"
-            "[*]         /later cancel <n>            cancel\n"
-            "[*] Same nick on federation peers is notified too.\n"
+            "[*]         /later list                  your pending reminders (incl. federation)\n"
+            "[*]         /later cancel <n>            cancel (same-nick peers can cancel too)\n"
+            "[*] Federation same-nick can list/cancel; delivery reaches them too.\n"
         ),
         "later_none": "[*] You have no pending time capsules.\n",
         "later_list_header": "[*] Your pending time capsules ({n}):\n",
@@ -171,7 +171,7 @@ MESSAGES: dict = {
         "later_too_soon": "[*] Delivery too soon (at least {min_sec} seconds from now).\n",
         "later_too_far": "[*] Delivery too far (max 30 days).\n",
         "later_user_full": "[*] Too many pending reminders (max {max_n}).\n",
-        "later_scheduled": "[*] Reminder set for {when} (only you; survives restart; federation same-nick too).\n",
+        "later_scheduled": "[*] Reminder set for {when} (only you; survives restart; federation same-nick can list/cancel + delivery).\n",
         "later_deliver": "[*] Time capsule: {text}\n",
         "offline_header": "[*] You have {n} leave-message(s) (received while offline, oldest first):\n",
         "offline_file_meta": "[*] (offline file {when}, from {sender})\n",

@@ -666,6 +666,25 @@ def _format_later_when(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
+def _capsule_origin_id() -> str:
+    hub = federation.get_hub()
+    if hub is None:
+        return ""
+    return str(getattr(hub, "node_id", "") or "").strip()
+
+
+def _capsule_is_local(cap: dict, local_id: Optional[str] = None) -> bool:
+    origin = str(cap.get("origin") or "").strip()
+    if not origin:
+        return True
+    if local_id is None:
+        local_id = _capsule_origin_id()
+    if not local_id:
+        # No node id yet — do not treat foreign replicas as local.
+        return False
+    return origin == local_id
+
+
 def _user_capsules_locked(nickname: str) -> list[dict]:
     key = (nickname or "").strip().lower()
     return [
@@ -675,10 +694,137 @@ def _user_capsules_locked(nickname: str) -> list[dict]:
     ]
 
 
+def _user_local_capsules_locked(
+    nickname: str, local_id: Optional[str] = None
+) -> list[dict]:
+    if local_id is None:
+        local_id = _capsule_origin_id()
+    return [
+        c
+        for c in _user_capsules_locked(nickname)
+        if _capsule_is_local(c, local_id)
+    ]
+
+
+def _capsule_wire_dict(cap: dict) -> dict:
+    return {
+        "id": int(cap.get("id") or 0),
+        "room": str(cap.get("room") or ""),
+        "creator": str(cap.get("creator") or ""),
+        "text": str(cap.get("text") or ""),
+        "deliver_at": float(cap.get("deliver_at") or 0),
+    }
+
+
+def _federation_sync_capsules(nickname: str) -> None:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        caps = [
+            _capsule_wire_dict(c)
+            for c in _user_local_capsules_locked(nickname)
+        ]
+    try:
+        hub.sync_capsules(nickname, caps)
+    except Exception as e:
+        print(f"federation: capsule sync failed: {e!r}")
+
+
+def _fed_local_capsules_snapshot() -> list[dict]:
+    """Local-origin capsules grouped by creator nick (for peer catch-up)."""
+    local_id = _capsule_origin_id()
+    by_nick: dict[str, list[dict]] = {}
+    with lock:
+        for cap in room_capsules:
+            if not isinstance(cap, dict) or not _capsule_is_local(cap, local_id):
+                continue
+            nick = str(cap.get("creator") or "").strip()
+            if not nick:
+                continue
+            by_nick.setdefault(nick, []).append(_capsule_wire_dict(cap))
+    return [{"name": nick, "capsules": caps} for nick, caps in by_nick.items()]
+
+
+def _fed_on_capsules(origin: str, nick: str, capsules: list) -> None:
+    """Replace this origin's pending capsules for nick with the remote snapshot."""
+    origin = str(origin or "").strip()
+    nick_key = (nick or "").strip().lower()
+    if not origin or not nick_key or not isinstance(capsules, list):
+        return
+    restored: list[dict] = []
+    for item in capsules:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        creator = str(item.get("creator") or "").strip() or str(nick or "").strip()
+        try:
+            deliver_at = float(item.get("deliver_at") or 0)
+            cap_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not text or deliver_at <= 0 or cap_id < 1:
+            continue
+        if creator.strip().lower() != nick_key:
+            creator = str(nick or "").strip() or creator
+        restored.append(
+            {
+                "id": cap_id,
+                "room": str(item.get("room") or ""),
+                "creator": creator,
+                "text": text,
+                "deliver_at": deliver_at,
+                "origin": origin,
+            }
+        )
+    with lock:
+        keep = [
+            c
+            for c in room_capsules
+            if not (
+                str(c.get("origin") or "").strip() == origin
+                and str(c.get("creator") or "").strip().lower() == nick_key
+            )
+        ]
+        keep.extend(restored)
+        keep.sort(key=lambda c: float(c.get("deliver_at") or 0))
+        room_capsules.clear()
+        room_capsules.extend(keep)
+    _safe_persist_sessions_now()
+
+
+def _fed_on_capsule_cancel(nick: str, cap_id: int) -> None:
+    """Origin-node handler: cancel a local capsule after a peer /later cancel."""
+    try:
+        cid = int(cap_id)
+    except (TypeError, ValueError):
+        return
+    local_id = _capsule_origin_id()
+    removed = False
+    with lock:
+        before = len(room_capsules)
+        room_capsules[:] = [
+            c
+            for c in room_capsules
+            if not (
+                _capsule_is_local(c, local_id)
+                and str(c.get("creator") or "").strip().lower()
+                == (nick or "").strip().lower()
+                and int(c.get("id") or 0) == cid
+            )
+        ]
+        removed = len(room_capsules) < before
+    if removed:
+        _safe_persist_sessions_now()
+        _federation_sync_capsules(nick)
+
+
 def _deliver_due_capsules() -> None:
     global room_capsules
     now = time.time()
     due: list[dict] = []
+    local_id = _capsule_origin_id()
+    touched_creators: set[str] = set()
     with lock:
         keep: list[dict] = []
         for cap in room_capsules:
@@ -686,8 +832,12 @@ def _deliver_due_capsules() -> None:
                 when = float(cap.get("deliver_at") or 0)
             except (TypeError, ValueError):
                 continue
-            if when <= now:
+            # Only the origin node delivers; replicas stay until origin syncs.
+            if when <= now and _capsule_is_local(cap, local_id):
                 due.append(cap)
+                creator = str(cap.get("creator") or "").strip()
+                if creator:
+                    touched_creators.add(creator)
             else:
                 keep.append(cap)
         if not due:
@@ -728,6 +878,8 @@ def _deliver_due_capsules() -> None:
                 except Exception as e:
                     print(f"time capsule federation leave seed failed: {e!r}")
     _safe_persist_sessions_now()
+    for creator in touched_creators:
+        _federation_sync_capsules(creator)
 
 
 def _capsule_loop() -> None:
@@ -777,14 +929,33 @@ def _handle_later(conn, name: str, room: str, payload: str) -> None:
             send_line(conn, _ts(conn, "later_usage"))
             return
         idx = int(parts[1].strip())
+        remote_cancel: Optional[tuple[str, int]] = None
         with lock:
             caps = _user_capsules_locked(name)
             if idx < 1 or idx > len(caps):
                 send_line(conn, _ts(conn, "later_bad_index", max_n=len(caps) or 0))
                 return
             target = caps[idx - 1]
-            room_capsules[:] = [c for c in room_capsules if c is not target]
+            if _capsule_is_local(target):
+                room_capsules[:] = [c for c in room_capsules if c is not target]
+            else:
+                origin = str(target.get("origin") or "").strip()
+                cid = int(target.get("id") or 0)
+                room_capsules[:] = [c for c in room_capsules if c is not target]
+                if origin and cid >= 1:
+                    remote_cancel = (origin, cid)
         _safe_persist_sessions_now()
+        if remote_cancel is not None:
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled:
+                try:
+                    hub.request_capsule_cancel(
+                        remote_cancel[0], name, remote_cancel[1]
+                    )
+                except Exception as e:
+                    print(f"federation: capsule cancel request failed: {e!r}")
+        else:
+            _federation_sync_capsules(name)
         send_line(conn, _ts(conn, "later_cancelled", index=idx))
         return
 
@@ -813,8 +984,9 @@ def _handle_later(conn, name: str, room: str, payload: str) -> None:
     if delay > MAX_LATER_DELAY_SECONDS:
         send_line(conn, _ts(conn, "later_too_far"))
         return
+    origin = _capsule_origin_id()
     with lock:
-        if len(_user_capsules_locked(name)) >= MAX_LATER_PER_USER:
+        if len(_user_local_capsules_locked(name, origin)) >= MAX_LATER_PER_USER:
             send_line(
                 conn,
                 _ts(conn, "later_user_full", max_n=MAX_LATER_PER_USER),
@@ -826,11 +998,13 @@ def _handle_later(conn, name: str, room: str, payload: str) -> None:
             "creator": name,
             "text": text,
             "deliver_at": deliver_at,
+            "origin": origin,
         }
         _capsule_next_id += 1
         room_capsules.append(cap)
         room_capsules.sort(key=lambda c: float(c.get("deliver_at") or 0))
     _safe_persist_sessions_now()
+    _federation_sync_capsules(name)
     send_line(
         conn,
         _ts(conn, "later_scheduled", when=_format_later_when(deliver_at)),
@@ -1465,6 +1639,11 @@ def _build_session_payload_locked() -> dict[str, object]:
                 "creator": str(c.get("creator") or ""),
                 "text": str(c.get("text") or ""),
                 "deliver_at": float(c.get("deliver_at") or 0),
+                **(
+                    {"origin": str(c.get("origin") or "").strip()}
+                    if str(c.get("origin") or "").strip()
+                    else {}
+                ),
             }
             for c in room_capsules
             if isinstance(c, dict)
@@ -1572,15 +1751,17 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 continue
             if not text or deliver_at <= 0:
                 continue
-            restored.append(
-                {
-                    "id": cap_id or 0,
-                    "room": room,
-                    "creator": creator,
-                    "text": text,
-                    "deliver_at": deliver_at,
-                }
-            )
+            origin = str(item.get("origin") or "").strip()
+            entry = {
+                "id": cap_id or 0,
+                "room": room,
+                "creator": creator,
+                "text": text,
+                "deliver_at": deliver_at,
+            }
+            if origin:
+                entry["origin"] = origin
+            restored.append(entry)
             if cap_id > max_id:
                 max_id = cap_id
         room_capsules.clear()
@@ -7375,10 +7556,15 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _fed_hub.on_ratings = _fed_on_ratings
     _fed_hub.get_local_ratings = rating_store.export_entries
+    _fed_hub.get_local_capsules = _fed_local_capsules_snapshot
+    _fed_hub.on_capsules = _fed_on_capsules
+    _fed_hub.on_capsule_cancel = _fed_on_capsule_cancel
     _federation_sync_library_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
+    for row in _fed_local_capsules_snapshot():
+        _federation_sync_capsules(row["name"])
     try:
         _federation_push_all_offline_clears()
     except Exception as e:

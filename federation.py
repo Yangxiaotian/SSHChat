@@ -182,6 +182,12 @@ class FederationHub:
         self.on_library_bookmarks = on_library_bookmarks
         # nick, book_name — clear bookmark on this (owner) node
         self.on_library_bookmark_clear: Optional[Callable[[str, str], None]] = None
+        # () -> [{"name": nick, "capsules": [capsule_dict, ...]}] local-origin only
+        self.get_local_capsules: Optional[Callable[[], list[dict[str, Any]]]] = None
+        # origin_node, nick, capsules_list — merge remote time capsules
+        self.on_capsules: Optional[Callable[[str, str, list], None]] = None
+        # nick, cap_id — cancel on this (origin) node
+        self.on_capsule_cancel: Optional[Callable[[str, int], None]] = None
         # host_node (self), req_id, payload — create upload session for a peer
         self.on_file_host_request = on_file_host_request
         # from_peer, req_id, payload — reply to our fhost_req
@@ -740,6 +746,47 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
+    def sync_capsules(self, nick: str, capsules: Optional[list] = None) -> None:
+        """Fan-out this node's pending /later capsules for nick (may be empty)."""
+        if not self.enabled or not self._peers:
+            return
+        nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip()
+        if not nick:
+            return
+        if capsules is None:
+            capsules = []
+        if not isinstance(capsules, list):
+            return
+        clean = [c for c in capsules if isinstance(c, dict)]
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"lcap\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def request_capsule_cancel(self, origin_node: str, nick: str, cap_id: int) -> bool:
+        """Ask origin_node to cancel nick's capsule id (same-nick /later cancel)."""
+        if not self.enabled:
+            return False
+        origin_node = str(origin_node or "").strip()
+        nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip()
+        try:
+            cid = int(cap_id)
+        except (TypeError, ValueError):
+            return False
+        if not origin_node or not nick or cid < 1:
+            return False
+        line = (
+            f"lcap_cancel\t{self.node_id}\t{origin_node}\t{nick}\t"
+            f"{cid}\t{time.time_ns()}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(origin_node, line)
+
     def sync_file_public(self, base_url: Optional[str] = None) -> None:
         """Fan-out this node's public file base URL (Cloudflare / domain).
 
@@ -1167,6 +1214,7 @@ class FederationHub:
         # behind lcatalog on slow links (ZeroTier / iSH) and falls back to LAN.
         self._push_file_public(link)
         self._push_library_catalog(link)
+        self._push_capsules(link)
 
     def _push_presence_async(self, link: _PeerLink) -> None:
         """Push presence/catalog off the session read loop.
@@ -1263,6 +1311,35 @@ class FederationHub:
                 json.dumps(books, ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
             line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
+            self._remember_seen(line)
+            link.send_line(line)
+
+    def _push_capsules(self, link: _PeerLink) -> None:
+        """Send local-origin /later capsules so same-nick peers can list them."""
+        rows: list[dict[str, Any]] = []
+        if self.get_local_capsules is not None:
+            try:
+                rows = self.get_local_capsules() or []
+            except Exception as e:
+                print(f"federation: get_local_capsules error: {e!r}")
+                rows = []
+        if not isinstance(rows, list):
+            rows = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            nick = str(item.get("name") or "").strip()
+            capsules = item.get("capsules")
+            if not nick or not isinstance(capsules, list):
+                continue
+            clean = [c for c in capsules if isinstance(c, dict)]
+            try:
+                blob = base64.b64encode(
+                    json.dumps(clean, ensure_ascii=False).encode("utf-8")
+                ).decode("ascii")
+            except (TypeError, ValueError):
+                continue
+            line = f"lcap\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
 
@@ -1415,6 +1492,58 @@ class FederationHub:
                 except Exception as e:
                     print(f"federation: on_library_bookmarks error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lcap":
+            if self._remember_seen(line):
+                return
+            cap_parts = line.split("\t", 4)
+            if len(cap_parts) < 4:
+                return
+            origin, nick, b64 = cap_parts[1], cap_parts[2], cap_parts[3]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                capsules = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(capsules, list) and self.on_capsules is not None:
+                try:
+                    self.on_capsules(origin, nick, capsules)
+                except Exception as e:
+                    print(f"federation: on_capsules error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lcap_cancel":
+            cancel_parts = line.split("\t", 5)
+            if len(cancel_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, owner, nick, cid_s = (
+                cancel_parts[1],
+                cancel_parts[2],
+                cancel_parts[3],
+                cancel_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                cid = int(str(cid_s).strip())
+            except ValueError:
+                return
+            if owner == self.node_id:
+                if self.on_capsule_cancel is not None:
+                    try:
+                        self.on_capsule_cancel(nick, cid)
+                    except Exception as e:
+                        print(f"federation: on_capsule_cancel error: {e!r}")
+            else:
+                self._learn_route(owner, peer_node)
+                self._send_toward(owner, line + "\n", exclude_node=peer_node)
             return
         if kind == "lmark_clear":
             clear_parts = line.split("\t", 5)

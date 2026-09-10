@@ -1570,6 +1570,64 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(got[-1][1], "yxt")
         self.assertEqual(got[-1][2]["a.epub"]["page"], 2)
 
+    def test_lcap_fanout_and_handler(self) -> None:
+        got: list[tuple] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub.on_capsules = lambda *a: got.append(a)
+        peer = FakeLink("node-b")
+        hub._peers["node-b"] = peer
+        caps = [
+            {
+                "id": 1,
+                "room": "lobby",
+                "creator": "Alice",
+                "text": "hi",
+                "deliver_at": 99.0,
+            }
+        ]
+        hub.sync_capsules("Alice", caps)
+        self.assertEqual(len(peer.lines), 1)
+        parts = peer.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "lcap")
+        self.assertEqual(parts[2], "Alice")
+        decoded = json.loads(base64.b64decode(parts[3]).decode("utf-8"))
+        self.assertEqual(decoded[0]["text"], "hi")
+
+        other = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        other.enabled = True
+        other.node_id = "node-b"
+        other.on_capsules = lambda *a: got.append(a)
+        other._peers["node-a"] = FakeLink("node-a")
+        other._on_peer_line("node-a", peer.lines[0].rstrip("\n"))
+        self.assertEqual(got[-1][0], "node-a")
+        self.assertEqual(got[-1][1], "Alice")
+        self.assertEqual(got[-1][2][0]["text"], "hi")
+
     def test_run_session_assembles_chunked_lines(self) -> None:
         """Large federation frames (lpage_ok) must survive multi-recv delivery."""
         handled: list[str] = []
