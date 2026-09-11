@@ -380,6 +380,32 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(promoted.elements[0]["id"], "keep")
         self.assertIsNotNone(self.store.get_by_token(token))
 
+    def test_claim_remote_as_local_indexes_tokens(self) -> None:
+        remote = self.store.register_remote_session(
+            session_id="remote-claim",
+            creator="Alice",
+            participants=["Alice", "Bob"],
+            room="claimme",
+            tokens={"Alice": "tok-a", "Bob": "tok-b"},
+            keys={"Alice": "KEYAAA", "Bob": "KEYBBB"},
+            host_node="peer-dead",
+            host_base_url="https://dead.trycloudflare.com",
+        )
+        self.assertIsNone(self.store.get_by_token("tok-a"))
+        claimed = self.store.claim_remote_as_local(
+            remote.session_id,
+            base_url="https://local.trycloudflare.com",
+        )
+        self.assertIsNotNone(claimed)
+        self.assertIsNone(claimed.host_node)
+        self.assertEqual(claimed.host_base_url, "https://local.trycloudflare.com")
+        self.assertIsNotNone(self.store.get_by_token("tok-a"))
+        self.assertEqual(
+            self.store.get_by_token("tok-b").session_id, "remote-claim"
+        )
+        # Already local → no-op.
+        self.assertIsNone(self.store.claim_remote_as_local(remote.session_id))
+
     def test_restart_reloads_room_scene(self) -> None:
         """Simulates process restart: new CanvasStore on the same JSON path."""
         session = self.store.create_session(

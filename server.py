@@ -4715,7 +4715,28 @@ def _deliver_canvas_invites(
     # latest fpub so invites survive Quick Tunnel hostname churn.
     if session.host_node and hub is not None and hub.enabled:
         live = hub.get_remote_file_public(session.host_node)
-        if live:
+        host = (session.host_node or "").strip()
+        host_up = _canvas_host_reachable(host)
+        candidate = (live or base_url or "").strip().rstrip("/")
+        # Peer gone, or still listed but Quick Tunnel DNS is already dead:
+        # take over on this node's Cloudflare when available.
+        need_claim = (not host_up) or (
+            bool(candidate)
+            and candidate.endswith(".trycloudflare.com")
+            and not _trycloudflare_url_resolves(candidate)
+        )
+        if need_claim:
+            claimed = _try_claim_canvas_locally(session)
+            if claimed is not None:
+                session = claimed
+                base_url = ""
+                try:
+                    _federation_push_canvas_announce(session)
+                except Exception as e:
+                    print(f"[Canvas] csync after local claim failed: {e!r}")
+            elif live:
+                base_url = live
+        elif live:
             base_url = live
             if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
                 canvas_sharing.canvas_store.refresh_host_base_url(
@@ -4815,6 +4836,64 @@ def _canvas_host_reachable(host: str) -> bool:
     if host == hub.node_id:
         return True
     return host in hub.known_peer_ids()
+
+
+def _trycloudflare_url_resolves(url: str, *, timeout: float = 2.0) -> bool:
+    """True when URL host is not a dead Quick Tunnel name (DNS still resolves)."""
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        host = (urlparse(raw if "://" in raw else f"https://{raw}").hostname or "").strip()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if not host.endswith(".trycloudflare.com"):
+        return True
+    prev_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        return True
+    except OSError:
+        return False
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
+
+
+def _local_file_public_ready() -> str:
+    """Return this node's public file base URL when it is externally reachable."""
+    if file_http is None:
+        return ""
+    try:
+        base = (file_http.get_base_url() or "").strip().rstrip("/")
+    except Exception:
+        return ""
+    if not base or not file_http_server.is_externally_reachable_url(base):
+        return ""
+    return base
+
+
+def _try_claim_canvas_locally(
+    session: canvas_sharing.CanvasSession,
+) -> Optional[canvas_sharing.CanvasSession]:
+    """If *session* is a remote mirror and we have Cloudflare/public HTTPS, take over."""
+    if session is None or not (session.host_node or "").strip():
+        return None
+    base = _local_file_public_ready()
+    if not base:
+        return None
+    claimed = canvas_sharing.canvas_store.claim_remote_as_local(
+        session.session_id, base_url=base
+    )
+    if claimed is None:
+        return None
+    print(
+        f"[Canvas] claimed remote board {claimed.session_id[:12]}… "
+        f"locally at {base} (former host unreachable/dead CF)"
+    )
+    return claimed
 
 
 def _federation_adopt_remote_canvas(announce: dict) -> Optional[canvas_sharing.CanvasSession]:
@@ -4983,11 +5062,12 @@ def _fed_on_canvas_sync(origin: str, announce: dict) -> None:
 
 
 def _fed_handle_unreachable_canvas_authority(down_peer: str = "") -> None:
-    """When a canvas host drops, promote any parked local room board."""
+    """When a canvas host drops, promote parked local board or claim on local CF."""
     down_peer = (down_peer or "").strip()
     hub = federation.get_hub()
     local_id = hub.node_id if hub is not None else _local_node_id()
     restored: list[tuple[str, canvas_sharing.CanvasSession]] = []
+    claimed: list[tuple[str, canvas_sharing.CanvasSession]] = []
     with canvas_sharing.canvas_store.lock:
         rooms = {
             s.room
@@ -5013,15 +5093,28 @@ def _fed_handle_unreachable_canvas_authority(down_peer: str = "") -> None:
         if _canvas_host_reachable(host):
             continue
         promoted = canvas_sharing.canvas_store.promote_parked_for_room(room)
-        if promoted is None:
+        if promoted is not None:
+            restored.append((room, promoted))
             continue
-        restored.append((room, promoted))
+        # No local fork: take over the remote mirror on this node's public URL.
+        took = _try_claim_canvas_locally(active)
+        if took is not None:
+            claimed.append((room, took))
     for room, session in restored:
         notice = (
-            f"[*] 联邦画板宿主不可达，已恢复本节点暂存的 #{room} 画板。"
-            f"请重新 /canvas 获取密钥。\n"
+            f"[*] 联邦画板宿主不可达，已恢复本节点暂存的 #{room} 画板；"
+            f"正在重发本机邀请链接。\n"
         )
         broadcast_room(room, notice.encode("utf-8"))
+        _deliver_canvas_invites(session)
+        _federation_push_canvas_announce(session)
+    for room, session in claimed:
+        notice = (
+            f"[*] 联邦画板宿主不可达，已改用本机公网地址托管 #{room} 画板"
+            f"（对端画面可能丢失）；正在重发邀请。\n"
+        )
+        broadcast_room(room, notice.encode("utf-8"))
+        _deliver_canvas_invites(session)
         _federation_push_canvas_announce(session)
 
 
@@ -5247,6 +5340,19 @@ def _handle_canvas(conn, sender: str, payload: str) -> None:
         if not force_new:
             existing = canvas_sharing.canvas_store.find_open_for_room(room_name)
             if existing is not None:
+                host = (existing.host_node or "").strip()
+                if host and not _canvas_host_reachable(host):
+                    claimed = _try_claim_canvas_locally(existing)
+                    if claimed is not None:
+                        existing = claimed
+                        send_line(
+                            conn,
+                            f"[*] 联邦画板宿主不可达，已改用本机公网地址托管；"
+                            f"正在发送邀请。\n",
+                        )
+                        _deliver_canvas_invites(existing, only=sender)
+                        _federation_push_canvas_announce(existing)
+                        return
                 ok, err = _ensure_canvas_participant(existing, sender)
                 if not ok:
                     send_line(conn, f"[*] 加入已有画布失败：{err}\n")

@@ -448,6 +448,42 @@ class CanvasStore:
             self._save()
             return parked
 
+    def claim_remote_as_local(
+        self, session_id: str, *, base_url: str = ""
+    ) -> Optional[CanvasSession]:
+        """Take over a federated mirror after its host peer dies.
+
+        Stroke/scene data usually lived only on the remote host, so the local
+        board starts empty (or with whatever was already mirrored). Tokens and
+        keys are kept so re-delivered invites still match participants; tokens
+        are indexed for local FileHTTP serving.
+        """
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return None
+        base = (base_url or "").strip().rstrip("/") or None
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or session.parked:
+                return None
+            if not (session.host_node or "").strip():
+                return None
+            session.host_node = None
+            session.host_base_url = base
+            for token in session.tokens.values():
+                tok = (token or "").strip()
+                if tok:
+                    self.token_to_session[tok] = session_id
+            dead = [
+                t
+                for t, entry in self.tickets.items()
+                if entry.session_id == session_id
+            ]
+            for t in dead:
+                self.tickets.pop(t, None)
+            self._save()
+            return session
+
     def get_by_token(self, token: str) -> Optional[CanvasSession]:
         with self.lock:
             sid = self.token_to_session.get(token)
