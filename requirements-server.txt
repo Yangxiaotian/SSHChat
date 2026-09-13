@@ -3,3 +3,5 @@ chess>=1.10
 pypdf>=4.0
 pymupdf>=1.24
 ebooklib>=0.18
+# cgi was removed from the stdlib in Python 3.13+; file_http_server still needs FieldStorage.
+legacy-cgi>=2.6
