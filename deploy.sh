@@ -536,6 +536,10 @@ apply_data_plane_permissions() {
 
   chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 700 "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/scripts"
+    chmod 700 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   # Bridge runs as sshchat-federation via forced-command; must be executable by that user.
   chown "$ROOT_OWN" "$PREFIX/federation-bridge.sh"
   chmod 755 "$PREFIX/federation-bridge.sh"
@@ -663,6 +667,10 @@ apply_root_group_permissions() {
   chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/scripts"
+    chmod 700 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
@@ -1090,7 +1098,10 @@ fi
 for _f in chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
-chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+# admin-add-peer.sh / admin-remove-peer.sh source this helper at runtime
+install -m 0755 -d "$PREFIX/scripts"
+copy_app_file "$SCRIPT_DIR/scripts/ensure-federation-user.sh" "$PREFIX/scripts/ensure-federation-user.sh"
+chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh" "$PREFIX/scripts/ensure-federation-user.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
@@ -1347,6 +1358,9 @@ else
   chmod 755 "$PREFIX"
   chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 755 "$PREFIX/federation-bridge.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chmod 755 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
   # Library directory should be accessible by client group
