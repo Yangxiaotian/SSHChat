@@ -1111,7 +1111,8 @@ find "$PREFIX/locales" -name '*.pyc' -delete 2>/dev/null || true
 
 REUSE_VENV=0
 if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
-  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+  # Include cgi: removed from stdlib in Python 3.13+; file uploads need legacy-cgi.
+  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi" 2>/dev/null; then
     REUSE_VENV=1
     echo "info: iSH: reusing existing venv (deps already importable)" >&2
   fi
@@ -1161,16 +1162,19 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     # Install pure-python / wheel deps first; ebooklib needs lxml which comes from apk
     # via --system-site-packages — avoid pip compiling lxml for i686.
     pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary \
-      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0'
+      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0' 'legacy-cgi>=2.6'
     pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary --no-deps \
       'ebooklib>=0.18'
-    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi" 2>/dev/null; then
       echo "error: iSH venv missing required modules after install" >&2
       if ! "$PREFIX/venv/bin/python" -c "import lxml" 2>/dev/null; then
         echo "error: lxml missing — install system package then re-run: apk add py3-lxml" >&2
         echo "error: (venv uses --system-site-packages; see DEPLOY-iSH.md if apk.ish.app hangs)" >&2
       fi
-      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
+      if ! "$PREFIX/venv/bin/python" -c "import cgi" 2>/dev/null; then
+        echo "error: cgi missing — need pip package legacy-cgi on Python 3.13+" >&2
+      fi
+      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi"
       exit 1
     fi
     echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
@@ -1182,6 +1186,20 @@ else
   echo "info: skipped venv recreate / pip install"
 fi
 
+# Python 3.13+ dropped stdlib cgi; ensure uploads (file_http_server) still import.
+if ! "$PREFIX/venv/bin/python" -c "import cgi" 2>/dev/null; then
+  echo "info: cgi missing from venv (common on Python 3.13+); installing legacy-cgi" >&2
+  PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
+  if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
+    PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
+  fi
+  pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary 'legacy-cgi>=2.6'
+fi
+
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import file_http_server" || {
+  echo "error: file_http_server failed to import (often missing cgi on Python 3.13+; need legacy-cgi)" >&2
+  exit 1
+}
 PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import piano_sharing, piano_http" || {
   echo "error: piano modules failed to import (need piano_sharing.py, piano_http.py, piano_samples/)" >&2
   exit 1
@@ -1407,7 +1425,27 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable sshchat.service
+  systemctl reset-failed sshchat.service 2>/dev/null || true
   systemctl restart sshchat.service
+  # Catch immediate import/crash loops (e.g. missing cgi) instead of reporting success.
+  _sshchat_ok=0
+  for _i in 1 2 3 4 5 6 7 8; do
+    if systemctl is-active --quiet sshchat.service; then
+      _sshchat_ok=1
+      break
+    fi
+    # Still starting / restarting — wait a bit.
+    if systemctl is-failed --quiet sshchat.service 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$_sshchat_ok" -ne 1 ]]; then
+    echo "error: sshchat.service failed to stay running after deploy" >&2
+    systemctl status sshchat.service --no-pager -l >&2 || true
+    journalctl -u sshchat.service -n 40 --no-pager >&2 || true
+    exit 1
+  fi
   echo "info: systemd service sshchat.service enabled and restarted"
 elif [[ "$INSTALL_OPENRC" -eq 1 ]] && command -v rc-update &>/dev/null && [[ -d /etc/init.d ]]; then
   OPENRC_SRC="$SCRIPT_DIR/scripts/sshchat.openrc"
