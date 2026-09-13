@@ -1916,20 +1916,29 @@ def _socket_send(conn, data: bytes) -> None:
     if not data:
         return
     old = None
-    try:
-        old = conn.gettimeout()
-    except Exception:
-        old = None
-    try:
-        timeout = _SEND_TIMEOUT_SECONDS
-        if timeout > 0:
-            conn.settimeout(timeout)
-        conn.sendall(data)
-    finally:
+    has_timeout_api = hasattr(conn, "gettimeout") and hasattr(conn, "settimeout")
+    if has_timeout_api:
         try:
-            conn.settimeout(old)
+            old = conn.gettimeout()
         except Exception:
-            pass
+            old = None
+        try:
+            timeout = _SEND_TIMEOUT_SECONDS
+            if timeout > 0:
+                conn.settimeout(timeout)
+        except Exception:
+            has_timeout_api = False
+    try:
+        if hasattr(conn, "sendall"):
+            conn.sendall(data)
+        else:
+            conn.send(data)
+    finally:
+        if has_timeout_api:
+            try:
+                conn.settimeout(old)
+            except Exception:
+                pass
 
 
 def send_line(conn, text: str) -> None:
@@ -8852,12 +8861,9 @@ def handle_client(conn, addr) -> None:
 
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
-        join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
-        broadcast_room(active_room, join_msg, exclude_conn=conn, skip_federation=True)
-        if hub is not None and hub.enabled:
-            for room in inherited_rooms:
-                hub.notify_join(name, room)
-            _federation_sync_library_bookmarks(name)
+        # Welcome the local client BEFORE federation fanout. Peer sendall used
+        # to block here when a remote TCP window was full, so /names and /rooms
+        # never ran. Federation notify is queued/async on the peer link.
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
@@ -8895,6 +8901,13 @@ def handle_client(conn, addr) -> None:
                         _federation_sync_game(active_room)
                     except Exception as e:
                         print(f"federation: reconnect bot sync failed: {e!r}")
+
+        join_msg = f"[+] {name} joined #{active_room}\n".encode("utf-8")
+        broadcast_room(active_room, join_msg, exclude_conn=conn, skip_federation=True)
+        if hub is not None and hub.enabled:
+            for room in inherited_rooms:
+                hub.notify_join(name, room)
+            _federation_sync_library_bookmarks(name)
 
         while True:
             if not buffer:

@@ -1222,6 +1222,9 @@ SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
 SSHCHAT_ALERT_SOUND=auto
 # 联邦互联：互信节点用 admin-add-peer.sh / admin-remove-peer.sh 登记或拆除；同名用户/房间跨服合并。
 # 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
+# 联邦发送超时（秒）与每对端出站队列长度：对端 TCP 堵死时仍保证本机进房/命令不被拖死
+# SSHCHAT_FED_SEND_TIMEOUT=5
+# SSHCHAT_FED_SEND_QUEUE_MAX=512
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
@@ -1254,6 +1257,9 @@ SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
 SSHCHAT_ALERT_SOUND=auto
 # 联邦互联：互信节点用 admin-add-peer.sh / admin-remove-peer.sh 登记或拆除；同名用户/房间跨服合并。
 # 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
+# 联邦发送超时（秒）与每对端出站队列长度：对端 TCP 堵死时仍保证本机进房/命令不被拖死
+# SSHCHAT_FED_SEND_TIMEOUT=5
+# SSHCHAT_FED_SEND_QUEUE_MAX=512
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library

@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
@@ -27,6 +28,11 @@ _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
 _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
 # Bound flood dedup memory (graph cycles / rebroadcast).
 _SEEN_MAX = int(os.environ.get("SSHCHAT_FED_SEEN_MAX", "4096"))
+# Bound federation sendall so a congested peer cannot stall forever.
+_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5")
+# Outbound queue per peer: join/leave/chat fanout returns immediately to callers
+# (e.g. local SSH clients). Writer thread drains with _FED_SEND_TIMEOUT.
+_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
 
 
 def _node_id() -> str:
@@ -62,6 +68,37 @@ def _nick_key(name: str) -> str:
     return name.strip().lower()
 
 
+def _sendall_timeout(sock, data: bytes, timeout: float | None = None) -> None:
+    """sendall with a temporary timeout; restore the prior socket timeout after.
+
+    Pipes / file objects without gettimeout/settimeout fall back to bare sendall.
+    """
+    if not data:
+        return
+    if timeout is None:
+        timeout = _FED_SEND_TIMEOUT
+    old = None
+    has_timeout_api = hasattr(sock, "gettimeout") and hasattr(sock, "settimeout")
+    if has_timeout_api:
+        try:
+            old = sock.gettimeout()
+        except Exception:
+            old = None
+        try:
+            if timeout > 0:
+                sock.settimeout(timeout)
+        except Exception:
+            has_timeout_api = False
+    try:
+        sock.sendall(data)
+    finally:
+        if has_timeout_api:
+            try:
+                sock.settimeout(old)
+            except Exception:
+                pass
+
+
 class RemoteUser:
     """Presence for a user connected on a peer node."""
 
@@ -81,28 +118,71 @@ class RemoteUser:
 
 
 class _PeerLink:
-    """One bidirectional federation link to a peer node."""
+    """One bidirectional federation link to a peer node.
+
+    Outbound bytes are queued and written on a daemon thread so local chat
+    handlers (join welcome, /names, /rooms) never block on a congested peer
+    TCP window. The writer applies ``SSHCHAT_FED_SEND_TIMEOUT`` when the
+    underlying object is a socket.
+    """
 
     def __init__(self, hub: FederationHub, node_id: str, send_fn: Callable[[bytes], None]) -> None:
         self.hub = hub
         self.node_id = node_id
         self._send_fn = send_fn
         self._closed = False
+        qmax = max(16, _FED_SEND_QUEUE_MAX)
+        self._send_q: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=qmax)
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            name=f"fed-send-{node_id}",
+            daemon=True,
+        )
+        self._writer.start()
 
     def send_line(self, line: str) -> None:
         if self._closed:
             return
+        data = line.encode("utf-8")
         try:
-            self._send_fn(line.encode("utf-8"))
-        except Exception as e:
-            print(f"federation: send to {self.node_id} failed: {e!r}")
+            self._send_q.put_nowait(data)
+        except queue.Full:
+            print(
+                f"federation: send queue full for {self.node_id} "
+                f"(peer congested); closing link"
+            )
             self.close()
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        try:
+            self._send_q.put_nowait(None)
+        except queue.Full:
+            pass
 
     def handle_line(self, line: str) -> None:
         self.hub._on_peer_line(self.node_id, line)
+
+    def _write_loop(self) -> None:
+        while True:
+            try:
+                item = self._send_q.get(timeout=0.5)
+            except queue.Empty:
+                if self._closed:
+                    break
+                continue
+            if item is None:
+                break
+            if self._closed:
+                break
+            try:
+                self._send_fn(item)
+            except Exception as e:
+                print(f"federation: send to {self.node_id} failed: {e!r}")
+                self.close()
+                break
 
 
 class FederationHub:
@@ -1828,11 +1908,21 @@ class FederationHub:
                 self.on_file_notice(to_name, from_name, notice)
             self._forward_unicast_for_nick(line + "\n", to_name, ingress=peer_node)
             return
-        if kind == "fleave" and len(parts) >= 5 and self.on_file_notice:
+        if kind == "fleave" and self.on_file_notice:
             # Offline file leave seed — fan-out to all peers (not presence-gated).
+            # Format: fleave\torigin\tto\tfrom\tb64\tnonce — must not use the
+            # maxsplit=4 `parts` above or nonce is glued onto the JSON blob.
+            fleave_parts = line.split("\t")
+            if len(fleave_parts) < 5:
+                return
             if self._remember_seen(line):
                 return
-            origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
+            origin, to_name, from_name, b64 = (
+                fleave_parts[1],
+                fleave_parts[2],
+                fleave_parts[3],
+                fleave_parts[4],
+            )
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -2290,10 +2380,12 @@ class FederationHub:
                 peer_node = remote_id
 
                 def _send(data: bytes, _c=conn) -> None:
-                    _c.sendall(data)
+                    _sendall_timeout(_c, data)
 
                 link = _PeerLink(self, peer_node, _send)
                 is_new = self._register_peer(peer_node, link)
+                # Handshake @fed-ok must go out immediately (not via the queue)
+                # so the peer can finish connecting even if the writer is busy.
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
                 if is_new:
@@ -2453,7 +2545,7 @@ class FederationHub:
 
         def _send(data: bytes) -> None:
             if hasattr(send_sock, "sendall"):
-                send_sock.sendall(data)
+                _sendall_timeout(send_sock, data)
             else:
                 send_sock.write(data)
                 send_sock.flush()

@@ -2146,5 +2146,74 @@ class FilePublicReachabilityTests(unittest.TestCase):
                 self.assertEqual(srv.get_base_url(), "http://10.0.0.9:8443")
 
 
+class FederationSendQueueTests(unittest.TestCase):
+    """Local handlers must not block when a peer sendall hangs."""
+
+    def test_peer_link_send_line_returns_while_send_blocks(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        sent: list[bytes] = []
+
+        def blocking_send(data: bytes) -> None:
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test release not signaled")
+            sent.append(data)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "node-b", blocking_send)
+        hub._peers["node-b"] = link
+
+        t0 = time.monotonic()
+        hub.notify_join("alice", "lobby")
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.5, f"notify_join blocked for {elapsed:.2f}s")
+        self.assertTrue(started.wait(2.0), "writer never invoked send_fn")
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not sent:
+            time.sleep(0.01)
+        self.assertTrue(sent)
+        self.assertTrue(sent[0].startswith(b"join\t"))
+        link.close()
+
+    def test_sendall_timeout_applies_socket_timeout(self) -> None:
+        """_sendall_timeout must set a temporary timeout around sendall."""
+
+        class TrackingSock:
+            def __init__(self) -> None:
+                self.timeouts: list[float | None] = []
+                self._timeout: float | None = None
+                self.sent: list[bytes] = []
+
+            def gettimeout(self) -> float | None:
+                return self._timeout
+
+            def settimeout(self, value: float | None) -> None:
+                self.timeouts.append(value)
+                self._timeout = value
+
+            def sendall(self, data: bytes) -> None:
+                if self._timeout == 0.3:
+                    raise TimeoutError("timed out")
+                self.sent.append(data)
+
+        sock = TrackingSock()
+        with self.assertRaises(TimeoutError):
+            federation._sendall_timeout(sock, b"hello", timeout=0.3)
+        self.assertEqual(sock.timeouts[0], 0.3)
+        # Prior timeout restored even after failure.
+        self.assertIsNone(sock.timeouts[-1])
+
+
 if __name__ == "__main__":
     unittest.main()
