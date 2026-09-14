@@ -21,7 +21,7 @@ MESSAGES: dict = {
         "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
         "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
         "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
-        "[*] /pad           房间剪贴板（房内任何人可改，重启后保留）：/pad 查看；/pad <文字> 写入一行；/pad clear 清除。\n",
+        "[*] /pad           房间剪贴板（房内任何人可改，重启后保留；联邦同名房间同步）：/pad 查看；/pad <文字> 写入一行；/pad clear 清除。\n",
         "[*]              多行请用终端 /pad edit（vim/$EDITOR）；详细：/pad help。\n",
         "[*] /poll          房间投票：/poll new 问题 | 选项A | 选项B；/poll <序号> 投票；/poll close 结束。\n",
         "[*] /later         私人时间胶囊（只提醒自己，重启后保留；联邦同名可 list/cancel，到期也会收到）："
@@ -126,6 +126,7 @@ MESSAGES: dict = {
             "[*]         /pad           查看\n"
             "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim）\n"
             "[*]         /pad clear     清除\n"
+            "[*] 联邦同名房间共享同一份剪贴板（后写覆盖）。\n"
         ),
         "pad_preview": "[#{room}] [*] 剪贴板：{text}\n",
         "pad_preview_multi": "[#{room}] [*] 剪贴板（{n} 行）：{text} …\n",

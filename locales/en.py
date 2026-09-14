@@ -21,7 +21,7 @@ MESSAGES: dict = {
         "[*] /clear or /cls  Clear screen (terminal clears; GUI clients clear the current room history).\n",
         "[*] /announce      Show this room's announcement; owner may /announce <text> to set, /announce clear to clear.\n",
         "[*]              Owner: #default is the first user on the server; other rooms, the first /join to that room.\n",
-        "[*] /pad           Room clipboard (anyone in the room may edit; survives restart): /pad to view; /pad <text> one line; /pad clear.\n",
+        "[*] /pad           Room clipboard (anyone may edit; survives restart; federated same-name rooms sync): /pad to view; /pad <text> one line; /pad clear.\n",
         "[*]              Multi-line: terminal /pad edit (vim/$EDITOR). Details: /pad help.\n",
         "[*] /poll          Room poll: /poll new Q | A | B; /poll <n> to vote; /poll close to end.\n",
         "[*] /later         Personal reminder (only you; survives restart; federation same-nick can list/cancel and gets delivery): "
@@ -130,6 +130,7 @@ MESSAGES: dict = {
             "[*]         /pad           show\n"
             "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim)\n"
             "[*]         /pad clear     clear\n"
+            "[*] Federated same-name rooms share one pad (last write wins).\n"
         ),
         "pad_preview": "[#{room}] [*] Pad: {text}\n",
         "pad_preview_multi": "[#{room}] [*] Pad ({n} lines): {text} …\n",

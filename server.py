@@ -121,6 +121,8 @@ room_owners: dict[str, object] = {}
 room_announcements: dict[str, str] = {}
 # room -> shared sticky-note / clipboard text (anyone in room may edit)
 room_pads: dict[str, str] = {}
+# room -> monotonic ns revision for federated /pad last-write-wins
+room_pad_revs: dict[str, int] = {}
 # room -> active poll {"question", "options", "votes", "creator"}
 room_polls: dict[str, dict] = {}
 # pending room time capsules (sorted loosely; deliver loop scans)
@@ -484,6 +486,66 @@ def _normalize_pad_text(text: str) -> str:
     return normalized.rstrip("\n").strip("\0")
 
 
+def _federation_push_pad(room: str) -> None:
+    """Fan-out one room pad (empty text = cleared) to federation peers."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        text = room_pads.get(room) or ""
+        rev = int(room_pad_revs.get(room) or 0)
+    if rev <= 0:
+        return
+    try:
+        hub.sync_pad(room, text, rev)
+    except Exception as e:
+        print(f"federation: pad sync failed for #{room}: {e!r}")
+
+
+def _federation_push_all_pads() -> None:
+    """Catch-up: push every known pad revision after a peer comes up."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        rooms = set(room_pads) | set(room_pad_revs)
+        # Stamp legacy pads that survived restart without a rev.
+        now = time.time_ns()
+        for room in list(rooms):
+            if int(room_pad_revs.get(room) or 0) <= 0 and (room_pads.get(room) or ""):
+                room_pad_revs[room] = now
+                now += 1
+    for room in rooms:
+        _federation_push_pad(room)
+
+
+def _fed_on_pad_sync(origin: str, room: str, text: str, rev: int) -> None:
+    """Apply peer /pad snapshot when remote revision is newer (LWW)."""
+    room = (room or "").strip()
+    if not room:
+        return
+    try:
+        rev_i = int(rev)
+    except (TypeError, ValueError):
+        return
+    if rev_i <= 0:
+        return
+    text = _normalize_pad_text(text or "")
+    if len(text) > MAX_PAD_LEN:
+        print(f"federation: ignoring overlong pad from {origin} for #{room}")
+        return
+    with lock:
+        local_rev = int(room_pad_revs.get(room) or 0)
+        if rev_i <= local_rev:
+            return
+        room_pad_revs[room] = rev_i
+        if text.strip():
+            room_pads[room] = text
+        else:
+            room_pads.pop(room, None)
+    _mark_sessions_dirty()
+
+
 def _set_room_pad(conn, name: str, room: str, text: str) -> None:
     text = _normalize_pad_text(text)
     if not text.strip():
@@ -494,7 +556,9 @@ def _set_room_pad(conn, name: str, room: str, text: str) -> None:
         return
     with lock:
         room_pads[room] = text
+        room_pad_revs[room] = time.time_ns()
     _mark_sessions_dirty()
+    _federation_push_pad(room)
     n_lines = _pad_line_count(text)
     if n_lines <= 1:
         bcast = _ts(conn, "pad_set_bcast", room=room, editor=name, text=text)
@@ -534,10 +598,13 @@ def _handle_pad(conn, name: str, room: str, payload: str) -> None:
         with lock:
             had = bool((room_pads.get(room) or "").strip())
             room_pads.pop(room, None)
+            if had:
+                room_pad_revs[room] = time.time_ns()
         if not had:
             send_line(conn, _ts(conn, "pad_none", room=room))
             return
         _mark_sessions_dirty()
+        _federation_push_pad(room)
         broadcast_room(
             room,
             _ts(conn, "pad_cleared_bcast", room=room, editor=name).encode("utf-8"),
@@ -1777,6 +1844,11 @@ def _build_session_payload_locked() -> dict[str, object]:
         "room_enabled_games_version": ROOM_GAME_CATALOG_VERSION,
         "room_announcements": dict(room_announcements),
         "room_pads": dict(room_pads),
+        "room_pad_revs": {
+            room: int(rev)
+            for room, rev in room_pad_revs.items()
+            if isinstance(room, str) and int(rev or 0) > 0
+        },
         "room_capsules": [
             {
                 "id": int(c.get("id") or 0),
@@ -1884,6 +1956,17 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
         for room, text in pads.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_pads[room] = text
+    pad_revs = payload.get("room_pad_revs")
+    if isinstance(pad_revs, dict):
+        for room, rev in pad_revs.items():
+            if not isinstance(room, str):
+                continue
+            try:
+                rev_i = int(rev)
+            except (TypeError, ValueError):
+                continue
+            if rev_i > 0:
+                room_pad_revs[room] = rev_i
     capsules = payload.get("room_capsules")
     if isinstance(capsules, list):
         restored: list[dict] = []
@@ -7611,6 +7694,10 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
                 _federation_push_all_canvas_announces()
             except Exception as e:
                 print(f"federation: peer-up canvas catch-up error: {e!r}")
+            try:
+                _federation_push_all_pads()
+            except Exception as e:
+                print(f"federation: peer-up pad catch-up error: {e!r}")
         else:
             text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
@@ -7817,6 +7904,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
     _fed_hub.on_offline_pm = _fed_on_offline_pm
     _fed_hub.on_canvas_sync = _fed_on_canvas_sync
+    _fed_hub.on_pad_sync = _fed_on_pad_sync
     _fed_hub.on_file_public_change = _fed_on_file_public_change
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _fed_hub.on_ratings = _fed_on_ratings
@@ -7842,6 +7930,10 @@ def _ensure_federation_hub() -> None:
         _federation_sync_ratings(rating_store.export_entries())
     except Exception as e:
         print(f"federation: initial ratings sync error: {e!r}")
+    try:
+        _federation_push_all_pads()
+    except Exception as e:
+        print(f"federation: initial pad sync error: {e!r}")
     try:
         # Peers may already be up; otherwise peer-up handler reconciles again.
         _federation_reconcile_restored_games()

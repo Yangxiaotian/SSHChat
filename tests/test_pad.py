@@ -22,6 +22,7 @@ class PadTests(unittest.TestCase):
         server.room_owners.clear()
         server.room_announcements.clear()
         server.room_pads.clear()
+        server.room_pad_revs.clear()
         server.room_polls.clear()
         self.alice = DummyConn()
         self.bob = DummyConn()
@@ -98,6 +99,28 @@ class PadTests(unittest.TestCase):
     def test_edit_hint_for_non_terminal(self) -> None:
         server.handle_command(self.bob, "/pad edit")
         self.assertIn("terminal", self._out(self.bob).lower())
+
+    def test_fed_pad_lww_and_clear(self) -> None:
+        server.room_pads["lobby"] = "old"
+        server.room_pad_revs["lobby"] = 100
+        server._fed_on_pad_sync("peer-a", "lobby", "new\nline", 200)
+        self.assertEqual(server.room_pads["lobby"], "new\nline")
+        self.assertEqual(server.room_pad_revs["lobby"], 200)
+        # Stale revision ignored.
+        server._fed_on_pad_sync("peer-b", "lobby", "stale", 150)
+        self.assertEqual(server.room_pads["lobby"], "new\nline")
+        # Clear via empty body with newer rev.
+        server._fed_on_pad_sync("peer-a", "lobby", "", 300)
+        self.assertNotIn("lobby", server.room_pads)
+        self.assertEqual(server.room_pad_revs["lobby"], 300)
+
+    def test_set_bumps_rev_and_clear_keeps_rev(self) -> None:
+        server.handle_command(self.alice, "/pad hello fed")
+        self.assertGreater(server.room_pad_revs.get("lobby", 0), 0)
+        rev = server.room_pad_revs["lobby"]
+        server.handle_command(self.bob, "/pad clear")
+        self.assertNotIn("lobby", server.room_pads)
+        self.assertGreater(server.room_pad_revs["lobby"], rev)
 
 
 if __name__ == "__main__":
