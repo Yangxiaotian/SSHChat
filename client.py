@@ -870,8 +870,76 @@ def _pad_editor_unrestricted() -> bool:
     )
 
 
-def _pad_editor_argv(editor: str) -> list[str]:
-    """Build editor argv; block vim/nvim shell escapes (:term, :!, etc.).
+def _vim_script_string(path: str) -> str:
+    """Quote a filesystem path for embedding in Vimscript."""
+    return "'" + path.replace("'", "''") + "'"
+
+
+def _write_pad_vim_lock_rc(pad_path: str) -> str:
+    """Write a one-shot vimrc that only allows reading/editing the pad file.
+
+    -Z alone still permits :e / :vimgrep / :r on other paths; this closes that.
+    :help under $VIMRUNTIME remains allowed.
+    """
+    rc_path = pad_path + ".vimrc"
+    pad_lit = _vim_script_string(os.path.realpath(pad_path))
+    rc_path_lit = _vim_script_string(os.path.realpath(rc_path))
+    content = f"""set nocompatible
+set modelines=0
+set secure
+set noswapfile
+set noundofile
+set viminfo=
+set nobackup
+set nowritebackup
+set noshelltemp
+filetype plugin off
+let s:pad = resolve({pad_lit})
+let s:rc = resolve({rc_path_lit})
+function! s:Allowed(path) abort
+  let f = resolve(a:path)
+  if empty(f) || f ==# s:pad || f ==# s:rc
+    return 1
+  endif
+  let rt = resolve($VIMRUNTIME)
+  if !empty(rt) && stridx(f, rt . '/') == 0
+    return 1
+  endif
+  return 0
+endfunction
+function! s:GuardRead() abort
+  if !s:Allowed(expand('<afile>:p'))
+    throw 'E145: only the pad file may be read'
+  endif
+endfunction
+function! s:GuardBuf() abort
+  if s:Allowed(expand('%:p'))
+    return
+  endif
+  echoerr 'E145: only the pad buffer is allowed'
+  silent! execute 'keepalt edit' fnameescape(s:pad)
+endfunction
+augroup sshchat_pad_lock
+  autocmd!
+  autocmd BufReadPre,FileReadPre,FilterReadPre,BufNewFile * call s:GuardRead()
+  autocmd BufEnter,WinEnter * call s:GuardBuf()
+augroup END
+"""
+    with open(rc_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return rc_path
+
+
+def _pad_editor_is_vim_family(base: str) -> bool:
+    if base in ("rvim", "rview", "vim", "vi", "vimx", "view", "nvim"):
+        return True
+    if base.startswith("nvim") or base.startswith("vim."):
+        return True
+    return False
+
+
+def _pad_editor_argv(editor: str, pad_path: str = "", lock_rc: str = "") -> list[str]:
+    """Build editor argv; block shell escapes and opening other files.
 
     Override with SSHCHAT_PAD_UNRESTRICTED=1 if you truly need an unrestricted editor.
     """
@@ -881,10 +949,28 @@ def _pad_editor_argv(editor: str) -> list[str]:
     base = os.path.basename(cmd[0]).lower()
     if base.endswith(".exe"):
         base = base[:-4]
+
+    if _pad_editor_is_vim_family(base) and lock_rc:
+        # -u replaces user vimrc; --noplugin avoids netrw/:Explore etc.
+        locked = [cmd[0], "-u", lock_rc, "-i", "NONE", "-n", "--noplugin"]
+        if base not in ("rvim", "rview") and base != "nvim" and not base.startswith("nvim"):
+            if "-Z" not in cmd[1:] and "--restricted" not in cmd[1:]:
+                locked.insert(1, "-Z")
+        if base == "nvim" or base.startswith("nvim"):
+            false = shutil.which("false") or "/usr/bin/false"
+            locked[1:1] = [
+                "--cmd",
+                f"set shell={false}",
+                "--cmd",
+                "lua vim.fn.termopen=function() error('E145: restricted',0) end",
+            ]
+        # Keep any user-supplied flags after the binary name (e.g. EDITOR='vim -N').
+        locked.extend(cmd[1:])
+        return locked
+
     if base in ("rvim", "rview"):
         return cmd
     if base == "nvim" or base.startswith("nvim"):
-        # nvim has no -Z; pin a non-shell and block :terminal's termopen().
         false = shutil.which("false") or "/usr/bin/false"
         return [
             cmd[0],
@@ -931,6 +1017,7 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         return
 
     path = ""
+    lock_rc = ""
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -943,7 +1030,13 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
             if current and not current.endswith("\n"):
                 tf.write("\n")
             path = tf.name
-        cmd = _pad_editor_argv(editor)
+        if not _pad_editor_unrestricted():
+            base = os.path.basename(editor.split()[0]).lower()
+            if base.endswith(".exe"):
+                base = base[:-4]
+            if _pad_editor_is_vim_family(base):
+                lock_rc = _write_pad_vim_lock_rc(path)
+        cmd = _pad_editor_argv(editor, path, lock_rc)
         mode = "unrestricted" if _pad_editor_unrestricted() else "restricted"
         print(f"[*] Opening editor ({' '.join(cmd)}; {mode}). Save & quit to upload.")
         # Flush prompt_toolkit stdout proxy so vim gets a clean TTY.
@@ -960,11 +1053,12 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         print(f"[*] Pad edit failed: {e!r}")
         return
     finally:
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        for p in (path, lock_rc):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
         "\r\n", "\n"
