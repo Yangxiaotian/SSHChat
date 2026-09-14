@@ -32,6 +32,29 @@ New-Item -ItemType Directory -Path $appDir | Out-Null
 
 Copy-Item -Path (Join-Path $sourceDir "*") -Destination $appDir -Recurse -Force
 
+# Include local Gomoku and Go engine bundles for the authorized assistants.
+$repoRapfiDir = Join-Path $PSScriptRoot "..\engines\rapfi"
+$portableRapfiDir = Join-Path $appDir "engines\rapfi"
+if (Test-Path $repoRapfiDir) {
+  New-Item -ItemType Directory -Path $portableRapfiDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $repoRapfiDir "*") -Destination $portableRapfiDir -Recurse -Force
+}
+
+$repoKataGoDir = Join-Path $PSScriptRoot "..\engines\katago"
+$portableKataGoDir = Join-Path $appDir "engines\katago"
+if (Test-Path $repoKataGoDir) {
+  New-Item -ItemType Directory -Path $portableKataGoDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $repoKataGoDir "*") -Destination $portableKataGoDir -Recurse -Force
+}
+
+# Include the local Pikafish bundle for the authorized Xiangqi assistant.
+$repoPikafishDir = Join-Path $PSScriptRoot "..\engines\Pikafish"
+$portablePikafishDir = Join-Path $appDir "engines\Pikafish"
+if (Test-Path $repoPikafishDir) {
+  New-Item -ItemType Directory -Path $portablePikafishDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $repoPikafishDir "*") -Destination $portablePikafishDir -Recurse -Force
+}
+
 $psLauncher = @'
 $ErrorActionPreference = "Stop"
 

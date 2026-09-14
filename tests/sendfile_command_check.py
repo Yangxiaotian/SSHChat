@@ -10,6 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 tmpdir = tempfile.mkdtemp(prefix="sshchat_cmd_")
 os.environ["SSHCHAT_FILE_STORAGE_DIR"] = os.path.join(tmpdir, "files")
 os.environ["SSHCHAT_FILE_TRANSFER_STORE"] = os.path.join(tmpdir, "transfers.json")
+# This script's assertions expect the Chinese strings used throughout (matching
+# the hardcoded /sendfile UI text), so pin the i18n default instead of relying
+# on whatever SSHCHAT_DEFAULT_LOCALE happens to be set to in the environment.
+os.environ["SSHCHAT_DEFAULT_LOCALE"] = "zh"
+os.environ["SSHCHAT_LOCALE_STORE"] = os.path.join(tmpdir, "user_locales.json")
 
 import server
 
@@ -78,12 +83,14 @@ t = latest()
 assert set(t.download_tokens) == {"bob"} and t.filename == ""
 print("4. 旧写法 /sendfile bob report.pdf 仍可用，多余文件名被忽略并提示")
 
-# 5. Room with nobody else
+# 5. Room with nobody else: still allow send (same-nick multi-device)
 server.clients[alice]["current_room"] = "quiet"
 out = run("/sendfile")
-assert "没有其他用户" in out, out
+assert "仅你在线" in out and "上传网址" in out, out
+t = latest()
+assert t.room == "quiet" and set(t.download_tokens) == {"alice"}, t
 server.clients[alice]["current_room"] = "dev"
-print("5. 空房间给出友好提示")
+print("5. 空房间允许发给自己（同名多端）")
 
 # 6. Room the sender is not in
 out = run("/sendfile #nosuch")
@@ -133,7 +140,8 @@ store.mark_upload_complete(t.upload_token, uploaded2, len(b"offline-file"), "给
 captured.clear()
 prev_box = server.offline_messages.count("eve")
 server._notify_file_ready(store.get_transfer_by_token(t.upload_token))
-assert "".join(captured) == "", "offline recipient should not get live notice"
+joined_notify = "".join(captured)
+assert "eve" in joined_notify and "留言" in joined_notify, joined_notify
 assert server.offline_messages.count("eve") == prev_box + 1
 listed = server.offline_messages.list_sent_unread("alice", "eve")
 assert listed and listed[-1]["kind"] == "file"
@@ -215,5 +223,19 @@ try:
     print("13. 上传完成后向联邦远端发送 fnotice（含公网 download_url）")
 finally:
     _fed.get_hub = _prev_get
+
+# 14. Same nick on two sessions: sender's other device is not a recipient
+alice_desktop = object()
+server.clients[alice_desktop] = {
+    "name": "alice",
+    "rooms": {"dev"},
+    "current_room": "dev",
+}
+server.rooms["dev"].add(alice_desktop)
+out = run("/sendfile #dev")
+t = latest()
+assert "alice" not in t.download_tokens, sorted(t.download_tokens.keys())
+assert "bob" in t.download_tokens and "carol" in t.download_tokens
+print("14. 同名双端在线：发送者的另一会话不会占收件名额")
 
 print("\n✅ /sendfile 参数解析全部通过")

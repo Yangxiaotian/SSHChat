@@ -2,7 +2,7 @@
 
 **Languages:** English (this file) · [中文说明](README.zh.md)
 
-SSHChat is a multi-user chat server over SSH/TCP with room chat, private messages, offline leave-messages, secure HTTP file transfer, RSS news, a small library reader, dictionary lookup, and room mini-games (chess, gomoku, go, xiangqi, poker variants, werewolf, and more). An optional Electron GUI is included.
+SSHChat is a multi-user chat server over SSH/TCP with room chat, private messages, offline leave-messages, secure HTTP file transfer, a shared drawing board (`/canvas`), RSS news, a small library reader, dictionary lookup, and room mini-games (chess, gomoku, go, xiangqi, poker variants, werewolf, and more). An optional Electron GUI is included.
 
 **UI language defaults to English.** Switch with `/lang zh` (preference is saved per nickname). The Electron client defaults to English and syncs `/lang` on connect. **Sanguosha (`sanguo`) move/skill text is still mostly Chinese** in this release; other games localize at send time.
 
@@ -28,6 +28,21 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/msg <nick> <text>` | PM (or leave-message if offline) |
 | `/sendfile` | File to current room |
 | `/sendfile <nick>` | File to a user |
+| `/canvas` | Shared drawing board (current room) |
+| `/canvas <nick>` | Private board with one user |
+| `/clock` | Fullscreen chess clock (Kindle-friendly; ticks on the device) |
+| `/clock 10+5` | 10 minutes each, plus 5 seconds a move |
+| `/pad` | Show room clipboard (shared sticky note; federated same-name rooms sync) |
+| `/pad <text>` | Set one line (use terminal `/pad edit` for newlines) |
+| `/pad edit` | Open vim/$EDITOR for multi-line, then upload (alias `/pad vim`) |
+| `/pad clear` | Clear room pad |
+| `/poll` | Show room poll |
+| `/poll new Q \| A \| B` | Start a poll (`\|`-separated options) |
+| `/poll <n>` | Vote (may change) |
+| `/poll close` | Close poll (creator or room owner) |
+| `/later 30m <text>` | Personal reminder (only you; survives restart; federation same-nick too; also `2h`/`1d`, `09:30`, `tomorrow 09:00`) |
+| `/later list` | List your pending reminders |
+| `/later cancel <n>` | Cancel one |
 | `/game help` | Mini-game help |
 | `/news` | RSS headlines |
 | `/library` | Browse books |
@@ -113,11 +128,28 @@ The GUI has its own locale toggle (default **English**). On connect it sends `/l
 
 ---
 
+## Shared drawing board
+
+`/canvas` (alias `/board`) opens a shared web whiteboard on the same HTTP(S) file service as `/sendfile`. Each participant gets a **unique URL** and a **separate 6-character key** (the key is never in the URL).
+
+| Command | Purpose |
+|---------|---------|
+| `/canvas` | Board for the current room |
+| `/canvas <nick>` | Private board with an online user |
+| `/canvas #<room>` | Board for a room you are in |
+| `/canvas close` | Creator closes the current room board |
+| `/canvas new` | Force a new board even if the room already has one |
+| `/canvas help` | Short usage reminder |
+
+Open the URL in a browser, enter the key, then draw; strokes sync live. GUI clients (tk / Electron) open the board in-app. Sessions expire after a few hours (default 4). Same Cloudflare / federation-proxy rules as `/sendfile`.
+
+---
+
 ## File transfer security (summary)
 
 `/sendfile` opens a one-time HTTP(S) upload/download page. Keys are **not** embedded in URLs; upload and download tokens are single-use. Details: [docs/en/file-sharing.md](docs/en/file-sharing.md).
 
-Upload/download HTML defaults to English; add `?lang=zh` for Chinese pages.
+Upload/download HTML defaults to English; add `?lang=zh` for Chinese pages. The shared canvas uses the same port and key-not-in-URL pattern; canvas access tickets are multi-use until expiry so people can keep drawing.
 
 ---
 

@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import canvas_sharing
 import federation
+import file_http_server
 import library
 import server
 
@@ -33,9 +35,13 @@ class FederationProtocolTests(unittest.TestCase):
         server.rooms.clear()
         server.room_owners.clear()
         server.room_announcements.clear()
+        server.room_polls.clear()
+        server.room_capsules.clear()
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
@@ -748,6 +754,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
         server.room_games.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_games_parked.clear()
         federation._hub = None
         server._fed_hub = None
@@ -758,6 +766,68 @@ class FederationServerIntegrationTests(unittest.TestCase):
         port = s.getsockname()[1]
         s.close()
         return port
+
+    def test_canvas_nick_invite_reaches_federated_user(self) -> None:
+        """ /canvas <nick> must accept a user who is only online on a peer. """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = canvas_sharing.CanvasStore(
+            store_path=os.path.join(tmp.name, "canvas.json")
+        )
+        alice = DummyConn()
+        server.clients[alice] = {"name": "alice", "current_room": "lobby"}
+        pms: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+
+            def has_remote_user(self, nick: str) -> bool:
+                return str(nick).lower() == "bob"
+
+            def send_pm(self, to_nick, from_name, text) -> bool:
+                pms.append((to_nick, from_name, text))
+                return True
+
+            def has_remote_file_public(self) -> bool:
+                return False
+
+            def pick_file_public_peer(self):
+                return None
+
+        class FakeFileHttp:
+            def get_base_url(self) -> str:
+                return "https://files.example"
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "file_http", FakeFileHttp()):
+                with mock.patch.object(canvas_sharing, "canvas_store", store):
+                    with mock.patch.object(
+                        file_http_server,
+                        "needs_federation_file_proxy",
+                        return_value=False,
+                    ):
+                        server._handle_canvas(alice, "alice", "/canvas bob")
+
+        sent = b"".join(alice.sent).decode("utf-8")
+        self.assertNotIn("不在线", sent)
+        self.assertTrue(pms, sent)
+        self.assertEqual(pms[0][0], "bob")
+        self.assertIn("gui-open canvas", pms[0][2])
+
+    def test_fed_pm_canvas_invite_not_wrapped_as_pm(self) -> None:
+        bob = DummyConn()
+        server.clients[bob] = {"name": "bob", "current_room": "lobby"}
+        invite = (
+            "[*] ========== 共享画布 ==========\n"
+            "[*] gui-open canvas https://files.example/canvas/tok ABCDEF\n"
+        )
+        server._fed_on_pm("bob", "alice", invite)
+        sent = b"".join(bob.sent).decode("utf-8")
+        self.assertNotIn("[PM from alice]", sent)
+        self.assertIn("gui-open canvas", sent)
+        server._fed_on_pm("bob", "alice", "hello there")
+        sent2 = b"".join(bob.sent).decode("utf-8")
+        self.assertIn("[PM from alice] hello there", sent2)
 
     def test_broadcast_forwards_to_hub(self) -> None:
         sent: list[tuple[str, bytes]] = []
@@ -787,6 +857,12 @@ class FederationServerIntegrationTests(unittest.TestCase):
                 return None
 
             def sync_file_public(self, base_url=None):
+                return None
+
+            def request_game(self, room: str) -> None:
+                return None
+
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
                 return None
 
         class FakeGame:
@@ -950,6 +1026,8 @@ class FederationServerIntegrationTests(unittest.TestCase):
         server.room_game_authority["lobby"] = "node-a"
         server.room_game_tokens["lobby"] = "aaaa"  # loses to bbbb
         server.room_games_parked.clear()
+        # Unsolicited gsync cannot overwrite a live host; token tiebreak is for greq.
+        server._note_greq("lobby")
         with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
             with mock.patch.object(server.pickle, "loads", return_value=remote):
                 with mock.patch.object(server, "_rebind_game_services"):
@@ -1170,6 +1248,71 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(got[-1][5], "yxt")
         self.assertEqual(got[-1][6], "r")
 
+    def test_lpage_search_flag_and_query_reach_owner(self) -> None:
+        got: list[tuple] = []
+        done = threading.Event()
+
+        def on_req(*a):
+            got.append(a)
+            done.set()
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        owner = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+            on_library_page_request=on_req,
+        )
+        owner.enabled = True
+        owner.node_id = "node-owner"
+        owner._peers["node-b"] = FakeLink("node-b")
+
+        reader = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        reader.enabled = True
+        reader.node_id = "node-b"
+        reader._peers["node-owner"] = FakeLink("node-owner")
+        reader._routes["node-owner"] = "node-owner"
+
+        self.assertTrue(
+            reader.request_library_page(
+                "node-owner",
+                "req3",
+                "book.epub",
+                0,
+                flags="f",
+                query="hello world",
+            )
+        )
+        line = reader._peers["node-owner"].lines[-1].rstrip("\n")
+        self.assertIn("\tf\t", line)
+        self.assertTrue(line.endswith("hello world"))
+        owner._on_peer_line("node-b", line)
+        self.assertTrue(done.wait(2.0))
+        self.assertEqual(got[-1][6], "f")
+        self.assertEqual(got[-1][7], "hello world")
+        self.assertFalse(
+            reader.request_library_page(
+                "node-owner", "req4", "book.epub", 0, flags="f", query="  "
+            )
+        )
+
     def test_owner_page_request_resumes_bookmark(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1249,6 +1392,53 @@ class FederationServerIntegrationTests(unittest.TestCase):
                     "owner", "rid", "tale.txt", 3, "reader", "yxt", "s"
                 )
         self.assertEqual(server.library_bookmarks.get_page("yxt", "tale.txt"), 3)
+
+    def test_owner_page_request_searches_book(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lib_dir = Path(tmp.name)
+        book = lib_dir / "tale.txt"
+        book.write_text(
+            "alpha " * 40 + "\n\nneedle in hay\n\n" + "omega " * 40,
+            encoding="utf-8",
+        )
+        old_chars = library.LIBRARY_PAGE_CHARS
+        library.LIBRARY_PAGE_CHARS = 80
+        self.addCleanup(lambda: setattr(library, "LIBRARY_PAGE_CHARS", old_chars))
+
+        prev_dir = os.environ.get("SSHCHAT_LIBRARY_DIR")
+        os.environ["SSHCHAT_LIBRARY_DIR"] = str(lib_dir)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("SSHCHAT_LIBRARY_DIR", prev_dir)
+            if prev_dir is not None
+            else os.environ.pop("SSHCHAT_LIBRARY_DIR", None)
+        )
+        prev_bm = server.library_bookmarks
+        store_path = str(Path(tmp.name) / "bm.json")
+        server.library_bookmarks = library.LibraryBookmarkStore(store_path)
+        self.addCleanup(lambda: setattr(server, "library_bookmarks", prev_bm))
+
+        replies: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "owner"
+
+            def reply_library_page(self, requester, req_id, payload):
+                replies.append((requester, req_id, payload))
+
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            server._fed_on_library_page_request(
+                "owner", "rid", "tale.txt", 0, "reader", "", "f", "needle"
+            )
+        self.assertEqual(len(replies), 1)
+        payload = replies[0][2]
+        self.assertTrue(payload.get("ok"))
+        self.assertIn("results", payload)
+        self.assertNotIn("text", payload)
+        hits = payload["results"]
+        self.assertTrue(hits)
+        self.assertIn("needle", hits[0]["snippet"])
 
     def test_lpage_handler_does_not_block_peer_line(self) -> None:
         """Slow book loads must not stall federation I/O."""
@@ -1379,6 +1569,64 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(got[-1][0], "node-a")
         self.assertEqual(got[-1][1], "yxt")
         self.assertEqual(got[-1][2]["a.epub"]["page"], 2)
+
+    def test_lcap_fanout_and_handler(self) -> None:
+        got: list[tuple] = []
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub.on_capsules = lambda *a: got.append(a)
+        peer = FakeLink("node-b")
+        hub._peers["node-b"] = peer
+        caps = [
+            {
+                "id": 1,
+                "room": "lobby",
+                "creator": "Alice",
+                "text": "hi",
+                "deliver_at": 99.0,
+            }
+        ]
+        hub.sync_capsules("Alice", caps)
+        self.assertEqual(len(peer.lines), 1)
+        parts = peer.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "lcap")
+        self.assertEqual(parts[2], "Alice")
+        decoded = json.loads(base64.b64decode(parts[3]).decode("utf-8"))
+        self.assertEqual(decoded[0]["text"], "hi")
+
+        other = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        other.enabled = True
+        other.node_id = "node-b"
+        other.on_capsules = lambda *a: got.append(a)
+        other._peers["node-a"] = FakeLink("node-a")
+        other._on_peer_line("node-a", peer.lines[0].rstrip("\n"))
+        self.assertEqual(got[-1][0], "node-a")
+        self.assertEqual(got[-1][1], "Alice")
+        self.assertEqual(got[-1][2][0]["text"], "hi")
 
     def test_run_session_assembles_chunked_lines(self) -> None:
         """Large federation frames (lpage_ok) must survive multi-recv delivery."""
@@ -1693,6 +1941,140 @@ class FederationServerIntegrationTests(unittest.TestCase):
                 hub_a.stop()
                 hub_b.stop()
 
+    def test_canvas_host_rpc_roundtrip(self) -> None:
+        chat_a = self._free_port()
+        chat_b = self._free_port()
+        fed_a = self._free_port()
+        fed_b = self._free_port()
+
+        with tempfile.TemporaryDirectory() as td:
+            peers_a = Path(td) / "peers_a.json"
+            peers_b = Path(td) / "peers_b.json"
+            peers_a.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-b",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_b,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peers_b.write_text(
+                json.dumps(
+                    [
+                        {
+                            "node_id": "node-a",
+                            "host": "127.0.0.1",
+                            "mode": "tcp",
+                            "federation_port": fed_a,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            hosted: dict = {}
+            result: dict = {}
+            done = threading.Event()
+
+            def on_host_req(requester, req_id, payload):
+                hosted["payload"] = payload
+                hub_b.reply_file_host(
+                    requester,
+                    req_id,
+                    {
+                        "ok": True,
+                        "mode": "canvas",
+                        "base_url": "https://cf.trycloudflare.com",
+                        "session_id": "canvas-1",
+                        "creator": "alice",
+                        "tokens": {"alice": "tok-a", "bob": "tok-b"},
+                        "keys": {"alice": "AAA111", "bob": "BBB222"},
+                        "host_node": "node-b",
+                    },
+                )
+
+            def on_host_result(origin, req_id, payload):
+                result["origin"] = origin
+                result["payload"] = payload
+                done.set()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-a",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_a),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_a),
+                },
+                clear=False,
+            ):
+                hub_a = federation.FederationHub(
+                    chat_a,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_result=on_host_result,
+                    get_local_file_public=lambda: "",
+                )
+                hub_a.enabled = True
+                hub_a.start()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_NODE_ID": "node-b",
+                    "SSHCHAT_FEDERATION_PORT": str(fed_b),
+                    "SSHCHAT_FEDERATION_PEERS": str(peers_b),
+                },
+                clear=False,
+            ):
+                hub_b = federation.FederationHub(
+                    chat_b,
+                    threading.Lock(),
+                    lambda r, m, p: None,
+                    lambda r, m: None,
+                    lambda t, f, x: None,
+                    lambda: [],
+                    on_file_host_request=on_host_req,
+                    get_local_file_public=lambda: "https://cf.trycloudflare.com",
+                )
+                hub_b.enabled = True
+                hub_b.start()
+
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if hub_a.peer_count and hub_b.peer_count:
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(
+                    hub_a.request_file_host(
+                        "node-b",
+                        "c-req1",
+                        {
+                            "mode": "canvas",
+                            "creator": "alice",
+                            "participants": ["bob"],
+                            "room": "default",
+                        },
+                    )
+                )
+                self.assertTrue(done.wait(5))
+                self.assertEqual(result.get("origin"), "node-b")
+                payload = result.get("payload") or {}
+                self.assertTrue(payload.get("ok"))
+                self.assertEqual(payload.get("mode"), "canvas")
+                self.assertEqual(hosted.get("payload", {}).get("mode"), "canvas")
+            finally:
+                hub_a.stop()
+                hub_b.stop()
+
 
 class FilePublicReachabilityTests(unittest.TestCase):
     def test_trycloudflare_and_private(self) -> None:
@@ -1710,6 +2092,127 @@ class FilePublicReachabilityTests(unittest.TestCase):
             self.assertFalse(
                 fhs.needs_federation_file_proxy("http://10.0.0.5:8443")
             )
+
+    def test_live_cloudflare_url_overrides_stale_env(self) -> None:
+        """Boot refreshes public_url; long-lived server must prefer the live file."""
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("https://fresh-boot-host.trycloudflare.com\n")
+            with mock.patch.dict(
+                os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}
+            ):
+                self.assertEqual(
+                    fhs.live_cloudflare_base_url(),
+                    "https://fresh-boot-host.trycloudflare.com",
+                )
+                srv = fhs.FileHTTPServer(
+                    host="127.0.0.1",
+                    port=8443,
+                    use_https=False,
+                    public_host="stale-old-host.trycloudflare.com",
+                    public_port=443,
+                )
+                self.assertEqual(
+                    srv.get_base_url(),
+                    "https://fresh-boot-host.trycloudflare.com",
+                )
+                self.assertEqual(srv.get_public_host(), "fresh-boot-host.trycloudflare.com")
+        finally:
+            os.unlink(path)
+
+    def test_stale_trycloudflare_env_ignored_without_live_file(self) -> None:
+        """Tunnel restart deletes public_url; do not keep serving the dead hostname."""
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        os.unlink(path)  # missing latch
+        with mock.patch.dict(os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}):
+            with mock.patch.object(fhs, "_detect_lan_ip", return_value="10.0.0.9"):
+                srv = fhs.FileHTTPServer(
+                    host="127.0.0.1",
+                    port=8443,
+                    use_https=False,
+                    public_host="dead-old-host.trycloudflare.com",
+                    public_port=443,
+                )
+                self.assertEqual(srv.get_public_host(), "10.0.0.9")
+                self.assertEqual(srv.get_base_url(), "http://10.0.0.9:8443")
+
+
+class FederationSendQueueTests(unittest.TestCase):
+    """Local handlers must not block when a peer sendall hangs."""
+
+    def test_peer_link_send_line_returns_while_send_blocks(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        sent: list[bytes] = []
+
+        def blocking_send(data: bytes) -> None:
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test release not signaled")
+            sent.append(data)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "node-b", blocking_send)
+        hub._peers["node-b"] = link
+
+        t0 = time.monotonic()
+        hub.notify_join("alice", "lobby")
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.5, f"notify_join blocked for {elapsed:.2f}s")
+        self.assertTrue(started.wait(2.0), "writer never invoked send_fn")
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not sent:
+            time.sleep(0.01)
+        self.assertTrue(sent)
+        self.assertTrue(sent[0].startswith(b"join\t"))
+        link.close()
+
+    def test_sendall_timeout_applies_socket_timeout(self) -> None:
+        """_sendall_timeout must set a temporary timeout around sendall."""
+
+        class TrackingSock:
+            def __init__(self) -> None:
+                self.timeouts: list[float | None] = []
+                self._timeout: float | None = None
+                self.sent: list[bytes] = []
+
+            def gettimeout(self) -> float | None:
+                return self._timeout
+
+            def settimeout(self, value: float | None) -> None:
+                self.timeouts.append(value)
+                self._timeout = value
+
+            def sendall(self, data: bytes) -> None:
+                if self._timeout == 0.3:
+                    raise TimeoutError("timed out")
+                self.sent.append(data)
+
+        sock = TrackingSock()
+        with self.assertRaises(TimeoutError):
+            federation._sendall_timeout(sock, b"hello", timeout=0.3)
+        self.assertEqual(sock.timeouts[0], 0.3)
+        # Prior timeout restored even after failure.
+        self.assertIsNone(sock.timeouts[-1])
 
 
 if __name__ == "__main__":

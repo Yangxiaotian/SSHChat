@@ -46,15 +46,27 @@ if (-not (Test-Path $activate)) {
 
 pip install -q -r (Join-Path $root "requirements-gui.txt") -r (Join-Path $root "requirements-packaging.txt")
 
+$iconArg = @()
+$iconPath = Join-Path $root "electron\assets\icon.ico"
+if (Test-Path $iconPath) {
+  $iconArg = @("--icon", $iconPath)
+} else {
+  Write-Warning "app icon not found at $iconPath; using PyInstaller default"
+}
+
 python -m PyInstaller `
   --clean `
   --noconfirm `
   --noconsole `
   --name SSHChat `
+  @iconArg `
   --paths $root `
   --hidden-import sshchat_client_util `
+  --hidden-import PIL `
+  --hidden-import PIL.Image `
   --collect-all paramiko `
   --collect-all cryptography `
+  --collect-all PIL `
   --distpath $distPath `
   --workpath $workPath `
   --add-data "$BundleFile;." `

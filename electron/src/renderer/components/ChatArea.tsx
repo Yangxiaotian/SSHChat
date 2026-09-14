@@ -3,17 +3,32 @@ import { useChatStore } from '../store/chatStore';
 import TabBar from './TabBar';
 import InputBar from './InputBar';
 import MessageBubble from './MessageBubble';
+import SecureLinkCard from './SecureLinkCard';
 import GameWorkbench from './GameWorkbench';
+import CanvasPanel from './CanvasPanel';
+import PianoPanel from './PianoPanel';
+import { groupSecureLinkMessages, isInviteNoise } from '../lib/secureLinks';
+import {
+  extractFileFromDataTransfer,
+  getPasteUploadState,
+  startPasteSendFile,
+} from '../lib/pasteUpload';
 
 const WORKBENCH_HEIGHT_KEY = 'sshchat:workbench-height:v1';
 const WORKBENCH_MIN_HEIGHT = 96;
 const CHAT_MIN_HEIGHT = 180;
 const DEFAULT_WORKBENCH_HEIGHT = 340;
 
+function isDrawGuessWordHint(content: string): boolean {
+  return /本回合词[:：]|你是画家/.test(content);
+}
+
 function isGameFloodMessage(content: string): boolean {
   const raw = content.trim();
   const t = raw.toLowerCase();
   if (!t) return false;
+  // Drawer-only word lines use 【】 and were hidden as xiangqi/sanguo flood.
+  if (isDrawGuessWordHint(raw)) return false;
 
   if (
     /^\d+\s*,\s*\d+$/.test(t) ||
@@ -32,8 +47,8 @@ function isGameFloodMessage(content: string): boolean {
     /等宽字体/.test(raw) ||
     /积分体系/.test(raw) ||
     /对局[（(]/.test(raw) ||
-    /^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b/.test(t) ||
-    /^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)/.test(raw) ||
+    /^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|drawguess|mahjong)\b/.test(t) ||
+    /^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|你画我猜|麻将)/.test(raw) ||
     /[♔♕♖♗♘♙♚♛♜♝♞♟]/.test(raw) ||
     /^\s+[a-h](?:\s+[a-h]){7}\s*$/i.test(raw) ||
     /方\s+\S+\s+落子/.test(raw) ||
@@ -78,11 +93,13 @@ function isGameFloodMessage(content: string): boolean {
     'niutou',
     'sanguo',
     'werewolf',
+    'drawguess',
     'doushou',
     '斗兽棋',
     '国际象棋',
     '五子棋',
     '中国象棋',
+    '你画我猜',
     '上一步',
     '己方在下方',
     '行棋',
@@ -95,7 +112,25 @@ function isGameFloodMessage(content: string): boolean {
 }
 
 export default function ChatArea() {
-  const { messages, activeRoom, nickname, status, privacyMode, doNotDisturb, clearMessages } = useChatStore();
+  const {
+    messages,
+    activeRoom,
+    nickname,
+    status,
+    privacyMode,
+    doNotDisturb,
+    clearMessages,
+    canvasSession,
+    canvasMaximized,
+    pianoSession,
+    pianoMaximized,
+    expectingOwnCanvas,
+    canvasRequestAt,
+    openCanvas,
+    setExpectingOwnCanvas,
+  } = useChatStore();
+  const mediaSession = canvasSession || pianoSession;
+  const mediaMaximized = canvasSession ? canvasMaximized : pianoMaximized;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const splitRootRef = useRef<HTMLDivElement>(null);
@@ -111,6 +146,7 @@ export default function ChatArea() {
     }
   });
   const [isResizing, setIsResizing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   const roomMessages = messages.get(activeRoom) || [];
   const visibleMessages = useMemo(() => {
@@ -118,15 +154,33 @@ export default function ChatArea() {
       if (msg.hidden) return false;
       if (msg.type === 'chat' || msg.type === 'pm') return true;
       if (msg.type === 'game') return false;
-      if (msg.type === 'system') return !isGameFloodMessage(msg.content);
+      if (msg.type === 'system') return isInviteNoise(msg.content) || !isGameFloodMessage(msg.content);
       return false;
     });
   }, [roomMessages]);
 
+  const timelineItems = useMemo(
+    () => groupSecureLinkMessages(visibleMessages),
+    [visibleMessages],
+  );
+
+  useEffect(() => {
+    if (!expectingOwnCanvas) return;
+    const latest = [...timelineItems].reverse().find(
+      (item) =>
+        item.type === 'secure-link' &&
+        item.payload.kind === 'canvas' &&
+        (!item.payload.receivedAt || item.payload.receivedAt >= canvasRequestAt),
+    );
+    if (!latest || latest.type !== 'secure-link') return;
+    setExpectingOwnCanvas(false);
+    openCanvas(latest.payload);
+  }, [canvasRequestAt, expectingOwnCanvas, openCanvas, setExpectingOwnCanvas, timelineItems]);
+
   useEffect(() => {
     if (!stickToBottom) return;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages, stickToBottom]);
+  }, [timelineItems, stickToBottom]);
 
   useEffect(() => {
     setStickToBottom(true);
@@ -217,13 +271,23 @@ export default function ChatArea() {
       </div>
 
       <div ref={splitRootRef} className="chat-main-split">
-        <div
-          className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
-          style={doNotDisturb ? undefined : { height: `${workbenchHeight}px` }}
-        >
-          <GameWorkbench />
-        </div>
-        {!doNotDisturb && (
+        {canvasSession ? (
+          <div className={`canvas-pane${canvasMaximized ? ' maximized' : ''}`}>
+            <CanvasPanel />
+          </div>
+        ) : pianoSession ? (
+          <div className={`canvas-pane${pianoMaximized ? ' maximized' : ''}`}>
+            <PianoPanel />
+          </div>
+        ) : (
+          <div
+            className={`game-pane ${doNotDisturb ? 'game-pane-dnd' : ''}`}
+            style={doNotDisturb ? undefined : { height: `${workbenchHeight}px` }}
+          >
+            <GameWorkbench />
+          </div>
+        )}
+        {!doNotDisturb && !mediaSession && (
         <div
           className={`chat-splitter ${isResizing ? 'active' : ''}`}
           title="Drag to resize game panel height"
@@ -233,10 +297,48 @@ export default function ChatArea() {
           <span className="chat-splitter-grip">...</span>
         </div>
         )}
+        {mediaSession && !mediaMaximized ? (
+          <div className="chat-splitter canvas-splitter" aria-hidden>
+            <span className="chat-splitter-grip">...</span>
+          </div>
+        ) : null}
 
-        <div className="chat-messages-surface">
-          <div ref={chatScrollRef} className="chat-messages" onScroll={onChatScroll}>
-            {visibleMessages.length === 0 ? (
+        <div className={`chat-messages-surface${mediaSession && mediaMaximized ? ' canvas-hidden' : ''}`}>
+          <div
+            ref={chatScrollRef}
+            className={`chat-messages${dragOver ? ' drag-over' : ''}`}
+            onScroll={onChatScroll}
+            onDragEnter={(e) => {
+              if (status !== 'connected') return;
+              if (![...e.dataTransfer.types].includes('Files')) return;
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragOver={(e) => {
+              if (status !== 'connected') return;
+              if (![...e.dataTransfer.types].includes('Files')) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (status !== 'connected' || getPasteUploadState().busy) return;
+              const file = extractFileFromDataTransfer(e.dataTransfer);
+              if (!file) return;
+              void startPasteSendFile(file, activeRoom);
+            }}
+            onPaste={(e) => {
+              if (status !== 'connected' || getPasteUploadState().busy) return;
+              const file = extractFileFromDataTransfer(e.clipboardData);
+              if (!file) return;
+              e.preventDefault();
+              void startPasteSendFile(file, activeRoom);
+            }}
+          >
+            {timelineItems.length === 0 ? (
               <div className="chat-empty">
                 <div className="chat-empty-icon">{'</>'}</div>
                 <div className="chat-empty-text">
@@ -246,9 +348,18 @@ export default function ChatArea() {
                 </div>
               </div>
             ) : (
-              visibleMessages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} isMe={msg.sender === nickname} currentNickname={nickname} />
-              ))
+              timelineItems.map((item) =>
+                item.type === 'secure-link' ? (
+                  <SecureLinkCard key={item.id} payload={item.payload} />
+                ) : (
+                  <MessageBubble
+                    key={item.message.id}
+                    message={item.message}
+                    isMe={item.message.sender === nickname}
+                    currentNickname={nickname}
+                  />
+                ),
+              )
             )}
             <div ref={messagesEndRef} />
           </div>

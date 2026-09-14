@@ -21,6 +21,10 @@ LIBRARY_WRAP_WIDTH = int(os.environ.get("SSHCHAT_LIBRARY_WRAP", "88"))
 LIBRARY_WRAP_BYTES = int(os.environ.get("SSHCHAT_LIBRARY_WRAP_BYTES", "78"))
 LIBRARY_LIST_PREVIEW_CHARS = int(os.environ.get("SSHCHAT_LIBRARY_PREVIEW_CHARS", "400"))
 
+# Outbound chat tags like ``[*] `` — keep on every wrapped fragment so mobile SSH
+# clients (via client.py) still classify continuations as system lines, not clocked chat.
+_OUTBOUND_TAG_PREFIX = re.compile(r"^(\[[^\]]+\] )")
+
 _BLOCK_HTML_TAGS = frozenset({
     "p",
     "div",
@@ -860,6 +864,33 @@ def wrap_page_lines(text: str, width: int = LIBRARY_WRAP_WIDTH) -> list[str]:
         break_long_words=True,
         break_on_hyphens=False,
     )
+
+
+def wrap_output_lines(line: str, max_bytes: int | None = None) -> list[str]:
+    """Split one outbound chat line for mobile SSH UTF-8 byte wrapping.
+
+    Many mobile terminals soft-wrap near ~80 UTF-8 bytes (not Unicode columns).
+    A mid-codepoint split drops the rest of the line or shows ``???``. Keep each
+    piece under the library byte budget; ``max_bytes<=0`` disables splitting.
+    """
+    budget = LIBRARY_WRAP_BYTES if max_bytes is None else int(max_bytes)
+    body = line[:-1] if line.endswith("\n") else line
+    if budget <= 0:
+        return [body + "\n"]
+    if not body:
+        return ["\n"]
+    if len(body.encode("utf-8")) <= budget:
+        return [body + "\n"]
+    wrap_budget = max(24, budget)
+    tag_m = _OUTBOUND_TAG_PREFIX.match(body)
+    if tag_m:
+        prefix = tag_m.group(1)
+        content = body[len(prefix):]
+        content_budget = max(24, wrap_budget - len(prefix.encode("utf-8")))
+        parts = [prefix + chunk for chunk in _wrap_page_lines_utf8_bytes(content, content_budget)]
+    else:
+        parts = _wrap_page_lines_utf8_bytes(body, wrap_budget)
+    return [part + "\n" for part in parts]
 
 
 def _normalize_user(name: str) -> str:

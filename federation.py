@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
@@ -27,6 +28,11 @@ _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
 _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
 # Bound flood dedup memory (graph cycles / rebroadcast).
 _SEEN_MAX = int(os.environ.get("SSHCHAT_FED_SEEN_MAX", "4096"))
+# Bound federation sendall so a congested peer cannot stall forever.
+_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5")
+# Outbound queue per peer: join/leave/chat fanout returns immediately to callers
+# (e.g. local SSH clients). Writer thread drains with _FED_SEND_TIMEOUT.
+_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
 
 
 def _node_id() -> str:
@@ -62,6 +68,37 @@ def _nick_key(name: str) -> str:
     return name.strip().lower()
 
 
+def _sendall_timeout(sock, data: bytes, timeout: float | None = None) -> None:
+    """sendall with a temporary timeout; restore the prior socket timeout after.
+
+    Pipes / file objects without gettimeout/settimeout fall back to bare sendall.
+    """
+    if not data:
+        return
+    if timeout is None:
+        timeout = _FED_SEND_TIMEOUT
+    old = None
+    has_timeout_api = hasattr(sock, "gettimeout") and hasattr(sock, "settimeout")
+    if has_timeout_api:
+        try:
+            old = sock.gettimeout()
+        except Exception:
+            old = None
+        try:
+            if timeout > 0:
+                sock.settimeout(timeout)
+        except Exception:
+            has_timeout_api = False
+    try:
+        sock.sendall(data)
+    finally:
+        if has_timeout_api:
+            try:
+                sock.settimeout(old)
+            except Exception:
+                pass
+
+
 class RemoteUser:
     """Presence for a user connected on a peer node."""
 
@@ -81,28 +118,71 @@ class RemoteUser:
 
 
 class _PeerLink:
-    """One bidirectional federation link to a peer node."""
+    """One bidirectional federation link to a peer node.
+
+    Outbound bytes are queued and written on a daemon thread so local chat
+    handlers (join welcome, /names, /rooms) never block on a congested peer
+    TCP window. The writer applies ``SSHCHAT_FED_SEND_TIMEOUT`` when the
+    underlying object is a socket.
+    """
 
     def __init__(self, hub: FederationHub, node_id: str, send_fn: Callable[[bytes], None]) -> None:
         self.hub = hub
         self.node_id = node_id
         self._send_fn = send_fn
         self._closed = False
+        qmax = max(16, _FED_SEND_QUEUE_MAX)
+        self._send_q: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=qmax)
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            name=f"fed-send-{node_id}",
+            daemon=True,
+        )
+        self._writer.start()
 
     def send_line(self, line: str) -> None:
         if self._closed:
             return
+        data = line.encode("utf-8")
         try:
-            self._send_fn(line.encode("utf-8"))
-        except Exception as e:
-            print(f"federation: send to {self.node_id} failed: {e!r}")
+            self._send_q.put_nowait(data)
+        except queue.Full:
+            print(
+                f"federation: send queue full for {self.node_id} "
+                f"(peer congested); closing link"
+            )
             self.close()
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        try:
+            self._send_q.put_nowait(None)
+        except queue.Full:
+            pass
 
     def handle_line(self, line: str) -> None:
         self.hub._on_peer_line(self.node_id, line)
+
+    def _write_loop(self) -> None:
+        while True:
+            try:
+                item = self._send_q.get(timeout=0.5)
+            except queue.Empty:
+                if self._closed:
+                    break
+                continue
+            if item is None:
+                break
+            if self._closed:
+                break
+            try:
+                self._send_fn(item)
+            except Exception as e:
+                print(f"federation: send to {self.node_id} failed: {e!r}")
+                self.close()
+                break
 
 
 class FederationHub:
@@ -117,7 +197,7 @@ class FederationHub:
         on_pm: Callable[[str, str, str], None],
         get_local_clients: Callable[[], list[dict[str, Any]]],
         on_game_sync: Optional[Callable[..., None]] = None,
-        on_game_end: Optional[Callable[[str, str], None]] = None,
+        on_game_end: Optional[Callable[..., None]] = None,
         on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
         on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
         on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,
@@ -182,12 +262,24 @@ class FederationHub:
         self.on_library_bookmarks = on_library_bookmarks
         # nick, book_name — clear bookmark on this (owner) node
         self.on_library_bookmark_clear: Optional[Callable[[str, str], None]] = None
+        # () -> [{"name": nick, "capsules": [capsule_dict, ...]}] local-origin only
+        self.get_local_capsules: Optional[Callable[[], list[dict[str, Any]]]] = None
+        # origin_node, nick, capsules_list — merge remote time capsules
+        self.on_capsules: Optional[Callable[[str, str, list], None]] = None
+        # nick, cap_id — cancel on this (origin) node
+        self.on_capsule_cancel: Optional[Callable[[str, int], None]] = None
         # host_node (self), req_id, payload — create upload session for a peer
         self.on_file_host_request = on_file_host_request
         # from_peer, req_id, payload — reply to our fhost_req
         self.on_file_host_result = on_file_host_result
         # () -> public file base URL (empty if not externally reachable)
         self.get_local_file_public = get_local_file_public
+        # origin_node, announce_dict — room canvas advertise / conflict merge
+        self.on_canvas_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
+        # origin_node, room, text, rev — room /pad LWW sync
+        self.on_pad_sync: Optional[Callable[[str, str, str, int], None]] = None
+        # node_id, base_url — peer public file URL changed (refresh canvas mirrors)
+        self.on_file_public_change: Optional[Callable[[str, str], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
             "1",
             "true",
@@ -736,6 +828,47 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
+    def sync_capsules(self, nick: str, capsules: Optional[list] = None) -> None:
+        """Fan-out this node's pending /later capsules for nick (may be empty)."""
+        if not self.enabled or not self._peers:
+            return
+        nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip()
+        if not nick:
+            return
+        if capsules is None:
+            capsules = []
+        if not isinstance(capsules, list):
+            return
+        clean = [c for c in capsules if isinstance(c, dict)]
+        try:
+            blob = base64.b64encode(
+                json.dumps(clean, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"lcap\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def request_capsule_cancel(self, origin_node: str, nick: str, cap_id: int) -> bool:
+        """Ask origin_node to cancel nick's capsule id (same-nick /later cancel)."""
+        if not self.enabled:
+            return False
+        origin_node = str(origin_node or "").strip()
+        nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip()
+        try:
+            cid = int(cap_id)
+        except (TypeError, ValueError):
+            return False
+        if not origin_node or not nick or cid < 1:
+            return False
+        line = (
+            f"lcap_cancel\t{self.node_id}\t{origin_node}\t{nick}\t"
+            f"{cid}\t{time.time_ns()}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(origin_node, line)
+
     def sync_file_public(self, base_url: Optional[str] = None) -> None:
         """Fan-out this node's public file base URL (Cloudflare / domain).
 
@@ -754,6 +887,51 @@ class FederationHub:
                 return
         url = str(base_url or "").strip() or "-"
         line = f"fpub\t{self.node_id}\t{url}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def known_peer_ids(self) -> list[str]:
+        """Routable peer node ids (direct + learned), excluding self."""
+        ids = set(self._peers) | set(self._routes)
+        ids.discard(self.node_id)
+        return sorted(ids)
+
+    def sync_canvas_announce(self, announce: dict[str, Any]) -> None:
+        """Fan-out an open room-canvas advertisement (csync)."""
+        if not self.enabled or not self._peers:
+            return
+        if not isinstance(announce, dict):
+            return
+        room = str(announce.get("room") or "").strip()
+        sid = str(announce.get("session_id") or "").strip()
+        if not room or not sid:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(announce, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"csync\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def sync_pad(self, room: str, text: str, rev: int) -> None:
+        """Fan-out room /pad content (psync); empty text means cleared."""
+        if not self.enabled or not self._peers:
+            return
+        room = str(room or "").strip()
+        if not room:
+            return
+        try:
+            rev_i = int(rev)
+        except (TypeError, ValueError):
+            return
+        if rev_i <= 0:
+            return
+        blob = base64.b64encode(str(text or "").encode("utf-8")).decode("ascii")
+        # Nonce so peer-up re-pushes are not dropped by ingress dedup.
+        line = f"psync\t{self.node_id}\t{room}\t{blob}\t{rev_i}\t{time.time_ns()}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -833,12 +1011,14 @@ class FederationHub:
         *,
         nick: str = "",
         flags: str = "",
+        query: str = "",
     ) -> bool:
         """Ask owner_node for one page of book_name (0-based page).
 
         flags may include:
           r — resume from owner's bookmark for nick (ignore page)
           s — save this page as nick's bookmark on the owner node
+          f — search the book for query; reply with hits instead of a page
         """
         if not self.enabled:
             return False
@@ -853,12 +1033,24 @@ class FederationHub:
             return False
         safe_nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip() or "-"
         safe_flags = (
-            "".join(ch for ch in str(flags or "").lower() if ch in "rs") or "-"
+            "".join(ch for ch in str(flags or "").lower() if ch in "rsf") or "-"
         )
         line = (
             f"lpage\t{self.node_id}\t{owner_node}\t{req_id}\t"
-            f"{book_name}\t{page_i}\t{safe_nick}\t{safe_flags}\n"
+            f"{book_name}\t{page_i}\t{safe_nick}\t{safe_flags}"
         )
+        if "f" in safe_flags:
+            safe_query = (
+                str(query or "")
+                .replace("\t", " ")
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .strip()[:200]
+            )
+            if not safe_query:
+                return False
+            line += f"\t{safe_query}"
+        line += "\n"
         self._remember_seen(line)
         return self._send_toward(owner_node, line)
 
@@ -909,10 +1101,16 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
-    def end_game(self, room: str, authority: str) -> None:
+    def end_game(self, room: str, authority: str, token: str = "") -> None:
         if not self.enabled or not self._peers:
             return
-        line = f"gend\t{self.node_id}\t{room}\t{authority}\n"
+        room = str(room or "").strip()
+        authority = str(authority or "").strip() or self.node_id
+        token = str(token or "").strip()
+        if token:
+            line = f"gend\t{self.node_id}\t{room}\t{authority}\t{token}\n"
+        else:
+            line = f"gend\t{self.node_id}\t{room}\t{authority}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -1117,6 +1315,7 @@ class FederationHub:
         # behind lcatalog on slow links (ZeroTier / iSH) and falls back to LAN.
         self._push_file_public(link)
         self._push_library_catalog(link)
+        self._push_capsules(link)
 
     def _push_presence_async(self, link: _PeerLink) -> None:
         """Push presence/catalog off the session read loop.
@@ -1213,6 +1412,35 @@ class FederationHub:
                 json.dumps(books, ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
             line = f"lmarks\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
+            self._remember_seen(line)
+            link.send_line(line)
+
+    def _push_capsules(self, link: _PeerLink) -> None:
+        """Send local-origin /later capsules so same-nick peers can list them."""
+        rows: list[dict[str, Any]] = []
+        if self.get_local_capsules is not None:
+            try:
+                rows = self.get_local_capsules() or []
+            except Exception as e:
+                print(f"federation: get_local_capsules error: {e!r}")
+                rows = []
+        if not isinstance(rows, list):
+            rows = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            nick = str(item.get("name") or "").strip()
+            capsules = item.get("capsules")
+            if not nick or not isinstance(capsules, list):
+                continue
+            clean = [c for c in capsules if isinstance(c, dict)]
+            try:
+                blob = base64.b64encode(
+                    json.dumps(clean, ensure_ascii=False).encode("utf-8")
+                ).decode("ascii")
+            except (TypeError, ValueError):
+                continue
+            line = f"lcap\t{self.node_id}\t{nick}\t{blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
 
@@ -1366,6 +1594,58 @@ class FederationHub:
                     print(f"federation: on_library_bookmarks error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
+        if kind == "lcap":
+            if self._remember_seen(line):
+                return
+            cap_parts = line.split("\t", 4)
+            if len(cap_parts) < 4:
+                return
+            origin, nick, b64 = cap_parts[1], cap_parts[2], cap_parts[3]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                capsules = json.loads(
+                    base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return
+            if isinstance(capsules, list) and self.on_capsules is not None:
+                try:
+                    self.on_capsules(origin, nick, capsules)
+                except Exception as e:
+                    print(f"federation: on_capsules error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "lcap_cancel":
+            cancel_parts = line.split("\t", 5)
+            if len(cancel_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, owner, nick, cid_s = (
+                cancel_parts[1],
+                cancel_parts[2],
+                cancel_parts[3],
+                cancel_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                cid = int(str(cid_s).strip())
+            except ValueError:
+                return
+            if owner == self.node_id:
+                if self.on_capsule_cancel is not None:
+                    try:
+                        self.on_capsule_cancel(nick, cid)
+                    except Exception as e:
+                        print(f"federation: on_capsule_cancel error: {e!r}")
+            else:
+                self._learn_route(owner, peer_node)
+                self._send_toward(owner, line + "\n", exclude_node=peer_node)
+            return
         if kind == "lmark_clear":
             clear_parts = line.split("\t", 5)
             if len(clear_parts) < 5:
@@ -1393,8 +1673,8 @@ class FederationHub:
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "lpage":
-            # lpage\torigin\towner\treq_id\tbook\tpage[\tnick\tflags]
-            page_parts = line.split("\t", 7)
+            # lpage\torigin\towner\treq_id\tbook\tpage[\tnick\tflags[\tquery]]
+            page_parts = line.split("\t", 8)
             if len(page_parts) < 6:
                 return
             if self._remember_seen(line):
@@ -1408,6 +1688,7 @@ class FederationHub:
             )
             nick = page_parts[6].strip() if len(page_parts) >= 7 else ""
             flags = page_parts[7].strip() if len(page_parts) >= 8 else ""
+            query = page_parts[8].strip() if len(page_parts) >= 9 else ""
             if nick in {"", "-"}:
                 nick = ""
             if flags in {"", "-"}:
@@ -1425,7 +1706,16 @@ class FederationHub:
                     # federation I/O thread — that stalls the duplex link and
                     # SSH tunnels drop mid-request.
                     cb = self.on_library_page_request
-                    args = (owner, req_id, book_name, page_i, origin, nick, flags)
+                    args = (
+                        owner,
+                        req_id,
+                        book_name,
+                        page_i,
+                        origin,
+                        nick,
+                        flags,
+                        query,
+                    )
 
                     def _run_library_page(
                         _cb=cb, _args=args, _req=req_id
@@ -1639,11 +1929,21 @@ class FederationHub:
                 self.on_file_notice(to_name, from_name, notice)
             self._forward_unicast_for_nick(line + "\n", to_name, ingress=peer_node)
             return
-        if kind == "fleave" and len(parts) >= 5 and self.on_file_notice:
+        if kind == "fleave" and self.on_file_notice:
             # Offline file leave seed — fan-out to all peers (not presence-gated).
+            # Format: fleave\torigin\tto\tfrom\tb64\tnonce — must not use the
+            # maxsplit=4 `parts` above or nonce is glued onto the JSON blob.
+            fleave_parts = line.split("\t")
+            if len(fleave_parts) < 5:
+                return
             if self._remember_seen(line):
                 return
-            origin, to_name, from_name, b64 = parts[1], parts[2], parts[3], parts[4]
+            origin, to_name, from_name, b64 = (
+                fleave_parts[1],
+                fleave_parts[2],
+                fleave_parts[3],
+                fleave_parts[4],
+            )
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
@@ -1740,6 +2040,60 @@ class FederationHub:
                     print(f"federation: on_ratings error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
+        if kind == "csync":
+            # csync\torigin\tb64json\tnonce
+            cparts = line.split("\t", 3)
+            if len(cparts) < 3:
+                return
+            if self._remember_seen(line):
+                return
+            origin, blob = cparts[1], cparts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            announce: dict[str, Any] = {}
+            try:
+                raw = base64.b64decode(blob.encode("ascii"))
+                parsed = json.loads(raw.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    announce = parsed
+            except Exception as e:
+                print(f"federation: csync decode error: {e!r}")
+                return
+            host = str(announce.get("host_node") or "").strip()
+            if host and host != self.node_id:
+                self._learn_route(host, peer_node)
+            if self.on_canvas_sync is not None:
+                try:
+                    self.on_canvas_sync(origin, announce)
+                except Exception as e:
+                    print(f"federation: on_canvas_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "psync":
+            # psync\torigin\troom\tb64text\trev\tnonce
+            pparts = line.split("\t", 5)
+            if len(pparts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, room, blob, rev_s = pparts[1], pparts[2], pparts[3], pparts[4]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                rev = int(rev_s)
+                text = base64.b64decode(blob.encode("ascii")).decode("utf-8")
+            except Exception as e:
+                print(f"federation: psync decode error: {e!r}")
+                return
+            if self.on_pad_sync is not None:
+                try:
+                    self.on_pad_sync(origin, room, text, rev)
+                except Exception as e:
+                    print(f"federation: on_pad_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
         if kind == "gsync" and self.on_game_sync:
             # Must not use the early split(..., 4): nonce/token would stick to b64
             # and base64.b64decode raises Incorrect padding (replicas never apply).
@@ -1780,14 +2134,18 @@ class FederationHub:
                     print(f"federation: on_game_request error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
-        if kind == "gend" and len(parts) >= 3 and self.on_game_end:
+        if kind == "gend" and len(parts) >= 4 and self.on_game_end:
             if self._remember_seen(line):
                 return
             origin, room, authority = parts[1], parts[2], parts[3]
+            token = parts[4].strip() if len(parts) >= 5 else ""
             if origin == self.node_id:
                 return
             self._learn_route(origin, peer_node)
-            self.on_game_end(room, authority)
+            try:
+                self.on_game_end(room, authority, token)
+            except TypeError:
+                self.on_game_end(room, authority)
             self._fanout(line + "\n", exclude_node=peer_node)
             return
 
@@ -1958,6 +2316,15 @@ class FederationHub:
             f"{len(users)} user(s) → tracking {sum(1 for k in self._remote_users if k[0] == node_id)}"
         )
 
+    def get_remote_file_public(self, node_id: str) -> Optional[str]:
+        """Latest advertised public file base URL for *node_id*, if any."""
+        node_id = str(node_id or "").strip()
+        if not node_id:
+            return None
+        info = self._remote_file_pubs.get(node_id) or {}
+        url = str(info.get("base_url") or "").strip().rstrip("/")
+        return url or None
+
     def _remote_file_pub_set(self, node_id: str, base_url: str) -> None:
         if node_id == self.node_id:
             return
@@ -1965,11 +2332,18 @@ class FederationHub:
         if not url or url == "-":
             self._remote_file_pubs.pop(node_id, None)
             return
+        cleaned = url.rstrip("/")
+        prev = str((self._remote_file_pubs.get(node_id) or {}).get("base_url") or "").strip()
         self._remote_file_pubs[node_id] = {
-            "base_url": url.rstrip("/"),
+            "base_url": cleaned,
             "seen_at": time.time(),
         }
         print(f"federation: file public from {node_id}: {url}")
+        if prev != cleaned and self.on_file_public_change is not None:
+            try:
+                self.on_file_public_change(node_id, cleaned)
+            except Exception as e:
+                print(f"federation: on_file_public_change error: {e!r}")
 
     def _remote_library_bulk(self, node_id: str, b64: str) -> None:
         if node_id == self.node_id:
@@ -2051,10 +2425,12 @@ class FederationHub:
                 peer_node = remote_id
 
                 def _send(data: bytes, _c=conn) -> None:
-                    _c.sendall(data)
+                    _sendall_timeout(_c, data)
 
                 link = _PeerLink(self, peer_node, _send)
                 is_new = self._register_peer(peer_node, link)
+                # Handshake @fed-ok must go out immediately (not via the queue)
+                # so the peer can finish connecting even if the writer is busy.
                 _send(f"@fed-ok\t{self.node_id}\n".encode("utf-8"))
                 print(f"federation: peer {peer_node} connected from {addr[0]!r}:{addr[1]}")
                 if is_new:
@@ -2214,7 +2590,7 @@ class FederationHub:
 
         def _send(data: bytes) -> None:
             if hasattr(send_sock, "sendall"):
-                send_sock.sendall(data)
+                _sendall_timeout(send_sock, data)
             else:
                 send_sock.write(data)
                 send_sock.flush()
@@ -2339,7 +2715,7 @@ def init_hub(
     on_pm: Callable[[str, str, str], None],
     get_local_clients: Callable[[], list[dict[str, Any]]],
     on_game_sync: Optional[Callable[..., None]] = None,
-    on_game_end: Optional[Callable[[str, str], None]] = None,
+    on_game_end: Optional[Callable[..., None]] = None,
     on_game_cmd: Optional[Callable[[str, str, str, str, str, str], None]] = None,
     on_game_priv: Optional[Callable[[str, str, list[str]], None]] = None,
     on_file_notice: Optional[Callable[[str, str, dict[str, Any]], None]] = None,

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 type Props = {
   disabled: boolean;
+  assistantVisible: boolean;
   nickname: string;
   boardText: string;
   onMove: (fr: number, fc: number, tr: number, tc: number) => void;
@@ -14,6 +15,7 @@ type Piece = {
   actualCol: number;
   symbol: string;
   isRed: boolean;
+  last?: boolean;
 };
 
 type Side = 1 | -1;
@@ -42,6 +44,7 @@ type ParsedBoard = {
   pieces: Map<string, Piece>;
   board: number[][];
   pieceCount: number;
+  complete: boolean;
   flipped: boolean;
   toActual: (displayRow: number, displayCol: number) => { row: number; col: number };
   toDisplay: (actualRow: number, actualCol: number) => { row: number; col: number };
@@ -145,7 +148,7 @@ function parseBoard(boardText: string, turnSide: Side | null, viewerSide: Side |
     row: flipped ? ROWS + 1 - actualRow : actualRow,
     col: flipped ? COLS + 1 - actualCol : actualCol,
   });
-  if (!boardText.trim()) return { pieces, board, pieceCount: 0, flipped, toActual, toDisplay };
+  if (!boardText.trim()) return { pieces, board, pieceCount: 0, complete: false, flipped, toActual, toDisplay };
 
   let rowNum = 1;
   const lastMoverSide = parseLastMoveSide(boardText) ?? (turnSide ? ((-turnSide) as Side) : null);
@@ -205,6 +208,7 @@ function parseBoard(boardText: string, turnSide: Side | null, viewerSide: Side |
         actualCol: actual.col,
         symbol,
         isRed,
+        last: marker === '!',
       });
 
       const pt = pieceTypeFromSymbol(symbol);
@@ -221,7 +225,11 @@ function parseBoard(boardText: string, turnSide: Side | null, viewerSide: Side |
     }
   }
 
-  return { pieces, board, pieceCount, flipped, toActual, toDisplay };
+  const hasRedKing = board.some((row) => row.some((cell) => cell === RED * PT.K));
+  const hasBlackKing = board.some((row) => row.some((cell) => cell === BLACK * PT.K));
+  const complete = boardRows.length >= ROWS && hasRedKing && hasBlackKing;
+
+  return { pieces, board, pieceCount, complete, flipped, toActual, toDisplay };
 }
 
 function pieceSide(cell: number): Side | 0 {
@@ -650,7 +658,7 @@ function killPatternScore(board: number[][], mv: Move, side: Side): number {
     if (!flyingKings(board) && board[mv.tr][mv.tc] !== 0 && pt === PT.R && mv.tc === oppK[1]) score += 140;
 
     const dist = Math.abs(mv.tr - oppK[0]) + Math.abs(mv.tc - oppK[1]);
-    if (pt === PT.N && dist <= 3) score += 180; // 鍗фЫ椹?鎸傝椹殑杩戝皢闂ㄥ舰鎬併€?    if (pt === PT.C && mv.tc === oppK[1]) score += 150; // 涓偖銆侀噸鐐€侀┈鍚庣偖鍊惧悜銆?    if (pt === PT.R && (mv.tc === 3 || mv.tc === 5 || mv.tc === oppK[1])) score += 190; // 鑲嬮亾/涓矾杞﹀帇鍒躲€?    score += Math.max(0, 4 - dist) * 35;
+    if (pt === PT.N && dist <= 3) score += 180; // 闂佸憡銇嗛崟鎴亝閵?闂佸湱顭堥崐浠嬶綖濡や降浠氭い鎺戝€归悾閬嶅级閳哄倸鐏ラ柣銊ｅ灲濮婂濡搁妷銊ョ厒闂佽鍏涢梽宥夊焵?    if (pt === PT.C && mv.tc === oppK[1]) score += 150; // 婵炴垶鎼╅崢楣冨磻閺嶎厼违濞撴埃鍋撻柛锝嗘倐閹瑩顢欑悰鈥充壕濞撴埃鍋撻柍鐟扮墦瀹曘儲鎯旈敐鍛病闂佺锕ラ崕鎶藉箖濠婂牆违?    if (pt === PT.R && (mv.tc === 3 || mv.tc === 5 || mv.tc === oppK[1])) score += 190; // 闂佸吋褰冮澶嬬?婵炴垶鎼╅崣鈧柣顓犲亾濞碱亪鏁冮埀顒傛暜閸ヮ剙绀嗛棅顒佺ゴ閸?    score += Math.max(0, 4 - dist) * 35;
   }
 
   const pressure = palacePressure(board, side);
@@ -684,12 +692,12 @@ function strategicRuleScore(board: number[][], mv: Move, side: Side, strategy: S
   const protectedLanding = isAttacked(board, mv.tr, mv.tc, side);
   undoMove(board, mv, captured);
 
-  // 閾佸緥锛氫笉鍏佽缁欏鏂圭洿鎺ユ潃妫嬶紱浜忔崲銆佺櫧閫佽溅椹偖蹇呴』寮烘儵缃氥€?  if (oppMate) score -= 500000;
+  // 闂備礁褰炵粈浣烘閵夆晜鏅慨姗嗗亞閻熸繈鏌涜箛搴㈢グ妞ゆ柨绻掔槐鎺戔枎韫囷絽娈搁梺鍝勫€稿﹢鍗灻洪崸妤€绠抽柕澶涢檮缁茬粯淇婇銏╁劀缂佽精椴哥粋宥堢疀閺傚灝绨ラ梺闈涙閼宠泛鈻嶈閺屽懏鎷呴懞銉х泝婵＄偠顕栭崜娑㈠磻閺嶎剛鐤€闁告稒鐣埀顒€绻愰锝夋倻濡搫濮︾紓鍌氬暞閸濆酣鍩€?  if (oppMate) score -= 500000;
   if (oppThreat >= 900000) score -= 120000;
   if (attackedLanding && !protectedLanding) score -= PIECE_VALUE[pt] * 5;
   if (oppBestCapture >= PIECE_VALUE[pt] && attackedLanding) score -= Math.round(oppBestCapture * 1.4);
 
-  // 姣忔瑕佸埗閫犲▉鑳侊紱浼樺娍闃舵浼樺厛绠€鍖栵紝鍔ｅ娍闃舵淇濈暀澶嶆潅鍜屽厛鎵嬨€?  if (myThreat >= 900000) score += 120000;
+  // 濠殿噯绲界换鎴︻敆閻愬灚鍟哄ù锝囶焾閻撴垿姊洪銈呅㈤柍璇差樀閹虫绗熸繝鍕€挎繛鏉戝悑閿氬┑鐐茬Ч濮婂ジ鎳滃▓鍨杸婵炴潙鍚嬮敋闁告ɑ绋撶划濠氬焵椤掑嫬绀岄柡宥囨暩缁€澶愭煕閺冩挾鍒板┑鐐茬Ч濮婂ジ鎳滃▓鍨杸婵烇絽娲︾换鍕汲閳ь剙顭跨捄铏剐ｆ繛鐓庢嚇瀹曨亞浠﹂挊澶婂紬闂佸綊娼ч鍐焵?  if (myThreat >= 900000) score += 120000;
   else if (myThreat >= 900) score += 900;
   else if (myThreat >= 430) score += 360;
   else score -= phase === 'opening' ? 40 : 160;
@@ -950,7 +958,7 @@ function buildAssistant(
     };
   }
 
-  // 瀵规墜鍥炲悎锛氬厛棰勬祴瀵规墜鏈€浼樺簲鎵嬶紝鍐嶇粰鎴戞柟搴斿寤鸿銆?
+  // 闁诲簼绲婚～澶嬫櫠濠婂牆鐐婇柣鎰级閸娿倝鏌ㄥ☉娆掑闁告ɑ绋掗敍鎰板礋椤掑倶鍋為柣搴濈祷椤鏅跺鍫濆珘闁逞屽墯鐎电厧螣閾忕懓鐣ㄩ梺褰掓涧椤戞垹妲愬┑瀣鐎广儱娲ㄩ懜鍫曟煙鐎涙ê鐏﹂柡宀€鍠愰幆鏃堝棘濞嗘儳娈搁悗鐐瑰€濈紓姘额敊閸涙潙违?
   const opp = (mySide === RED ? BLACK : RED) as Side;
   const oppRes = searchTop(cloneBoard(board), opp, strategy, Math.max(3, depth - 1), Math.floor(timeMs * 0.65), Math.floor(maxNodes * 0.6), phase);
   if (oppRes.moves.length === 0) {
@@ -990,8 +998,18 @@ function buildLightAssistant(board: number[][], mySide: Side, pieceCount: number
     depth: 1,
     nodes: moves.length,
     ms: Date.now() - start,
-    note: 'Pikafish 分析中，当前仅显示轻量备选，避免棋盘刷新卡顿。',
+    note: 'Pikafish \u5206\u6790\u4e2d\uff0c\u5148\u663e\u793a\u8f7b\u91cf\u5907\u9009\uff0c\u907f\u514d\u68cb\u76d8\u5361\u987f\u3002',
   };
+}
+
+function pikafishTimeoutForPieceCount(pieceCount: number): number {
+  if (pieceCount <= 14) return 9000;
+  if (pieceCount <= 24) return 6500;
+  return 4500;
+}
+
+function pikafishExpectedSeconds(pieceCount: number): number {
+  return Math.ceil((pikafishTimeoutForPieceCount(pieceCount) + 3500) / 1000);
 }
 
 function isLegalSuggestion(board: number[][], side: Side, mv: Move): boolean {
@@ -1042,12 +1060,13 @@ function palaceLines(cell: number, pad: number): string {
   ].join(' ');
 }
 
-export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: Props) {
+export default function XiangqiPanel({ assistantVisible, disabled, nickname, boardText, onMove }: Props) {
   const [from, setFrom] = useState<{ row: number; col: number; displayRow: number; displayCol: number } | null>(null);
   const [strategy, setStrategy] = useState<StrategyId>('pikafish_external');
   const [pikafishPending, setPikafishPending] = useState(false);
   const [pikafishResult, setPikafishResult] = useState<{ key: string; move: Move | null; ms: number; error?: string; enginePath?: string } | null>(null);
   const pikafishSeqRef = useRef(0);
+  const pikafishInFlightKeyRef = useRef<string | null>(null);
   const pikafishCacheRef = useRef<Map<string, { move: Move | null; ms: number; error?: string; enginePath?: string }>>(new Map());
 
   const turn = useMemo(() => parseTurnInfo(boardText), [boardText]);
@@ -1061,7 +1080,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   const myTurn = !!turn.name && turn.name === nickname;
   const canPlay = !disabled && (!turn.name || myTurn);
-  const isMaster = false;
+  const isMaster = nickname === 'zouyu';
 
   const mySide: Side | null = useMemo(() => {
     if (seats.redName && seats.redName === nickname) return RED;
@@ -1095,7 +1114,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
 
   const pikafishKey = `${boardSignature}::${mySide ?? 0}`;
   useEffect(() => {
-    if (!isMaster || !mySide || strategy !== 'pikafish_external' || disabled || parsed.pieceCount <= 0) {
+    if (!isMaster || !mySide || strategy !== 'pikafish_external' || disabled || parsed.pieceCount <= 0 || !parsed.complete) {
       setPikafishPending(false);
       return;
     }
@@ -1111,53 +1130,86 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
       setPikafishPending(false);
       return;
     }
+    if (pikafishInFlightKeyRef.current === pikafishKey) {
+      setPikafishPending(true);
+      return;
+    }
 
     const seq = pikafishSeqRef.current + 1;
     pikafishSeqRef.current = seq;
     setPikafishPending(true);
 
-    const timeoutMs = parsed.pieceCount <= 14 ? 12000 : parsed.pieceCount <= 24 ? 10000 : 8500;
-    window.api.analyzeXiangqiPikafish({
-      board: parsed.board,
-      side: mySide,
-      timeoutMs,
-    }).then((resp) => {
+    const timeoutMs = pikafishTimeoutForPieceCount(parsed.pieceCount);
+    const boardForRequest = parsed.board.map((row) => row.slice());
+    const requestTimer = window.setTimeout(() => {
       if (pikafishSeqRef.current !== seq) return;
-      const move = resp.ok && resp.move
-        ? {
-            fr: resp.move.fr - 1,
-            fc: resp.move.fc - 1,
-            tr: resp.move.tr - 1,
-            tc: resp.move.tc - 1,
-            score: 999999,
-          }
-        : null;
-      const next = {
-        move,
-        ms: resp.ms,
-        error: resp.ok ? undefined : (resp.error || 'Pikafish 未返回可用着法'),
-        enginePath: resp.enginePath,
-      };
-      pikafishCacheRef.current.set(pikafishKey, next);
-      while (pikafishCacheRef.current.size > 32) {
-        const first = pikafishCacheRef.current.keys().next();
-        if (first.done) break;
-        pikafishCacheRef.current.delete(first.value);
-      }
-      setPikafishResult({ key: pikafishKey, ...next });
-    }).catch((err) => {
-      if (pikafishSeqRef.current !== seq) return;
-      setPikafishResult({
-        key: pikafishKey,
-        move: null,
-        ms: 0,
-        error: err instanceof Error ? err.message : 'Pikafish 调用失败',
+      pikafishInFlightKeyRef.current = pikafishKey;
+      let guardedOut = false;
+      const guardTimer = window.setTimeout(() => {
+        if (pikafishSeqRef.current !== seq) return;
+        guardedOut = true;
+        if (pikafishInFlightKeyRef.current === pikafishKey) {
+          pikafishInFlightKeyRef.current = null;
+        }
+        setPikafishResult({
+          key: pikafishKey,
+          move: null,
+          ms: 0,
+          error: 'Pikafish 分析超时，已自动回退内置助手',
+        });
+        setPikafishPending(false);
+      }, timeoutMs + 7500);
+      window.api.analyzeXiangqiPikafish({
+        board: boardForRequest,
+        side: mySide,
+        timeoutMs,
+      }).then((resp) => {
+        if (guardedOut) return;
+        if (pikafishSeqRef.current !== seq) return;
+        const move = resp.ok && resp.move
+          ? {
+              fr: resp.move.fr - 1,
+              fc: resp.move.fc - 1,
+              tr: resp.move.tr - 1,
+              tc: resp.move.tc - 1,
+              score: 999999,
+            }
+          : null;
+        const next = {
+          move,
+          ms: resp.ms,
+          error: resp.ok ? undefined : (resp.error || 'Pikafish \u672a\u8fd4\u56de\u53ef\u7528\u7740\u6cd5'),
+          enginePath: resp.enginePath,
+        };
+        pikafishCacheRef.current.set(pikafishKey, next);
+        while (pikafishCacheRef.current.size > 32) {
+          const first = pikafishCacheRef.current.keys().next();
+          if (first.done) break;
+          pikafishCacheRef.current.delete(first.value);
+        }
+        setPikafishResult({ key: pikafishKey, ...next });
+      }).catch((err) => {
+        if (guardedOut) return;
+        if (pikafishSeqRef.current !== seq) return;
+        setPikafishResult({
+          key: pikafishKey,
+          move: null,
+          ms: 0,
+          error: err instanceof Error ? err.message : 'Pikafish \u8c03\u7528\u5931\u8d25',
+        });
+      }).finally(() => {
+        window.clearTimeout(guardTimer);
+        if (pikafishInFlightKeyRef.current === pikafishKey) {
+          pikafishInFlightKeyRef.current = null;
+        }
+        if (pikafishSeqRef.current === seq) setPikafishPending(false);
       });
-    }).finally(() => {
-      if (pikafishSeqRef.current === seq) setPikafishPending(false);
-    });
-  }, [isMaster, mySide, strategy, disabled, pikafishKey, parsed.pieceCount, parsed.board, turn.side]);
+    }, 280);
 
+    return () => {
+      window.clearTimeout(requestTimer);
+    };
+  }, [isMaster, mySide, strategy, disabled, pikafishKey, parsed.pieceCount, parsed.complete, turn.side]);
   const shownAssistant = useMemo<AssistantResult | null>(() => {
     if (!assistant) return null;
     const fallbackSuggestions = sanitizeSuggestions(parsed.board, mySide, assistant.suggestions);
@@ -1173,7 +1225,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
         return {
           ...assistant,
           suggestions: fallbackSuggestions,
-          note: `Pikafish 返回的坐标与当前棋盘不匹配，已拦截空起点建议并回退内置助手（耗时${pikafishResult.ms}ms）。`,
+          note: `Pikafish \u8fd4\u56de\u7684\u7740\u6cd5\u4e0e\u5f53\u524d\u68cb\u76d8\u4e0d\u5339\u914d\uff0c\u5df2\u56de\u9000\u5185\u7f6e\u52a9\u624b\uff08\u8017\u65f6${pikafishResult.ms}ms\uff09\u3002`,
         };
       }
       return {
@@ -1186,21 +1238,21 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
         depth: assistant.depth,
         nodes: assistant.nodes,
         ms: pikafishResult.ms,
-        note: `Pikafish 已给出最强建议（耗时${pikafishResult.ms}ms），内置助手作为备选。`,
+        note: `Pikafish \u5df2\u7ed9\u51fa\u5f15\u64ce\u5efa\u8bae\uff08\u8017\u65f6${pikafishResult.ms}ms\uff09\uff0c\u5185\u7f6e\u52a9\u624b\u4f5c\u4e3a\u5907\u9009\u3002`,
       };
     }
     if (pikafishResult?.key === pikafishKey && pikafishResult.error) {
       return {
         ...assistant,
         suggestions: fallbackSuggestions,
-        note: `Pikafish 暂不可用，已回退内置职业助手：${pikafishResult.error}`,
+        note: `Pikafish \u6682\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u5185\u7f6e\u52a9\u624b\uff1a${pikafishResult.error}`,
       };
     }
     if (pikafishPending) {
       return {
         ...assistant,
         suggestions: fallbackSuggestions,
-        note: 'Pikafish 分析中，先显示内置职业助手建议，结果返回后自动替换。',
+        note: 'Pikafish \u5206\u6790\u4e2d\uff0c\u5148\u663e\u793a\u5185\u7f6e\u52a9\u624b\u5efa\u8bae\uff0c\u7ed3\u679c\u8fd4\u56de\u540e\u81ea\u52a8\u66ff\u6362\u3002',
       };
     }
     return {
@@ -1215,6 +1267,10 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
   const boardH = pad * 2 + cell * 9;
 
   const riverY = pad + cell * 4.5;
+  const firstSuggestion = shownAssistant?.suggestions[0] || null;
+  const firstSuggestionDisplay = firstSuggestion
+    ? parsed.toDisplay(firstSuggestion.tr + 1, firstSuggestion.tc + 1)
+    : null;
 
   return (
     <div className="game-interaction-panel">
@@ -1223,7 +1279,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
         <div className="game-workbench-hint">{'\u5f53\u524d\u8f6e\u5230\uff1a'}{turn.name}{'\uff0c\u4f60\u6682\u65f6\u4e0d\u80fd\u8d70\u5b50\u3002'}</div>
       )}
 
-      {isMaster && (
+      {isMaster && assistantVisible && (
         <div className="game-advisor game-advisor-info" style={{ marginBottom: 8 }}>
           <div className="game-advisor-title">{'\u9690\u85cf\u529f\u80fd\uff1a\u8c61\u68cb\u804c\u4e1a\u52a9\u624b'}</div>
           <div className="game-chip-row" style={{ alignItems: 'center' }}>
@@ -1239,11 +1295,17 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
           {shownAssistant && (
             <>
               <div className="game-workbench-hint">
-                {strategy === 'pikafish_external' ? 'Pikafish：' : '\u641c\u7d22\u6df1\u5ea6\uff1a'}
                 {strategy === 'pikafish_external'
-                  ? (pikafishPending ? '\u5206\u6790\u4e2d...' : (pikafishResult?.error ? '\u56de\u9000\u5185\u7f6e' : '\u5df2\u63a5\u5165'))
-                  : `${shownAssistant.depth} \u5c42\uff0c\u8282\u70b9\uff1a${shownAssistant.nodes}`}
-                {'\uff0c\u8017\u65f6\uff1a'}{shownAssistant.ms}{'ms\u3002'}
+                  ? (
+                    pikafishPending
+                      ? `\u72b6\u6001\uff1aPikafish \u5206\u6790\u4e2d\uff0c\u9884\u8ba1${pikafishExpectedSeconds(parsed.pieceCount)}\u79d2\u5185\u5b8c\u6210\uff08\u5f53\u524d\u5148\u663e\u793a\u5185\u7f6e\u4e34\u65f6\u5efa\u8bae\uff09\u3002`
+                      : pikafishResult?.error
+                        ? `\u72b6\u6001\uff1aPikafish \u5931\u8d25\uff0c\u5df2\u56de\u9000\u5185\u7f6e\u52a9\u624b\uff08\u5185\u7f6e\u8017\u65f6${shownAssistant.ms}ms\uff09\u3002`
+                        : pikafishResult?.move
+                          ? `\u72b6\u6001\uff1aPikafish \u5206\u6790\u5b8c\u6210\uff0c\u5f53\u524d\u5efa\u8bae\u6765\u81ea\u5f15\u64ce\uff08\u8017\u65f6${shownAssistant.ms}ms\uff09\u3002`
+                          : '\u72b6\u6001\uff1a\u7b49\u5f85\u5b8c\u6574\u68cb\u76d8\uff0c\u6682\u672a\u8c03\u7528 Pikafish\u3002'
+                  )
+                  : `\u641c\u7d22\u6df1\u5ea6\uff1a${shownAssistant.depth} \u5c42\uff0c\u8282\u70b9\uff1a${shownAssistant.nodes}\uff0c\u8017\u65f6\uff1a${shownAssistant.ms}ms\u3002`}
               </div>
               <div className="game-workbench-hint">{shownAssistant.note}</div>
               <div className="game-chip-row">
@@ -1298,11 +1360,13 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
             const piece = parsed.pieces.get(key);
             const selected = from?.displayRow === row && from?.displayCol === col;
             const actual = parsed.toActual(row, col);
+            const lastTarget = !!piece?.last;
+            const suggestionTarget = assistantVisible && !!firstSuggestionDisplay && firstSuggestionDisplay.row === row && firstSuggestionDisplay.col === col;
 
             return (
               <button
                 key={key}
-                className={`xiangqi-cell xiangqi-piece ${selected ? 'selected' : ''} ${piece ? (piece.isRed ? 'red-piece' : 'black-piece') : 'empty-point'}`}
+                className={`xiangqi-cell xiangqi-piece ${selected ? 'selected' : ''} ${lastTarget ? 'last-target' : ''} ${suggestionTarget ? 'suggestion-target' : ''} ${piece ? (piece.isRed ? 'red-piece' : 'black-piece') : 'empty-point'}`}
                 style={{ left: pad + cIx * cell, top: pad + rIx * cell }}
                 onClick={() => {
                   if (!canPlay) return;
@@ -1328,7 +1392,7 @@ export default function XiangqiPanel({ disabled, nickname, boardText, onMove }: 
                   setFrom(null);
                 }}
                 disabled={!canPlay}
-                title={`${row},${col}`}
+                title={`${row},${col}${lastTarget ? ' 上一手落点' : ''}${suggestionTarget ? ' 建议1落点' : ''}`}
               >
                 {piece ? piece.symbol : ''}
               </button>

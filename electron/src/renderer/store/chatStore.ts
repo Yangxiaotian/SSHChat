@@ -66,6 +66,24 @@ declare global {
       analyzeGoKataGo: (payload: GoKataGoAnalyzeRequest) => Promise<GoKataGoAnalyzeResponse>;
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
       analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
+      openSecureWebSession: (payload: {
+        kind: 'canvas' | 'piano' | 'upload' | 'download';
+        url: string;
+        key: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      uploadSecureFile: (payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      }) => Promise<{ ok: boolean; filename?: string; error?: string }>;
+      canvasHttp: (payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      }) => Promise<{ ok: boolean; status: number; json?: any; error?: string }>;
       onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
       onRoomUpdate: (callback: (rooms: string[] | null, activeRoom: string) => void) => () => void;
       onUserUpdate: (callback: (snapshot: { room: string; count: number; users: string[] }) => void) => () => void;
@@ -95,6 +113,14 @@ interface ChatState {
   doNotDisturb: boolean;
   composerText: string;
   libraryView: LibraryViewState;
+  canvasSession: { url: string; key: string } | null;
+  canvasMaximized: boolean;
+  pianoSession: { url: string; key: string } | null;
+  pianoMaximized: boolean;
+  /** True after this client clicked 画板/钢琴 — auto-open the next matching invite. */
+  expectingOwnCanvas: boolean;
+  canvasRequestAt: number;
+  expectingOwnPiano: boolean;
 
   monitorEnabled: boolean;
   monitorPersonCount: number;
@@ -130,6 +156,14 @@ interface ChatState {
   toggleDoNotDisturb: () => void;
   setComposerText: (value: string) => void;
   clearMessages: (room?: string) => void;
+  openCanvas: (session: { url: string; key: string }) => void;
+  closeCanvas: () => void;
+  setCanvasMaximized: (value: boolean) => void;
+  openPiano: (session: { url: string; key: string }) => void;
+  closePiano: () => void;
+  setPianoMaximized: (value: boolean) => void;
+  setExpectingOwnCanvas: (value: boolean) => void;
+  setExpectingOwnPiano: (value: boolean) => void;
 
   setMonitorEnabled: (enabled: boolean) => void;
   setMonitorPersonCount: (count: number) => void;
@@ -156,6 +190,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   doNotDisturb: initDndFromStorage(),
   composerText: '',
   libraryView: emptyLibraryViewState(),
+  canvasSession: null,
+  canvasMaximized: false,
+  pianoSession: null,
+  pianoMaximized: false,
+  expectingOwnCanvas: false,
+  canvasRequestAt: 0,
+  expectingOwnPiano: false,
 
   monitorEnabled: false,
   monitorPersonCount: 0,
@@ -320,6 +361,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     rooms: [{ name: 'default', isDefault: true, unreadCount: 0, lastActivity: Date.now() }],
     activeRoom: 'default',
     users: [],
+    canvasSession: null,
+    canvasMaximized: false,
+    pianoSession: null,
+    pianoMaximized: false,
+    expectingOwnCanvas: false,
+    canvasRequestAt: 0,
+    expectingOwnPiano: false,
   }),
 
   setUsers: (users) => set({ users }),
@@ -359,6 +407,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     next.set(target, []);
     set({ messages: next });
   },
+  openCanvas: (session) => set({
+    canvasSession: session,
+    canvasMaximized: true,
+    pianoSession: null,
+    pianoMaximized: false,
+    expectingOwnCanvas: false,
+  }),
+  closeCanvas: () => set({ canvasSession: null, canvasMaximized: false }),
+  setCanvasMaximized: (value) => set({ canvasMaximized: value }),
+  openPiano: (session) => set({
+    pianoSession: session,
+    pianoMaximized: true,
+    canvasSession: null,
+    canvasMaximized: false,
+    expectingOwnPiano: false,
+  }),
+  closePiano: () => set({ pianoSession: null, pianoMaximized: false }),
+  setPianoMaximized: (value) => set({ pianoMaximized: value }),
+  setExpectingOwnCanvas: (value) => set({
+    expectingOwnCanvas: value,
+    canvasRequestAt: value ? Date.now() : 0,
+  }),
+  setExpectingOwnPiano: (value) => set({ expectingOwnPiano: value }),
 
   setMonitorEnabled: (enabled) => set({ monitorEnabled: enabled }),
   setMonitorPersonCount: (count) => set({ monitorPersonCount: count }),

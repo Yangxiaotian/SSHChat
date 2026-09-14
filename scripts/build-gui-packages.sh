@@ -104,15 +104,30 @@ PYINST=(
   --name SSHChat
   --paths "$ROOT"
   --hidden-import sshchat_client_util
+  --hidden-import PIL
+  --hidden-import PIL.Image
   --collect-all paramiko
   --collect-all cryptography
+  --collect-all PIL
   --distpath "$ARTIFACT_DIR"
   --workpath "$PYI_WORKPATH"
   --add-data "$BUNDLE${SEP}."
 )
 
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  PYINST+=(--osx-bundle-identifier "chat.ssh.SSHChat")
+ICON=""
+case "$(uname -s)" in
+  Darwin)
+    ICON="$ROOT/electron/assets/icon.icns"
+    PYINST+=(--osx-bundle-identifier "chat.ssh.SSHChat")
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    ICON="$ROOT/electron/assets/icon.ico"
+    ;;
+esac
+if [[ -n "$ICON" && -f "$ICON" ]]; then
+  PYINST+=(--icon "$ICON")
+else
+  echo "warning: app icon not found at $ICON; using PyInstaller default" >&2
 fi
 
 "${PYINST[@]}" "$ROOT/sshchat_gui.py"

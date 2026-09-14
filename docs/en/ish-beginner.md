@@ -53,6 +53,12 @@ You should see an active-room tip, for example:
 
 Type plain text to chat. Try `/help`, `/names`, `/lang zh` (Chinese UI), `/lang en` (English UI).
 
+Room clipboard: `/pad meet at 21:00` for one line; `/pad edit` opens vim/$EDITOR for multi-line; `/pad` to view; `/pad clear` to clear (anyone in the room may edit).
+
+Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; `/poll close` to end (creator or room owner).
+
+Personal reminder: `/later 30m bring an umbrella` (only you see it); `/later list`; `/later cancel 1`.
+
 ## 4. Common tips
 
 - **Chinese input:** use the system Chinese keyboard from the iSH keyboard icon.
@@ -73,6 +79,21 @@ Host sshchat
 ```
 
 Then: `ssh sshchat`.
+
+## 6. Chess clock (Kindle)
+
+Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). Copy the URL into the **Kindle browser**. The page fills the screen and ticks on the device. Sides are top and bottom, not a color; after you move, tap your side.
+
+## 7. Shared drawing board
+
+Type `/canvas` in chat. You get a **URL** and a **6-character key on a separate line**. Copy the URL into Safari (iSH cannot open the web page), enter the key, then draw. Strokes sync to everyone who unlocked the board.
+
+- Current room: `/canvas`
+- One online user: `/canvas theirnick`
+- Close (creator): `/canvas close`
+- Alias: `/board`
+
+If the page will not load, it is the same network issue as `/sendfile` (the phone must reach the server’s file HTTP port). Ask your admin.
 
 ---
 

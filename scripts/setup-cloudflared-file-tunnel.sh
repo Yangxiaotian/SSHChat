@@ -132,7 +132,8 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStart=$HELPER
 Restart=on-failure
-RestartSec=300
+# Boot often races WAN/DNS; retry quickly instead of waiting 5 minutes.
+RestartSec=30
 Environment=SSHCHAT_ENV_FILE=$ENV_FILE
 Environment=SSHCHAT_FILE_LOCAL_URL=$LOCAL_URL
 Environment=SSHCHAT_PREFIX=$PREFIX
@@ -145,6 +146,49 @@ TimeoutStopSec=20
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
+}
+
+install_macos_server_daemon() {
+  # Chat server must come up on boot so the tunnel helper can reach :8443 and
+  # then rewrite PUBLIC_HOST. Without this, only cloudflared auto-starts.
+  local server_plist=/Library/LaunchDaemons/com.sshchat.server.plist
+  cat >"$server_plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sshchat.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$PREFIX/server.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$PREFIX</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>$PREFIX/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>$PREFIX/server.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>
+EOF
+  chmod 644 "$server_plist"
+  launchctl bootout system "$server_plist" 2>/dev/null || true
+  launchctl bootstrap system "$server_plist" 2>/dev/null || launchctl load -w "$server_plist"
+  echo "info: installed $server_plist (boot autostart for chat server)"
 }
 
 install_macos_daemon() {
@@ -198,19 +242,24 @@ stop_existing() {
   if is_darwin && [[ -f "$PLIST" ]]; then
     launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
   fi
-  # Also clear a user LaunchAgent leftover from earlier ad-hoc setups
+  # Remove leftover user LaunchAgents from earlier ad-hoc setups (they mint a
+  # second Quick Tunnel and often rewrite sshchat.env without restarting sshchat).
   if is_darwin; then
     local user_plist
     for user_plist in /Users/*/Library/LaunchAgents/com.sshchat.cloudflared.plist; do
       [[ -f "$user_plist" ]] || continue
       local u
       u=$(echo "$user_plist" | cut -d/ -f3)
+      launchctl asuser "$(id -u "$u" 2>/dev/null)" launchctl bootout "gui/$(id -u "$u" 2>/dev/null)/com.sshchat.cloudflared" 2>/dev/null || true
       launchctl asuser "$(id -u "$u" 2>/dev/null)" launchctl unload "$user_plist" 2>/dev/null || true
+      rm -f "$user_plist"
+      echo "info: removed leftover user LaunchAgent $user_plist"
     done
   fi
   # KillMode=process used to leave orphans; always reap them so the next start gets a NEW trycloudflare URL.
   pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   pkill -f '/usr/local/sbin/sshchat-cloudflared-tunnel.sh' 2>/dev/null || true
+  pkill -f '/Users/.*/var/sshchat-cloudflared/run-tunnel.sh' 2>/dev/null || true
   sleep 1
   pkill -9 -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   rm -f "$STATE_DIR/public_url"
@@ -338,6 +387,7 @@ install_cloudflared_bin || exit 1
 install_helper
 stop_existing
 if is_darwin; then
+  install_macos_server_daemon
   install_macos_daemon
 else
   install_linux_unit
@@ -348,6 +398,86 @@ if [[ "$INSTALL_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
+dns_a_record() {
+  local host="$1"
+  local ip=""
+  if command -v dig >/dev/null 2>&1; then
+    for ns in 1.1.1.1 8.8.8.8 114.114.114.114; do
+      ip=$(dig +short "$host" A @"$ns" +time=2 +tries=1 2>/dev/null | awk '/^[0-9]+\./{print; exit}')
+      [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+    done
+  fi
+  return 1
+}
+
+probe_public_url() {
+  # Verify Quick Tunnel hostname has public DNS *and* answers HTTP.
+  # cloudflared may print a URL whose DNS is NXDOMAIN (clients cannot open it)
+  # while the connector still looks "Registered" — reject those.
+  local url="$1"
+  local host code ip
+  host="${url#https://}"
+  host="${host%%/*}"
+
+  ip=$(dns_a_record "$host" || true)
+  if [[ -z "$ip" ]]; then
+    echo "error: PUBLIC_URL has no DNS A record (NXDOMAIN?): $host" >&2
+    echo "hint: Cloudflare Quick Tunnel sometimes mint a name that never resolves; restart tunnel for a new URL" >&2
+    return 2
+  fi
+
+  code=$(curl --noproxy '*' -sS -o /dev/null -w "%{http_code}" --max-time 20 "$url/" 2>/dev/null || echo "000")
+  if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
+    echo "info: probe ok http=$code dns=$ip $url/"
+    return 0
+  fi
+
+  # System resolver may differ from dig; try forced IP.
+  code=$(curl --noproxy '*' --resolve "$host:443:$ip" -sS -o /dev/null -w "%{http_code}" --max-time 20 "$url/" 2>/dev/null || echo "000")
+  if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
+    echo "warning: tunnel answers via $ip (http=$code) but system DNS may still be flaky for $host" >&2
+    echo "hint: local DNS=$(scutil --dns 2>/dev/null | awk '/nameserver\[0\]/{print $3; exit}') — Clash/114 often breaks new trycloudflare names" >&2
+    echo "info: PUBLIC_URL=$url (tunnel ok)"
+    return 0
+  fi
+
+  echo "error: tunnel probe failed for $url (dns=$ip http=$code)" >&2
+  return 1
+}
+
+refresh_tunnel_for_resolvable_url() {
+  # If the first URL is NXDOMAIN, bounce cloudflared once more for a new name.
+  local attempts="${1:-2}"
+  local n public wait_rc
+  for n in $(seq 1 "$attempts"); do
+    if [[ -f "$STATE_DIR/public_url" ]]; then
+      public=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+      if probe_public_url "$public"; then
+        ensure_env_matches_public_url || return 1
+        return 0
+      fi
+    fi
+    echo "warning: tunnel URL not usable (attempt $n/$attempts); forcing fresh Quick Tunnel..." >&2
+    stop_existing
+    start_service
+    LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
+    rm -f "$STATE_DIR/public_url" 2>/dev/null || true
+    wait_rc=0
+    wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
+    if [[ "$wait_rc" -eq 2 ]]; then
+      return 2
+    fi
+    if [[ ! -f "$STATE_DIR/public_url" ]]; then
+      continue
+    fi
+  done
+  if [[ -f "$STATE_DIR/public_url" ]] && probe_public_url "$(tr -d '[:space:]' <"$STATE_DIR/public_url")"; then
+    ensure_env_matches_public_url || return 1
+    return 0
+  fi
+  return 1
+}
+
 start_service
 # Capture log offset AFTER start so we never treat a pre-start URL as "new".
 LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
@@ -356,11 +486,18 @@ rm -f "$STATE_DIR/public_url" 2>/dev/null || true
 wait_rc=0
 wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
 
-if [[ -f "$STATE_DIR/public_url" ]]; then
-  ensure_env_matches_public_url || wait_rc=1
-  PUBLIC=$(cat "$STATE_DIR/public_url")
-  sleep 2
-  curl --noproxy '*' -sS -o /dev/null -w "info: probe %{http_code} $PUBLIC/\n" --max-time 20 "$PUBLIC/" || true
+if [[ "$wait_rc" -eq 2 ]]; then
+  echo "error: Cloudflare rate-limited quick tunnels" >&2
+elif [[ -f "$STATE_DIR/public_url" ]]; then
+  if ! refresh_tunnel_for_resolvable_url 2; then
+    echo "error: could not obtain a DNS-resolvable Cloudflare PUBLIC_URL" >&2
+    echo "hint: sudo $SCRIPT_DIR/start-cloudflared-once.sh   # after cooldown if rate-limited" >&2
+    wait_rc=1
+  else
+    wait_rc=0
+    PUBLIC=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+    echo "info: /sendfile + /canvas public URL: $PUBLIC"
+  fi
 else
   echo "error: deploy did not obtain a Cloudflare public URL; /sendfile links will break" >&2
   wait_rc=1

@@ -21,6 +21,11 @@ MESSAGES: dict = {
         "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
         "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
         "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
+        "[*] /pad           房间剪贴板（房内任何人可改，重启后保留；联邦同名房间同步）：/pad 查看；/pad <文字> 写入一行；/pad clear 清除。\n",
+        "[*]              多行请用终端 /pad edit（vim/$EDITOR）；详细：/pad help。\n",
+        "[*] /poll          房间投票：/poll new 问题 | 选项A | 选项B；/poll <序号> 投票；/poll close 结束。\n",
+        "[*] /later         私人时间胶囊（只提醒自己，重启后保留；联邦同名可 list/cancel，到期也会收到）："
+        "/later 30m 文本；/later 明天 09:00 文本；/later list；/later cancel <编号>。\n",
         "[*] /lang [en|zh]   切换界面语言（默认英文；偏好按昵称保存）。\n",
         "[*]\n",
         "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
@@ -34,12 +39,27 @@ MESSAGES: dict = {
         "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
         "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
         "[*]\n",
-        "[*] /sendfile      发送文件到当前房间，你将收到上传网址，密钥另行单独给出。\n",
+        "[*] /sendfile      发送文件到当前房间（仅自己在线也可发，同名多端可下载）；你将收到上传网址，密钥另行单独给出。\n",
         "[*] /sendfile <昵称>    发送文件给指定用户（对方离线则留言，上线后收到；可用 /leave 查看或撤回）。\n",
         "[*] /sendfile #<房间>   发送文件到指定房间，成员各自收到不同的下载网址+密钥。\n",
         "[*]              文件名以你实际上传的文件为准，不必在指令里写。\n",
         "[*]              密钥不在网址里，打开网页后另行输入；支持图片、视频、PDF等在线预览。\n",
         "[*]              上传和下载都只能用一次，用过即作废，链接被别人截获也没用。\n",
+        "[*] /canvas        当前房间共享画板（网页；别名 /board）；每人独立网址+密钥，解锁后共同绘画。\n",
+        "[*] /canvas <昵称>    与某位在线用户开私密画板。\n",
+        "[*] /canvas #<房间>   在指定房间开共享画板（你必须在该房内）。\n",
+        "[*] /canvas close     发起人关闭当前房间画板；/canvas new 强制新开（即使房间已有）。\n",
+        "[*]              密钥不在网址里，打开网页后另行输入；笔画实时同步。详细用法：/canvas help。\n",
+        "[*] /piano         当前房间共享钢琴（网页）；键盘演奏，同房间其他人可听到。\n",
+        "[*] /piano <昵称>     与某位在线用户开私密钢琴。\n",
+        "[*] /piano #<房间>    在指定房间开共享钢琴（你必须在该房内）。\n",
+        "[*] /piano close      发起人关闭当前房间钢琴；/piano new 强制新开。\n",
+        "[*]              详细用法：/piano help。\n",
+        "[*] /clock         当前房间棋钟（全屏网页，可在 Kindle 打开，设备上计时）。\n",
+        "[*] /clock 10+5       每方 10 分钟，每步加 5 秒。也可 /clock #<房间> 或 /clock <昵称>。\n",
+        "[*] /clock close      发起人关闭当前房间棋钟；/clock new 强制新开。\n",
+        "[*]              详细用法：/clock help。走完后点自己这边（上方/下方）。\n",
+        "[*]              图形客户端会自动打开画板；终端请把网址复制到浏览器。\n",
         "[*] /help          显示本说明。\n",
     ],
     "game_help_lines": [
@@ -53,6 +73,10 @@ MESSAGES: dict = {
         "[*] /game seats            显示双方与对局状态。",
         "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
         "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
+        "[*] 终端玩法：reversi 黑白棋用 /game move 行 列（无合法落点时 pass）。",
+        "[*] darkchess（暗棋/翻翻棋）中英指令：翻 flip <行> <列> | 走 move <起行> <起列> <终行> <终列>；"
+        "4×8，翻子定红黑；炮吃须隔一子；将可吃除卒外任意已翻棋，卒可吃将。",
+        "[*] 终端玩法：battleship 海战棋先 place 舰名 行 列 h|v，再 ready、fire 行 列；junqi 军棋先 setup 棋子 行 列，再 ready、move 起行 起列 终行 终列。",
         "[*] chess 棋盘用 Unicode 棋子（♔♟ 等）；空位为 ·，上一步格子用括号标出。"
         "请用等宽字体；深色背景下黑子若看不清可换浅色终端主题。",
         "[*] /game move …           chess: SAN/UCI；gomoku/go: 行 列；go 可 pass 停一手；"
@@ -69,6 +93,7 @@ MESSAGES: dict = {
         "[*] /game resign           认负（仅对局进行中）。",
         "[*] /game abort            终止未开始的对局。",
         "[*] /game end              房主可强制结束当前对局。",
+        "[*] /game restore          把因重启/联邦冲突暂存的对局恢复到空房间（别名：恢复）。",
         "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
         "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
         "[*] holdem（德州扑克）中英指令对照：",
@@ -83,6 +108,8 @@ MESSAGES: dict = {
         "[*] 支持吃/碰/杠/点炮胡/自摸胡；轮到你时 discard <牌>，可 gang/hu；他人弃牌后可 chi/peng/gang/hu/pass。",
         "[*] 麻将编码说明：m=万（man），p=筒/饼（pin），s=条/索（sou），z=字牌（东南西北中发白）。",
         "[*] 麻将支持中文出牌：二万、九筒、五条、东风、红中、发财、白板（也支持 m1/p9/s5/z3）。",
+        "[*] drawguess（你画我猜）至少 2 人：房主 start；画家用 /canvas 画板作画；"
+        "其他人 /game move guess <词>；跳过 skip；画家可 word 重看词语。",
     ],
     "server": {
         "announce_preview": "[#{room}] [*] 公告：{text}\n",
@@ -94,6 +121,80 @@ MESSAGES: dict = {
         "announce_too_long": "[*] 公告过长（最多 {max_len} 字符）。\n",
         "announce_updated": "[*] 已更新 #{room} 的公告。\n",
         "announce_set_bcast": "[#{room}] [*] 公告：{text}\n",
+        "pad_usage": (
+            "[*] 用法：/pad <文字>     写入一行（空格合并；带换行请用 /pad edit）\n"
+            "[*]         /pad           查看\n"
+            "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim）\n"
+            "[*]         /pad clear     清除\n"
+            "[*] 联邦同名房间共享同一份剪贴板（后写覆盖）。\n"
+        ),
+        "pad_preview": "[#{room}] [*] 剪贴板：{text}\n",
+        "pad_preview_multi": "[#{room}] [*] 剪贴板（{n} 行）：{text} …\n",
+        "pad_current": "[*] #{room} 剪贴板：{text}\n",
+        "pad_current_multi_header": "[*] #{room} 剪贴板（{n} 行）：\n",
+        "pad_current_multi_line": "[*] | {text}\n",
+        "pad_none": "[*] #{room} 剪贴板为空。\n",
+        "pad_too_long": "[*] 剪贴板过长（最多 {max_len} 字符）。\n",
+        "pad_updated": "[*] 已更新 #{room} 的剪贴板。\n",
+        "pad_set_bcast": "[#{room}] [*] {editor} 更新了剪贴板：{text}\n",
+        "pad_set_bcast_multi": "[#{room}] [*] {editor} 更新了剪贴板（{n} 行）：{text} …（/pad 查看）\n",
+        "pad_cleared_bcast": "[#{room}] [*] {editor} 清除了剪贴板。\n",
+        "pad_cleared": "[*] 已清除 #{room} 的剪贴板。\n",
+        "pad_edit_client_only": (
+            "[*] 多行编辑：终端用 /pad edit；手机 App 点「+」→「便签」。"
+            "也可继续 /pad <一行文字>。\n"
+        ),
+        "pad_load_usage": "[*] 用法：/pad load <base64>（由 /pad edit 自动发送）\n",
+        "pad_load_bad": "[*] 剪贴板数据无效（base64 解码失败）。\n",
+        "poll_usage": (
+            "[*] 用法：/poll new 问题 | 选项A | 选项B [| …]\n"
+            "[*]         /poll <序号>   投票（可改投）\n"
+            "[*]         /poll          查看当前投票\n"
+            "[*]         /poll close    结束（发起人或房主）\n"
+        ),
+        "poll_preview": (
+            "[#{room}] [*] 进行中投票：{question}（{n_votes} 票 / {n_opts} 项，/poll 查看）\n"
+        ),
+        "poll_none": "[*] #{room} 当前没有进行中的投票。\n",
+        "poll_header": (
+            "[*] #{room} 投票：{question}（发起人 {creator}，{n_votes} 人已投）\n"
+        ),
+        "poll_closed_header": (
+            "[*] #{room} 投票已结束：{question}（发起人 {creator}，共 {n_votes} 票）\n"
+        ),
+        "poll_option_line": "[*]   {index}. {text}  ({count})\n",
+        "poll_vote_hint": "[*] 投票：/poll <序号>   结束：/poll close\n",
+        "poll_need_options": "[*] 至少需要问题 + {min_opts} 个选项（用 | 分隔）。\n",
+        "poll_too_many_options": "[*] 选项过多（最多 {max_opts} 个）。\n",
+        "poll_question_too_long": "[*] 问题过长（最多 {max_len} 字符）。\n",
+        "poll_option_too_long": "[*] 选项过长（最多 {max_len} 字符）。\n",
+        "poll_already": "[*] #{room} 已有进行中的投票，先 /poll close 再开新的。\n",
+        "poll_opened_bcast": "[#{room}] [*] {creator} 发起投票：{question}\n",
+        "poll_bad_choice": "[*] 选项序号须为 1～{max_n}。\n",
+        "poll_voted": "[*] 已投给 {index}. {text}\n",
+        "poll_changed": "[*] 已改投为 {index}. {text}\n",
+        "poll_close_denied": "[*] 只有发起人或房主可以结束投票。\n",
+        "later_usage": (
+            "[*] 用法：/later 30m|2h|1d <文字>     （到期只提醒你自己；重启后保留）\n"
+            "[*]         /later 09:30 <文字>     （今天该时刻已过则明天）\n"
+            "[*]         /later 明天 09:00 <文字>\n"
+            "[*]         /later 2026-09-05 09:00 <文字>\n"
+            "[*]         /later list             查看你的待提醒（含联邦节点上创建的）\n"
+            "[*]         /later cancel <编号>    取消（联邦同名也可取消）\n"
+            "[*] 联邦节点上同名账号可 list/cancel，到期也会收到提醒。\n"
+        ),
+        "later_none": "[*] 你没有待投递的时间胶囊。\n",
+        "later_list_header": "[*] 你的待投递时间胶囊（{n}）：\n",
+        "later_list_item": "[*]   {index}. [{when}] {text}\n",
+        "later_cancel_hint": "[*] 取消：/later cancel <编号>\n",
+        "later_bad_index": "[*] 编号无效（当前 1～{max_n}）。\n",
+        "later_cancelled": "[*] 已取消第 {index} 条时间胶囊。\n",
+        "later_text_too_long": "[*] 正文过长（最多 {max_len} 字符）。\n",
+        "later_too_soon": "[*] 投递时间太近（至少 {min_sec} 秒以后）。\n",
+        "later_too_far": "[*] 投递时间太远（最多 30 天以后）。\n",
+        "later_user_full": "[*] 待提醒已满（最多 {max_n} 条）。\n",
+        "later_scheduled": "[*] 已设定提醒，将于 {when} 只发给你（重启后仍有效；联邦同名可 list/cancel，到期也会收到）。\n",
+        "later_deliver": "[*] 时间胶囊：{text}\n",
         "offline_header": "[*] 你有 {n} 条留言（离线期间收到，按时间顺序）：\n",
         "offline_file_meta": "[*] （离线文件 {when}，来自 {sender}）\n",
         "offline_file_pm": "[PM from {sender}] (离线文件 {when}) {text}\n",

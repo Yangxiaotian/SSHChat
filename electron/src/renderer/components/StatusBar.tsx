@@ -10,7 +10,6 @@ export default function StatusBar() {
     nickname,
     theme,
     toggleTheme,
-    toggleLocale,
     privacyMode,
     togglePrivacyMode,
     doNotDisturb,
@@ -56,9 +55,6 @@ export default function StatusBar() {
       <div className="statusbar-right">
         <span className="statusbar-item">{t('common.rooms', { count: rooms.length })}</span>
         <span className="statusbar-separator"></span>
-        <span className="statusbar-item clickable" onClick={toggleLocale} title="中文 / English">
-          {t('status.language')}
-        </span>
         <span className="statusbar-separator"></span>
         <span className="statusbar-item clickable" onClick={toggleTheme}>
           {theme === 'dark' ? t('status.dark') : t('status.light')}

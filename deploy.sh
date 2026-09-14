@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # One-shot install: copy app under PREFIX, venv + prompt_toolkit, sshchat.env, systemd unit.
 # Linux: systemd + service user. macOS: auto local-dev (no useradd/groupadd/systemd).
 # iSH (iOS Alpine): auto OpenRC + no Cloudflare + lightweight deps (no pymupdf).
@@ -9,6 +9,33 @@
 #   sudo ./deploy.sh --no-systemd
 #   sudo ./deploy.sh --prefix /opt/sshchat --keep-env   # upgrade: keep sshchat.env
 # Rewrites user authorized_keys command= to PREFIX/chat.sh each run unless --no-migrate-keys (needs perl).
+#
+# Shebang is /bin/sh so Alpine/iSH can start without bash; bootstrap below installs
+# bash via apk when missing, then re-execs. Body requires bash (arrays, [[, pipefail).
+
+# POSIX-only bootstrap — must run before any bashisms.
+# Always re-exec real bash: macOS /bin/sh is bash with POSIXLY_CORRECT set, so
+# BASH_VERSION is already set and a naive check would skip exec, then choke on
+# [[ / =~ / arrays. Guard with SSHCHAT_DEPLOY_IN_BASH so we only exec once.
+if [ -z "${SSHCHAT_DEPLOY_IN_BASH:-}" ]; then
+  if ! command -v bash >/dev/null 2>&1; then
+    if command -v apk >/dev/null 2>&1; then
+      echo "info: bash not found; installing via apk (needed for deploy.sh)" >&2
+      if ! apk add --no-cache bash 2>/dev/null && ! apk add bash; then
+        echo "error: failed to install bash; as root run: apk update && apk add bash" >&2
+        echo "error: if apk.ish.app hangs, see DEPLOY-iSH.md (apk mirror)" >&2
+        exit 1
+      fi
+    else
+      echo "error: bash is required but not installed" >&2
+      echo "error: install bash, then re-run this script" >&2
+      exit 1
+    fi
+  fi
+  SSHCHAT_DEPLOY_IN_BASH=1 exec bash "$0" "$@"
+fi
+unset POSIXLY_CORRECT
+set +o posix 2>/dev/null || true
 
 set -euo pipefail
 
@@ -88,21 +115,23 @@ ish_apk_add_timed() {
   fi
 }
 
-# Fresh iSH needs apk py3-lxml (venv --system-site-packages). apk.ish.app often
-# fails; switch to Alpine CDN / tuna and retry before aborting.
+# Fresh Alpine/iSH: python3 + py3-lxml (venv --system-site-packages). apk.ish.app
+# often fails; switch to Alpine CDN / tuna and retry before aborting.
 ish_ensure_py_apk_deps() {
   if ! command -v apk &>/dev/null; then
     return 0
   fi
-  if python3 -c "import lxml" 2>/dev/null \
+  if command -v python3 &>/dev/null \
+    && python3 -c "import lxml" 2>/dev/null \
     && { command -v pip3 &>/dev/null || command -v pip &>/dev/null; }; then
-    echo "info: iSH: py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
+    echo "info: iSH: python3/py3-lxml/pip already present; skipping apk add (avoids apk.ish.app hang)" >&2
     return 0
   fi
 
-  echo "info: iSH: ensuring apk packages py3-lxml py3-pip" >&2
+  echo "info: iSH: ensuring apk packages python3 py3-lxml py3-pip" >&2
   echo "info: iSH: if this stalls on fetch http://apk.ish.app/.../APKINDEX.tar.gz, Ctrl+C and see DEPLOY-iSH.md (apk mirror)" >&2
-  if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+  if ish_apk_add_timed python3 py3-lxml py3-pip 2>/dev/null \
+    && command -v python3 &>/dev/null \
     && python3 -c "import lxml" 2>/dev/null; then
     return 0
   fi
@@ -126,17 +155,113 @@ ish_ensure_py_apk_deps() {
     else
       apk update 2>/dev/null || continue
     fi
-    if ish_apk_add_timed py3-lxml py3-pip 2>/dev/null \
+    if ish_apk_add_timed python3 py3-lxml py3-pip 2>/dev/null \
+      && command -v python3 &>/dev/null \
       && python3 -c "import lxml" 2>/dev/null; then
-      echo "info: iSH: installed py3-lxml via $mirror" >&2
+      echo "info: iSH: installed python3/py3-lxml via $mirror" >&2
       return 0
     fi
   done
 
-  echo "error: iSH: py3-lxml still missing after apk mirror retries" >&2
-  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add py3-lxml py3-pip" >&2
+  echo "error: iSH: python3/py3-lxml still missing after apk mirror retries" >&2
+  echo "error: fix apk mirrors (see DEPLOY-iSH.md § apk.ish.app), then: apk add python3 py3-lxml py3-pip" >&2
   echo "error: re-run ./deploy.sh --keep-env (do not continue without lxml — ebooklib needs it)" >&2
   exit 1
+}
+
+# /piano needs MP3 samples (~2MB). Repo may ship piano_samples/; otherwise fetch Wscats/piano once.
+ensure_piano_samples() {
+  local dest=$1
+  local n=0
+  if [[ -d "$dest" ]]; then
+    n=$(find "$dest" -maxdepth 1 -name '*.mp3' 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  if [[ "${n:-0}" -ge 50 ]]; then
+    return 0
+  fi
+  echo "info: piano_samples/ missing or incomplete; fetching from Wscats/piano (~2MB)..." >&2
+  if is_ish; then
+    echo "info: iSH: piano download needs network; on slow links this can take a few minutes" >&2
+  fi
+  mkdir -p "$dest"
+  local tmp ok=0
+  tmp=$(mktemp -d)
+  local url=${SSHCHAT_PIANO_SAMPLES_URL:-https://github.com/Wscats/piano/archive/refs/heads/master.tar.gz}
+  local timeout=${SSHCHAT_PIANO_DOWNLOAD_TIMEOUT:-600}
+  if command -v curl &>/dev/null; then
+    if curl -fsSL --connect-timeout 30 --max-time "$timeout" "$url" \
+      | tar xz -C "$dest" --strip-components=4 piano-master/public/samples/piano 2>/dev/null; then
+      ok=1
+    fi
+  elif command -v wget &>/dev/null; then
+    if wget -qO- "$url" 2>/dev/null \
+      | tar xz -C "$dest" --strip-components=4 piano-master/public/samples/piano 2>/dev/null; then
+      ok=1
+    fi
+  fi
+  if [[ "$ok" -eq 0 ]] && command -v git &>/dev/null; then
+    if git clone --depth 1 --quiet https://github.com/Wscats/piano.git "$tmp/piano" 2>/dev/null \
+      && [[ -d "$tmp/piano/public/samples/piano" ]]; then
+      rm -rf "$dest"
+      mkdir -p "$dest"
+      cp -a "$tmp/piano/public/samples/piano/." "$dest/"
+      ok=1
+    fi
+  fi
+  rm -rf "$tmp"
+  n=$(find "$dest" -maxdepth 1 -name '*.mp3' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$ok" -eq 1 && "${n:-0}" -ge 50 ]]; then
+    echo "info: piano_samples ready ($n MP3 files)" >&2
+    return 0
+  fi
+  echo "error: could not obtain piano_samples (need GitHub or place piano_samples/ in repo)" >&2
+  if is_ish; then
+    echo "error: iSH: ensure apk add curl wget git, or copy piano_samples/ to $dest before deploy" >&2
+  fi
+  return 1
+}
+
+copy_piano_samples_dir() {
+  local src=$1 dest=$2
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  # BusyBox cp on iSH fake FS: avoid cp -a directory quirks; file-by-file is safer.
+  if is_ish; then
+    cp -r "$src/." "$dest/"
+  else
+    cp -a "$src/." "$dest/"
+  fi
+}
+
+# Install python3 (+venv) when missing — mirrors the bash apk bootstrap for Alpine/iSH.
+ensure_python3() {
+  if command -v python3 &>/dev/null; then
+    return 0
+  fi
+  if command -v apk &>/dev/null; then
+    echo "info: python3 not found; installing via apk (needed for deploy.sh)" >&2
+    if ish_apk_add_timed python3 2>/dev/null || apk add --no-cache python3 2>/dev/null || apk add python3; then
+      :
+    else
+      echo "error: failed to install python3; as root run: apk update && apk add python3" >&2
+      echo "error: if apk.ish.app hangs, see DEPLOY-iSH.md (apk mirror)" >&2
+      exit 1
+    fi
+  elif command -v apt-get &>/dev/null; then
+    echo "info: python3 not found; installing via apt-get" >&2
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv; then
+      echo "error: failed to install python3; as root run: apt-get install -y python3 python3-venv" >&2
+      exit 1
+    fi
+  else
+    echo "error: python3 not found" >&2
+    echo "error: install python3, then re-run this script" >&2
+    exit 1
+  fi
+  if ! command -v python3 &>/dev/null; then
+    echo "error: python3 still missing after package install" >&2
+    exit 1
+  fi
 }
 
 # Alpine BusyBox adduser -S often puts system users in "nogroup", so user:user chown fails.
@@ -380,11 +505,20 @@ apply_data_plane_permissions() {
     fi
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$u:$g" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -d "$PREFIX/piano_samples" ]]; then
+    chown -R "$u:$CLIENT_GROUP" "$PREFIX/piano_samples"
+    if [[ "$ish_client_world" -eq 1 ]]; then
+      find "$PREFIX/piano_samples" -type d -exec chmod 755 {} + 2>/dev/null || true
+      find "$PREFIX/piano_samples" -type f -exec chmod 644 {} + 2>/dev/null || true
+    else
+      chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/piano_samples"
+    fi
   fi
   if [[ -f "$PREFIX/user_locales.json" ]]; then
     chown "$u:$g" "$PREFIX/user_locales.json"
@@ -402,6 +536,10 @@ apply_data_plane_permissions() {
 
   chown "$ROOT_OWN" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 700 "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/scripts"
+    chmod 700 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   # Bridge runs as sshchat-federation via forced-command; must be executable by that user.
   chown "$ROOT_OWN" "$PREFIX/federation-bridge.sh"
   chmod 755 "$PREFIX/federation-bridge.sh"
@@ -526,12 +664,20 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/scripts"
+    chmod 700 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
+  fi
+  if [[ -d "$PREFIX/piano_samples" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/piano_samples"
+    chmod -R 'u=rwX,g=rX,o=rX' "$PREFIX/piano_samples"
   fi
   if [[ -f "$PREFIX/user_locales.json" ]]; then
     chown "$ROOT_OWN" "$PREFIX/user_locales.json"
@@ -834,9 +980,10 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py clock_sharing.py clock_http.py; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
+ensure_piano_samples "$SCRIPT_DIR/piano_samples" || exit 1
 
 chmod +x \
   "$SCRIPT_DIR/chat.sh" \
@@ -846,13 +993,16 @@ chmod +x \
   "$SCRIPT_DIR/admin-remove-peer.sh" \
   "$SCRIPT_DIR/federation-bridge.sh"
 
-if ! command -v python3 &>/dev/null; then
-  echo "error: python3 not found" >&2
-  exit 1
-fi
+ensure_python3
 if ! python3 -c "import venv" 2>/dev/null; then
-  echo "error: python3 venv module missing (e.g. apt install python3-venv)" >&2
-  exit 1
+  if command -v apt-get &>/dev/null; then
+    echo "info: python3 venv module missing; installing python3-venv via apt-get" >&2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv || true
+  fi
+  if ! python3 -c "import venv" 2>/dev/null; then
+    echo "error: python3 venv module missing (e.g. apt install python3-venv / apk add python3)" >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "$SERVER_IP" ]]; then
@@ -923,11 +1073,35 @@ install -m 0755 -d "$PREFIX"
 install -m 0755 -d "$PREFIX/library"
 # Ensure no stale interpreter is still importing the old server.py/games.py.
 stop_existing_server "$PREFIX"
-cp -f "$SCRIPT_DIR/server.py" "$SCRIPT_DIR/client.py" "$SCRIPT_DIR/sshchat_client_util.py" "$SCRIPT_DIR/games.py" "$SCRIPT_DIR/ratings.py" "$SCRIPT_DIR/sgs_data.py" "$SCRIPT_DIR/library.py" "$SCRIPT_DIR/dict_lookup.py" "$SCRIPT_DIR/session_store.py" "$SCRIPT_DIR/federation.py" "$SCRIPT_DIR/offline_messages.py" "$SCRIPT_DIR/file_sharing.py" "$SCRIPT_DIR/file_http_server.py" "$SCRIPT_DIR/i18n.py" "$SCRIPT_DIR/locale_store.py" "$PREFIX/"
+# BusyBox cp/install on iSH (fake FS) do NOT truncate the destination when the
+# source is shorter — leftover bytes corrupt Python sources (SyntaxError).
+# Always replace by removing the target first on iSH.
+copy_app_file() {
+  local src=$1 dest=$2
+  if is_ish; then
+    rm -f "$dest"
+  fi
+  cp -f "$src" "$dest"
+}
+for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
+  library.py dict_lookup.py session_store.py federation.py offline_messages.py \
+  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py \
+  clock_sharing.py clock_http.py i18n.py locale_store.py; do
+  copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
+done
 rm -rf "$PREFIX/locales"
 cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
-cp -f "$SCRIPT_DIR/chat.sh" "$SCRIPT_DIR/server.sh" "$SCRIPT_DIR/admin-add-user.sh" "$SCRIPT_DIR/admin-add-peer.sh" "$SCRIPT_DIR/admin-remove-peer.sh" "$SCRIPT_DIR/federation-bridge.sh" "$PREFIX/"
-chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh"
+copy_piano_samples_dir "$SCRIPT_DIR/piano_samples" "$PREFIX/piano_samples"
+if [[ -d "$SCRIPT_DIR/piano_static" ]]; then
+  copy_piano_samples_dir "$SCRIPT_DIR/piano_static" "$PREFIX/piano_static"
+fi
+for _f in chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh; do
+  copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
+done
+# admin-add-peer.sh / admin-remove-peer.sh source this helper at runtime
+install -m 0755 -d "$PREFIX/scripts"
+copy_app_file "$SCRIPT_DIR/scripts/ensure-federation-user.sh" "$PREFIX/scripts/ensure-federation-user.sh"
+chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh" "$PREFIX/scripts/ensure-federation-user.sh"
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
@@ -937,7 +1111,8 @@ find "$PREFIX/locales" -name '*.pyc' -delete 2>/dev/null || true
 
 REUSE_VENV=0
 if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
-  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+  # Include cgi: removed from stdlib in Python 3.13+; file uploads need legacy-cgi.
+  if "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi" 2>/dev/null; then
     REUSE_VENV=1
     echo "info: iSH: reusing existing venv (deps already importable)" >&2
   fi
@@ -987,16 +1162,19 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     # Install pure-python / wheel deps first; ebooklib needs lxml which comes from apk
     # via --system-site-packages — avoid pip compiling lxml for i686.
     pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary \
-      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0'
+      prompt_toolkit 'chess>=1.10' 'pypdf>=4.0' 'legacy-cgi>=2.6'
     pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary --no-deps \
       'ebooklib>=0.18'
-    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf" 2>/dev/null; then
+    if ! "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi" 2>/dev/null; then
       echo "error: iSH venv missing required modules after install" >&2
       if ! "$PREFIX/venv/bin/python" -c "import lxml" 2>/dev/null; then
         echo "error: lxml missing — install system package then re-run: apk add py3-lxml" >&2
         echo "error: (venv uses --system-site-packages; see DEPLOY-iSH.md if apk.ish.app hangs)" >&2
       fi
-      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf"
+      if ! "$PREFIX/venv/bin/python" -c "import cgi" 2>/dev/null; then
+        echo "error: cgi missing — need pip package legacy-cgi on Python 3.13+" >&2
+      fi
+      "$PREFIX/venv/bin/python" -c "import ebooklib, lxml, prompt_toolkit, chess, pypdf, cgi"
       exit 1
     fi
     echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
@@ -1007,6 +1185,29 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
 else
   echo "info: skipped venv recreate / pip install"
 fi
+
+# Python 3.13+ dropped stdlib cgi; ensure uploads (file_http_server) still import.
+if ! "$PREFIX/venv/bin/python" -c "import cgi" 2>/dev/null; then
+  echo "info: cgi missing from venv (common on Python 3.13+); installing legacy-cgi" >&2
+  PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
+  if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
+    PIP_COMMON_ARGS+=(--index-url "$PIP_INDEX_URL_ARG")
+  fi
+  pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary 'legacy-cgi>=2.6'
+fi
+
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import file_http_server" || {
+  echo "error: file_http_server failed to import (often missing cgi on Python 3.13+; need legacy-cgi)" >&2
+  exit 1
+}
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import piano_sharing, piano_http" || {
+  echo "error: piano modules failed to import (need piano_sharing.py, piano_http.py, piano_samples/)" >&2
+  exit 1
+}
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import clock_sharing, clock_http" || {
+  echo "error: clock modules failed to import (need clock_sharing.py, clock_http.py)" >&2
+  exit 1
+}
 
 umask 022
 if [[ "$KEEP_ENV" -eq 1 && -f "$PREFIX/sshchat.env" ]]; then
@@ -1021,6 +1222,9 @@ SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
 SSHCHAT_ALERT_SOUND=auto
 # 联邦互联：互信节点用 admin-add-peer.sh / admin-remove-peer.sh 登记或拆除；同名用户/房间跨服合并。
 # 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
+# 联邦发送超时（秒）与每对端出站队列长度：对端 TCP 堵死时仍保证本机进房/命令不被拖死
+# SSHCHAT_FED_SEND_TIMEOUT=5
+# SSHCHAT_FED_SEND_QUEUE_MAX=512
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
@@ -1053,6 +1257,9 @@ SSHCHAT_NODE_ID=$(hostname -f 2>/dev/null || hostname)
 SSHCHAT_ALERT_SOUND=auto
 # 联邦互联：互信节点用 admin-add-peer.sh / admin-remove-peer.sh 登记或拆除；同名用户/房间跨服合并。
 # 禁用联邦：SSHCHAT_FEDERATION_DISABLE=1
+# 联邦发送超时（秒）与每对端出站队列长度：对端 TCP 堵死时仍保证本机进房/命令不被拖死
+# SSHCHAT_FED_SEND_TIMEOUT=5
+# SSHCHAT_FED_SEND_QUEUE_MAX=512
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
@@ -1175,6 +1382,9 @@ else
   chmod 755 "$PREFIX"
   chmod 755 "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   chmod 755 "$PREFIX/federation-bridge.sh"
+  if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
+    chmod 755 "$PREFIX/scripts" "$PREFIX/scripts/ensure-federation-user.sh"
+  fi
   chmod 644 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/client.py"
   [[ -f "$PREFIX/sshchat.env" ]] && chmod 644 "$PREFIX/sshchat.env"
   # Library directory should be accessible by client group
@@ -1221,7 +1431,27 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable sshchat.service
+  systemctl reset-failed sshchat.service 2>/dev/null || true
   systemctl restart sshchat.service
+  # Catch immediate import/crash loops (e.g. missing cgi) instead of reporting success.
+  _sshchat_ok=0
+  for _i in 1 2 3 4 5 6 7 8; do
+    if systemctl is-active --quiet sshchat.service; then
+      _sshchat_ok=1
+      break
+    fi
+    # Still starting / restarting — wait a bit.
+    if systemctl is-failed --quiet sshchat.service 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$_sshchat_ok" -ne 1 ]]; then
+    echo "error: sshchat.service failed to stay running after deploy" >&2
+    systemctl status sshchat.service --no-pager -l >&2 || true
+    journalctl -u sshchat.service -n 40 --no-pager >&2 || true
+    exit 1
+  fi
   echo "info: systemd service sshchat.service enabled and restarted"
 elif [[ "$INSTALL_OPENRC" -eq 1 ]] && command -v rc-update &>/dev/null && [[ -d /etc/init.d ]]; then
   OPENRC_SRC="$SCRIPT_DIR/scripts/sshchat.openrc"
