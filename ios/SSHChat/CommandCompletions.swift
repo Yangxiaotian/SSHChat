@@ -44,7 +44,7 @@ enum CommandCompletions {
     private static let top = [
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/poll", "/later",
+        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
     ]
 
@@ -66,6 +66,7 @@ enum CommandCompletions {
         "/dnd": ["on", "off"],
         "/lang": ["en", "zh", "english", "chinese", "中文", "英文"],
         "/language": ["en", "zh", "english", "chinese", "中文", "英文"],
+        "/pad": ["clear", "help", "show"],
         "/poll": ["new", "close", "help", "show"],
         "/later": ["list", "ls", "show", "cancel", "help"],
         "/clock": ["help", "close", "new"],

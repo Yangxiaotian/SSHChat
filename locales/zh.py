@@ -21,6 +21,8 @@ MESSAGES: dict = {
         "[*] /clear 或 /cls  清屏（终端会清空显示；图形客户端会清空当前房间记录）。\n",
         "[*] /announce      查看当前房间公告；房主可用 /announce <文字> 设置，/announce clear 清除。\n",
         "[*]              房主：#default 为第一个进服用户；其它房间为第一个 /join 该房的用户。\n",
+        "[*] /pad           房间剪贴板（房内任何人可改，重启后保留）：/pad 查看；/pad <文字> 写入；/pad clear 清除。\n",
+        "[*]              详细用法：/pad help。\n",
         "[*] /poll          房间投票：/poll new 问题 | 选项A | 选项B；/poll <序号> 投票；/poll close 结束。\n",
         "[*] /later         私人时间胶囊（只提醒自己，重启后保留；联邦同名可 list/cancel，到期也会收到）："
         "/later 30m 文本；/later 明天 09:00 文本；/later list；/later cancel <编号>。\n",
@@ -119,6 +121,19 @@ MESSAGES: dict = {
         "announce_too_long": "[*] 公告过长（最多 {max_len} 字符）。\n",
         "announce_updated": "[*] 已更新 #{room} 的公告。\n",
         "announce_set_bcast": "[#{room}] [*] 公告：{text}\n",
+        "pad_usage": (
+            "[*] 用法：/pad <文字>     写入/覆盖房间剪贴板（房内任何人可改；重启后保留）\n"
+            "[*]         /pad           查看\n"
+            "[*]         /pad clear     清除\n"
+        ),
+        "pad_preview": "[#{room}] [*] 剪贴板：{text}\n",
+        "pad_current": "[*] #{room} 剪贴板：{text}\n",
+        "pad_none": "[*] #{room} 剪贴板为空。\n",
+        "pad_too_long": "[*] 剪贴板过长（最多 {max_len} 字符）。\n",
+        "pad_updated": "[*] 已更新 #{room} 的剪贴板。\n",
+        "pad_set_bcast": "[#{room}] [*] {editor} 更新了剪贴板：{text}\n",
+        "pad_cleared_bcast": "[#{room}] [*] {editor} 清除了剪贴板。\n",
+        "pad_cleared": "[*] 已清除 #{room} 的剪贴板。\n",
         "poll_usage": (
             "[*] 用法：/poll new 问题 | 选项A | 选项B [| …]\n"
             "[*]         /poll <序号>   投票（可改投）\n"

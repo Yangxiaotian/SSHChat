@@ -152,6 +152,7 @@ _TOP_COMMANDS = (
     "/leave",
     "/unmsg",
     "/announce",
+    "/pad",
     "/poll",
     "/later",
     "/game",
@@ -180,6 +181,12 @@ _POLL_SUBCOMMANDS = {
     "show": None,
 }
 
+_PAD_SUBCOMMANDS = {
+    "clear": None,
+    "help": None,
+    "show": None,
+}
+
 _LATER_SUBCOMMANDS = {
     "list": None,
     "ls": None,
@@ -204,6 +211,7 @@ _SUBCOMMANDS_BY_CMD = {
     "/lang": sorted(_LANG_SUBCOMMANDS),
     "/language": sorted(_LANG_SUBCOMMANDS),
     "/poll": sorted(_POLL_SUBCOMMANDS),
+    "/pad": sorted(_PAD_SUBCOMMANDS),
     "/later": sorted(_LATER_SUBCOMMANDS),
     "/clock": sorted(_CLOCK_SUBCOMMANDS),
 }
@@ -1252,7 +1260,7 @@ def main():
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")

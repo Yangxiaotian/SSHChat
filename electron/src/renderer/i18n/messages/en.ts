@@ -94,6 +94,7 @@ export const enMessages: MessageTree = {
       lang: 'Switch UI language (en/zh)',
       dict: 'Dictionary lookup (en/cn/hh)',
       announce: 'Room announcement',
+      pad: 'Room clipboard (shared sticky note)',
       poll: 'Room poll',
       later: 'Personal reminder (time capsule)',
     },

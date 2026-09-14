@@ -32,6 +32,9 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/canvas <nick>` | Private board with one user |
 | `/clock` | Fullscreen chess clock (Kindle-friendly; ticks on the device) |
 | `/clock 10+5` | 10 minutes each, plus 5 seconds a move |
+| `/pad` | Show room clipboard (shared sticky note) |
+| `/pad <text>` | Set/overwrite pad (anyone in room; survives restart) |
+| `/pad clear` | Clear room pad |
 | `/poll` | Show room poll |
 | `/poll new Q \| A \| B` | Start a poll (`\|`-separated options) |
 | `/poll <n>` | Vote (may change) |

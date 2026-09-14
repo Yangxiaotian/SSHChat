@@ -119,6 +119,8 @@ rooms = defaultdict(set)
 room_owners: dict[str, object] = {}
 # room -> announcement text (shown to everyone entering the room)
 room_announcements: dict[str, str] = {}
+# room -> shared sticky-note / clipboard text (anyone in room may edit)
+room_pads: dict[str, str] = {}
 # room -> active poll {"question", "options", "votes", "creator"}
 room_polls: dict[str, dict] = {}
 # pending room time capsules (sorted loosely; deliver loop scans)
@@ -184,6 +186,7 @@ PERSIST_DEBOUNCE_SECONDS = float(
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
+MAX_PAD_LEN = 800
 MAX_POLL_QUESTION_LEN = 120
 MAX_POLL_OPTION_LEN = 60
 MAX_POLL_OPTIONS = 8
@@ -383,6 +386,15 @@ def send_room_announcement_preview(conn, room: str) -> None:
     send_line(conn, _ts(conn, "announce_preview", room=room, text=text))
 
 
+def send_room_pad_preview(conn, room: str) -> None:
+    """If the room has a shared pad, show it to this client (after join/switch)."""
+    with lock:
+        text = (room_pads.get(room) or "").strip()
+    if not text:
+        return
+    send_line(conn, _ts(conn, "pad_preview", room=room, text=text))
+
+
 def send_room_poll_preview(conn, room: str) -> None:
     """If the room has an open poll, show a one-line teaser after join/switch."""
     with lock:
@@ -432,6 +444,58 @@ def _poll_body_lines(conn, room: str, poll: dict, *, closed: bool = False) -> li
     if not closed:
         lines.append(_ts(conn, "poll_vote_hint"))
     return lines
+
+
+def _handle_pad(conn, name: str, room: str, payload: str) -> None:
+    """Room shared sticky note: /pad ; /pad <text> ; /pad clear ; /pad help."""
+    raw = payload[len("/pad") :].strip()
+    low = raw.lower()
+
+    if not raw or low in ("help", "?", "show", "status"):
+        if low in ("help", "?"):
+            send_line(conn, _ts(conn, "pad_usage"))
+            return
+        with lock:
+            cur = (room_pads.get(room) or "").strip()
+        if cur:
+            send_line(conn, _ts(conn, "pad_current", room=room, text=cur))
+        else:
+            send_line(conn, _ts(conn, "pad_none", room=room))
+            send_line(conn, _ts(conn, "pad_usage"))
+        return
+
+    if low == "clear":
+        with lock:
+            had = bool((room_pads.get(room) or "").strip())
+            room_pads.pop(room, None)
+        if not had:
+            send_line(conn, _ts(conn, "pad_none", room=room))
+            return
+        _mark_sessions_dirty()
+        broadcast_room(
+            room,
+            _ts(conn, "pad_cleared_bcast", room=room, editor=name).encode("utf-8"),
+        )
+        send_line(conn, _ts(conn, "pad_cleared", room=room))
+        return
+
+    one_line = " ".join(raw.split())
+    if not one_line:
+        send_line(conn, _ts(conn, "pad_usage"))
+        return
+    if len(one_line) > MAX_PAD_LEN:
+        send_line(conn, _ts(conn, "pad_too_long", max_len=MAX_PAD_LEN))
+        return
+    with lock:
+        room_pads[room] = one_line
+    _mark_sessions_dirty()
+    broadcast_room(
+        room,
+        _ts(
+            conn, "pad_set_bcast", room=room, editor=name, text=one_line
+        ).encode("utf-8"),
+    )
+    send_line(conn, _ts(conn, "pad_updated", room=room))
 
 
 def _handle_poll(conn, name: str, room: str, payload: str) -> None:
@@ -1632,6 +1696,7 @@ def _build_session_payload_locked() -> dict[str, object]:
         },
         "room_enabled_games_version": ROOM_GAME_CATALOG_VERSION,
         "room_announcements": dict(room_announcements),
+        "room_pads": dict(room_pads),
         "room_capsules": [
             {
                 "id": int(c.get("id") or 0),
@@ -1734,6 +1799,11 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
         for room, text in announcements.items():
             if isinstance(room, str) and isinstance(text, str):
                 room_announcements[room] = text
+    pads = payload.get("room_pads")
+    if isinstance(pads, dict):
+        for room, text in pads.items():
+            if isinstance(room, str) and isinstance(text, str):
+                room_pads[room] = text
     capsules = payload.get("room_capsules")
     if isinstance(capsules, list):
         restored: list[dict] = []
@@ -7923,6 +7993,7 @@ def handle_command(conn, payload: str) -> None:
                 f"[*] Joined #{new_room} and switched from #{prev_room} to #{new_room}\n",
             )
             send_room_announcement_preview(conn, new_room)
+            send_room_pad_preview(conn, new_room)
             send_room_poll_preview(conn, new_room)
             with lock:
                 active_game = room_games.get(new_room)
@@ -7937,6 +8008,7 @@ def handle_command(conn, payload: str) -> None:
         else:
             send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
             send_room_announcement_preview(conn, new_room)
+            send_room_pad_preview(conn, new_room)
             send_room_poll_preview(conn, new_room)
         return
 
@@ -7969,6 +8041,7 @@ def handle_command(conn, payload: str) -> None:
             hub.notify_switch(name, target_room)
         send_line(conn, f"[*] Switched from #{active} to #{target_room}\n")
         send_room_announcement_preview(conn, target_room)
+        send_room_pad_preview(conn, target_room)
         send_room_poll_preview(conn, target_room)
         return
 
@@ -8193,6 +8266,10 @@ def handle_command(conn, payload: str) -> None:
             _ts(conn, "announce_set_bcast", room=room, text=one_line).encode("utf-8"),
         )
         send_line(conn, _ts(conn, "announce_updated", room=room))
+        return
+
+    if cmd == "/pad":
+        _handle_pad(conn, name, current_room, payload)
         return
 
     if cmd == "/poll":
@@ -8867,7 +8944,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -8887,6 +8964,7 @@ def handle_client(conn, addr) -> None:
             deliver_offline_messages(conn, name)
         _mark_sessions_dirty()
         send_room_announcement_preview(conn, active_room)
+        send_room_pad_preview(conn, active_room)
         send_room_poll_preview(conn, active_room)
         if active_game_lines:
             send_game_private(conn, active_room, active_game_lines)

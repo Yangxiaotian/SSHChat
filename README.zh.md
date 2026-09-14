@@ -124,7 +124,7 @@
 
    连上后会进入聊天界面，不是平时那种可随便执行命令的 shell（由服务器配置决定）。
 
-4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/sendfile`、`/canvas`（画板，别名 `/board`）、`/clock`（棋钟，可在 Kindle 打开）、`/leave`、`/poll`、`/later`、`/game`、`/news`、`/library`（简写 `/lib`）、`/dict`、`/clear`。终端客户端输入 `/` 后按 **Tab** 可补全命令（类似 Linux shell）。
+4. 发普通文字就是聊天。常用命令：`/help`、`/names` 或 `/users`、`/rooms`、`/join`、`/switch`、`/msg`、`/sendfile`、`/canvas`（画板，别名 `/board`）、`/clock`（棋钟，可在 Kindle 打开）、`/leave`、`/pad`、`/poll`、`/later`、`/game`、`/news`、`/library`（简写 `/lib`）、`/dict`、`/clear`。终端客户端输入 `/` 后按 **Tab** 可补全命令（类似 Linux shell）。
 
 5. 要发文件就输 `/sendfile`（发到当前房间）、`/sendfile 昵称`（发给某人）或 `/sendfile #房间`。文件不走 SSH 通道，服务器会给你一个网页地址和一个 6 位密钥（分两行给出）：在网页上输入密钥、选文件上传即可，文件名以你选的文件为准。接收方各自收到一个专属网址和密钥，图片、视频、PDF 等能直接在网页里预览。**注意文件只能下载一次**，接收方确认保存成功之前别关页面。
 
@@ -491,6 +491,9 @@ npm run build:portable
 | `/leave 昵称` | 只看发给该昵称的未读留言（带编号） |
 | `/leave 昵称 编号` | 撤回发给该昵称的第 N 条未读留言（别名：`/留言`、`/unmsg`） |
 | `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
+| `/pad` | 查看房间剪贴板（共享便签） |
+| `/pad 文字` | 写入/覆盖剪贴板（房内任何人可改；重启后保留） |
+| `/pad clear` | 清除房间剪贴板 |
 | `/poll` | 查看当前房间投票 |
 | `/poll new 问题 \| 选项A \| 选项B` | 发起投票（至少两个选项，用 `\|` 分隔） |
 | `/poll <序号>` | 投票（可改投） |

@@ -92,6 +92,7 @@ export const zhMessages = {
       lang: '切换界面语言（en/zh）',
       dict: '词典查询（en/cn/hh）',
       announce: '房间公告',
+      pad: '房间剪贴板（共享便签）',
       poll: '房间投票',
       later: '私人提醒（时间胶囊）',
     },

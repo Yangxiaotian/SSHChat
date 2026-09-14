@@ -53,6 +53,8 @@ You should see an active-room tip, for example:
 
 Type plain text to chat. Try `/help`, `/names`, `/lang zh` (Chinese UI), `/lang en` (English UI).
 
+Room clipboard: `/pad meet at 21:00` to set; `/pad` to view; `/pad clear` to clear (anyone in the room may edit).
+
 Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; `/poll close` to end (creator or room owner).
 
 Personal reminder: `/later 30m bring an umbrella` (only you see it); `/later list`; `/later cancel 1`.

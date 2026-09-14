@@ -21,6 +21,8 @@ MESSAGES: dict = {
         "[*] /clear or /cls  Clear screen (terminal clears; GUI clients clear the current room history).\n",
         "[*] /announce      Show this room's announcement; owner may /announce <text> to set, /announce clear to clear.\n",
         "[*]              Owner: #default is the first user on the server; other rooms, the first /join to that room.\n",
+        "[*] /pad           Room clipboard (anyone in the room may edit; survives restart): /pad to view; /pad <text> to set; /pad clear.\n",
+        "[*]              Details: /pad help.\n",
         "[*] /poll          Room poll: /poll new Q | A | B; /poll <n> to vote; /poll close to end.\n",
         "[*] /later         Personal reminder (only you; survives restart; federation same-nick can list/cancel and gets delivery): "
         "/later 30m text; /later tomorrow 09:00 text; /later list; /later cancel <n>.\n",
@@ -123,6 +125,19 @@ MESSAGES: dict = {
         "announce_too_long": "[*] Announcement too long (max {max_len} characters).\n",
         "announce_updated": "[*] Updated the announcement for #{room}.\n",
         "announce_set_bcast": "[#{room}] [*] Announcement: {text}\n",
+        "pad_usage": (
+            "[*] Usage: /pad <text>     set/overwrite room clipboard (anyone in room; survives restart)\n"
+            "[*]         /pad           show\n"
+            "[*]         /pad clear     clear\n"
+        ),
+        "pad_preview": "[#{room}] [*] Pad: {text}\n",
+        "pad_current": "[*] #{room} pad: {text}\n",
+        "pad_none": "[*] #{room} pad is empty.\n",
+        "pad_too_long": "[*] Pad too long (max {max_len} characters).\n",
+        "pad_updated": "[*] Updated the pad for #{room}.\n",
+        "pad_set_bcast": "[#{room}] [*] {editor} updated the pad: {text}\n",
+        "pad_cleared_bcast": "[#{room}] [*] {editor} cleared the pad.\n",
+        "pad_cleared": "[*] Cleared the pad for #{room}.\n",
         "poll_usage": (
             "[*] Usage: /poll new question | optionA | optionB [| …]\n"
             "[*]         /poll <n>     vote (may change)\n"

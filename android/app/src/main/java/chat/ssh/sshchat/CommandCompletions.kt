@@ -5,7 +5,7 @@ object CommandCompletions {
     private val TOP = listOf(
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/poll", "/later",
+        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
     )
 
@@ -27,6 +27,7 @@ object CommandCompletions {
         "/dnd" to listOf("on", "off"),
         "/lang" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
         "/language" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
+        "/pad" to listOf("clear", "help", "show"),
         "/poll" to listOf("new", "close", "help", "show"),
         "/later" to listOf("list", "ls", "show", "cancel", "help"),
         "/clock" to listOf("help", "close", "new"),
