@@ -128,7 +128,7 @@ MESSAGES: dict = {
         "pad_usage": (
             "[*] Usage: /pad <text>     set one line (whitespace collapsed; use /pad edit for newlines)\n"
             "[*]         /pad           show\n"
-            "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim)\n"
+            "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim; vim restricted: no :term/:!)\n"
             "[*]         /pad clear     clear\n"
             "[*] Federated same-name rooms share one pad (last write wins).\n"
         ),

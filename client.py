@@ -854,10 +854,50 @@ def _pick_pad_editor() -> str | None:
         val = (os.environ.get(key) or "").strip()
         if val:
             return val
-    for cand in ("vim", "nvim", "nano", "vi"):
+    # Prefer rvim (already restricted) when available.
+    for cand in ("rvim", "vim", "nvim", "nano", "vi"):
         if shutil.which(cand):
             return cand
     return None
+
+
+def _pad_editor_unrestricted() -> bool:
+    return (os.environ.get("SSHCHAT_PAD_UNRESTRICTED") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _pad_editor_argv(editor: str) -> list[str]:
+    """Build editor argv; block vim/nvim shell escapes (:term, :!, etc.).
+
+    Override with SSHCHAT_PAD_UNRESTRICTED=1 if you truly need an unrestricted editor.
+    """
+    cmd = editor.split()
+    if not cmd or _pad_editor_unrestricted():
+        return cmd
+    base = os.path.basename(cmd[0]).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base in ("rvim", "rview"):
+        return cmd
+    if base == "nvim" or base.startswith("nvim"):
+        # nvim has no -Z; pin a non-shell and block :terminal's termopen().
+        false = shutil.which("false") or "/usr/bin/false"
+        return [
+            cmd[0],
+            "--cmd",
+            f"set shell={false}",
+            "--cmd",
+            "lua vim.fn.termopen=function() error('E145: restricted',0) end",
+            *cmd[1:],
+        ]
+    if base in ("vim", "vi", "vimx", "view") or base.startswith("vim."):
+        if "-Z" not in cmd[1:] and "--restricted" not in cmd[1:]:
+            return [cmd[0], "-Z", *cmd[1:]]
+    return cmd
 
 
 def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
@@ -903,13 +943,13 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
             if current and not current.endswith("\n"):
                 tf.write("\n")
             path = tf.name
-        print(f"[*] Opening editor ({editor}). Save & quit to upload.")
+        cmd = _pad_editor_argv(editor)
+        mode = "unrestricted" if _pad_editor_unrestricted() else "restricted"
+        print(f"[*] Opening editor ({' '.join(cmd)}; {mode}). Save & quit to upload.")
         # Flush prompt_toolkit stdout proxy so vim gets a clean TTY.
         _clear_stdout_proxy_pending()
         sys.stdout.flush()
         sys.stderr.flush()
-        # $EDITOR may be "vim" or "vim -n"; split like a shell only on spaces.
-        cmd = editor.split()
         rc = subprocess.call(cmd + [path])
         if rc != 0:
             print(f"[*] Editor exited with code {rc}; pad not uploaded.")

@@ -124,7 +124,7 @@ MESSAGES: dict = {
         "pad_usage": (
             "[*] 用法：/pad <文字>     写入一行（空格合并；带换行请用 /pad edit）\n"
             "[*]         /pad           查看\n"
-            "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim）\n"
+            "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim；vim 限制模式禁 :term/:!）\n"
             "[*]         /pad clear     清除\n"
             "[*] 联邦同名房间共享同一份剪贴板（后写覆盖）。\n"
         ),
