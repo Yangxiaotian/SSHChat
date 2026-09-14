@@ -1434,12 +1434,16 @@ def _clear_with_prompt_toolkit_output() -> bool:
 
 
 def _write_real_clear_csi() -> None:
+    """Emit ANSI clear to the stream the SSH client renders.
+
+    Do not require isatty(): ``ssh host cmd`` (no -t) uses pipes, but the local
+    terminal still interprets CSI in that pipe output — gating on isatty made
+    /cls a no-op in that common forced-command path.
+    """
     real = _get_real_stdout()
     if real is None:
-        return
+        real = sys.stdout
     try:
-        if not real.isatty():
-            return
         if hasattr(real, "buffer"):
             real.buffer.write(_CLEAR_CSI)
         else:
@@ -1455,10 +1459,9 @@ def _raw_terminal_clear() -> None:
 
 def _clear_terminal_with_prompt_sync() -> None:
     """Clear screen without desyncing prompt_toolkit's prompt rendering."""
-    if not _terminal_is_tty():
-        return
     _clear_stdout_proxy_pending()
-    _clear_with_prompt_toolkit_output()
+    if _terminal_is_tty():
+        _clear_with_prompt_toolkit_output()
     _write_real_clear_csi()
 
 
@@ -1575,6 +1578,7 @@ def main():
     use_prompt_toolkit = sys.stdin.isatty() and sys.stdout.isatty()
     if not use_prompt_toolkit:
         print("[*] non-interactive terminal detected; fallback input mode")
+        print("[*] Tip: ssh -t <user>@host  (allocate a TTY for Tab complete / clearer /cls)")
 
     if use_prompt_toolkit:
         # GUI / Paramiko / some PTYs do not answer CPR (cursor position requests);
