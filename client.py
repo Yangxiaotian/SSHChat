@@ -795,10 +795,12 @@ def _is_dnd_game_read_command(cmd: str) -> bool:
 
 
 _PAD_DUMP_PREFIX = "[*] <<PADDUMP>> "
+_PAD_DUMP_MARKER = "<<PADDUMP>>"
 _pad_dump_lock = threading.Lock()
 _pad_dump_event = threading.Event()
 _pad_dump_payload: str | None = None
 _pad_dump_waiting = False
+_ANSI_NOISE = re.compile(r"\033\[[0-9;?]*[A-Za-z]|\?\[[0-9;?]*[A-Za-z]")
 
 
 def _arm_pad_dump_waiter() -> None:
@@ -815,22 +817,31 @@ def _disarm_pad_dump_waiter() -> None:
         _pad_dump_waiting = False
 
 
+def _extract_pad_dump_blob(text: str) -> str | None:
+    """Return base64 payload if this line is a pad dump (tolerate PTY/CSI noise)."""
+    raw = _ANSI_NOISE.sub("", text.rstrip("\n"))
+    idx = raw.find(_PAD_DUMP_MARKER)
+    if idx < 0:
+        return None
+    return raw[idx + len(_PAD_DUMP_MARKER) :].strip()
+
+
 def _take_pad_dump_line(text: str) -> bool:
     """Swallow PADDUMP only while /pad edit is waiting (mobile clients need the line)."""
     global _pad_dump_payload, _pad_dump_waiting
-    raw = text.rstrip("\n")
-    if not raw.startswith(_PAD_DUMP_PREFIX):
+    blob = _extract_pad_dump_blob(text)
+    if blob is None:
         return False
     with _pad_dump_lock:
         if not _pad_dump_waiting:
             return False
         _pad_dump_waiting = False
-        _pad_dump_payload = raw[len(_PAD_DUMP_PREFIX) :]
+        _pad_dump_payload = blob
         _pad_dump_event.set()
     return True
 
 
-def _wait_pad_dump(timeout: float = 8.0) -> str | None:
+def _wait_pad_dump(timeout: float = 12.0) -> str | None:
     if not _pad_dump_event.wait(timeout):
         _disarm_pad_dump_waiter()
         return None
@@ -862,6 +873,7 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
     try:
         sock.send(f"[{my_name}] /pad dump\n".encode("utf-8"))
     except Exception:
+        _disarm_pad_dump_waiter()
         print("[*] Failed to request pad dump.")
         return
     blob = _wait_pad_dump()
@@ -869,6 +881,10 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         print("[*] Timed out waiting for pad content.")
         return
     try:
+        # Accept missing padding from older encoders.
+        pad = (-len(blob)) % 4
+        if pad:
+            blob = blob + ("=" * pad)
         current = base64.urlsafe_b64decode(blob.encode("ascii")).decode("utf-8")
     except Exception:
         print("[*] Bad pad dump from server.")
@@ -888,6 +904,10 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
                 tf.write("\n")
             path = tf.name
         print(f"[*] Opening editor ({editor}). Save & quit to upload.")
+        # Flush prompt_toolkit stdout proxy so vim gets a clean TTY.
+        _clear_stdout_proxy_pending()
+        sys.stdout.flush()
+        sys.stderr.flush()
         # $EDITOR may be "vim" or "vim -n"; split like a shell only on spaces.
         cmd = editor.split()
         rc = subprocess.call(cmd + [path])
