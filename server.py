@@ -8135,6 +8135,7 @@ def handle_command(conn, payload: str) -> None:
             return
 
         newly_joined = False
+        switched = False
         with lock:
             if conn not in clients:
                 return
@@ -8147,7 +8148,9 @@ def handle_command(conn, payload: str) -> None:
                 if was_empty:
                     room_owners[new_room] = conn
                 newly_joined = True
-            clients[conn]["current_room"] = new_room
+            if new_room != prev_room:
+                clients[conn]["current_room"] = new_room
+                switched = True
             _sync_live_session_locked(conn)
 
         if newly_joined:
@@ -8175,10 +8178,14 @@ def handle_command(conn, payload: str) -> None:
                     send_line(conn, f"[*] 本房正在进行一局 {game_label}，用 /game show 查看。\n")
                     if seats_info:
                         send_line(conn, "\n".join(seats_info) + "\n")
-        elif new_room == current_room:
+        elif not switched:
             send_line(conn, f"[*] Already active in #{new_room}\n")
         else:
-            send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled:
+                # /join to an already-joined room is a switch; peers need current_room.
+                hub.notify_switch(name, new_room)
+            send_line(conn, f"[*] Switched from #{prev_room} to #{new_room}\n")
             send_room_announcement_preview(conn, new_room)
             send_room_pad_preview(conn, new_room)
             send_room_poll_preview(conn, new_room)
@@ -9058,25 +9065,39 @@ def handle_client(conn, addr) -> None:
             previous_session = _load_recent_session_locked(name)
             inherited_rooms: set[str] = set()
             active_room = DEFAULT_ROOM
+            session_active = ""
+            if previous_session is not None:
+                inherited_rooms.update(previous_session.get("rooms") or set())
+                previous_active = previous_session.get("current_room")
+                if isinstance(previous_active, str) and previous_active.strip():
+                    session_active = previous_active.strip()
+            peer_active = ""
             if same_name_peers:
                 for peer in same_name_peers:
                     peer_info = clients.get(peer)
                     if not peer_info:
                         continue
                     inherited_rooms.update(peer_info["rooms"])
-                    if active_room == DEFAULT_ROOM:
-                        active_room = peer_info["current_room"]
-            elif previous_session is not None:
-                inherited_rooms.update(previous_session.get("rooms") or set())
-                previous_active = previous_session.get("current_room")
-                if isinstance(previous_active, str) and previous_active:
-                    active_room = previous_active
-                restored_from_session = True
+                    if not peer_active:
+                        cur = str(peer_info.get("current_room") or "").strip()
+                        if cur:
+                            peer_active = cur
+            fed_active = ""
             if hub is not None and hub.enabled:
                 inherited_rooms.update(hub.rooms_for_name(name))
-                fed_active = hub.active_room_for_name(name)
-                if fed_active and active_room == DEFAULT_ROOM:
-                    active_room = fed_active
+                remote_active = hub.active_room_for_name(name)
+                if isinstance(remote_active, str) and remote_active.strip():
+                    fed_active = remote_active.strip()
+            # Active room: live federated same-nick > last local session
+            # (updated on every /join|/switch) > other local device > default.
+            # Do not let a stale idle peer overwrite a fresher remembered room.
+            if fed_active:
+                active_room = fed_active
+            elif session_active:
+                active_room = session_active
+                restored_from_session = True
+            elif peer_active:
+                active_room = peer_active
             inherited_rooms.add(DEFAULT_ROOM)
             if active_room not in inherited_rooms:
                 inherited_rooms.add(active_room)
@@ -9107,6 +9128,7 @@ def handle_client(conn, addr) -> None:
                 f"*#{r}" if r == active_room else f"#{r}"
                 for r in sorted(inherited_rooms)
             ]
+            _sync_live_session_locked(conn)
 
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
