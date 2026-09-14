@@ -35,7 +35,7 @@ final class ChatViewModel: ObservableObject {
     @Published var keys: DeviceKeyStore.Keys
     @Published var chatFont: CGFloat = 13
     @Published var suggestions: [String] = []
-    @Published var mediaHint = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 垃圾桶清屏"
+    @Published var mediaHint = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 便签 · 垃圾桶清屏"
     @Published var recording = false
     @Published var toast: String?
     @Published var webInvite: WebInvitePayload?
@@ -51,6 +51,8 @@ final class ChatViewModel: ObservableObject {
     @Published var onlineUsers: [String] = []
     @Published var knownRooms: [String] = SendTargetStore.loadKnownRooms()
     @Published var showSendTargetPicker = false
+    @Published var showPadEditor = false
+    @Published var padEditorText = ""
 
     enum FileImportKind { case media, identity }
 
@@ -76,6 +78,8 @@ final class ChatViewModel: ObservableObject {
     private var pendingFileMeta = SecureInvite.FileMeta()
     private var expectingOwnCanvas = false
     private var expectingOwnPiano = false
+    private var pendingPadEdit = false
+    private var padEditWaitTask: Task<Void, Never>?
     private let ansiClear = try! NSRegularExpression(pattern: #"\u001B\[[0-9;]*[HJKjk]"#)
 
     struct WebInvitePayload: Identifiable {
@@ -301,11 +305,13 @@ final class ChatViewModel: ObservableObject {
         mediaPickerOpen = false
         onConnectedOnce = nil
         cancelUploadWait()
+        cancelPadEditWait()
+        showPadEditor = false
         pendingUpload = nil
         voiceRecorder?.cancel()
         voiceRecorder = nil
         recording = false
-        mediaHint = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 垃圾桶清屏"
+        mediaHint = "话筒语音 · 相机拍照/长按录像 · 文件夹 · 画板 · 便签 · 垃圾桶清屏"
         Task {
             await session.disconnect()
             connected = false
@@ -413,6 +419,59 @@ final class ChatViewModel: ObservableObject {
         appendText("[*] 正在开启房间钢琴…（/piano）")
         expectingOwnPiano = true
         Task { try? await session.send("/piano") }
+    }
+
+    private func cancelPadEditWait() {
+        padEditWaitTask?.cancel()
+        padEditWaitTask = nil
+        pendingPadEdit = false
+    }
+
+    func startPadEdit() {
+        guard connected else { toast = "请先连接"; return }
+        if pendingPadEdit {
+            toast = "正在打开便签…"
+            return
+        }
+        pendingPadEdit = true
+        appendText("[*] 正在打开房间便签…（/pad）")
+        padEditWaitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.pendingPadEdit else { return }
+                self.pendingPadEdit = false
+                self.toast = "打开便签超时"
+                self.appendText("[*] 打开便签超时")
+            }
+        }
+        Task { try? await session.send("/pad dump") }
+    }
+
+    func savePadEditor() {
+        let body = padEditorText
+        showPadEditor = false
+        let data = Data(body.utf8)
+        let b64 = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        Task { try? await session.send("/pad load \(b64)") }
+    }
+
+    func clearPadFromEditor() {
+        showPadEditor = false
+        Task { try? await session.send("/pad clear") }
+    }
+
+    private static func decodeURLSafeBase64(_ s: String) -> Data? {
+        var t = s
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - t.count % 4) % 4
+        if pad > 0 {
+            t += String(repeating: "=", count: pad)
+        }
+        return Data(base64Encoded: t)
     }
 
     func sendSlashCommand(_ command: String) {
@@ -674,6 +733,23 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        if let b64 = ChatLineParsers.parsePadDump(stripped) {
+            guard pendingPadEdit else { return }
+            cancelPadEditWait()
+            if b64.isEmpty {
+                padEditorText = ""
+                showPadEditor = true
+            } else if let data = Self.decodeURLSafeBase64(b64),
+                      let text = String(data: data, encoding: .utf8) {
+                padEditorText = text
+                showPadEditor = true
+            } else {
+                toast = "便签数据无效"
+                appendText("[*] 便签数据无效")
+            }
+            return
+        }
+
         SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
 
         if let open = SecureInvite.parseGuiOpen(stripped) {
@@ -924,6 +1000,28 @@ struct ContentView: View {
             Button("从相册选择") { model.launchPhotoLibrary() }
             Button("录像发送") { model.launchCameraVideo() }
             Button("取消", role: .cancel) {}
+        }
+        .sheet(isPresented: $model.showPadEditor) {
+            NavigationStack {
+                TextEditor(text: $model.padEditorText)
+                    .font(.system(size: 15, design: .monospaced))
+                    .padding(8)
+                    .navigationTitle("房间便签")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { model.showPadEditor = false }
+                        }
+                        ToolbarItem(placement: .bottomBar) {
+                            Button("清除", role: .destructive) { model.clearPadFromEditor() }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("保存") { model.savePadEditor() }
+                                .fontWeight(.semibold)
+                        }
+                    }
+            }
+            .preferredColorScheme(.light)
         }
         .sheet(isPresented: $model.showCameraPhoto) {
             CameraPicker(mode: .photo, onPicked: { url in
@@ -1438,6 +1536,10 @@ struct ContentView: View {
             plusCell(title: "棋钟", system: "timer") {
                 showPlusPanel = false
                 model.startClock()
+            }
+            plusCell(title: "便签", system: "note.text") {
+                showPlusPanel = false
+                model.startPadEdit()
             }
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false

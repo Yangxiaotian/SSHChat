@@ -492,7 +492,8 @@ npm run build:portable
 | `/leave 昵称 编号` | 撤回发给该昵称的第 N 条未读留言（别名：`/留言`、`/unmsg`） |
 | `/announce` | 查看当前房间公告；房主可 `/announce 文字` 设置，`/announce clear` 清除 |
 | `/pad` | 查看房间剪贴板（共享便签） |
-| `/pad 文字` | 写入/覆盖剪贴板（房内任何人可改；重启后保留） |
+| `/pad 文字` | 写入/覆盖一行（带换行请用终端 `/pad edit`） |
+| `/pad edit` | 终端用 vim/$EDITOR 编辑多行后上传（别名 `/pad vim`） |
 | `/pad clear` | 清除房间剪贴板 |
 | `/poll` | 查看当前房间投票 |
 | `/poll new 问题 \| 选项A \| 选项B` | 发起投票（至少两个选项，用 `\|` 分隔） |

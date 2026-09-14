@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import base64
 import getpass
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -183,6 +185,8 @@ _POLL_SUBCOMMANDS = {
 
 _PAD_SUBCOMMANDS = {
     "clear": None,
+    "edit": None,
+    "vim": None,
     "help": None,
     "show": None,
 }
@@ -790,7 +794,132 @@ def _is_dnd_game_read_command(cmd: str) -> bool:
     return any(lower == prefix or lower.startswith(prefix + " ") for prefix in readonly)
 
 
-def _try_handle_local_command(msg: str) -> bool:
+_PAD_DUMP_PREFIX = "[*] <<PADDUMP>> "
+_pad_dump_lock = threading.Lock()
+_pad_dump_event = threading.Event()
+_pad_dump_payload: str | None = None
+_pad_dump_waiting = False
+
+
+def _arm_pad_dump_waiter() -> None:
+    global _pad_dump_payload, _pad_dump_waiting
+    with _pad_dump_lock:
+        _pad_dump_waiting = True
+        _pad_dump_payload = None
+        _pad_dump_event.clear()
+
+
+def _disarm_pad_dump_waiter() -> None:
+    global _pad_dump_waiting
+    with _pad_dump_lock:
+        _pad_dump_waiting = False
+
+
+def _take_pad_dump_line(text: str) -> bool:
+    """Swallow PADDUMP only while /pad edit is waiting (mobile clients need the line)."""
+    global _pad_dump_payload, _pad_dump_waiting
+    raw = text.rstrip("\n")
+    if not raw.startswith(_PAD_DUMP_PREFIX):
+        return False
+    with _pad_dump_lock:
+        if not _pad_dump_waiting:
+            return False
+        _pad_dump_waiting = False
+        _pad_dump_payload = raw[len(_PAD_DUMP_PREFIX) :]
+        _pad_dump_event.set()
+    return True
+
+
+def _wait_pad_dump(timeout: float = 8.0) -> str | None:
+    if not _pad_dump_event.wait(timeout):
+        _disarm_pad_dump_waiter()
+        return None
+    with _pad_dump_lock:
+        return _pad_dump_payload
+
+
+def _pick_pad_editor() -> str | None:
+    for key in ("SSHCHAT_PAD_EDITOR", "EDITOR", "VISUAL"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    for cand in ("vim", "nvim", "nano", "vi"):
+        if shutil.which(cand):
+            return cand
+    return None
+
+
+def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
+    editor = _pick_pad_editor()
+    if not editor:
+        print("[*] No editor found. Set $EDITOR or install vim/nano.")
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("[*] /pad edit needs an interactive TTY.")
+        return
+
+    _arm_pad_dump_waiter()
+    try:
+        sock.send(f"[{my_name}] /pad dump\n".encode("utf-8"))
+    except Exception:
+        print("[*] Failed to request pad dump.")
+        return
+    blob = _wait_pad_dump()
+    if blob is None:
+        print("[*] Timed out waiting for pad content.")
+        return
+    try:
+        current = base64.urlsafe_b64decode(blob.encode("ascii")).decode("utf-8")
+    except Exception:
+        print("[*] Bad pad dump from server.")
+        return
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".pad.txt",
+            prefix="sshchat-pad-",
+            delete=False,
+        ) as tf:
+            tf.write(current)
+            if current and not current.endswith("\n"):
+                tf.write("\n")
+            path = tf.name
+        print(f"[*] Opening editor ({editor}). Save & quit to upload.")
+        # $EDITOR may be "vim" or "vim -n"; split like a shell only on spaces.
+        cmd = editor.split()
+        rc = subprocess.call(cmd + [path])
+        if rc != 0:
+            print(f"[*] Editor exited with code {rc}; pad not uploaded.")
+            return
+        with open(path, encoding="utf-8") as f:
+            new_text = f.read()
+    except Exception as e:
+        print(f"[*] Pad edit failed: {e!r}")
+        return
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
+        "\r\n", "\n"
+    ).replace("\r", "\n").rstrip("\n"):
+        print("[*] Pad unchanged.")
+        return
+    encoded = base64.urlsafe_b64encode(new_text.encode("utf-8")).decode("ascii")
+    try:
+        sock.send(f"[{my_name}] /pad load {encoded}\n".encode("utf-8"))
+    except Exception:
+        print("[*] Failed to upload pad.")
+        return
+
+
+def _try_handle_local_command(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
     stripped = msg.strip()
     lower = stripped.lower()
     if lower == "/dnd":
@@ -812,11 +941,17 @@ def _try_handle_local_command(msg: str) -> bool:
     if lower in ("/clear", "/cls"):
         _terminal_hard_clear()
         return True
+    if lower in ("/pad edit", "/pad vim") or lower.startswith("/pad edit ") or lower.startswith("/pad vim "):
+        if sock is None:
+            print("[*] /pad edit is only available in the terminal client.")
+            return True
+        _run_pad_edit(sock, my_name or name)
+        return True
     return False
 
 
-def _prepare_outgoing(msg: str) -> bool:
-    if _try_handle_local_command(msg):
+def _prepare_outgoing(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
+    if _try_handle_local_command(msg, sock=sock, my_name=my_name):
         return False
     lower = msg.strip().lower()
     if lower.startswith("/game"):
@@ -1209,6 +1344,8 @@ def recv_msg(sock, my_name: str):
 
                 if _should_skip_display_line(text):
                     continue
+                if _take_pad_dump_line(text):
+                    continue
                 if _consume_sent_input_echo(text):
                     continue
                 _absorb_completion_line(text)
@@ -1304,7 +1441,7 @@ def main():
                     if msg.strip() == "":
                         continue
 
-                    if not _prepare_outgoing(msg):
+                    if not _prepare_outgoing(msg, sock=s, my_name=name):
                         continue
 
                     _remember_sent_input(msg)
@@ -1331,7 +1468,7 @@ def main():
                 msg = msg.rstrip("\r\n")
                 if msg.strip() == "":
                     continue
-                if not _prepare_outgoing(msg):
+                if not _prepare_outgoing(msg, sock=s, my_name=name):
                     continue
                 _remember_sent_input(msg)
                 s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))

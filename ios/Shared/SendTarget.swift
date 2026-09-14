@@ -195,6 +195,13 @@ enum ChatLineParsers {
         return NamesLine(room: room, members: members)
     }
 
+    /// Machine line from `/pad dump`: `[*] <<PADDUMP>> <urlsafe-b64>`.
+    static func parsePadDump(_ line: String) -> String? {
+        let t = normalizeForParse(line)
+        guard let range = t.range(of: "<<PADDUMP>>") else { return nil }
+        return String(t[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func parsePm(_ line: String) -> PmLine? {
         let t = normalizeForParse(line)
         if let m = pmLine.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),

@@ -51,6 +51,15 @@ object ChatLineParsers {
         return null
     }
 
+    /** Machine line from `/pad dump`: `[*] <<PADDUMP>> <urlsafe-b64>` (may have local prefixes). */
+    fun parsePadDump(line: String): String? {
+        val t = normalizeForParse(line)
+        val marker = "<<PADDUMP>>"
+        val idx = t.indexOf(marker)
+        if (idx < 0) return null
+        return t.substring(idx + marker.length).trim()
+    }
+
     // Same shapes as client.py / electron (do not treat [#room] or [HH:MM:SS] as sender).
     private val roomChat = Regex("""^\[#([^\]]+)]\s+\[([^\]]+)]\s+(.*)$""")
     private val plainChat = Regex("""^\[([^\]]+)]\s+(.*)$""")

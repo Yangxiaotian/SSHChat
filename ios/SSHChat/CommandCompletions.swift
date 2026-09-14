@@ -66,7 +66,7 @@ enum CommandCompletions {
         "/dnd": ["on", "off"],
         "/lang": ["en", "zh", "english", "chinese", "中文", "英文"],
         "/language": ["en", "zh", "english", "chinese", "中文", "英文"],
-        "/pad": ["clear", "help", "show"],
+        "/pad": ["clear", "edit", "vim", "help", "show"],
         "/poll": ["new", "close", "help", "show"],
         "/later": ["list", "ls", "show", "cancel", "help"],
         "/clock": ["help", "close", "new"],

@@ -27,7 +27,7 @@ object CommandCompletions {
         "/dnd" to listOf("on", "off"),
         "/lang" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
         "/language" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
-        "/pad" to listOf("clear", "help", "show"),
+        "/pad" to listOf("clear", "edit", "vim", "help", "show"),
         "/poll" to listOf("new", "close", "help", "show"),
         "/later" to listOf("list", "ls", "show", "cancel", "help"),
         "/clock" to listOf("help", "close", "new"),

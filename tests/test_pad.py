@@ -71,6 +71,34 @@ class PadTests(unittest.TestCase):
         server.handle_command(self.alice, "/pad clear wifi password later")
         self.assertEqual(server.room_pads["lobby"], "clear wifi password later")
 
+    def test_load_preserves_newlines(self) -> None:
+        import base64
+
+        text = "line1\nline2\nline3"
+        b64 = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii")
+        server.handle_command(self.alice, f"/pad load {b64}")
+        self.assertEqual(server.room_pads["lobby"], text)
+        self.alice.sent.clear()
+        server.handle_command(self.alice, "/pad")
+        out = self._out(self.alice)
+        self.assertIn("3 lines", out.lower())
+        self.assertIn("line2", out)
+
+    def test_dump_roundtrip(self) -> None:
+        import base64
+
+        server.handle_command(self.alice, "/pad hello")
+        self.alice.sent.clear()
+        server.handle_command(self.alice, "/pad dump")
+        out = self._out(self.alice)
+        self.assertTrue(out.startswith(server.PAD_DUMP_PREFIX))
+        blob = out[len(server.PAD_DUMP_PREFIX) :].strip()
+        self.assertEqual(base64.urlsafe_b64decode(blob).decode("utf-8"), "hello")
+
+    def test_edit_hint_for_non_terminal(self) -> None:
+        server.handle_command(self.bob, "/pad edit")
+        self.assertIn("terminal", self._out(self.bob).lower())
+
 
 if __name__ == "__main__":
     unittest.main()

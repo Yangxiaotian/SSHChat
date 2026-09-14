@@ -64,6 +64,9 @@ class MainActivity : AppCompatActivity() {
     private var expectingNames = false
     @Volatile private var expectingOwnCanvas = false
     @Volatile private var expectingOwnPiano = false
+    @Volatile private var pendingPadEdit = false
+    private var padEditTimeout: Runnable? = null
+    private var padEditDialog: android.app.AlertDialog? = null
 
     private val requestNotifyPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -204,6 +207,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnClock.setOnClickListener {
             hidePlusPanel()
             startClock()
+        }
+        binding.btnPad.setOnClickListener {
+            hidePlusPanel()
+            startPadEdit()
         }
         binding.btnClear.setOnClickListener {
             hidePlusPanel()
@@ -480,6 +487,82 @@ class MainActivity : AppCompatActivity() {
         appendLine("[*] 正在开启房间钢琴…（/piano）")
         expectingOwnPiano = true
         client?.send("/piano")
+    }
+
+    private fun cancelPadEditWait() {
+        padEditTimeout?.let { binding.root.removeCallbacks(it) }
+        padEditTimeout = null
+        pendingPadEdit = false
+    }
+
+    private fun startPadEdit() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (pendingPadEdit) {
+            Toast.makeText(this, "正在打开便签…", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingPadEdit = true
+        appendLine("[*] 正在打开房间便签…（/pad）")
+        val timeout = Runnable {
+            if (pendingPadEdit) {
+                pendingPadEdit = false
+                Toast.makeText(this, "打开便签超时", Toast.LENGTH_SHORT).show()
+                appendLine("[*] 打开便签超时")
+            }
+        }
+        padEditTimeout = timeout
+        binding.root.postDelayed(timeout, 8_000L)
+        client?.send("/pad dump")
+    }
+
+    private fun showPadEditorDialog(text: String) {
+        if (isFinishing || isDestroyed) return
+        padEditDialog?.dismiss()
+        val input = android.widget.EditText(this).apply {
+            setText(text)
+            setSelection(text.length)
+            minLines = 8
+            maxLines = 16
+            gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setHorizontallyScrolling(false)
+            hint = "房间共享便签（可多行）"
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        val scroll = android.widget.ScrollView(this).apply {
+            addView(
+                input,
+                android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            setPadding(0, dp(8), 0, 0)
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("房间便签 /pad")
+            .setView(scroll)
+            .setPositiveButton("保存") { _, _ ->
+                val body = input.text?.toString().orEmpty()
+                val b64 = android.util.Base64.encodeToString(
+                    body.toByteArray(Charsets.UTF_8),
+                    android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP,
+                )
+                client?.send("/pad load $b64")
+            }
+            .setNeutralButton("清除") { _, _ ->
+                client?.send("/pad clear")
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        padEditDialog = dialog
+        dialog.setOnDismissListener { padEditDialog = null }
+        dialog.show()
     }
 
     private fun sendSlashCommand(command: String) {
@@ -1036,6 +1119,29 @@ class MainActivity : AppCompatActivity() {
             appendPmLine(pm.from, pm.body)
             return
         }
+        ChatLineParsers.parsePadDump(stripped)?.let { b64 ->
+            if (!pendingPadEdit) {
+                // Unsolicited dump — ignore quietly (another client may have requested it).
+                return
+            }
+            cancelPadEditWait()
+            try {
+                val text = if (b64.isEmpty()) {
+                    ""
+                } else {
+                    val bytes = android.util.Base64.decode(
+                        b64,
+                        android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP,
+                    )
+                    String(bytes, Charsets.UTF_8)
+                }
+                showPadEditorDialog(text)
+            } catch (_: Exception) {
+                Toast.makeText(this, "便签数据无效", Toast.LENGTH_SHORT).show()
+                appendLine("[*] 便签数据无效")
+            }
+            return
+        }
         SecureInvite.absorbFileMeta(stripped, pendingFileMeta)
         val open = SecureInvite.parseGuiOpen(stripped)
         if (open != null) {
@@ -1476,6 +1582,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
         binding.btnPiano.isEnabled = on
+        binding.btnPad.isEnabled = on
         binding.btnLibrary.isEnabled = on
         binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
@@ -1490,11 +1597,14 @@ class MainActivity : AppCompatActivity() {
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
         binding.btnPiano.alpha = iconAlpha
+        binding.btnPad.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE
         if (!on) {
+            cancelPadEditWait()
+            padEditDialog?.dismiss()
             hidePlusPanel()
             binding.suggestScroll.visibility = View.GONE
             binding.suggestRow.removeAllViews()

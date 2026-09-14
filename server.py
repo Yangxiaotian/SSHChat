@@ -186,7 +186,8 @@ PERSIST_DEBOUNCE_SECONDS = float(
 
 ROOM_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
 MAX_ANNOUNCE_LEN = 400
-MAX_PAD_LEN = 800
+MAX_PAD_LEN = 8000
+PAD_DUMP_PREFIX = "[*] <<PADDUMP>> "
 MAX_POLL_QUESTION_LEN = 120
 MAX_POLL_OPTION_LEN = 60
 MAX_POLL_OPTIONS = 8
@@ -392,7 +393,21 @@ def send_room_pad_preview(conn, room: str) -> None:
         text = (room_pads.get(room) or "").strip()
     if not text:
         return
-    send_line(conn, _ts(conn, "pad_preview", room=room, text=text))
+    lines = text.splitlines()
+    if len(lines) <= 1:
+        send_line(conn, _ts(conn, "pad_preview", room=room, text=text))
+        return
+    first = lines[0] if lines[0] else "(empty line)"
+    send_line(
+        conn,
+        _ts(
+            conn,
+            "pad_preview_multi",
+            room=room,
+            n=len(lines),
+            text=first,
+        ),
+    )
 
 
 def send_room_poll_preview(conn, room: str) -> None:
@@ -446,8 +461,59 @@ def _poll_body_lines(conn, room: str, poll: dict, *, closed: bool = False) -> li
     return lines
 
 
+def _pad_line_count(text: str) -> int:
+    return max(1, len(text.splitlines())) if text else 0
+
+
+def _send_pad_view(conn, room: str, text: str) -> None:
+    lines = text.splitlines()
+    if len(lines) <= 1:
+        send_line(conn, _ts(conn, "pad_current", room=room, text=text))
+        return
+    send_line(
+        conn,
+        _ts(conn, "pad_current_multi_header", room=room, n=len(lines)),
+    )
+    for line in lines:
+        send_line(conn, _ts(conn, "pad_current_multi_line", text=line))
+
+
+def _normalize_pad_text(text: str) -> str:
+    """Keep newlines; normalize CRLF; strip trailing blank lines."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.rstrip("\n").strip("\0")
+
+
+def _set_room_pad(conn, name: str, room: str, text: str) -> None:
+    text = _normalize_pad_text(text)
+    if not text.strip():
+        send_line(conn, _ts(conn, "pad_usage"))
+        return
+    if len(text) > MAX_PAD_LEN:
+        send_line(conn, _ts(conn, "pad_too_long", max_len=MAX_PAD_LEN))
+        return
+    with lock:
+        room_pads[room] = text
+    _mark_sessions_dirty()
+    n_lines = _pad_line_count(text)
+    if n_lines <= 1:
+        bcast = _ts(conn, "pad_set_bcast", room=room, editor=name, text=text)
+    else:
+        first = text.splitlines()[0] or "(empty line)"
+        bcast = _ts(
+            conn,
+            "pad_set_bcast_multi",
+            room=room,
+            editor=name,
+            n=n_lines,
+            text=first,
+        )
+    broadcast_room(room, bcast.encode("utf-8"))
+    send_line(conn, _ts(conn, "pad_updated", room=room))
+
+
 def _handle_pad(conn, name: str, room: str, payload: str) -> None:
-    """Room shared sticky note: /pad ; /pad <text> ; /pad clear ; /pad help."""
+    """Room sticky note: /pad ; /pad <text> ; /pad clear ; /pad edit ; /pad dump|load."""
     raw = payload[len("/pad") :].strip()
     low = raw.lower()
 
@@ -458,7 +524,7 @@ def _handle_pad(conn, name: str, room: str, payload: str) -> None:
         with lock:
             cur = (room_pads.get(room) or "").strip()
         if cur:
-            send_line(conn, _ts(conn, "pad_current", room=room, text=cur))
+            _send_pad_view(conn, room, cur)
         else:
             send_line(conn, _ts(conn, "pad_none", room=room))
             send_line(conn, _ts(conn, "pad_usage"))
@@ -479,23 +545,37 @@ def _handle_pad(conn, name: str, room: str, payload: str) -> None:
         send_line(conn, _ts(conn, "pad_cleared", room=room))
         return
 
+    if low in ("edit", "vim"):
+        # Terminal client intercepts /pad edit locally; other clients get a hint.
+        send_line(conn, _ts(conn, "pad_edit_client_only"))
+        return
+
+    if low == "dump":
+        with lock:
+            cur = room_pads.get(room) or ""
+        blob = base64.urlsafe_b64encode(cur.encode("utf-8")).decode("ascii")
+        send_line(conn, f"{PAD_DUMP_PREFIX}{blob}\n")
+        return
+
+    if low.startswith("load ") or low == "load":
+        parts = raw.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            send_line(conn, _ts(conn, "pad_load_usage"))
+            return
+        b64 = parts[1].strip()
+        try:
+            pad = (-len(b64)) % 4
+            if pad:
+                b64 = b64 + ("=" * pad)
+            decoded = base64.urlsafe_b64decode(b64.encode("ascii")).decode("utf-8")
+        except Exception:
+            send_line(conn, _ts(conn, "pad_load_bad"))
+            return
+        _set_room_pad(conn, name, room, decoded)
+        return
+
     one_line = " ".join(raw.split())
-    if not one_line:
-        send_line(conn, _ts(conn, "pad_usage"))
-        return
-    if len(one_line) > MAX_PAD_LEN:
-        send_line(conn, _ts(conn, "pad_too_long", max_len=MAX_PAD_LEN))
-        return
-    with lock:
-        room_pads[room] = one_line
-    _mark_sessions_dirty()
-    broadcast_room(
-        room,
-        _ts(
-            conn, "pad_set_bcast", room=room, editor=name, text=one_line
-        ).encode("utf-8"),
-    )
-    send_line(conn, _ts(conn, "pad_updated", room=room))
+    _set_room_pad(conn, name, room, one_line)
 
 
 def _handle_poll(conn, name: str, room: str, payload: str) -> None:

@@ -53,7 +53,7 @@ You should see an active-room tip, for example:
 
 Type plain text to chat. Try `/help`, `/names`, `/lang zh` (Chinese UI), `/lang en` (English UI).
 
-Room clipboard: `/pad meet at 21:00` to set; `/pad` to view; `/pad clear` to clear (anyone in the room may edit).
+Room clipboard: `/pad meet at 21:00` for one line; `/pad edit` opens vim/$EDITOR for multi-line; `/pad` to view; `/pad clear` to clear (anyone in the room may edit).
 
 Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; `/poll close` to end (creator or room owner).
 

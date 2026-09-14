@@ -291,7 +291,7 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
     "/lang": ("en", "zh", "english", "chinese", "中文", "英文"),
     "/language": ("en", "zh", "english", "chinese", "中文", "英文"),
     "/poll": ("new", "close", "help", "show"),
-    "/pad": ("clear", "help", "show"),
+    "/pad": ("clear", "edit", "vim", "help", "show"),
     "/later": ("list", "ls", "show", "cancel", "help"),
     "/clock": ("help", "close", "new"),
 }
