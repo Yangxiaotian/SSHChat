@@ -21,6 +21,11 @@ MESSAGES: dict = {
         "[*] /clear or /cls  Clear screen (terminal clears; GUI clients clear the current room history).\n",
         "[*] /announce      Show this room's announcement; owner may /announce <text> to set, /announce clear to clear.\n",
         "[*]              Owner: #default is the first user on the server; other rooms, the first /join to that room.\n",
+        "[*] /pad           Room clipboard (anyone may edit; survives restart; federated same-name rooms sync): /pad to view; /pad <text> one line; /pad clear.\n",
+        "[*]              Multi-line: terminal /pad edit (vim/$EDITOR). Details: /pad help.\n",
+        "[*] /poll          Room poll: /poll new Q | A | B; /poll <n> to vote; /poll close to end.\n",
+        "[*] /later         Personal reminder (only you; survives restart; federation same-nick can list/cancel and gets delivery): "
+        "/later 30m text; /later tomorrow 09:00 text; /later list; /later cancel <n>.\n",
         "[*] /lang [en|zh]   Switch UI language (default English; preference saved per nickname).\n",
         "[*]\n",
         "[*] /game ...      Room games (chess, gomoku, xiangqi, sanguo). /game list /new /join …; owner /game on|off.\n",
@@ -34,12 +39,27 @@ MESSAGES: dict = {
         "[*] /library find <keyword>        Find by title; while reading, search in the current book (aliases: search / 搜索 / 查找).\n",
         "[*] /dict en|cn|hh <word>  Dictionary: EN→ZH, ZH→EN, Chinese gloss; /dict <word> auto-detects.\n",
         "[*]\n",
-        "[*] /sendfile      Send a file to the current room; you get an upload URL; the key is given separately.\n",
+        "[*] /sendfile      Send a file to the current room (ok when alone — same nick on another device can download); you get an upload URL; the key is given separately.\n",
         "[*] /sendfile <nick>    Send a file to a user (offline → leave-message on next login; /leave to list/recall).\n",
         "[*] /sendfile #<room>   Send a file to a room; each member gets a distinct download URL + key.\n",
         "[*]              Filename is whatever you upload; you need not put it in the command.\n",
         "[*]              The key is not in the URL—enter it on the page; images, video, PDF can preview in-browser.\n",
         "[*]              Upload and download tokens are single-use; stolen links are useless after use.\n",
+        "[*] /canvas        Shared drawing board for the current room (web; alias /board); each person gets a unique URL + key.\n",
+        "[*] /canvas <nick>    Private board with an online user.\n",
+        "[*] /canvas #<room>   Board for a specific room (you must be in that room).\n",
+        "[*] /canvas close     Creator closes the current room board; /canvas new forces a new session.\n",
+        "[*]              The key is not in the URL—enter it on the page; strokes sync live. Details: /canvas help.\n",
+        "[*] /piano         Shared room piano (web); play with your keyboard—others in the room hear you.\n",
+        "[*] /piano <nick>     Private piano with an online user.\n",
+        "[*] /piano #<room>    Piano for a specific room (you must be in that room).\n",
+        "[*] /piano close      Creator closes the current room piano; /piano new forces a new session.\n",
+        "[*]              Details: /piano help.\n",
+        "[*] /clock         Room chess clock (fullscreen web page; open on a Kindle, ticks on the device).\n",
+        "[*] /clock 10+5       10 minutes each, plus 5 seconds a move. Also /clock #<room> or /clock <nick>.\n",
+        "[*] /clock close      Creator closes the current room clock; /clock new forces a new one.\n",
+        "[*]              Details: /clock help. After you move, tap your side (top/bottom).\n",
+        "[*]              GUI clients open the board automatically; in a terminal, copy the URL into a browser.\n",
         "[*] /help          Show this help.\n",
     ],
     "game_help_lines": [
@@ -53,6 +73,10 @@ MESSAGES: dict = {
         "[*] /game seats            Show players and game state.",
         "[*] /game show             Redraw the board (you at the bottom; opponent view flips automatically).",
         "[*] /game rating [game] [nick]  Show persisted board-game rating/level; ratings are shared across rooms.",
+        "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked).",
+        "[*] darkchess (Dark Chess / flip chess) EN/ZH: 翻 flip <row> <col> | 走 move <fr> <fc> <tr> <tc>; "
+        "4×8 board; first flip assigns red/black; cannon needs one screen; general beats all but soldier, soldier can take general.",
+        "[*] Terminal: battleship = place carrier/battleship/cruiser/submarine/destroyer row col h|v, then ready; fire row col. Junqi = setup <piece> row col, then ready and move fr fc tr tc.",
         "[*] chess boards use Unicode pieces (♔♟ etc.); empty squares are ·; last move is marked with parentheses. "
         "Use a monospace font; if Black is hard to see on a dark theme, try a light terminal theme.",
         "[*] /game move …           chess: SAN/UCI; gomoku/go: row col; go may pass; "
@@ -71,6 +95,7 @@ MESSAGES: dict = {
         "[*] /game resign           Resign (only while a game is in progress).",
         "[*] /game abort            Abort a game that has not started.",
         "[*] /game end              Room owner may force-end the current game.",
+        "[*] /game restore          Restore a game parked by restart/federation into an idle room.",
         "[*] /game on <name>        Owner enables a game in this room (same name aliases as new).",
         "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected).",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",
@@ -87,6 +112,8 @@ MESSAGES: dict = {
         "after another's discard: chi/peng/gang/hu/pass.",
         "[*] Tile codes: m=man (万), p=pin (筒/饼), s=sou (条/索), z=honors (ESWN + dragons).",
         "[*] Chinese discard names work: 二万, 九筒, 五条, 东风, 红中, 发财, 白板 (also m1/p9/s5/z3).",
+        "[*] drawguess (Pictionary): need 2+ players; host start; drawer uses /canvas; "
+        "others /game move guess <word>; skip; drawer may word to re-read the secret.",
     ],
     "server": {
         "announce_preview": "[#{room}] [*] Announcement: {text}\n",
@@ -98,6 +125,81 @@ MESSAGES: dict = {
         "announce_too_long": "[*] Announcement too long (max {max_len} characters).\n",
         "announce_updated": "[*] Updated the announcement for #{room}.\n",
         "announce_set_bcast": "[#{room}] [*] Announcement: {text}\n",
+        "pad_usage": (
+            "[*] Usage: /pad <text>     set one line (whitespace collapsed; use /pad edit for newlines)\n"
+            "[*]         /pad           show\n"
+            "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim)\n"
+            "[*]         /pad clear     clear\n"
+            "[*] Federated same-name rooms share one pad (last write wins).\n"
+        ),
+        "pad_preview": "[#{room}] [*] Pad: {text}\n",
+        "pad_preview_multi": "[#{room}] [*] Pad ({n} lines): {text} …\n",
+        "pad_current": "[*] #{room} pad: {text}\n",
+        "pad_current_multi_header": "[*] #{room} pad ({n} lines):\n",
+        "pad_current_multi_line": "[*] | {text}\n",
+        "pad_none": "[*] #{room} pad is empty.\n",
+        "pad_too_long": "[*] Pad too long (max {max_len} characters).\n",
+        "pad_updated": "[*] Updated the pad for #{room}.\n",
+        "pad_set_bcast": "[#{room}] [*] {editor} updated the pad: {text}\n",
+        "pad_set_bcast_multi": "[#{room}] [*] {editor} updated the pad ({n} lines): {text} … (/pad to view)\n",
+        "pad_cleared_bcast": "[#{room}] [*] {editor} cleared the pad.\n",
+        "pad_cleared": "[*] Cleared the pad for #{room}.\n",
+        "pad_edit_client_only": (
+            "[*] Multi-line edit: terminal /pad edit, or mobile App + → Pad. "
+            "Or keep using /pad <one line>.\n"
+        ),
+        "pad_load_usage": "[*] Usage: /pad load <base64> (sent automatically by /pad edit)\n",
+        "pad_load_bad": "[*] Invalid pad payload (base64 decode failed).\n",
+        "poll_usage": (
+            "[*] Usage: /poll new question | optionA | optionB [| …]\n"
+            "[*]         /poll <n>     vote (may change)\n"
+            "[*]         /poll         show current poll\n"
+            "[*]         /poll close   end (creator or room owner)\n"
+        ),
+        "poll_preview": (
+            "[#{room}] [*] Open poll: {question} ({n_votes} vote(s) / {n_opts} options; /poll)\n"
+        ),
+        "poll_none": "[*] #{room} has no open poll.\n",
+        "poll_header": (
+            "[*] #{room} poll: {question} (by {creator}, {n_votes} voted)\n"
+        ),
+        "poll_closed_header": (
+            "[*] #{room} poll closed: {question} (by {creator}, {n_votes} vote(s))\n"
+        ),
+        "poll_option_line": "[*]   {index}. {text}  ({count})\n",
+        "poll_vote_hint": "[*] Vote: /poll <n>   Close: /poll close\n",
+        "poll_need_options": "[*] Need a question plus at least {min_opts} options (separated by |).\n",
+        "poll_too_many_options": "[*] Too many options (max {max_opts}).\n",
+        "poll_question_too_long": "[*] Question too long (max {max_len} characters).\n",
+        "poll_option_too_long": "[*] Option too long (max {max_len} characters).\n",
+        "poll_already": "[*] #{room} already has an open poll; /poll close it first.\n",
+        "poll_opened_bcast": "[#{room}] [*] {creator} started a poll: {question}\n",
+        "poll_bad_choice": "[*] Choice must be 1–{max_n}.\n",
+        "poll_voted": "[*] Voted for {index}. {text}\n",
+        "poll_changed": "[*] Changed vote to {index}. {text}\n",
+        "poll_close_denied": "[*] Only the creator or room owner can close the poll.\n",
+        "later_usage": (
+            "[*] Usage: /later 30m|2h|1d <text>     (delivers only to you; survives restart)\n"
+            "[*]         /later 09:30 <text>          (next day if that time already passed)\n"
+            "[*]         /later tomorrow 09:00 <text>\n"
+            "[*]         /later 明天 09:00 <text>\n"
+            "[*]         /later 2026-09-05 09:00 <text>\n"
+            "[*]         /later list                  your pending reminders (incl. federation)\n"
+            "[*]         /later cancel <n>            cancel (same-nick peers can cancel too)\n"
+            "[*] Federation same-nick can list/cancel; delivery reaches them too.\n"
+        ),
+        "later_none": "[*] You have no pending time capsules.\n",
+        "later_list_header": "[*] Your pending time capsules ({n}):\n",
+        "later_list_item": "[*]   {index}. [{when}] {text}\n",
+        "later_cancel_hint": "[*] Cancel: /later cancel <n>\n",
+        "later_bad_index": "[*] Invalid index (use 1–{max_n}).\n",
+        "later_cancelled": "[*] Cancelled time capsule #{index}.\n",
+        "later_text_too_long": "[*] Text too long (max {max_len} characters).\n",
+        "later_too_soon": "[*] Delivery too soon (at least {min_sec} seconds from now).\n",
+        "later_too_far": "[*] Delivery too far (max 30 days).\n",
+        "later_user_full": "[*] Too many pending reminders (max {max_n}).\n",
+        "later_scheduled": "[*] Reminder set for {when} (only you; survives restart; federation same-nick can list/cancel + delivery).\n",
+        "later_deliver": "[*] Time capsule: {text}\n",
         "offline_header": "[*] You have {n} leave-message(s) (received while offline, oldest first):\n",
         "offline_file_meta": "[*] (offline file {when}, from {sender})\n",
         "offline_file_pm": "[PM from {sender}] (offline file {when}) {text}\n",

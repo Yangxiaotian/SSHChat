@@ -1,7 +1,10 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import * as os from 'os';
+import { URL } from 'url';
 import { exec, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { SSHManager } from './ssh-manager';
 import { ConfigManager } from './config-manager';
@@ -22,6 +25,97 @@ import {
   ChatHistoryIdentity,
   ChatHistorySnapshot,
 } from '../shared/protocol';
+
+type SecureWebKind = 'canvas' | 'piano' | 'upload' | 'download';
+
+function buildSecureKeyAutofillScript(kind: SecureWebKind, key: string): string {
+  const safeKey = JSON.stringify(String(key || '').trim().toUpperCase());
+  const safeKind = JSON.stringify(kind);
+  // Fill the page key field. For canvas/download, also trigger unlock/verify.
+  // For upload, only fill the key so the user can still pick a file.
+  // Key never appears in the window URL.
+  return `(() => {
+    const key = ${safeKey};
+    const kind = ${safeKind};
+    const input = document.getElementById('key') || document.getElementById('keyInput');
+    if (!input) return { ok: false, error: 'key input missing' };
+    input.focus();
+    input.value = key;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (kind === 'upload') return { ok: true, mode: 'upload-fill-only' };
+    const unlock = document.getElementById('unlockBtn');
+    if (unlock) { unlock.click(); return { ok: true, mode: kind === 'piano' ? 'piano' : 'canvas' }; }
+    const submit = document.getElementById('submitBtn');
+    if (submit) { submit.click(); return { ok: true, mode: 'download' }; }
+    const form = document.getElementById('downloadForm');
+    if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return { ok: true, mode: 'form' }; }
+    return { ok: false, error: 'submit control missing' };
+  })()`;
+}
+
+async function openSecureWebSession(payload: {
+  kind: SecureWebKind;
+  url: string;
+  key: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const url = String(payload?.url || '').trim();
+  const key = String(payload?.key || '').trim().toUpperCase();
+  const kind = payload?.kind;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return { ok: false, error: 'Invalid URL' };
+  }
+  if (!key || key.length !== 6) {
+    return { ok: false, error: 'Invalid key' };
+  }
+  if (kind !== 'canvas' && kind !== 'piano' && kind !== 'upload' && kind !== 'download') {
+    return { ok: false, error: 'Invalid kind' };
+  }
+
+  const win = new BrowserWindow({
+    width: kind === 'canvas' || kind === 'piano' ? 1100 : 900,
+    height: kind === 'canvas' || kind === 'piano' ? 820 : 720,
+    autoHideMenuBar: true,
+    title: kind === 'canvas' ? 'SSHChat Canvas' : kind === 'piano' ? 'SSHChat Piano' : kind === 'upload' ? 'SSHChat Upload' : 'SSHChat File',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  try {
+    await win.loadURL(url);
+  } catch (e) {
+    try {
+      win.close();
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: e instanceof Error ? e.message : 'Failed to open page' };
+  }
+
+  const tryFill = async () => {
+    try {
+      if (win.isDestroyed()) return;
+      await win.webContents.executeJavaScript(buildSecureKeyAutofillScript(kind, key), true);
+    } catch {
+      // Page may still be settling; a later did-finish-load/dom-ready retry helps.
+    }
+  };
+
+  win.webContents.once('dom-ready', () => {
+    void tryFill();
+  });
+  win.webContents.once('did-finish-load', () => {
+    void tryFill();
+  });
+  // One delayed retry for slow Cloudflare/tunnel pages.
+  setTimeout(() => {
+    void tryFill();
+  }, 800);
+
+  return { ok: true };
+}
 
 // ============================================================
 // VSCode Disguise: Process name, app name, user agent
@@ -58,10 +152,6 @@ let currentRoom = 'default';
 let currentNickname = '';
 let knownRooms = new Set<string>(['default']);
 let lastConfig: ConnectionConfig | null = null;
-let reconnectTimer: NodeJS.Timeout | null = null;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BASE_DELAY_MS = 3000;
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 function normalizeRoomName(room: string): string | null {
@@ -145,6 +235,29 @@ const PIKAFISH_DEFAULT_TIMEOUT_MS = intEnv('PIKAFISH_TIMEOUT_MS', 8000, 1500, 30
 const PIKAFISH_THREADS = intEnv('PIKAFISH_THREADS', defaultPikafishThreads(), 1, 128);
 const PIKAFISH_HASH_MB = intEnv('PIKAFISH_HASH_MB', defaultPikafishHashMb(), 16, 8192);
 let resolvedPikafishExecutableCache: string | null | undefined;
+const pendingPikafishAnalyze = new Map<string, Promise<XiangqiPikafishAnalyzeResponse>>();
+let pikafishAnalyzeChain: Promise<unknown> = Promise.resolve();
+
+type PikafishSearchState = {
+  startedAt: number;
+  timeoutMs: number;
+  resolve: (resp: XiangqiPikafishAnalyzeResponse) => void;
+  timer: NodeJS.Timeout;
+  stopTimer: NodeJS.Timeout;
+};
+
+type PikafishSession = {
+  enginePath: string;
+  proc: ChildProcessWithoutNullStreams;
+  stdoutBuf: string;
+  phase: 'boot' | 'uci' | 'ready' | 'idle' | 'search';
+  lastInfo: string;
+  readyWaiters: Array<(ok: boolean) => void>;
+  currentSearch: PikafishSearchState | null;
+  readyTimer: NodeJS.Timeout | null;
+};
+
+let pikafishSession: PikafishSession | null = null;
 
 function withKataGoConfigValue(text: string, key: string, value: string): string {
   const line = `${key} = ${value}`;
@@ -461,8 +574,214 @@ function appendPikafishLog(line: string): void {
   }
 }
 
+function resetPikafishSession(reason: string): void {
+  const sess = pikafishSession;
+  pikafishSession = null;
+  if (!sess) return;
+  appendPikafishLog(`persistent reset reason="${reason}"`);
+  try {
+    if (sess.readyTimer) {
+      clearTimeout(sess.readyTimer);
+      sess.readyTimer = null;
+    }
+    if (sess.currentSearch) {
+      clearTimeout(sess.currentSearch.timer);
+      clearTimeout(sess.currentSearch.stopTimer);
+      sess.currentSearch.resolve({
+        ok: false,
+        ms: Date.now() - sess.currentSearch.startedAt,
+        enginePath: sess.enginePath,
+        error: `Pikafish 会话中断：${reason}`,
+      });
+    }
+    for (const waiter of sess.readyWaiters.splice(0)) waiter(false);
+    if (!sess.proc.killed) sess.proc.kill();
+  } catch {
+    // ignore reset failures
+  }
+}
+
+function handlePikafishLine(sess: PikafishSession, text: string): void {
+  if (/^(info|string|id|option)\b/i.test(text)) {
+    sess.lastInfo = text.slice(0, 260);
+  }
+  if (/^uciok\b/i.test(text) && sess.phase === 'uci') {
+    sess.phase = 'ready';
+    const evalFile = findPikafishEvalFile(sess.enginePath);
+    const lines = [
+      ...(evalFile ? [`setoption name EvalFile value ${evalFile}`] : []),
+      `setoption name Threads value ${PIKAFISH_THREADS}`,
+      `setoption name Hash value ${PIKAFISH_HASH_MB}`,
+      'setoption name MultiPV value 1',
+      'setoption name Move Overhead value 20',
+      'setoption name UCI_ShowWDL value true',
+      'setoption name NumaPolicy value auto',
+      'isready',
+    ];
+    sess.proc.stdin.write(`${lines.join('\n')}\n`);
+    return;
+  }
+  if (/^readyok\b/i.test(text) && sess.phase === 'ready') {
+    sess.phase = 'idle';
+    if (sess.readyTimer) {
+      clearTimeout(sess.readyTimer);
+      sess.readyTimer = null;
+    }
+    for (const waiter of sess.readyWaiters.splice(0)) waiter(true);
+    return;
+  }
+  const best = text.match(/^bestmove\s+(\S+)/i);
+  if (!best || !sess.currentSearch) return;
+  const search = sess.currentSearch;
+  sess.currentSearch = null;
+  sess.phase = 'idle';
+  clearTimeout(search.timer);
+  clearTimeout(search.stopTimer);
+  const move = parsePikafishMove(best[1]);
+  search.resolve({
+    ok: !!move,
+    ms: Date.now() - search.startedAt,
+    enginePath: sess.enginePath,
+    move: move || undefined,
+    error: move ? undefined : `Pikafish 返回了无法识别的着法：${best[1]}（最近信息：${sess.lastInfo || '无'}）`,
+  });
+}
+
+function ensurePikafishSession(enginePath: string): Promise<PikafishSession | null> {
+  if (pikafishSession && pikafishSession.enginePath === enginePath && !pikafishSession.proc.killed) {
+    if (pikafishSession.phase === 'idle' || pikafishSession.phase === 'search') return Promise.resolve(pikafishSession);
+    return new Promise((resolve) => {
+      pikafishSession?.readyWaiters.push((ok) => resolve(ok ? pikafishSession : null));
+    });
+  }
+  resetPikafishSession('engine path changed or session missing');
+  return new Promise((resolve) => {
+    let proc: ChildProcessWithoutNullStreams;
+    try {
+      proc = spawn(enginePath, [], { cwd: path.dirname(enginePath), stdio: 'pipe', windowsHide: true });
+    } catch (err) {
+      appendPikafishLog(`persistent spawn failed error="${err instanceof Error ? err.message : 'spawn failed'}"`);
+      resolve(null);
+      return;
+    }
+    const sess: PikafishSession = {
+      enginePath,
+      proc,
+      stdoutBuf: '',
+      phase: 'uci',
+      lastInfo: '',
+      readyWaiters: [(ok) => resolve(ok ? sess : null)],
+      currentSearch: null,
+      readyTimer: null,
+    };
+    pikafishSession = sess;
+    proc.stdout.setEncoding('utf8');
+    proc.stderr.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      sess.stdoutBuf += chunk;
+      const lines = sess.stdoutBuf.split(/\r?\n/);
+      sess.stdoutBuf = lines.pop() || '';
+      for (const line of lines) {
+        const text = line.trim();
+        if (text) handlePikafishLine(sess, text);
+      }
+    });
+    proc.stderr.on('data', (chunk: string) => {
+      sess.lastInfo = `${sess.lastInfo} ${chunk}`.trim().slice(-260);
+    });
+    proc.on('error', (err) => resetPikafishSession(`process error: ${err.message}`));
+    proc.on('close', () => resetPikafishSession('process closed'));
+    proc.stdin.write('uci\n');
+    sess.readyTimer = setTimeout(() => {
+      sess.readyTimer = null;
+      if (pikafishSession === sess && sess.phase !== 'idle') {
+        resetPikafishSession(`ready timeout phase=${sess.phase} lastInfo="${sess.lastInfo || '无'}"`);
+        resolve(null);
+      }
+    }, 8000);
+  });
+}
+
+async function analyzeXiangqiByPikafishPersistent(
+  enginePath: string,
+  fen: string,
+  timeoutMs: number,
+  startedAt: number,
+): Promise<XiangqiPikafishAnalyzeResponse> {
+  const sess = await ensurePikafishSession(enginePath);
+  if (!sess) {
+    return {
+      ok: false,
+      ms: Date.now() - startedAt,
+      enginePath,
+      error: 'Pikafish 常驻会话启动失败。',
+    };
+  }
+  return new Promise((resolve) => {
+    appendPikafishLog(`persistent search timeoutMs=${timeoutMs} fen="${fen}"`);
+    const search: PikafishSearchState = {
+      startedAt,
+      timeoutMs,
+      resolve,
+      stopTimer: setTimeout(() => {
+        if (sess.currentSearch !== search || sess.proc.killed) return;
+        appendPikafishLog(`persistent stop elapsed=${Date.now() - startedAt} lastInfo="${sess.lastInfo || ''}"`);
+        try {
+          sess.proc.stdin.write('stop\n');
+        } catch {
+          // The final timer below will reset the session if stop cannot be sent.
+        }
+      }, timeoutMs + 250),
+      timer: setTimeout(() => {
+        if (sess.currentSearch !== search) return;
+        sess.currentSearch = null;
+        sess.phase = 'idle';
+        clearTimeout(search.stopTimer);
+        const lastInfo = sess.lastInfo;
+        resetPikafishSession('search timeout without bestmove');
+        resolve({
+          ok: false,
+          ms: Date.now() - startedAt,
+          enginePath,
+          error: `Pikafish 搜索超时，未返回 bestmove（最近信息：${lastInfo || '无'}）`,
+        });
+      }, timeoutMs + 3000),
+    };
+    sess.currentSearch = search;
+    sess.phase = 'search';
+    sess.lastInfo = '';
+    sess.proc.stdin.write(`position fen ${fen}\ngo movetime ${timeoutMs}\n`);
+  });
+}
+
 function analyzeXiangqiByPikafish(payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> {
   const startedAt = Date.now();
+  if (!validateXiangqiBoard10(payload.board)) {
+    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, error: '象棋棋盘数据非法（要求10x9）。' });
+  }
+  if (payload.side !== 1 && payload.side !== -1) {
+    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, error: '执子参数非法。' });
+  }
+  const timeoutMs = sanitizePikafishTimeout(payload.timeoutMs);
+  const fen = xiangqiBoardToFen(payload.board, payload.side);
+  const requestKey = `${payload.side}|${timeoutMs}|${fen}`;
+  const pending = pendingPikafishAnalyze.get(requestKey);
+  if (pending) {
+    appendPikafishLog(`reuse key="${requestKey}"`);
+    return pending;
+  }
+  const promise = analyzeXiangqiByPikafishOnce(payload, timeoutMs, fen, startedAt)
+    .finally(() => pendingPikafishAnalyze.delete(requestKey));
+  pendingPikafishAnalyze.set(requestKey, promise);
+  return promise;
+}
+
+function analyzeXiangqiByPikafishOnce(
+  payload: XiangqiPikafishAnalyzeRequest,
+  timeoutMs: number,
+  fen: string,
+  startedAt: number,
+): Promise<XiangqiPikafishAnalyzeResponse> {
   const enginePath = resolvePikafishExecutable();
   if (!enginePath) {
     appendPikafishLog('resolve=missing');
@@ -472,164 +791,12 @@ function analyzeXiangqiByPikafish(payload: XiangqiPikafishAnalyzeRequest): Promi
       error: '未找到 Pikafish 可执行文件。请放到 engines/pikafish/pikafish.exe，或设置 PIKAFISH_PATH。',
     });
   }
-  if (!validateXiangqiBoard10(payload.board)) {
-    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, enginePath, error: '象棋棋盘数据非法（要求10x9）。' });
-  }
-  if (payload.side !== 1 && payload.side !== -1) {
-    return Promise.resolve({ ok: false, ms: Date.now() - startedAt, enginePath, error: '执子参数非法。' });
-  }
-
-  const timeoutMs = sanitizePikafishTimeout(payload.timeoutMs);
-  const fen = xiangqiBoardToFen(payload.board, payload.side);
   appendPikafishLog(`start exe="${enginePath}" side=${payload.side} timeoutMs=${timeoutMs} threads=${PIKAFISH_THREADS} hashMb=${PIKAFISH_HASH_MB} fen="${fen}"`);
-
-  return new Promise((resolve) => {
-    let proc: ChildProcessWithoutNullStreams | null = null;
-    let stdoutBuf = '';
-    let stderrTail = '';
-    let done = false;
-    let phase: 'boot' | 'uci' | 'ready' | 'newgame' | 'search' = 'boot';
-    let lastInfo = '';
-    let searchStartedAt = 0;
-    let stopSent = false;
-    let stopTimer: NodeJS.Timeout | undefined;
-
-    const writeLines = (lines: string[]) => {
-      if (!proc || proc.killed) return;
-      proc.stdin.write(`${lines.join('\n')}\n`);
-    };
-
-    const finish = (resp: XiangqiPikafishAnalyzeResponse) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      if (stopTimer) clearTimeout(stopTimer);
-      try {
-        if (proc && !proc.killed) proc.kill();
-      } catch {
-        // ignore
-      }
-      appendPikafishLog(`finish ok=${resp.ok ? 1 : 0} phase=${phase} ms=${resp.ms} move=${resp.move?.raw || ''} error="${resp.error || ''}" lastInfo="${lastInfo}"`);
-      resolve(resp);
-    };
-
-    const timer = setTimeout(() => {
-      finish({
-        ok: false,
-        ms: Date.now() - startedAt,
-        enginePath,
-        error: stderrTail
-          ? `Pikafish 超时（阶段：${phase}）：${stderrTail}`
-          : `Pikafish 超时（阶段：${phase}，${timeoutMs}ms；已请求停止：${stopSent ? '是' : '否'}；最近信息：${lastInfo || '无'}）`,
-      });
-    }, timeoutMs + 12000);
-
-    try {
-      proc = spawn(enginePath, [], { cwd: path.dirname(enginePath), stdio: 'pipe', windowsHide: true });
-    } catch (err) {
-      finish({
-        ok: false,
-        ms: Date.now() - startedAt,
-        enginePath,
-        error: `Pikafish 启动失败：${err instanceof Error ? err.message : 'spawn failed'}`,
-      });
-      return;
-    }
-
-    proc.stdout.setEncoding('utf8');
-    proc.stderr.setEncoding('utf8');
-    proc.stderr.on('data', (chunk: string) => {
-      stderrTail = `${stderrTail}\n${chunk}`.split(/\r?\n/).slice(-6).join(' | ').trim();
-    });
-    proc.stdout.on('data', (chunk: string) => {
-      stdoutBuf += chunk;
-      const lines = stdoutBuf.split(/\r?\n/);
-      stdoutBuf = lines.pop() || '';
-      for (const line of lines) {
-        const text = line.trim();
-        if (!text) continue;
-        if (/^(info|string|id|option)\b/i.test(text)) {
-          lastInfo = text.slice(0, 260);
-        }
-        if (/^uciok\b/i.test(text) && phase === 'uci') {
-          phase = 'ready';
-          const evalFile = findPikafishEvalFile(enginePath);
-          writeLines([
-            ...(evalFile ? [`setoption name EvalFile value ${evalFile}`] : []),
-            `setoption name Threads value ${PIKAFISH_THREADS}`,
-            `setoption name Hash value ${PIKAFISH_HASH_MB}`,
-            'setoption name MultiPV value 1',
-            'setoption name Move Overhead value 30',
-            'setoption name UCI_ShowWDL value true',
-            'setoption name NumaPolicy value auto',
-            'isready',
-          ]);
-          continue;
-        }
-        if (/^readyok\b/i.test(text) && phase === 'ready') {
-          phase = 'newgame';
-          writeLines([
-            'ucinewgame',
-            'isready',
-          ]);
-          continue;
-        }
-        if (/^readyok\b/i.test(text) && phase === 'newgame') {
-          phase = 'search';
-          searchStartedAt = Date.now();
-          stopTimer = setTimeout(() => {
-            if (done || phase !== 'search' || !proc || proc.killed) return;
-            stopSent = true;
-            appendPikafishLog(`stop phase=search elapsed=${Date.now() - searchStartedAt} timeoutMs=${timeoutMs} lastInfo="${lastInfo}"`);
-            try {
-              proc.stdin.write('stop\n');
-            } catch {
-              // The normal guard will report a timeout if stdin is already closed.
-            }
-          }, timeoutMs + 1200);
-          writeLines([
-            `position fen ${fen}`,
-            `go movetime ${timeoutMs}`,
-          ]);
-          continue;
-        }
-        const best = text.match(/^bestmove\s+(\S+)/i);
-        if (!best) continue;
-        const move = parsePikafishMove(best[1]);
-        finish({
-          ok: !!move,
-          ms: Date.now() - startedAt,
-          enginePath,
-          move: move || undefined,
-          error: move ? undefined : `Pikafish 返回了无法识别的着法：${best[1]}（最近信息：${lastInfo || '无'}）`,
-        });
-        return;
-      }
-    });
-    proc.on('error', (err) => {
-      finish({ ok: false, ms: Date.now() - startedAt, enginePath, error: `Pikafish 运行错误：${err.message}` });
-    });
-    proc.on('close', () => {
-      finish({
-        ok: false,
-        ms: Date.now() - startedAt,
-        enginePath,
-        error: stderrTail || `Pikafish 进程已退出但没有返回 bestmove（阶段：${phase}，搜索耗时：${searchStartedAt ? Date.now() - searchStartedAt : 0}ms，最近信息：${lastInfo || '无'}）。`,
-      });
-    });
-
-    try {
-      phase = 'uci';
-      writeLines(['uci']);
-    } catch (err) {
-      finish({
-        ok: false,
-        ms: Date.now() - startedAt,
-        enginePath,
-        error: `Pikafish 发送命令失败：${err instanceof Error ? err.message : 'stdin write failed'}`,
-      });
-    }
-  });
+  const queued = pikafishAnalyzeChain
+    .catch(() => undefined)
+    .then(() => analyzeXiangqiByPikafishPersistent(enginePath, fen, timeoutMs, startedAt));
+  pikafishAnalyzeChain = queued.catch(() => undefined);
+  return queued;
 }
 
 function sanitizeTimeout(timeoutMs?: number): number {
@@ -1233,10 +1400,11 @@ class RapfiEngineService {
   }
 }
 
-// Formal user-facing suggestions must favor correctness over speed. Incremental
-// TURN can be fast, but when engine state drifts it may return a shallow move.
-// Keep formal analysis on full BOARD rebuilds; ponder can stay isolated.
-const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, false, false, RAPFI_THREADS);
+// Keep the formal move service stateful so a normal opponent reply can use TURN
+// and preserve Rapfi's search continuity. Tactical positions, side changes,
+// undo/jumps, periodic resyncs, and any failed request still fall back to a
+// complete BOARD rebuild inside runAnalyze.
+const rapfiService = new RapfiEngineService('move', RAPFI_HASH_MB, true, true, RAPFI_THREADS);
 const rapfiPonderService = new RapfiEngineService('ponder', RAPFI_PONDER_HASH_MB, false, false, RAPFI_PONDER_THREADS);
 
 async function analyzeGomokuByRapfi(payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> {
@@ -1685,13 +1853,19 @@ class KataGoAnalysisService {
         initialStones.push([v === 1 ? 'B' : 'W', goUiToGtp(r + 1, c + 1)]);
       }
     }
-    const turn = payload.mySide === 1 ? 'B' : 'W';
-    const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
     const historyMoves = sanitizeKataGoMoves(payload.moves);
+    const turn = historyMoves.length > 0
+      ? historyMoves[0][0]
+      : payload.toMove === 2
+        ? 'W'
+        : payload.toMove === 1
+          ? 'B'
+          : (initialStones.filter(([player]) => player === 'B').length <= initialStones.filter(([player]) => player === 'W').length ? 'B' : 'W');
+    const maxTime = sanitizeKataGoMaxTime(payload.maxTimeSec);
     this.trace(
       `req#${reqId} start queueMs=${startedAt - queuedAt} stones=${initialStones.length} ` +
       `moves=${historyMoves.length} visits=${sanitizeKataGoVisits(payload.maxVisits)} ` +
-      `maxTime=${maxTime ?? -1} timeoutMs=${timeoutMs}`,
+      `toMove=${turn} maxTime=${maxTime ?? -1} timeoutMs=${timeoutMs}`,
     );
     const overrideSettings: Record<string, number> = {};
     if (maxTime) overrideSettings.maxTime = maxTime;
@@ -1810,67 +1984,6 @@ async function analyzeGoByKataGo(payload: GoKataGoAnalyzeRequest): Promise<GoKat
 
 async function warmupGoByKataGo(): Promise<GoKataGoAnalyzeResponse> {
   return kataGoService.warmup();
-}
-
-function attemptReconnect(): void {
-  if (!lastConfig || !currentNickname) return;
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    sendToRenderer(IPC_CHANNELS.CONNECTION_ERROR, `Reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts`);
-    reconnectAttempts = 0;
-    return;
-  }
-  reconnectAttempts++;
-  const delay = RECONNECT_BASE_DELAY_MS * reconnectAttempts;
-  sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'connecting' as ConnectionStatus);
-  reconnectTimer = setTimeout(async () => {
-    try {
-      await sshManager.connect(
-        lastConfig!,
-        currentNickname,
-        (status: string) => {
-          sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, status as ConnectionStatus);
-        },
-        (error: string) => {
-          sendToRenderer(IPC_CHANNELS.CONNECTION_ERROR, error);
-        },
-        (data: Buffer) => {
-          const line = data.toString('utf-8').trim();
-          if (!line) return;
-          const message = parseServerLine(line, currentRoom);
-          if (message) {
-            if (message.type === 'system') {
-              const rooms = extractRoomsFromSystem(message.content);
-              if (rooms) {
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, rememberRooms(rooms), currentRoom);
-              }
-              const usersSnapshot = extractUsersSnapshot(message.content);
-              if (usersSnapshot) {
-                sendToRenderer(IPC_CHANNELS.USER_UPDATE, usersSnapshot);
-              }
-              const activeRoom = extractActiveRoom(message.content);
-              if (activeRoom) {
-                pushRoomState(activeRoom);
-              }
-            }
-            if (message.room) {
-              rememberRooms([message.room]);
-              if (message.type === 'join' || message.type === 'leave') {
-                sendToRenderer(IPC_CHANNELS.ROOM_UPDATE, [...knownRooms], currentRoom);
-              }
-            }
-            sendToRenderer(IPC_CHANNELS.CHAT_MESSAGE, message);
-          }
-        },
-        () => {
-          sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
-          attemptReconnect();
-        },
-      );
-      reconnectAttempts = 0;
-    } catch {
-      attemptReconnect();
-    }
-  }, delay);
 }
 
 if (!singleInstanceLock) {
@@ -2057,11 +2170,6 @@ function setupIPC(): void {
     currentRoom = 'default';
     knownRooms = new Set<string>(['default']);
     lastConfig = config;
-    reconnectAttempts = 0;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
 
     try {
       await sshManager.connect(
@@ -2105,7 +2213,6 @@ function setupIPC(): void {
         },
         () => {
           sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
-          attemptReconnect();
         },
       );
 
@@ -2114,6 +2221,8 @@ function setupIPC(): void {
       return { success: true };
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : 'Connection failed';
+      sshManager.disconnect();
+      sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
       return { success: false, error: errorMessage };
     }
   });
@@ -2121,11 +2230,6 @@ function setupIPC(): void {
   // Disconnect
   ipcMain.handle(IPC_CHANNELS.DISCONNECT, () => {
     lastConfig = null;
-    reconnectAttempts = 0;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
     sshManager.disconnect();
     sendToRenderer(IPC_CHANNELS.CONNECTION_STATUS, 'disconnected');
     return true;
@@ -2338,20 +2442,239 @@ function setupIPC(): void {
     return true;
   });
 
-  // Game engine assistant endpoints are disabled in shared builds.
+  // Game engine assistant endpoints.
   ipcMain.handle(IPC_CHANNELS.GOMOKU_RAPFI_ANALYZE, async (_event, _payload: GomokuRapfiAnalyzeRequest): Promise<GomokuRapfiAnalyzeResponse> => {
-    return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
+    return analyzeGomokuByRapfi(_payload);
   });
 
   ipcMain.handle(IPC_CHANNELS.GO_KATAGO_ANALYZE, async (_event, _payload: GoKataGoAnalyzeRequest): Promise<GoKataGoAnalyzeResponse> => {
-    return { ok: false, ms: 0, suggestions: [], error: 'Game assistant disabled in this build.' };
+    return analyzeGoByKataGo(_payload);
   });
   ipcMain.handle(IPC_CHANNELS.GO_KATAGO_WARMUP, async (): Promise<GoKataGoAnalyzeResponse> => {
-    return { ok: false, ms: 0, suggestions: [], error: 'Game assistant disabled in this build.' };
+    return warmupGoByKataGo();
   });
 
   ipcMain.handle(IPC_CHANNELS.XIANGQI_PIKAFISH_ANALYZE, async (_event, _payload: XiangqiPikafishAnalyzeRequest): Promise<XiangqiPikafishAnalyzeResponse> => {
-    return { ok: false, ms: 0, error: 'Game assistant disabled in this build.' };
+    return analyzeXiangqiByPikafish(_payload);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.OPEN_SECURE_WEB_SESSION,
+    async (_event, payload: { kind: SecureWebKind; url: string; key: string }) => {
+      return openSecureWebSession(payload);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.UPLOAD_SECURE_FILE,
+    async (
+      _event,
+      payload: {
+        url: string;
+        key: string;
+        filename: string;
+        mime: string;
+        data: ArrayBuffer;
+      },
+    ): Promise<{ ok: boolean; filename?: string; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      const key = String(payload?.key || '').trim().toUpperCase();
+      const filename = String(payload?.filename || 'file').replace(/[\\/]/g, '_').slice(0, 200) || 'file';
+      const mime = String(payload?.mime || 'application/octet-stream');
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, error: 'Invalid upload URL' };
+      }
+      if (!key || key.length !== 6) {
+        return { ok: false, error: 'Invalid upload key' };
+      }
+      if (!payload?.data) {
+        return { ok: false, error: 'Empty file data' };
+      }
+
+      const bytes = Buffer.from(payload.data);
+      try {
+        return await postSecureUpload(url, key, filename, mime, bytes, false);
+      } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await postSecureUpload(url, key, filename, mime, bytes, true);
+          } catch (e2) {
+            return { ok: false, error: e2 instanceof Error ? e2.message : String(e2) };
+          }
+        }
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CANVAS_HTTP,
+    async (
+      _event,
+      payload: {
+        url: string;
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+      },
+    ): Promise<{ ok: boolean; status: number; json?: any; error?: string }> => {
+      const url = String(payload?.url || '').trim();
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return { ok: false, status: 0, error: 'Invalid canvas URL' };
+      }
+      const method = payload?.method === 'POST' ? 'POST' : 'GET';
+      const headers = { ...(payload?.headers || {}) };
+      const body = payload?.body;
+      try {
+        return await httpJsonRequest(url, method, headers, body, false);
+      } catch (e) {
+        if (url.toLowerCase().startsWith('https:') && isTlsCertError(e)) {
+          try {
+            return await httpJsonRequest(url, method, headers, body, true);
+          } catch (e2) {
+            return {
+              ok: false,
+              status: 0,
+              error: e2 instanceof Error ? e2.message : String(e2),
+            };
+          }
+        }
+        return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  );
+}
+
+function isTlsCertError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string } | null;
+  const code = String(err?.code || '');
+  const msg = String(err?.message || e || '');
+  return (
+    code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+    code === 'CERT_HAS_EXPIRED' ||
+    code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+    code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' ||
+    /CERTIFICATE_VERIFY_FAILED|certificate|CERT_|SSL/i.test(msg)
+  );
+}
+
+function postSecureUpload(
+  urlStr: string,
+  key: string,
+  filename: string,
+  mime: string,
+  bytes: Buffer,
+  insecure: boolean,
+): Promise<{ ok: boolean; filename?: string; error?: string }> {
+  const u = new URL(urlStr);
+  const boundary = `----SSHChat${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+      `Content-Type: ${mime}\r\n\r\n`,
+    'utf8',
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const body = Buffer.concat([preamble, bytes, epilogue]);
+  const lib = u.protocol === 'https:' ? https : http;
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method: 'POST',
+    headers: {
+      'X-Upload-Key': key,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': body.length,
+    },
+    rejectUnauthorized: !insecure,
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let result: { error?: string; filename?: string } = {};
+        try {
+          result = raw.trim() ? (JSON.parse(raw) as typeof result) : {};
+        } catch {
+          result = {};
+        }
+        if ((res.statusCode || 500) >= 400) {
+          resolve({ ok: false, error: result.error || `HTTP ${res.statusCode}` });
+          return;
+        }
+        resolve({ ok: true, filename: result.filename || filename });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(120_000, () => {
+      req.destroy(new Error('upload timeout'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+function httpJsonRequest(
+  urlStr: string,
+  method: 'GET' | 'POST',
+  headers: Record<string, string>,
+  body: string | undefined,
+  insecure: boolean,
+): Promise<{ ok: boolean; status: number; json?: any; error?: string }> {
+  const u = new URL(urlStr);
+  const lib = u.protocol === 'https:' ? https : http;
+  const payload = body ? Buffer.from(body, 'utf8') : undefined;
+  const reqHeaders: Record<string, string | number> = { ...headers };
+  if (payload) {
+    reqHeaders['Content-Length'] = payload.length;
+    if (!reqHeaders['Content-Type'] && !reqHeaders['content-type']) {
+      reqHeaders['Content-Type'] = 'application/json';
+    }
+  }
+  const options: https.RequestOptions = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: `${u.pathname}${u.search}`,
+    method,
+    headers: reqHeaders,
+    rejectUnauthorized: !insecure,
+  };
+  return new Promise((resolve, reject) => {
+    const req = lib.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let json: any = undefined;
+        try {
+          json = raw.trim() ? JSON.parse(raw) : {};
+        } catch {
+          json = { raw };
+        }
+        const status = res.statusCode || 0;
+        if (status >= 400) {
+          resolve({
+            ok: false,
+            status,
+            json,
+            error: (json && json.error) || `HTTP ${status}`,
+          });
+          return;
+        }
+        resolve({ ok: true, status, json });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(60_000, () => req.destroy(new Error('canvas request timeout')));
+    if (payload) req.write(payload);
+    req.end();
   });
 }
 

@@ -171,6 +171,19 @@ class TestLibraryTxt(unittest.TestCase):
         self.assertEqual(library.search_catalog(catalog, "   "), catalog)
 
 
+class TestLibrarySearchBook(unittest.TestCase):
+    def test_search_book_returns_page_snippets(self) -> None:
+        doc = library.BookDocument(
+            title="demo",
+            pages=["alpha foo bar", "nothing here", "foo again"],
+            source_path=Path("demo.txt"),
+        )
+        hits = library.search_book(doc, "foo")
+        self.assertEqual([h[0] for h in hits], [0, 2])
+        self.assertIn("foo", hits[0][1])
+        self.assertEqual(library.search_book(doc, "missing"), [])
+
+
 class TestLibraryHtml(unittest.TestCase):
     def test_html_to_text(self) -> None:
         text = library._html_to_text("<p>Hello <b>world</b></p>")
@@ -472,6 +485,30 @@ class TestLibraryIsolatedLoad(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 library.load_book_isolated(path)
         self.assertIn("boom", str(ctx.exception))
+
+
+class TestWrapOutputLines(unittest.TestCase):
+    def test_splits_before_utf8_byte_budget(self) -> None:
+        # 30 CJK chars = 90 UTF-8 bytes; must split under default 78-byte budget.
+        line = "[*] " + ("测" * 30) + "\n"
+        parts = library.wrap_output_lines(line)
+        self.assertGreater(len(parts), 1)
+        content = "".join(
+            p.rstrip("\n")[4:] if p.rstrip("\n").startswith("[*] ") else p.rstrip("\n")
+            for p in parts
+        )
+        self.assertEqual(content, "测" * 30)
+        for part in parts:
+            p = part.rstrip("\n")
+            self.assertTrue(p.startswith("[*] "))
+            self.assertLessEqual(
+                len(p.encode("utf-8")),
+                library.LIBRARY_WRAP_BYTES,
+            )
+
+    def test_short_line_unchanged(self) -> None:
+        line = "[*] short\n"
+        self.assertEqual(library.wrap_output_lines(line), [line])
 
 
 if __name__ == "__main__":

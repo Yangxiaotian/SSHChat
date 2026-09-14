@@ -11,6 +11,7 @@ import {
 
 type Props = {
   disabled: boolean;
+  assistantVisible: boolean;
   nickname: string;
   boardText: string;
   onPick: (row: number, col: number) => void;
@@ -329,14 +330,26 @@ function parseTurnInfo(boardText: string): { name: string; side: Side | null } {
 }
 
 function parseSeats(boardText: string): { blackName: string; whiteName: string } {
+  let blackName = '';
+  let whiteName = '';
   for (const raw of boardText.split('\n')) {
     const line = raw.trim();
-    const m1 = line.match(/黑（先手）[:：]\s*([^\s]+)\s+白[:：]\s*([^\s]+)/);
+    const m1 = line.match(/黑(?:方)?（先手）[:：]\s*([^\s]+)\s+白(?:方)?[:：]\s*([^\s]+)/);
     if (m1) return { blackName: m1[1].trim(), whiteName: m1[2].trim() };
-    const m2 = line.match(/黑[:：]\s*([^\s]+)\s+白[:：]\s*([^\s]+)/);
+    const m2 = line.match(/黑(?:方)?[:：]\s*([^\s]+)\s+白(?:方)?[:：]\s*([^\s]+)/);
     if (m2) return { blackName: m2[1].trim(), whiteName: m2[2].trim() };
+    const en = line.match(/\bBlack[:：]\s*([^\s]+)\s+White[:：]\s*([^\s]+)/i);
+    if (en) return { blackName: en[1].trim(), whiteName: en[2].trim() };
+    const black = line.match(/^黑(?:方)?(?:（先手）)?[:：]\s*([^\s]+)/);
+    if (black) blackName = black[1].trim();
+    const white = line.match(/^白(?:方)?[:：]\s*([^\s]+)/);
+    if (white) whiteName = white[1].trim();
+    const enBlack = line.match(/^Black[:：]\s*([^\s]+)/i);
+    if (enBlack) blackName = enBlack[1].trim();
+    const enWhite = line.match(/^White[:：]\s*([^\s]+)/i);
+    if (enWhite) whiteName = enWhite[1].trim();
   }
-  return { blackName: '', whiteName: '' };
+  return { blackName, whiteName };
 }
 
 function parseBoard(boardText: string): Cell[][] {
@@ -2071,7 +2084,7 @@ function rememberLimited<K, V>(cache: Map<K, V>, key: K, value: V, limit: number
   }
 }
 
-export default function GomokuPanel({ disabled, nickname, boardText, onPick, onSoulDraft }: Props) {
+export default function GomokuPanel({ assistantVisible, disabled, nickname, boardText, onPick, onSoulDraft }: Props) {
   const [strategy, setStrategy] = useState<StrategyId>('rapfi_external');
   const [soulDraftEnabled, setSoulDraftEnabled] = useState<boolean>(() => {
     try {
@@ -2144,7 +2157,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
 
   const myTurn = !!turnInfo.name && turnInfo.name === nickname;
   const canPick = !disabled && boardWinner === null && (!turnInfo.name || myTurn);
-  const isHiddenMaster = false;
+  const isHiddenMaster = nickname === 'zouyu';
   const hwThreads =
     typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
       ? Math.max(2, Math.floor(navigator.hardwareConcurrency))
@@ -2776,7 +2789,7 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         <div className="game-workbench-hint">当前轮到：{turnInfo.name}，你的落子按钮已暂时禁用。</div>
       )}
 
-      {isHiddenMaster && (
+      {isHiddenMaster && assistantVisible && (
         <div className="game-advisor game-advisor-info" style={{ marginBottom: 8 }}>
           <div className="game-advisor-title">隐藏功能：大师级五子棋助手</div>
           {mySide ? (
@@ -2887,8 +2900,8 @@ export default function GomokuPanel({ disabled, nickname, boardText, onPick, onS
         {renderedCells.map((row) =>
           row.map((cell) => {
             const text = cell.stone === '#' ? '●' : cell.stone === 'o' ? '○' : '·';
-            const isRapfiPoint = isHiddenMaster && rapfiDisplaySuggestion?.row === cell.row && rapfiDisplaySuggestion?.col === cell.col;
-            const isArbiterPoint = isHiddenMaster && arbiterSuggestion?.row === cell.row && arbiterSuggestion?.col === cell.col;
+            const isRapfiPoint = isHiddenMaster && assistantVisible && rapfiDisplaySuggestion?.row === cell.row && rapfiDisplaySuggestion?.col === cell.col;
+            const isArbiterPoint = isHiddenMaster && assistantVisible && arbiterSuggestion?.row === cell.row && arbiterSuggestion?.col === cell.col;
             const cls = [
               'gomoku-cell',
               cell.stone === '#' ? 'black' : '',

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
-import pwd
+import base64
+import getpass
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -19,14 +21,17 @@ from prompt_toolkit.patch_stdout import StdoutProxy, patch_stdout
 
 from sshchat_client_util import (
     default_client_config_path,
+    extract_completion_hints,
     load_client_config,
+    name_arg_completions,
     save_client_config,
 )
 
 SERVER_IP = os.environ.get("SSHCHAT_SERVER", "127.0.0.1")
 PORT = int(os.environ.get("SSHCHAT_PORT", "12345"))
 
-name = pwd.getpwuid(os.getuid()).pw_name
+# ``pwd`` is Unix-only; the terminal client also runs on Windows.
+name = getpass.getuser() or os.environ.get("USERNAME") or os.environ.get("USER") or "user"
 
 # beep: terminal bell | notify: desktop notification (macOS / Linux) | all | none
 _ALERT = (os.environ.get("SSHCHAT_ALERT") or "beep").strip().lower()
@@ -124,6 +129,11 @@ _DND_SUBCOMMANDS = {
     "off": None,
 }
 
+_GAME_NAMES = (
+    "chess", "xiangqi", "gomoku", "go", "reversi", "darkchess", "battleship",
+    "junqi", "doushou", "sanguo", "werewolf", "drawguess", "holdem", "zjh", "niutou", "mahjong",
+)
+
 _TOP_COMMANDS = (
     "/help",
     "/lang",
@@ -137,9 +147,16 @@ _TOP_COMMANDS = (
     "/msg",
     "/sendfile",
     "/file",
+    "/canvas",
+    "/board",
+    "/piano",
+    "/clock",
     "/leave",
     "/unmsg",
     "/announce",
+    "/pad",
+    "/poll",
+    "/later",
     "/game",
     "/news",
     "/library",
@@ -159,6 +176,35 @@ _LANG_SUBCOMMANDS = {
     "英文": None,
 }
 
+_POLL_SUBCOMMANDS = {
+    "new": None,
+    "close": None,
+    "help": None,
+    "show": None,
+}
+
+_PAD_SUBCOMMANDS = {
+    "clear": None,
+    "edit": None,
+    "vim": None,
+    "help": None,
+    "show": None,
+}
+
+_LATER_SUBCOMMANDS = {
+    "list": None,
+    "ls": None,
+    "show": None,
+    "cancel": None,
+    "help": None,
+}
+
+_CLOCK_SUBCOMMANDS = {
+    "help": None,
+    "close": None,
+    "new": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -168,15 +214,57 @@ _SUBCOMMANDS_BY_CMD = {
     "/dnd": sorted(_DND_SUBCOMMANDS),
     "/lang": sorted(_LANG_SUBCOMMANDS),
     "/language": sorted(_LANG_SUBCOMMANDS),
+    "/poll": sorted(_POLL_SUBCOMMANDS),
+    "/pad": sorted(_PAD_SUBCOMMANDS),
+    "/later": sorted(_LATER_SUBCOMMANDS),
+    "/clock": sorted(_CLOCK_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "new"): _GAME_NAMES,
+    ("/game", "on"): _GAME_NAMES,
+    ("/game", "off"): _GAME_NAMES,
 }
+
+# Learned from /rooms, /names, and chat traffic for Tab completion.
+_KNOWN_ROOMS: set[str] = {"default"}
+_KNOWN_USERS: set[str] = set()
+_COMPLETION_LOCK = threading.Lock()
+
+
+def _remember_completion_hints(*, rooms: list[str] | None = None, users: list[str] | None = None) -> None:
+    with _COMPLETION_LOCK:
+        if rooms:
+            for r in rooms:
+                key = r.strip().lstrip("#")
+                if key:
+                    _KNOWN_ROOMS.add(key)
+        if users:
+            for u in users:
+                key = u.strip()
+                if key and key not in _SYSTEM_SENDERS:
+                    _KNOWN_USERS.add(key)
+
+
+def _completion_rooms() -> list[str]:
+    with _COMPLETION_LOCK:
+        return sorted(_KNOWN_ROOMS, key=str.lower)
+
+
+def _completion_users() -> list[str]:
+    with _COMPLETION_LOCK:
+        return sorted(_KNOWN_USERS, key=str.lower)
+
+
+def _absorb_completion_line(text: str) -> None:
+    rooms, users = extract_completion_hints(text)
+    if rooms or users:
+        _remember_completion_hints(rooms=rooms, users=users)
 
 
 class SSHChatCommandCompleter(Completer):
-    """Prefix-complete top-level /commands and nested subcommands."""
+    """Prefix-complete top-level /commands, nested subcommands, and room/nick args."""
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -210,9 +298,19 @@ class SSHChatCommandCompleter(Completer):
                     return
             cmd = parts[0].lower()
             sub_prefix = parts[-1]
+            matched_sub = False
             for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
                 if sub.startswith(sub_prefix):
+                    matched_sub = True
                     yield Completion(sub, start_position=-len(sub_prefix))
+            if matched_sub:
+                return
+            # Room / nick argument (replace from command start via full strings).
+            for full in name_arg_completions(
+                text, rooms=_completion_rooms(), users=_completion_users()
+            ):
+                # Replace from start of current arg.
+                yield Completion(full.split(" ", 1)[-1], start_position=-len(parts[-1]))
             return
 
         parts = text.rstrip().split()
@@ -225,8 +323,16 @@ class SSHChatCommandCompleter(Completer):
                     yield Completion(item + " ", start_position=0)
                 return
         cmd = parts[0].lower()
-        for sub in _SUBCOMMANDS_BY_CMD.get(cmd, ()):
-            yield Completion(sub + " ", start_position=0)
+        subs = _SUBCOMMANDS_BY_CMD.get(cmd, ())
+        if subs:
+            for sub in subs:
+                yield Completion(sub + " ", start_position=0)
+            return
+        for full in name_arg_completions(
+            text, rooms=_completion_rooms(), users=_completion_users()
+        ):
+            arg = full.split(" ", 1)[-1]
+            yield Completion(arg + " ", start_position=0)
 
 
 def _load_dnd_setting() -> bool:
@@ -349,27 +455,43 @@ def _is_game_flood_line(payload: str) -> bool:
         "围棋",
         "chess",
         "xiangqi",
+        "reversi",
+        "darkchess",
+        "battleship",
+        "junqi",
         "holdem",
         "zjh",
         "niutou",
         "sanguo",
         "werewolf",
+        "drawguess",
         "doushou",
         "斗兽棋",
         "国际象棋",
         "五子棋",
+        "黑白棋",
+        "暗棋",
+        "翻翻棋",
+        "海战棋",
+        "军棋",
         "中国象棋",
         "德州扑克",
         "炸金花",
         "牛头王",
         "三国杀",
         "狼人杀",
+        "你画我猜",
         "对局",
         "开了一局",
         "上一步",
         "己方在下方",
+        "you are at the bottom",
+        "you at bottom",
         "楚河汉界",
+        "Chu River Han Border",
+        "Animal Chess",
         "图例：",
+        "Legend:",
         "等宽字体",
         "被将军",
         "将军）",
@@ -421,11 +543,11 @@ def _is_game_context_line(payload: str) -> bool:
     if re.match(r"^[a-h](?:\s+[a-h]){7}\s*$", t):
         return True
     if re.match(
-        r"^(go|chess|gomoku|xiangqi|doushou|holdem|zjh|niutou|sanguo|werewolf|mahjong)\b",
+        r"^(go|chess|gomoku|xiangqi|doushou|reversi|darkchess|battleship|junqi|holdem|zjh|niutou|sanguo|werewolf|drawguess|mahjong)\b",
         t,
     ):
         return True
-    if re.match(r"^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|麻将)", t):
+    if re.match(r"^(三国杀|牛头王|斗兽棋|德州扑克|炸金花|狼人|你画我猜|麻将)", t):
         return True
     if t.startswith("劫点") or "闷牌" in t or "已弃牌" in t or "已看牌" in t:
         return True
@@ -507,6 +629,8 @@ def _is_game_command_feedback_line(payload: str) -> bool:
     t = payload.strip()
     if not t:
         return False
+    if t.startswith("Terminal:"):
+        return True
     markers = (
         "已有进行",
         "没有进行",
@@ -670,7 +794,152 @@ def _is_dnd_game_read_command(cmd: str) -> bool:
     return any(lower == prefix or lower.startswith(prefix + " ") for prefix in readonly)
 
 
-def _try_handle_local_command(msg: str) -> bool:
+_PAD_DUMP_PREFIX = "[*] <<PADDUMP>> "
+_PAD_DUMP_MARKER = "<<PADDUMP>>"
+_pad_dump_lock = threading.Lock()
+_pad_dump_event = threading.Event()
+_pad_dump_payload: str | None = None
+_pad_dump_waiting = False
+_ANSI_NOISE = re.compile(r"\033\[[0-9;?]*[A-Za-z]|\?\[[0-9;?]*[A-Za-z]")
+
+
+def _arm_pad_dump_waiter() -> None:
+    global _pad_dump_payload, _pad_dump_waiting
+    with _pad_dump_lock:
+        _pad_dump_waiting = True
+        _pad_dump_payload = None
+        _pad_dump_event.clear()
+
+
+def _disarm_pad_dump_waiter() -> None:
+    global _pad_dump_waiting
+    with _pad_dump_lock:
+        _pad_dump_waiting = False
+
+
+def _extract_pad_dump_blob(text: str) -> str | None:
+    """Return base64 payload if this line is a pad dump (tolerate PTY/CSI noise)."""
+    raw = _ANSI_NOISE.sub("", text.rstrip("\n"))
+    idx = raw.find(_PAD_DUMP_MARKER)
+    if idx < 0:
+        return None
+    return raw[idx + len(_PAD_DUMP_MARKER) :].strip()
+
+
+def _take_pad_dump_line(text: str) -> bool:
+    """Swallow PADDUMP only while /pad edit is waiting (mobile clients need the line)."""
+    global _pad_dump_payload, _pad_dump_waiting
+    blob = _extract_pad_dump_blob(text)
+    if blob is None:
+        return False
+    with _pad_dump_lock:
+        if not _pad_dump_waiting:
+            return False
+        _pad_dump_waiting = False
+        _pad_dump_payload = blob
+        _pad_dump_event.set()
+    return True
+
+
+def _wait_pad_dump(timeout: float = 12.0) -> str | None:
+    if not _pad_dump_event.wait(timeout):
+        _disarm_pad_dump_waiter()
+        return None
+    with _pad_dump_lock:
+        return _pad_dump_payload
+
+
+def _pick_pad_editor() -> str | None:
+    for key in ("SSHCHAT_PAD_EDITOR", "EDITOR", "VISUAL"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    for cand in ("vim", "nvim", "nano", "vi"):
+        if shutil.which(cand):
+            return cand
+    return None
+
+
+def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
+    editor = _pick_pad_editor()
+    if not editor:
+        print("[*] No editor found. Set $EDITOR or install vim/nano.")
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("[*] /pad edit needs an interactive TTY.")
+        return
+
+    _arm_pad_dump_waiter()
+    try:
+        sock.send(f"[{my_name}] /pad dump\n".encode("utf-8"))
+    except Exception:
+        _disarm_pad_dump_waiter()
+        print("[*] Failed to request pad dump.")
+        return
+    blob = _wait_pad_dump()
+    if blob is None:
+        print("[*] Timed out waiting for pad content.")
+        return
+    try:
+        # Accept missing padding from older encoders.
+        pad = (-len(blob)) % 4
+        if pad:
+            blob = blob + ("=" * pad)
+        current = base64.urlsafe_b64decode(blob.encode("ascii")).decode("utf-8")
+    except Exception:
+        print("[*] Bad pad dump from server.")
+        return
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".pad.txt",
+            prefix="sshchat-pad-",
+            delete=False,
+        ) as tf:
+            tf.write(current)
+            if current and not current.endswith("\n"):
+                tf.write("\n")
+            path = tf.name
+        print(f"[*] Opening editor ({editor}). Save & quit to upload.")
+        # Flush prompt_toolkit stdout proxy so vim gets a clean TTY.
+        _clear_stdout_proxy_pending()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # $EDITOR may be "vim" or "vim -n"; split like a shell only on spaces.
+        cmd = editor.split()
+        rc = subprocess.call(cmd + [path])
+        if rc != 0:
+            print(f"[*] Editor exited with code {rc}; pad not uploaded.")
+            return
+        with open(path, encoding="utf-8") as f:
+            new_text = f.read()
+    except Exception as e:
+        print(f"[*] Pad edit failed: {e!r}")
+        return
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
+        "\r\n", "\n"
+    ).replace("\r", "\n").rstrip("\n"):
+        print("[*] Pad unchanged.")
+        return
+    encoded = base64.urlsafe_b64encode(new_text.encode("utf-8")).decode("ascii")
+    try:
+        sock.send(f"[{my_name}] /pad load {encoded}\n".encode("utf-8"))
+    except Exception:
+        print("[*] Failed to upload pad.")
+        return
+
+
+def _try_handle_local_command(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
     stripped = msg.strip()
     lower = stripped.lower()
     if lower == "/dnd":
@@ -692,11 +961,17 @@ def _try_handle_local_command(msg: str) -> bool:
     if lower in ("/clear", "/cls"):
         _terminal_hard_clear()
         return True
+    if lower in ("/pad edit", "/pad vim") or lower.startswith("/pad edit ") or lower.startswith("/pad vim "):
+        if sock is None:
+            print("[*] /pad edit is only available in the terminal client.")
+            return True
+        _run_pad_edit(sock, my_name or name)
+        return True
     return False
 
 
-def _prepare_outgoing(msg: str) -> bool:
-    if _try_handle_local_command(msg):
+def _prepare_outgoing(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
+    if _try_handle_local_command(msg, sock=sock, my_name=my_name):
         return False
     lower = msg.strip().lower()
     if lower.startswith("/game"):
@@ -826,8 +1101,48 @@ def _parse_chat_line(line: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _line_is_later_deliver(line: str) -> bool:
+    """Personal /later reminder line from the server."""
+    t = line.strip()
+    if not t:
+        return False
+    # [#room] [*] Time capsule: …  or  [*] 时间胶囊：…
+    return bool(
+        re.search(
+            r"(?:^|\[\*\]\s+)(?:Time capsule|时间胶囊)\s*[:：]",
+            t,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _line_is_poll_alert(line: str) -> bool:
+    """Room poll opened / closed / join-preview system lines."""
+    t = line.strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"(?:started a poll|poll closed|Open poll)\s*[:：]"
+            r"|发起投票\s*[:：]"
+            r"|投票已结束\s*[:：]"
+            r"|进行中投票\s*[:：]",
+            t,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _line_is_peer_chat(line: str, my_name: str) -> tuple[bool, str, str]:
     """Return (is_peer_chat, sender, preview) for a single line without trailing \\n."""
+    if _line_is_later_deliver(line):
+        _room, sender, payload = _parse_chat_line(line)
+        preview = payload or line.strip()
+        return True, "later", preview
+    if _line_is_poll_alert(line):
+        _room, sender, payload = _parse_chat_line(line)
+        preview = payload or line.strip()
+        return True, "poll", preview
     _room, sender, payload = _parse_chat_line(line)
     if not sender:
         return False, "", ""
@@ -877,8 +1192,9 @@ def _expand_xiangqi_color(text: str) -> str:
     # Legacy markup → +/-/! prefix form.
     text = _XQ_RED_MARK.sub(r"+\1", text)
     text = _XQ_BLACK_MARK.sub(r"-\1", text)
-    text = re.sub(r"【(.*?)】", r"+\1", text)
-    text = re.sub(r"〔(.*?)〕", r"-\1", text)
+    # Only single xiangqi pieces — not words like 【相机】 (drawguess) or 【杀】 (sanguo).
+    text = re.sub(r"【([车马炮相仕帅将士象兵卒])】", r"+\1", text)
+    text = re.sub(r"〔([车马炮相仕帅将士象兵卒])〕", r"-\1", text)
     return text
 
 
@@ -1048,8 +1364,11 @@ def recv_msg(sock, my_name: str):
 
                 if _should_skip_display_line(text):
                     continue
+                if _take_pad_dump_line(text):
+                    continue
                 if _consume_sent_input_echo(text):
                     continue
+                _absorb_completion_line(text)
                 if _is_clear_csi_line(text):
                     _terminal_hard_clear()
                     continue
@@ -1094,8 +1413,11 @@ def main():
         "Commands: /names  /rooms  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
+        "/canvas | /canvas <nick> | /canvas #<room>  "
+        "/piano | /piano <nick> | /piano #<room>  "
+        "/clock | /clock 10+5 | /clock #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")
@@ -1139,7 +1461,7 @@ def main():
                     if msg.strip() == "":
                         continue
 
-                    if not _prepare_outgoing(msg):
+                    if not _prepare_outgoing(msg, sock=s, my_name=name):
                         continue
 
                     _remember_sent_input(msg)
@@ -1166,7 +1488,7 @@ def main():
                 msg = msg.rstrip("\r\n")
                 if msg.strip() == "":
                     continue
-                if not _prepare_outgoing(msg):
+                if not _prepare_outgoing(msg, sock=s, my_name=name):
                     continue
                 _remember_sent_input(msg)
                 s.send(("[" + name + "] " + msg + "\n").encode("utf-8"))

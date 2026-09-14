@@ -5,6 +5,7 @@ Security model:
 - Keys are delivered separately from URLs and are never placed in a URL
 - The upload URL is consumed by the first successful upload
 - A recipient's download URL is consumed by the first completed download
+- Unused upload/download links do not time out by default (safe for offline leave-messages)
 - Entering the key mints two short-lived, single-use tickets: one for preview
   and one for download. The bytes are only ever served from a ticket URL, and
   a ticket dies on first use, so capturing a URL off the wire buys nothing.
@@ -26,9 +27,17 @@ from datetime import datetime, timedelta
 # you knowingly want recipients to be able to fetch a file more than once.
 ONE_TIME_DOWNLOAD = os.environ.get("SSHCHAT_ONE_TIME_DOWNLOAD", "1").strip() != "0"
 
+# Unused upload/download page links stay valid until first use. Set > 0 to restore
+# time limits (minutes). Default 0 = permanent until consumed (offline leave-safe).
+UPLOAD_TTL_MINUTES = int(os.environ.get("SSHCHAT_UPLOAD_TTL_MINUTES", "0"))
+DOWNLOAD_TTL_MINUTES = int(os.environ.get("SSHCHAT_DOWNLOAD_TTL_MINUTES", "0"))
+
 # How long a minted preview/download ticket stays valid before the recipient
 # has to re-enter the key. Tickets are single-use regardless of this window.
 TICKET_TTL_SECONDS = int(os.environ.get("SSHCHAT_TICKET_TTL_SECONDS", "600"))
+
+# Delete stored bytes this many seconds after every recipient has downloaded.
+FILE_RETENTION_SECONDS = int(os.environ.get("SSHCHAT_FILE_RETENTION_SECONDS", "86400"))
 
 
 def sanitize_filename(filename: str) -> str:
@@ -133,8 +142,8 @@ class FileTransferStore:
     def create_upload_session(self, sender: str,
                              recipients: List[str], filename: str = "",
                              room: Optional[str] = None,
-                             upload_ttl_minutes: int = 60,
-                             download_ttl_minutes: int = 1440) -> FileTransfer:
+                             upload_ttl_minutes: Optional[int] = None,
+                             download_ttl_minutes: Optional[int] = None) -> FileTransfer:
         """
         Create a new file transfer session.
         
@@ -143,20 +152,22 @@ class FileTransferStore:
             recipients: List of recipient usernames
             filename: Optional placeholder; the real name comes from the upload
             room: Room name if sent to room, None for private
-            upload_ttl_minutes: Upload URL expiry time in minutes
-            download_ttl_minutes: Download URL expiry time in minutes
+            upload_ttl_minutes: Minutes until unused upload link expires (0 = never)
+            download_ttl_minutes: Minutes until unused download links expire (0 = never)
             
         Returns:
             FileTransfer object with upload URL/key and download URLs/keys
         """
         with self.lock:
+            upload_ttl = UPLOAD_TTL_MINUTES if upload_ttl_minutes is None else upload_ttl_minutes
+            download_ttl = DOWNLOAD_TTL_MINUTES if download_ttl_minutes is None else download_ttl_minutes
             transfer_id = secrets.token_urlsafe(16)
             upload_token = self.generate_token()
             upload_key = self.generate_key()
             
             now = time.time()
-            upload_expires = now + (upload_ttl_minutes * 60)
-            download_expires = now + (download_ttl_minutes * 60)
+            upload_expires = now + (upload_ttl * 60) if upload_ttl > 0 else 0.0
+            download_expires = now + (download_ttl * 60) if download_ttl > 0 else 0.0
             
             # Generate unique download token and key for each recipient
             download_tokens = {}
@@ -222,7 +233,8 @@ class FileTransferStore:
             if transfer.upload_used:
                 return False, None, "该上传链接已使用过"
             
-            if time.time() > transfer.upload_expires:
+            if (UPLOAD_TTL_MINUTES > 0 and transfer.upload_expires > 0
+                    and time.time() > transfer.upload_expires):
                 return False, None, "上传链接已过期"
             
             if transfer.upload_key != key:
@@ -277,7 +289,8 @@ class FileTransferStore:
             if not transfer.upload_used:
                 return False, None, "发送方还没有上传文件"
             
-            if time.time() > transfer.download_expires:
+            if (DOWNLOAD_TTL_MINUTES > 0 and transfer.download_expires > 0
+                    and time.time() > transfer.download_expires):
                 return False, None, "下载链接已过期"
             
             # Find recipient for this token
@@ -419,8 +432,18 @@ class FileTransferStore:
             self._save()
             return True
     
+    def _transfer_fully_consumed(self, transfer: FileTransfer) -> bool:
+        if not transfer.upload_used:
+            return False
+        if not transfer.download_tokens:
+            return True
+        return all(
+            transfer.download_used.get(tok, False)
+            for tok in transfer.download_tokens.values()
+        )
+
     def cleanup_expired(self):
-        """Remove expired transfers and their files."""
+        """Remove fully consumed transfers and spent tickets."""
         with self.lock:
             now = time.time()
             expired_ids = []
@@ -433,8 +456,9 @@ class FileTransferStore:
                 del self.tickets[ticket]
             
             for t_id, transfer in self.transfers.items():
-                # Remove if download expired and all downloads used or expired
-                if now > transfer.download_expires + 86400:  # 1 day grace period
+                if not self._transfer_fully_consumed(transfer):
+                    continue
+                if now > transfer.created_at + FILE_RETENTION_SECONDS:
                     expired_ids.append(t_id)
                     
                     # Delete file if exists

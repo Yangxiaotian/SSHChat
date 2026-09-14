@@ -1,7 +1,16 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { SHAKE_TOKEN } from '../../shared/protocol';
+import type { ChatMessage } from '../../shared/protocol';
 import { useTranslation } from '../i18n';
+import {
+  clearPasteUpload,
+  extractFileFromDataTransfer,
+  getPasteUploadState,
+  startPasteSendFile,
+  subscribePasteUpload,
+  type PasteUploadState,
+} from '../lib/pasteUpload';
 
 const COMMAND_KEYS = [
   { name: '/help', key: 'input.commands.help' },
@@ -13,7 +22,15 @@ const COMMAND_KEYS = [
   { name: '/msg', key: 'input.commands.msg' },
   { name: '/sendfile', key: 'input.commands.sendfile' },
   { name: '/file', key: 'input.commands.sendfile' },
+  { name: '/canvas', key: 'input.commands.canvas' },
+  { name: '/board', key: 'input.commands.canvas' },
+  { name: '/piano', key: 'input.commands.piano' },
+  { name: '/clock', key: 'input.commands.clock' },
   { name: '/leave', key: 'input.commands.leave' },
+  { name: '/announce', key: 'input.commands.announce' },
+  { name: '/pad', key: 'input.commands.pad' },
+  { name: '/poll', key: 'input.commands.poll' },
+  { name: '/later', key: 'input.commands.later' },
   { name: '/clear', key: 'input.commands.clear' },
   { name: '/game', key: 'input.commands.game' },
   { name: '/news', key: 'input.commands.news' },
@@ -21,10 +38,9 @@ const COMMAND_KEYS = [
   { name: '/lib', key: 'input.commands.library' },
   { name: '/lang', key: 'input.commands.lang' },
   { name: '/dict', key: 'input.commands.dict' },
-  { name: '/announce', key: 'input.commands.announce' },
 ] as const;
 
-type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' };
+type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' | 'mention' };
 
 function longestCommonPrefix(values: string[]): string {
   if (!values.length) return '';
@@ -39,12 +55,139 @@ function longestCommonPrefix(values: string[]): string {
 }
 
 const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
+const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
+const USER_OR_ROOM_ARG_CMDS = new Set(['/msg', '/sendfile', '/file']);
+const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
+
+/** Subcommands for slash-command suggestions (keep in sync with client.py / mobile). */
+const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
+  '/game': [
+    'help', 'list', 'new', 'join', 'show', 'move', 'resign', 'undo', 'abort', 'end',
+    'on', 'off', 'seats', 'rating', 'pgn',
+  ],
+  '/news': ['中文', '国际', '科技', 'all', 'detail', '详情', 'fetch', '全文'],
+  '/library': [
+    'open', 'read', 'next', 'n', 'prev', 'p', 'page', 'find', 'search',
+    'bookmarks', 'bookmark', 'reset', 'close', 'info', 'show', 'help',
+  ],
+  '/lib': [
+    'open', 'read', 'next', 'n', 'prev', 'p', 'page', 'find', 'search',
+    'bookmarks', 'bookmark', 'reset', 'close', 'info', 'show', 'help',
+  ],
+  '/dict': ['en', 'cn', 'hh', 'help', '英', '中', '汉'],
+  '/dnd': ['on', 'off'],
+  '/lang': ['en', 'zh', 'english', 'chinese', '中文', '英文'],
+  '/language': ['en', 'zh', 'english', 'chinese', '中文', '英文'],
+  '/pad': ['clear', 'edit', 'vim', 'help', 'show'],
+  '/poll': ['new', 'close', 'help', 'show'],
+  '/later': ['list', 'ls', 'show', 'cancel', 'help'],
+  '/clock': ['help', 'close', 'new'],
+};
+
+function subcommandSuggestions(value: string): SuggestionItem[] {
+  if (!value.startsWith('/')) return [];
+  const trailingSpace = value.endsWith(' ');
+  const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const cmd = parts[0].toLowerCase();
+  const subs = SUBCOMMANDS_BY_CMD[cmd];
+  if (!subs?.length) return [];
+
+  if (trailingSpace && parts.length === 1) {
+    return subs.map((sub) => ({
+      value: `${parts[0]} ${sub}`,
+      desc: 'subcommand',
+      source: 'command' as const,
+    }));
+  }
+  if (parts.length === 2 && !trailingSpace) {
+    const prefix = parts[1].toLowerCase();
+    return subs
+      .filter((sub) => sub.toLowerCase().startsWith(prefix))
+      .map((sub) => ({
+        value: `${parts[0]} ${sub}`,
+        desc: 'subcommand',
+        source: 'command' as const,
+      }));
+  }
+  return [];
+}
+
+function uniqKeepOrder(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of items) {
+    const key = raw.trim();
+    if (!key) continue;
+    const low = key.toLowerCase();
+    if (seen.has(low)) continue;
+    seen.add(low);
+    out.push(key);
+  }
+  return out;
+}
+
+function nameArgSuggestions(
+  value: string,
+  rooms: string[],
+  users: string[],
+): SuggestionItem[] {
+  if (!value.startsWith('/')) return [];
+  const trailingSpace = value.endsWith(' ');
+  const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const cmd = parts[0].toLowerCase();
+  const roomNames = uniqKeepOrder(rooms.map((r) => r.replace(/^#/, '')));
+  const userNames = uniqKeepOrder(users);
+
+  let cands: string[] = [];
+  let desc = '';
+  if (ROOM_ARG_CMDS.has(cmd)) {
+    cands = roomNames;
+    desc = 'room';
+  } else if (USER_OR_ROOM_ARG_CMDS.has(cmd)) {
+    cands = [...userNames, ...roomNames.map((r) => `#${r}`)];
+    desc = 'user / #room';
+  } else if (USER_ARG_CMDS.has(cmd)) {
+    cands = userNames;
+    desc = 'user';
+  } else {
+    return [];
+  }
+
+  let matched = cands;
+  if (trailingSpace && parts.length === 1) {
+    // all candidates
+  } else if (parts.length >= 2 && !trailingSpace) {
+    const prefix = parts[1];
+    const pl = prefix.toLowerCase();
+    const bare = pl.replace(/^#/, '');
+    matched = cands.filter((c) => {
+      const cl = c.toLowerCase();
+      if (pl === '#') return c.startsWith('#');
+      if (cl.startsWith(pl)) return true;
+      if (c.startsWith('#') && c.slice(1).toLowerCase().startsWith(bare)) return true;
+      if (!c.startsWith('#') && cl.startsWith(bare) && prefix.startsWith('#')) return true;
+      return false;
+    });
+  } else {
+    return [];
+  }
+
+  return matched.map((c) => ({
+    value: `${parts[0]} ${c}`,
+    desc,
+    source: 'command' as const,
+  }));
+}
 
 function buildSuggestions(
   value: string,
   commands: { name: string; desc: string }[],
   history: string[],
   recentLabel: string,
+  rooms: string[],
+  users: string[],
 ): SuggestionItem[] {
   const gameUndoPrefix = '/game undo';
   if (value.toLowerCase().startsWith(gameUndoPrefix)) {
@@ -69,6 +212,12 @@ function buildSuggestions(
       }));
   }
 
+  const subItems = subcommandSuggestions(value);
+  if (subItems.length) return subItems;
+
+  const nameItems = nameArgSuggestions(value, rooms, users);
+  if (nameItems.length) return nameItems;
+
   const keyword = value.trim().toLowerCase();
   if (!keyword) return [];
   return history
@@ -81,21 +230,71 @@ function buildSuggestions(
     }));
 }
 
+function buildMentionSuggestions(value: string, users: string[], nickname: string): SuggestionItem[] {
+  const match = value.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!match) return [];
+  const query = match[1].toLowerCase();
+  const prefix = value.slice(0, value.length - match[1].length);
+  return users
+    .filter((user) => user && user.toLowerCase() !== nickname.toLowerCase())
+    .filter((user) => !query || user.toLowerCase().startsWith(query))
+    .slice(0, 10)
+    .map((user) => ({
+      value: `${prefix}${user} `,
+      desc: '私聊对象',
+      source: 'mention' as const,
+    }));
+}
+
+function toPrivateCommand(value: string): string {
+  const mention = value.trim().match(/^@([^\s@]+)\s+(.+)$/s);
+  if (mention) return `/msg ${mention[1]} ${mention[2].trim()}`;
+  const command = value.trim().match(/^\/msg\s+([^\s]+)\s+(.+)$/is);
+  if (command) return `/msg ${command[1]} ${command[2].trim()}`;
+  return value.trim();
+}
+
 export default function InputBar() {
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [pasteState, setPasteState] = useState<PasteUploadState>(() => ({
+    status: { phase: 'idle' },
+    busy: false,
+  }));
   const inputRef = useRef<HTMLInputElement>(null);
   const sendingRef = useRef(false);
-  const { status, activeRoom, composerText, setComposerText, clearMessages } = useChatStore();
+  const { status, activeRoom, users, nickname, composerText, setComposerText, clearMessages, addMessage, rooms } = useChatStore();
   const { t } = useTranslation();
   const HISTORY_KEY = 'sshchat:input-history:v1';
+
+  useEffect(() => subscribePasteUpload(setPasteState), []);
+
+  // Global paste: screenshot/file in clipboard → auto /sendfile + upload.
+  // Text-only pastes are left alone for the composer.
+  useEffect(() => {
+    const onWindowPaste = (e: ClipboardEvent) => {
+      if (status !== 'connected') return;
+      if (getPasteUploadState().busy) return;
+      const file = extractFileFromDataTransfer(e.clipboardData);
+      if (!file) return;
+      e.preventDefault();
+      void startPasteSendFile(file, useChatStore.getState().activeRoom);
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [status]);
 
   const commands = useMemo(
     () => COMMAND_KEYS.map((cmd) => ({ name: cmd.name, desc: t(cmd.key) })),
     [t],
+  );
+
+  const roomNames = useMemo(
+    () => uniqKeepOrder([activeRoom, ...rooms.map((r) => r.name)].filter(Boolean)),
+    [activeRoom, rooms],
   );
 
   useEffect(() => {
@@ -121,13 +320,21 @@ export default function InputBar() {
   };
 
   const refreshSuggestions = (value: string) => {
-    const merged = buildSuggestions(value, commands, history, t('common.recentInput')).slice(0, 10);
+    const mentions = buildMentionSuggestions(value, users, nickname);
+    const built = mentions.length > 0
+      ? mentions
+      : buildSuggestions(value, commands, history, t('common.recentInput'), roomNames, users);
+    // Top-level "/" matches many commands; keep enough room for /pad /poll /later etc.
+    const limit = value === '/' || (value.startsWith('/') && !value.includes(' ')) ? 30 : 10;
+    const merged = built.slice(0, limit);
     setSuggestions(merged);
     setActiveSuggestion(0);
     const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
     const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
+    const isSubCommand = subcommandSuggestions(value).length > 0;
+    const isNameArgCommand = nameArgSuggestions(value, roomNames, users).length > 0;
     setShowSuggestions(
-      isTopLevelCommand || isGameUndoCommand
+      mentions.length > 0 || isTopLevelCommand || isGameUndoCommand || isSubCommand || isNameArgCommand
         ? merged.length > 0
         : merged.length > 0 && value.trim().length > 0,
     );
@@ -151,7 +358,9 @@ export default function InputBar() {
 
     const canTabComplete =
       (value.startsWith('/') && !value.includes(' ')) ||
-      value.toLowerCase().startsWith('/game undo');
+      value.toLowerCase().startsWith('/game undo') ||
+      subcommandSuggestions(value).length > 0 ||
+      nameArgSuggestions(value, roomNames, users).length > 0;
 
     if (e.key === 'Tab' && canTabComplete) {
       e.preventDefault();
@@ -216,8 +425,21 @@ export default function InputBar() {
     sendingRef.current = true;
     setIsSending(true);
     try {
-      const ok = await window.api.sendMessage(trimmed);
+      const outbound = toPrivateCommand(trimmed);
+      const ok = await window.api.sendMessage(outbound);
       if (!ok) return;
+      const privateMatch = outbound.match(/^\/msg\s+([^\s]+)\s+(.+)$/is);
+      if (privateMatch && !privateMatch[1].startsWith('#')) {
+        const localEcho: ChatMessage = {
+          id: `local-pm-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          room: activeRoom,
+          sender: nickname,
+          content: privateMatch[2].trim(),
+          timestamp: Date.now(),
+          type: 'pm',
+        };
+        addMessage(localEcho);
+      }
       const next = [trimmed, ...history.filter((item) => item !== trimmed)].slice(0, 10);
       persistHistory(next);
       setComposerText('');
@@ -228,7 +450,7 @@ export default function InputBar() {
     }
   };
 
-  const handleSuggestionClick = (value: string, source: 'command' | 'history') => {
+  const handleSuggestionClick = (value: string, source: SuggestionItem['source']) => {
     applySuggestion({ value, desc: '', source });
   };
 
@@ -238,14 +460,98 @@ export default function InputBar() {
     await window.api.sendMessage(SHAKE_TOKEN);
   };
 
+  const sendQuickCommand = async (command: string) => {
+    if (!isConnected || sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    try {
+      const low = command.trim().toLowerCase();
+      if (low === '/canvas' || low.startsWith('/canvas ') || low === '/board' || low.startsWith('/board ')) {
+        useChatStore.getState().setExpectingOwnCanvas(true);
+      }
+      if (low === '/piano' || low.startsWith('/piano ')) {
+        useChatStore.getState().setExpectingOwnPiano(true);
+      }
+      await window.api.sendMessage(command);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
+  };
+
   const clearComposer = () => {
     setComposerText('');
     setShowSuggestions(false);
     inputRef.current?.focus();
   };
 
+  const pasteBannerText = (() => {
+    const s = pasteState.status;
+    if (s.phase === 'waiting') return t('pasteUpload.waiting', { name: s.filename });
+    if (s.phase === 'uploading') return t('pasteUpload.uploading', { name: s.filename });
+    if (s.phase === 'done') {
+      return t('pasteUpload.done', { name: s.remoteName || s.filename });
+    }
+    if (s.phase === 'error') {
+      if (s.error === 'busy') return t('pasteUpload.busy');
+      if (s.error === 'timeout') return t('pasteUpload.timeout');
+      if (s.error === 'send_failed') return t('pasteUpload.sendFailed');
+      return t('pasteUpload.error', { error: s.error });
+    }
+    return '';
+  })();
+
   return (
     <div className="input-bar">
+      {pasteBannerText ? (
+        <div className={`paste-upload-banner phase-${pasteState.status.phase}`}>
+          <span>{pasteBannerText}</span>
+          {(pasteState.status.phase === 'error' || pasteState.status.phase === 'done') && (
+            <button type="button" className="paste-upload-dismiss" onClick={() => clearPasteUpload()}>
+              {t('pasteUpload.dismiss')}
+            </button>
+          )}
+        </div>
+      ) : null}
+      <div className="input-quick-actions">
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending || pasteState.busy}
+          title={t('input.quick.fileTitle')}
+          onClick={() => void sendQuickCommand('/sendfile')}
+        >
+          {t('input.quick.file')}
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.canvasTitle')}
+          onClick={() => void sendQuickCommand('/canvas')}
+        >
+          {t('input.quick.canvas')}
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.pianoTitle')}
+          onClick={() => void sendQuickCommand('/piano')}
+        >
+          {t('input.quick.piano')}
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.clockTitle')}
+          onClick={() => void sendQuickCommand('/clock')}
+        >
+          {t('input.quick.clock')}
+        </button>
+        <span className="quick-action-hint">{t('input.quick.pasteHint')}</span>
+      </div>
       <div className="input-wrapper" style={{ position: 'relative' }}>
         {showSuggestions && (
           <div className="command-suggestions">

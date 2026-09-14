@@ -7,6 +7,11 @@ Provides:
 - Download page:   GET  /download/<token>        - HTML page with key input and preview
 - Ticket exchange: POST /download/<token>/ticket - Key in body, returns two one-time links
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
+- Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
+- Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
+- Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
+- Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
+- Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
 - HTTPS support with auto-generated or provided certificates
 
 No key is ever carried in a URL, and every URL that serves file bytes is
@@ -18,17 +23,21 @@ import cgi
 import html
 import ipaddress
 import json
+import re
 import ssl
 import subprocess
 import threading
 import mimetypes
 import socket
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, quote, parse_qs
 from pathlib import Path
 from typing import Optional
+import canvas_http
+import clock_http
 import file_sharing
+import piano_http
 
 
 MAX_FILE_SIZE = int(os.environ.get("SSHCHAT_MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
@@ -83,6 +92,33 @@ def _detect_lan_ip() -> str:
     except Exception:
         pass
     return "127.0.0.1"
+
+
+# Written by sshchat-cloudflared on each Quick Tunnel start (boot/deploy/restart).
+DEFAULT_CLOUDFLARED_URL_FILE = "/var/lib/sshchat/cloudflared/public_url"
+
+
+def live_cloudflare_base_url(
+    path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the live Quick Tunnel base URL if the helper has published one.
+
+    Prefer this over process env: after reboot the tunnel hostname changes, but
+    a long-lived server may still hold the previous SSHCHAT_FILE_PUBLIC_HOST.
+    """
+    url_path = (
+        (path or "").strip()
+        or os.environ.get("SSHCHAT_CLOUDFLARED_URL_FILE", "").strip()
+        or DEFAULT_CLOUDFLARED_URL_FILE
+    )
+    try:
+        with open(url_path, "r", encoding="utf-8") as f:
+            raw = (f.read() or "").strip()
+    except OSError:
+        return None
+    if re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+        return raw
+    return None
 
 
 def is_externally_reachable_host(host: str) -> bool:
@@ -1221,6 +1257,11 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle key exchange and file upload."""
+        if piano_http.handle_piano_post(self):
+            return
+        if canvas_http.handle_canvas_post(self):
+            return
+
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
         store = file_sharing.file_transfer_store
@@ -1387,6 +1428,19 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if clock_http.handle_clock_get(self):
+            return
+        if piano_http.handle_piano_static_get(self):
+            return
+        if piano_http.handle_piano_samples_get(self):
+            return
+        if piano_http.handle_piano_replay_get(self):
+            return
+        if piano_http.handle_piano_get(self):
+            return
+        if canvas_http.handle_canvas_get(self):
+            return
+
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
         store = file_sharing.file_transfer_store
@@ -1414,7 +1468,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                 self._send_html_error(403, errs["upload_used"], lang=lang)
                 return
             
-            if time.time() > transfer.upload_expires:
+            if (file_sharing.UPLOAD_TTL_MINUTES > 0 and transfer.upload_expires > 0
+                    and time.time() > transfer.upload_expires):
                 self._send_html_error(403, errs["upload_expired"], lang=lang)
                 return
             
@@ -1433,7 +1488,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                 self._send_html_error(403, errs["download_waiting"], lang=lang)
                 return
             
-            if time.time() > transfer.download_expires:
+            if (file_sharing.DOWNLOAD_TTL_MINUTES > 0 and transfer.download_expires > 0
+                    and time.time() > transfer.download_expires):
                 self._send_html_error(403, errs["download_expired"], lang=lang)
                 return
             
@@ -1467,7 +1523,7 @@ class FileHTTPServer:
         self.public_host = public_host
         # Port shown in user-facing links (e.g. 443 behind Cloudflare); listen port stays self.port
         self.public_port = public_port
-        self.server: Optional[HTTPServer] = None
+        self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
         
     def setup_certificates(self):
@@ -1589,7 +1645,9 @@ class FileHTTPServer:
                 print("[FileHTTP] Failed to setup certificates, falling back to HTTP")
                 self.use_https = False
         
-        self.server = HTTPServer((self.host, self.port), FileTransferHandler)
+        # Threading: canvas sync polls + uploads must not block each other
+        # (plain HTTPServer is single-request and causes "Sync error — will retry").
+        self.server = ThreadingHTTPServer((self.host, self.port), FileTransferHandler)
         
         if self.use_https and self.cert_file and self.key_file:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1628,7 +1686,13 @@ class FileHTTPServer:
 
         When public_port is 443/80 (e.g. Cloudflare Tunnel terminating TLS), the
         link scheme follows that public port even if the local listener is plain HTTP.
+
+        Live Cloudflare Quick Tunnel URLs (public_url file) win over env, so a
+        boot-time tunnel refresh is visible without waiting for a process restart.
         """
+        live = live_cloudflare_base_url()
+        if live:
+            return live
         port = self.port if self.public_port is None else self.public_port
         if self.public_port == 443:
             protocol = "https"
@@ -1636,7 +1700,13 @@ class FileHTTPServer:
             protocol = "http"
         else:
             protocol = "https" if self.use_https else "http"
-        host = self.get_public_host()
+        host = self._configured_public_host()
+        # Quick Tunnel hostnames die when the helper restarts; without a live
+        # public_url latch, never keep handing out the stale env hostname.
+        if host.endswith(".trycloudflare.com"):
+            host = _detect_lan_ip()
+            port = self.port
+            protocol = "https" if self.use_https else "http"
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"
@@ -1644,6 +1714,17 @@ class FileHTTPServer:
     
     def get_public_host(self) -> str:
         """Resolve the hostname users should see in their links."""
+        live = live_cloudflare_base_url()
+        if live:
+            host = (urlparse(live).hostname or "").strip()
+            if host:
+                return host
+        host = self._configured_public_host()
+        if host.endswith(".trycloudflare.com"):
+            return _detect_lan_ip()
+        return host
+
+    def _configured_public_host(self) -> str:
         for candidate in (self.domain, self.public_host):
             if candidate and candidate.strip():
                 return candidate.strip()

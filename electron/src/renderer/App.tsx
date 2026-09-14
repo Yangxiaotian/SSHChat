@@ -14,6 +14,7 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import StatusBar from './components/StatusBar';
 import LoginDialog from './components/LoginDialog';
+import { tryHandleUploadInviteLine } from './lib/pasteUpload';
 
 let audioCtx: AudioContext | null = null;
 function playNotificationSound(): void {
@@ -101,7 +102,7 @@ class RendererErrorBoundary extends Component<{ children: ReactNode; t: (key: st
 }
 
 export default function App() {
-  const { status, showLogin, theme, privacyMode, activeRoom, config, messages, rooms } = useChatStore();
+  const { status, showLogin, theme, privacyMode, activeRoom, config, messages, rooms, locale, toggleLocale } = useChatStore();
   const { t } = useTranslation();
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const loadedHistoryKey = React.useRef<string | null>(null);
@@ -114,15 +115,9 @@ export default function App() {
       if (config) {
         useChatStore.getState().setConfig(config);
         useChatStore.getState().setNickname(config.user);
-        if (config.host && config.user) {
-          useChatStore.getState().setShowLogin(false);
-          window.api.connect(config, config.user).then((result) => {
-            if (!result.success) {
-              useChatStore.getState().setError(result.error || t('app.autoReconnectFailed'));
-              useChatStore.getState().setShowLogin(true);
-            }
-          });
-        }
+        // Load saved values into the form, but never connect without an explicit user action.
+        // This gives the user a chance to correct an outdated host or port first.
+        useChatStore.getState().setShowLogin(true);
       }
     });
 
@@ -144,9 +139,29 @@ export default function App() {
         return;
       }
       useChatStore.getState().addMessage(message);
+      if (message.type === 'system') {
+        tryHandleUploadInviteLine(message.content);
+      }
+      const laterBody = message.content.trim();
+      const isLaterDeliver =
+        message.type === 'system' &&
+        (/^time capsule\s*[:：]/i.test(laterBody) ||
+          laterBody.startsWith('时间胶囊:') ||
+          laterBody.startsWith('时间胶囊：'));
+      const isPollAlert =
+        message.type === 'system' &&
+        (/started a poll\s*[:：]/i.test(laterBody) ||
+          /poll closed\s*[:：]/i.test(laterBody) ||
+          /^open poll\s*[:：]/i.test(laterBody) ||
+          laterBody.includes('发起投票：') ||
+          laterBody.includes('发起投票:') ||
+          laterBody.includes('投票已结束：') ||
+          laterBody.includes('投票已结束:') ||
+          laterBody.startsWith('进行中投票：') ||
+          laterBody.startsWith('进行中投票:'));
       const isPeerMessage = message.sender !== me && (message.type === 'chat' || message.type === 'pm' || message.type === 'game');
       const needAttention = isPeerMessage && (message.room !== currentRoom || !document.hasFocus());
-      if (needAttention) {
+      if (isLaterDeliver || isPollAlert || needAttention) {
         window.api.notifyAttention();
         playNotificationSound();
       }
@@ -289,6 +304,17 @@ export default function App() {
           <span className="titlebar-title">
             {privacyMode ? 'VsCodeEn' : `${t('app.title')}${status === 'connected' ? '' : ` (${t('status.disconnected')})`}`}
           </span>
+          <div className="titlebar-actions">
+            <button
+              type="button"
+              className="titlebar-language-button"
+              onClick={toggleLocale}
+              title={locale === 'zh' ? 'Switch to English' : '切换到中文'}
+              aria-label={locale === 'zh' ? 'Switch to English' : '切换到中文'}
+            >
+              {locale === 'zh' ? 'EN' : '中文'}
+            </button>
+          </div>
         </div>
 
         <div className="main-content">

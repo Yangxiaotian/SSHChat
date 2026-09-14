@@ -140,7 +140,8 @@ export class SSHManager {
       if (generation !== this.generation || stream !== this.stream) return;
       // Use StringDecoder to preserve multibyte UTF-8 characters across chunk boundaries.
       buffer += decoder.write(data);
-      const lines = buffer.split('\n');
+      // Windows tunnels / some SSH paths emit CRLF; split on either.
+      const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || '';
 
       for (const line of lines) {

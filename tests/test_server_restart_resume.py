@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from games import ChessGame, GoGame, GomokuGame, chess_available
+from games import ChessGame, GoGame, GomokuGame, chess_available, create_game
 import server
 from session_store import DisconnectedSeat, GameSessionStore
 from unittest.mock import patch
@@ -21,8 +21,14 @@ class ServerRestartResumeTests(unittest.TestCase):
         server.rooms.clear()
         server.room_owners.clear()
         server.room_announcements.clear()
+        server.room_polls.clear()
+        server.room_capsules.clear()
         server.room_games.clear()
         server.room_games_parked.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -171,6 +177,18 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(restored.ai_level, "hard")
         self.assertIsInstance(restored.white_conn, DisconnectedSeat)
 
+    def test_unpickleable_game_does_not_block_other_rooms(self) -> None:
+        good_room = "keep"
+        bad_room = "boom"
+        black = DummyConn()
+        good = GomokuGame(black, "zouyu")
+        server.room_games[good_room] = good
+        server.room_games[bad_room] = object()
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertIn(good_room, payload["room_games"])
+        self.assertNotIn(bad_room, payload["room_games"])
+
     def test_ended_games_are_not_persisted(self) -> None:
         room = "default"
         black = DummyConn()
@@ -203,7 +221,41 @@ class ServerRestartResumeTests(unittest.TestCase):
         self.assertEqual(server.room_game_authority[room], "Mathematics.local")
         self.assertEqual(server.room_game_tokens[room], "tok-abc")
 
-    def test_parked_game_survives_restart(self) -> None:
+    def test_ended_authority_tombstone_survives_restart(self) -> None:
+        """Auth without an active game must reload so stale peer gsync is rejected."""
+        room = "default"
+        server.room_game_authority[room] = "Mathematics.local"
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertNotIn(room, payload.get("room_games") or {})
+        self.assertEqual(payload["room_game_authority"].get(room), "Mathematics.local")
+        server.session_store.save(payload)
+
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server._load_persisted_sessions()
+
+        self.assertNotIn(room, server.room_games)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+
+    def test_ended_game_id_survives_restart(self) -> None:
+        room = "default"
+        token = "ended" + "0" * 27
+        server.room_game_authority[room] = "Mathematics.local"
+        server._remember_ended_game_locked(room, token)
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertEqual(payload["room_game_ended_ids"].get(token), room)
+        server.session_store.save(payload)
+
+        server.room_game_ended_ids.clear()
+        server.room_game_authority.clear()
+        server._load_persisted_sessions()
+
+        self.assertEqual(server.room_game_ended_ids.get(token), room)
+        self.assertEqual(server.room_game_authority[room], "Mathematics.local")
+
+    def test_parked_game_promoted_on_restart_when_room_idle(self) -> None:
         room = "default"
         host = DummyConn()
         game = GomokuGame(host, "parked-player")
@@ -215,9 +267,50 @@ class ServerRestartResumeTests(unittest.TestCase):
 
         server.room_games_parked.clear()
         server._load_persisted_sessions()
-        self.assertIn(room, server.room_games_parked)
-        self.assertEqual(server.room_games_parked[room].name, "gomoku")
-        self.assertEqual(server.room_games_parked[room].state, "waiting")
+        self.assertNotIn(room, server.room_games_parked)
+        self.assertIn(room, server.room_games)
+        self.assertEqual(server.room_games[room].name, "gomoku")
+        self.assertEqual(server.room_games[room].state, "waiting")
+
+    def test_parked_game_not_promoted_over_active(self) -> None:
+        room = "default"
+        host = DummyConn()
+        parked = GomokuGame(host, "parked-player")
+        active = GomokuGame(host, "active-player")
+        server.room_games[room] = active
+        server.room_games_parked[room] = parked
+        with server.lock:
+            restored = server._restore_idle_parked_games_locked()
+        self.assertEqual(restored, [])
+        self.assertIs(server.room_games[room], active)
+        self.assertIs(server.room_games_parked[room], parked)
+
+    def test_darkchess_with_socket_conns_persists(self) -> None:
+        import socket
+
+        room = "default"
+        first = socket.socket()
+        second = socket.socket()
+        try:
+            game = create_game("darkchess", first, "zouyu")
+            game.try_join(second, "yxt")
+            game.try_move(first, "flip 1 1")
+            server.room_games[room] = game
+            with server.lock:
+                payload = server._build_session_payload_locked()
+            self.assertIn(room, payload["room_games"])
+            server.session_store.save(payload)
+
+            server.room_games.clear()
+            server._load_persisted_sessions()
+            restored = server.room_games[room]
+            self.assertEqual(restored.name, "darkchess")
+            self.assertEqual(restored.state, "playing")
+            self.assertIsInstance(restored.first_conn, DisconnectedSeat)
+            self.assertIsInstance(restored.second_conn, DisconnectedSeat)
+        finally:
+            first.close()
+            second.close()
 
 
 if __name__ == "__main__":

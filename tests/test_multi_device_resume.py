@@ -1,6 +1,7 @@
 import unittest
+from unittest import mock
 
-from games import GomokuGame
+from games import GomokuGame, SanguoshaGame
 import server
 from session_store import DisconnectedSeat
 
@@ -37,6 +38,8 @@ class MultiDeviceResumeTests(unittest.TestCase):
         server.rooms.clear()
         server.room_owners.clear()
         server.room_announcements.clear()
+        server.room_polls.clear()
+        server.room_capsules.clear()
         server.room_games.clear()
         server.room_enabled_games.clear()
         server.disconnected_sessions.clear()
@@ -113,6 +116,37 @@ class MultiDeviceResumeTests(unittest.TestCase):
         self.assertTrue(moved)
         self.assertIs(game.players[0][0], new_conn)
 
+    def test_game_show_does_not_run_bot_nudge(self) -> None:
+        room = "default"
+        conn = DummyConn()
+        game = DummyGame(conn, "zouyu")
+        game.name = "gomoku"
+        game.show_calls = 0
+        game.nudge_calls = 0
+
+        def show(_conn=None, **_kwargs):
+            game.show_calls += 1
+            return ["board"]
+
+        def nudge_bots():
+            game.nudge_calls += 1
+            return ["ai moved"]
+
+        game.show = show  # type: ignore[method-assign]
+        game.nudge_bots = nudge_bots  # type: ignore[attr-defined]
+        server.clients[conn] = {
+            "name": "zouyu",
+            "rooms": {room},
+            "current_room": room,
+        }
+        server.rooms[room].add(conn)
+        server.room_games[room] = game
+        with mock.patch.object(server.federation, "get_hub", return_value=None):
+            server._handle_game(conn, "zouyu", room, "/game show")
+        self.assertEqual(game.show_calls, 1)
+        self.assertEqual(game.nudge_calls, 0)
+        self.assertTrue(any(b"board" in chunk for chunk in conn.sent))
+
     def test_reconnected_gomoku_player_can_continue_turn(self) -> None:
         room = "default"
         old_black = DummyConn()
@@ -138,6 +172,62 @@ class MultiDeviceResumeTests(unittest.TestCase):
         self.assertTrue(moved)
         self.assertEqual(priv, [])
         self.assertEqual(game.grid[7][7], 1)
+
+    def test_sanguo_seat_conn_by_name_finds_sgs_player(self) -> None:
+        host = DummyConn()
+        game = SanguoshaGame(host, "yxt")
+        game.try_join(DummyConn(), "bob")
+        self.assertIs(server._game_seat_conn_by_name(game, "yxt"), host)
+        self.assertIs(server._game_seat_conn_by_name(game, "bob"), game.players[1].conn)
+
+    def test_sanguo_terminal_resumes_host_seat_by_nickname(self) -> None:
+        room = "default"
+        phone = DummyConn()
+        terminal = DummyConn()
+        game = SanguoshaGame(phone, "yxt")
+        game.try_join(DummyConn(), "bob")
+
+        server.clients[phone] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.clients[terminal] = {
+            "name": "yxt",
+            "rooms": {room},
+            "current_room": room,
+        }
+        server.rooms[room].update({phone, terminal})
+
+        moved = server._resume_same_account_seat_locked(room, game, terminal, "yxt")
+        priv, _bcast, _ = game.try_move(terminal, "start")
+
+        self.assertTrue(moved)
+        self.assertIs(game.players[0].conn, terminal)
+        self.assertNotIn("你不是玩家", "\n".join(priv))
+
+    def test_sanguo_terminal_resumes_after_phone_disconnect(self) -> None:
+        room = "default"
+        phone = DummyConn()
+        terminal = DummyConn()
+        game = SanguoshaGame(phone, "yxt")
+        game.try_join(DummyConn(), "bob")
+
+        server.clients[phone] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room].add(phone)
+        server.room_games[room] = game
+
+        server.remove_client(phone)
+
+        server.clients[terminal] = {
+            "name": "yxt",
+            "rooms": {room},
+            "current_room": room,
+        }
+        server.rooms[room].add(terminal)
+
+        moved = server._resume_same_account_seat_locked(room, game, terminal, "yxt")
+        priv, _bcast, _ = game.try_move(terminal, "start")
+
+        self.assertTrue(moved)
+        self.assertIs(game.players[0].conn, terminal)
+        self.assertNotIn("你不是玩家", "\n".join(priv))
 
 
 if __name__ == "__main__":

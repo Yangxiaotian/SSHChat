@@ -144,6 +144,10 @@ export function extractRoomsFromSystem(message: string): string[] | null {
 }
 
 export function extractActiveRoom(message: string): string | null {
+  const explicit = message.match(/Active room\s+#([a-zA-Z0-9_-]{1,32})/i);
+  if (explicit) {
+    return explicit[1];
+  }
   const switchMatch = PATTERNS.ROOM_SWITCH.exec(message);
   if (switchMatch) {
     return switchMatch[1];

@@ -21,6 +21,37 @@ class I18nTests(unittest.TestCase):
         self.assertTrue(any("/lang" in line for line in zh))
         self.assertIn("command help", "".join(en).lower())
         self.assertIn("命令", "".join(zh))
+        en_text = "".join(en)
+        zh_text = "".join(zh)
+        self.assertIn("/canvas", en_text)
+        self.assertIn("/board", en_text)
+        self.assertIn("drawing board", en_text.lower())
+        self.assertIn("/canvas", zh_text)
+        self.assertIn("/board", zh_text)
+        self.assertIn("画板", zh_text)
+
+    def test_zh_help_wraps_under_mobile_utf8_byte_budget(self) -> None:
+        # Mobile SSH often soft-wraps near 80 UTF-8 bytes; mid-CJK splits truncate
+        # or show ???. Server uses library.wrap_output_lines for /help.
+        import library
+
+        budget = library.LIBRARY_WRAP_BYTES
+        self.assertGreater(budget, 0)
+        joined = []
+        for line in i18n.help_lines("zh"):
+            parts = library.wrap_output_lines(line)
+            self.assertTrue(parts)
+            for part in parts:
+                p = part.rstrip("\n")
+                self.assertLessEqual(len(p.encode("utf-8")), budget)
+                if p.startswith("[*] "):
+                    self.assertTrue(p.startswith("[*] "))
+                    joined.append(p[4:])
+                else:
+                    joined.append(p)
+        text = "".join(joined)
+        self.assertIn("发件人会收到汇总提示", text)
+        self.assertIn("按昵称分组编号", text)
 
     def test_game_help_lines(self) -> None:
         en = i18n.game_help_lines("en")
@@ -87,6 +118,29 @@ class I18nTests(unittest.TestCase):
                 "en",
             ),
             "  Last move: (8, 6)  (row col, 1-based, top-left is 1,1)",
+        )
+
+    def test_doushou_english_board_marks(self) -> None:
+        self.assertEqual(
+            i18n.localize_game_line("斗兽棋棋盘（7列×9行，+红 -黑，!上一步）", "en"),
+            "Animal Chess board (7×9, +Red -Black, !last move)",
+        )
+        row = i18n.localize_game_line(" 1  -狮 -虎 黑陷 黑穴 黑陷 -豹 -象", "en")
+        self.assertIn("-L", row)
+        self.assertIn("-T", row)
+        self.assertIn("-P", row)
+        self.assertIn("-E", row)
+        self.assertIn("bT", row)
+        self.assertIn("bD", row)
+        self.assertNotIn("狮", row)
+        self.assertNotIn("象", row)
+        self.assertEqual(
+            i18n.localize_game_line("象不能吃鼠。", "en"),
+            "Elephant cannot capture Rat.",
+        )
+        self.assertEqual(
+            i18n.localize_game_line("红方 Alice 走 鼠：(7,7) -> (6,7)，吃掉黑方象", "en"),
+            "Red Alice plays Rat:(7,7) -> (6,7), captures Black Elephant",
         )
 
     def test_env_default_override(self) -> None:

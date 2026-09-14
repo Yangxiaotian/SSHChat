@@ -123,6 +123,26 @@ assert len(room_transfer.download_tokens) == 3
 print(f"   ✓ Room transfer created for room: {room_transfer.room}")
 print(f"   ✓ Recipients: {', '.join(room_transfer.download_tokens.keys())}")
 
+# Test: unused links ignore past expiry timestamps (offline leave-safe)
+print("\n7. Unused links stay valid after nominal expiry...")
+transfer_old = store.create_upload_session(sender="alice", recipients=["bob"])
+transfer_old.upload_expires = time.time() - 3600
+transfer_old.download_expires = time.time() - 3600
+store._save()
+valid, _, error = store.validate_upload(transfer_old.upload_token, transfer_old.upload_key)
+assert valid, f"Unused upload should not expire: {error}"
+store.mark_upload_complete(
+    transfer_old.upload_token,
+    test_file,
+    os.path.getsize(test_file),
+    "old.txt",
+)
+bob_tok = transfer_old.download_tokens["bob"]
+bob_key = transfer_old.download_keys["bob"]
+valid, _, error = store.validate_download(bob_tok, bob_key)
+assert valid, f"Unused download should not expire: {error}"
+print("   ✓ Unused upload/download links remain valid")
+
 # Cleanup
 os.unlink(test_file)
 
