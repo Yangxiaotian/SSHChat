@@ -27,6 +27,10 @@ const COMMAND_KEYS = [
   { name: '/piano', key: 'input.commands.piano' },
   { name: '/clock', key: 'input.commands.clock' },
   { name: '/leave', key: 'input.commands.leave' },
+  { name: '/announce', key: 'input.commands.announce' },
+  { name: '/pad', key: 'input.commands.pad' },
+  { name: '/poll', key: 'input.commands.poll' },
+  { name: '/later', key: 'input.commands.later' },
   { name: '/clear', key: 'input.commands.clear' },
   { name: '/game', key: 'input.commands.game' },
   { name: '/news', key: 'input.commands.news' },
@@ -34,10 +38,6 @@ const COMMAND_KEYS = [
   { name: '/lib', key: 'input.commands.library' },
   { name: '/lang', key: 'input.commands.lang' },
   { name: '/dict', key: 'input.commands.dict' },
-  { name: '/announce', key: 'input.commands.announce' },
-  { name: '/pad', key: 'input.commands.pad' },
-  { name: '/poll', key: 'input.commands.poll' },
-  { name: '/later', key: 'input.commands.later' },
 ] as const;
 
 type SuggestionItem = { value: string; desc: string; source: 'command' | 'history' | 'mention' };
@@ -58,6 +58,60 @@ const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
 const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
 const USER_OR_ROOM_ARG_CMDS = new Set(['/msg', '/sendfile', '/file']);
 const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
+
+/** Subcommands for slash-command suggestions (keep in sync with client.py / mobile). */
+const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
+  '/game': [
+    'help', 'list', 'new', 'join', 'show', 'move', 'resign', 'undo', 'abort', 'end',
+    'on', 'off', 'seats', 'rating', 'pgn',
+  ],
+  '/news': ['中文', '国际', '科技', 'all', 'detail', '详情', 'fetch', '全文'],
+  '/library': [
+    'open', 'read', 'next', 'n', 'prev', 'p', 'page', 'find', 'search',
+    'bookmarks', 'bookmark', 'reset', 'close', 'info', 'show', 'help',
+  ],
+  '/lib': [
+    'open', 'read', 'next', 'n', 'prev', 'p', 'page', 'find', 'search',
+    'bookmarks', 'bookmark', 'reset', 'close', 'info', 'show', 'help',
+  ],
+  '/dict': ['en', 'cn', 'hh', 'help', '英', '中', '汉'],
+  '/dnd': ['on', 'off'],
+  '/lang': ['en', 'zh', 'english', 'chinese', '中文', '英文'],
+  '/language': ['en', 'zh', 'english', 'chinese', '中文', '英文'],
+  '/pad': ['clear', 'help', 'show'],
+  '/poll': ['new', 'close', 'help', 'show'],
+  '/later': ['list', 'ls', 'show', 'cancel', 'help'],
+  '/clock': ['help', 'close', 'new'],
+};
+
+function subcommandSuggestions(value: string): SuggestionItem[] {
+  if (!value.startsWith('/')) return [];
+  const trailingSpace = value.endsWith(' ');
+  const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const cmd = parts[0].toLowerCase();
+  const subs = SUBCOMMANDS_BY_CMD[cmd];
+  if (!subs?.length) return [];
+
+  if (trailingSpace && parts.length === 1) {
+    return subs.map((sub) => ({
+      value: `${parts[0]} ${sub}`,
+      desc: 'subcommand',
+      source: 'command' as const,
+    }));
+  }
+  if (parts.length === 2 && !trailingSpace) {
+    const prefix = parts[1].toLowerCase();
+    return subs
+      .filter((sub) => sub.toLowerCase().startsWith(prefix))
+      .map((sub) => ({
+        value: `${parts[0]} ${sub}`,
+        desc: 'subcommand',
+        source: 'command' as const,
+      }));
+  }
+  return [];
+}
 
 function uniqKeepOrder(items: string[]): string[] {
   const seen = new Set<string>();
@@ -157,6 +211,9 @@ function buildSuggestions(
         source: 'command' as const,
       }));
   }
+
+  const subItems = subcommandSuggestions(value);
+  if (subItems.length) return subItems;
 
   const nameItems = nameArgSuggestions(value, rooms, users);
   if (nameItems.length) return nameItems;
@@ -264,16 +321,20 @@ export default function InputBar() {
 
   const refreshSuggestions = (value: string) => {
     const mentions = buildMentionSuggestions(value, users, nickname);
-    const merged = (mentions.length > 0
+    const built = mentions.length > 0
       ? mentions
-      : buildSuggestions(value, commands, history, t('common.recentInput'), roomNames, users)).slice(0, 10);
+      : buildSuggestions(value, commands, history, t('common.recentInput'), roomNames, users);
+    // Top-level "/" matches many commands; keep enough room for /pad /poll /later etc.
+    const limit = value === '/' || (value.startsWith('/') && !value.includes(' ')) ? 30 : 10;
+    const merged = built.slice(0, limit);
     setSuggestions(merged);
     setActiveSuggestion(0);
     const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
     const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
+    const isSubCommand = subcommandSuggestions(value).length > 0;
     const isNameArgCommand = nameArgSuggestions(value, roomNames, users).length > 0;
     setShowSuggestions(
-      mentions.length > 0 || isTopLevelCommand || isGameUndoCommand || isNameArgCommand
+      mentions.length > 0 || isTopLevelCommand || isGameUndoCommand || isSubCommand || isNameArgCommand
         ? merged.length > 0
         : merged.length > 0 && value.trim().length > 0,
     );
@@ -298,6 +359,7 @@ export default function InputBar() {
     const canTabComplete =
       (value.startsWith('/') && !value.includes(' ')) ||
       value.toLowerCase().startsWith('/game undo') ||
+      subcommandSuggestions(value).length > 0 ||
       nameArgSuggestions(value, roomNames, users).length > 0;
 
     if (e.key === 'Tab' && canTabComplete) {
