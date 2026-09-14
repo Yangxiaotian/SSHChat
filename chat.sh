@@ -8,8 +8,23 @@ if [[ -f "$DIR/sshchat.env" ]]; then
 fi
 PY="$DIR/venv/bin/python"
 [[ -x "$PY" ]] || PY=python3
+
+# Run client.py. When SSH did not allocate a TTY (e.g. ``ssh host free`` without
+# -t), wrap in a PTY so prompt_toolkit Tab-complete and /cls keep working.
+run_client() {
+  if [[ -t 0 && -t 1 ]]; then
+    "$PY" "$DIR/client.py"
+    return $?
+  fi
+  "$PY" -c '
+import os, pty, sys
+status = pty.spawn([sys.argv[1], sys.argv[2]])
+raise SystemExit(os.waitstatus_to_exitcode(status))
+' "$PY" "$DIR/client.py"
+}
+
 while true; do
-  "$PY" "$DIR/client.py"
+  run_client
   rc=$?
   if [[ "$rc" -eq 75 ]]; then
     echo "[INFO] reconnecting in 1s ..."
