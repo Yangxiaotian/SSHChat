@@ -1102,6 +1102,12 @@ done
 install -m 0755 -d "$PREFIX/scripts"
 copy_app_file "$SCRIPT_DIR/scripts/ensure-federation-user.sh" "$PREFIX/scripts/ensure-federation-user.sh"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh" "$PREFIX/scripts/ensure-federation-user.sh"
+# So ``ssh user@localhost free`` still gets a TTY (Tab completion). Client-side.
+if [[ -d /etc/ssh/ssh_config.d && -f "$SCRIPT_DIR/ssh/sshchat-request-tty.conf" ]]; then
+  cp "$SCRIPT_DIR/ssh/sshchat-request-tty.conf" /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf
+  chmod 644 /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf
+  echo "info: installed /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf (RequestTTY yes for localhost)" >&2
+fi
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
