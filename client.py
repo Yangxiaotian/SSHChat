@@ -986,6 +986,79 @@ def _pad_editor_argv(editor: str, pad_path: str = "", lock_rc: str = "") -> list
     return cmd
 
 
+def _snapshot_tty_attrs():
+    """Save stdin termios so we can restore after an external editor."""
+    try:
+        import termios
+
+        if not sys.stdin.isatty():
+            return None
+        return termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return None
+
+
+def _restore_tty_after_editor(attrs) -> None:
+    """Undo vim/nano terminal damage so prompt_toolkit can take input again.
+
+    After :wq (especially with a large paste), vim may leave bracketed-paste /
+    mouse / alt-screen modes on; the next prompt then looks alive but /names
+    and other commands appear dead.
+    """
+    try:
+        import termios
+
+        if attrs is not None and sys.stdin.isatty():
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attrs)
+    except Exception:
+        pass
+    # Belt-and-suspenders when termios restore is incomplete (common on SSH PTYs).
+    try:
+        if sys.stdin.isatty() and shutil.which("stty"):
+            subprocess.call(
+                ["stty", "sane"],
+                stdin=sys.stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception:
+        pass
+    real = _get_real_stdout() or sys.stdout
+    try:
+        # Leave alt screen, disable mouse / bracketed paste, show cursor, reset SGR.
+        seq = (
+            b"\x1b[?1049l"  # alt screen off
+            b"\x1b[?2004l"  # bracketed paste off
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"  # mouse off
+            b"\x1b[?25h"  # cursor on
+            b"\x1b[0m\r\n"
+        )
+        if hasattr(real, "buffer"):
+            real.buffer.write(seq)
+            real.flush()
+        else:
+            real.write(seq.decode("ascii"))
+            real.flush()
+    except Exception:
+        pass
+    try:
+        from prompt_toolkit.application import get_app_or_none
+
+        app = get_app_or_none()
+        if app is not None:
+            try:
+                app.renderer.reset()
+            except Exception:
+                pass
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _clear_stdout_proxy_pending()
+
+
 def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
     editor = _pick_pad_editor()
     if not editor:
@@ -1018,6 +1091,8 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
 
     path = ""
     lock_rc = ""
+    tty_attrs = None
+    new_text: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -1043,7 +1118,11 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         _clear_stdout_proxy_pending()
         sys.stdout.flush()
         sys.stderr.flush()
-        rc = subprocess.call(cmd + [path])
+        tty_attrs = _snapshot_tty_attrs()
+        try:
+            rc = subprocess.call(cmd + [path])
+        finally:
+            _restore_tty_after_editor(tty_attrs)
         if rc != 0:
             print(f"[*] Editor exited with code {rc}; pad not uploaded.")
             return
@@ -1060,6 +1139,8 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
                 except OSError:
                     pass
 
+    if new_text is None:
+        return
     if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
         "\r\n", "\n"
     ).replace("\r", "\n").rstrip("\n"):
