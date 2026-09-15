@@ -2104,7 +2104,11 @@ class FilePublicReachabilityTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 f.write("https://fresh-boot-host.trycloudflare.com\n")
             with mock.patch.dict(
-                os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}
+                os.environ,
+                {
+                    "SSHCHAT_CLOUDFLARED_URL_FILE": path,
+                    "SSHCHAT_CF_URL_REQUIRE_DNS": "0",
+                },
             ):
                 self.assertEqual(
                     fhs.live_cloudflare_base_url(),
@@ -2122,6 +2126,30 @@ class FilePublicReachabilityTests(unittest.TestCase):
                     "https://fresh-boot-host.trycloudflare.com",
                 )
                 self.assertEqual(srv.get_public_host(), "fresh-boot-host.trycloudflare.com")
+        finally:
+            os.unlink(path)
+
+    def test_dead_live_cloudflare_latch_ignored_when_dns_fails(self) -> None:
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("https://dead-latch-host.trycloudflare.com\n")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_CLOUDFLARED_URL_FILE": path,
+                    "SSHCHAT_CF_URL_REQUIRE_DNS": "1",
+                },
+            ):
+                with mock.patch.object(
+                    fhs, "_trycloudflare_host_resolves", return_value=False
+                ):
+                    fhs._live_cf_url_cache = (0.0, "", None)
+                    self.assertIsNone(fhs.live_cloudflare_base_url())
         finally:
             os.unlink(path)
 

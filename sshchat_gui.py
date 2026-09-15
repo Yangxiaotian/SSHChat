@@ -2075,6 +2075,7 @@ class SSHChatGUI:
         self._expecting_own_canvas = False
         self._expecting_own_piano = False
         self._open_piano_tokens: set[str] = set()
+        self._open_canvas_tokens: set[str] = set()
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
@@ -3964,6 +3965,20 @@ class SSHChatGUI:
             return False
         url, key = m.group(1), m.group(2).upper()
         self._refresh_canvas_open_keys(url, key)
+        try:
+            tok = _canvas_token_from_url(url)[1]
+        except ValueError:
+            tok = ""
+        # Quick Tunnel hostname churn: server re-sends invite; reopen if we
+        # already had this board open so the old trycloudflare tab is abandoned.
+        if tok and tok in self._open_canvas_tokens:
+            self._expecting_own_canvas = False
+            self._open_native_canvas(
+                url,
+                key,
+                notice="[*] 画布公网地址已更新，已用新链接重新打开",
+            )
+            return True
         own = self._expecting_own_canvas
         self._expecting_own_canvas = False
         if own:
@@ -4109,15 +4124,27 @@ class SSHChatGUI:
                 f"[*] 已接收: {name}（显示失败: {e}）", local_sent=True
             )
 
-    def _open_native_canvas(self, url: str, key: str) -> None:
+    def _open_native_canvas(
+        self, url: str, key: str, *, notice: str | None = None
+    ) -> None:
         # Excalidraw board is the web page; #k= autofills client-side only.
+        try:
+            tok = _canvas_token_from_url(url)[1]
+        except ValueError:
+            tok = ""
+        ok_msg = notice or "[*] 已打开共享画布"
+        browser_msg = notice or "[*] 已在系统浏览器打开共享画布"
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
-                self._append_chat_line("[*] 已打开共享画布", local_sent=True)
+                if tok:
+                    self._open_canvas_tokens.add(tok)
+                self._append_chat_line(ok_msg, local_sent=True)
             else:
                 webbrowser.open(target)
-                self._append_chat_line("[*] 已在系统浏览器打开共享画布", local_sent=True)
+                if tok:
+                    self._open_canvas_tokens.add(tok)
+                self._append_chat_line(browser_msg, local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
@@ -4512,6 +4539,7 @@ class SSHChatGUI:
         self._expecting_names = False
         self._expecting_own_piano = False
         self._open_piano_tokens.clear()
+        self._open_canvas_tokens.clear()
         if clear_log:
             self._rooms_order = ["default"]
             self._active_room = "default"

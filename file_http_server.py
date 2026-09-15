@@ -97,6 +97,26 @@ def _detect_lan_ip() -> str:
 # Written by sshchat-cloudflared on each Quick Tunnel start (boot/deploy/restart).
 DEFAULT_CLOUDFLARED_URL_FILE = "/var/lib/sshchat/cloudflared/public_url"
 
+# (expiry_monotonic, latch_raw, validated_or_none) — avoid DNS on every get_base_url().
+_live_cf_url_cache: tuple[float, str, Optional[str]] = (0.0, "", None)
+_LIVE_CF_DNS_CACHE_SEC = 15.0
+
+
+def _trycloudflare_host_resolves(host: str, *, timeout: float = 1.5) -> bool:
+    """True when *host* still has DNS (Quick Tunnel names vanish when the tunnel dies)."""
+    host = (host or "").strip().rstrip(".")
+    if not host:
+        return False
+    prev = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        return True
+    except OSError:
+        return False
+    finally:
+        socket.setdefaulttimeout(prev)
+
 
 def live_cloudflare_base_url(
     path: Optional[str] = None,
@@ -105,7 +125,11 @@ def live_cloudflare_base_url(
 
     Prefer this over process env: after reboot the tunnel hostname changes, but
     a long-lived server may still hold the previous SSHCHAT_FILE_PUBLIC_HOST.
+
+    When SSHCHAT_CF_URL_REQUIRE_DNS is not 0 (default), ignore a latch whose
+    hostname no longer resolves — otherwise invites keep pointing at NXDOMAIN.
     """
+    global _live_cf_url_cache
     url_path = (
         (path or "").strip()
         or os.environ.get("SSHCHAT_CLOUDFLARED_URL_FILE", "").strip()
@@ -115,9 +139,22 @@ def live_cloudflare_base_url(
         with open(url_path, "r", encoding="utf-8") as f:
             raw = (f.read() or "").strip()
     except OSError:
+        _live_cf_url_cache = (0.0, "", None)
         return None
-    if re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+    if not re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+        return None
+    require_dns = os.environ.get("SSHCHAT_CF_URL_REQUIRE_DNS", "1").strip().lower()
+    if require_dns in ("0", "false", "no"):
         return raw
+    now = time.monotonic()
+    exp, cached_raw, cached_result = _live_cf_url_cache
+    if cached_raw == raw and now < exp:
+        return cached_result
+    host = raw[len("https://") :]
+    if _trycloudflare_host_resolves(host):
+        _live_cf_url_cache = (now + _LIVE_CF_DNS_CACHE_SEC, raw, raw)
+        return raw
+    _live_cf_url_cache = (now + _LIVE_CF_DNS_CACHE_SEC, raw, None)
     return None
 
 

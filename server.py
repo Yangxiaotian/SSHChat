@@ -3986,10 +3986,32 @@ def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
     except Exception as e:
         print(f"[Canvas] refresh_host_base_url error: {e!r}")
         return
-    if n:
-        print(
-            f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
-        )
+    if not n:
+        return
+    print(
+        f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
+    )
+    # Clients still hold the old trycloudflare invite; push fresh URLs.
+    host = (node_id or "").strip()
+    try:
+        with canvas_sharing.canvas_store.lock:
+            sessions = [
+                s
+                for s in canvas_sharing.canvas_store.sessions.values()
+                if not s.closed
+                and not s.parked
+                and (s.host_node or "").strip() == host
+            ]
+        for session in sessions:
+            try:
+                _deliver_canvas_invites(session, refreshed=True)
+            except Exception as e:
+                print(
+                    f"[Canvas] re-invite after peer CF change failed "
+                    f"({session.session_id[:12]}…): {e!r}"
+                )
+    except Exception as e:
+        print(f"[Canvas] peer CF re-invite sweep failed: {e!r}")
 
 
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
@@ -4910,14 +4932,21 @@ def _canvas_invite_message(
     key: str,
     room: Optional[str],
     title: str = "",
+    refreshed: bool = False,
 ) -> str:
     where = f"房间 #{room}" if room else "私密画布"
     title_line = f"[*] 标题: {title}\n" if title else ""
+    refresh_line = (
+        "[*] 公网地址已更新（旧 trycloudflare 链接已失效，请用下面新网址）\n"
+        if refreshed
+        else ""
+    )
     return (
         f"[*] ========== 共享画布 ==========\n"
         f"[*] 发起人: {creator}\n"
         f"[*] 范围: {where}\n"
         f"{title_line}"
+        f"{refresh_line}"
         f"[*]\n"
         f"[*] 画布网址:\n"
         f"[*] {url}\n"
@@ -4934,10 +4963,91 @@ def _canvas_invite_message(
     )
 
 
+_LAST_CANVAS_PUBLIC_BASE = ""
+
+
+def _canvas_public_base_state_path() -> str:
+    return (
+        os.environ.get("SSHCHAT_CANVAS_PUBLIC_BASE_FILE", "").strip()
+        or "/var/lib/sshchat/cloudflared/last_canvas_invite_base"
+    )
+
+
+def _load_last_canvas_public_base() -> str:
+    try:
+        with open(_canvas_public_base_state_path(), "r", encoding="utf-8") as f:
+            return (f.read() or "").strip().rstrip("/")
+    except OSError:
+        return ""
+
+
+def _save_last_canvas_public_base(base: str) -> None:
+    path = _canvas_public_base_state_path()
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write((base or "").strip().rstrip("/") + "\n")
+    except OSError as e:
+        print(f"[Canvas] could not save public base state: {e!r}")
+
+
+def _rediscover_canvas_invites_for_public_change(reason: str = "") -> int:
+    """Re-send canvas URL+key to participants when the public base URL moves."""
+    try:
+        with canvas_sharing.canvas_store.lock:
+            sessions = [
+                s
+                for s in canvas_sharing.canvas_store.sessions.values()
+                if not s.closed and not s.parked
+            ]
+    except Exception as e:
+        print(f"[Canvas] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_canvas_invites(session, refreshed=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Canvas] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Canvas] re-delivered invites for {n} board(s){suffix}")
+    return n
+
+
+def _maybe_refresh_canvas_invites_on_public_change(
+    cur: str, *, reason: str
+) -> None:
+    """If live public base changed since last invite wave, re-deliver + csync."""
+    global _LAST_CANVAS_PUBLIC_BASE
+    cur = (cur or "").strip().rstrip("/")
+    prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
+    if not cur:
+        return
+    if cur == prev:
+        _LAST_CANVAS_PUBLIC_BASE = cur
+        return
+    _rediscover_canvas_invites_for_public_change(reason)
+    try:
+        _federation_push_all_canvas_announces()
+    except Exception as e:
+        print(f"[Canvas] csync after public change failed: {e!r}")
+    _LAST_CANVAS_PUBLIC_BASE = cur
+    _save_last_canvas_public_base(cur)
+
+
 def _deliver_canvas_invites(
     session: canvas_sharing.CanvasSession,
     *,
     only: Optional[str] = None,
+    refreshed: bool = False,
 ) -> None:
     """Privately deliver each participant their canvas URL + key.
 
@@ -4951,44 +5061,54 @@ def _deliver_canvas_invites(
             if live is not None:
                 session.keys = dict(live.keys)
                 session.keys_rotated_at = live.keys_rotated_at
-    base_url = (session.host_base_url or "").strip()
     hub = federation.get_hub()
-    # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
-    # latest fpub so invites survive Quick Tunnel hostname churn.
-    if session.host_node and hub is not None and hub.enabled:
-        live = hub.get_remote_file_public(session.host_node)
-        host = (session.host_node or "").strip()
-        host_up = _canvas_host_reachable(host)
-        candidate = (live or base_url or "").strip().rstrip("/")
-        # Peer gone, or still listed but Quick Tunnel DNS is already dead:
-        # take over on this node's Cloudflare when available.
-        need_claim = (not host_up) or (
-            bool(candidate)
-            and candidate.endswith(".trycloudflare.com")
-            and not _trycloudflare_url_resolves(candidate)
-        )
-        if need_claim:
-            claimed = _try_claim_canvas_locally(session)
-            if claimed is not None:
-                session = claimed
-                base_url = ""
-                try:
-                    _federation_push_canvas_announce(session)
-                except Exception as e:
-                    print(f"[Canvas] csync after local claim failed: {e!r}")
-            elif live:
-                base_url = live
-        elif live:
-            base_url = live
-            if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
-                canvas_sharing.canvas_store.refresh_host_base_url(
-                    session.host_node, live
-                )
-                session.host_base_url = live
-    if not base_url:
+    base_url = ""
+    # Local boards always use the live FileHTTP/CF URL — never a frozen
+    # host_base_url from an earlier Quick Tunnel hostname.
+    if not (session.host_node or "").strip():
         if file_http is None:
             return
-        base_url = file_http.get_base_url()
+        base_url = (file_http.get_base_url() or "").strip()
+    else:
+        base_url = (session.host_base_url or "").strip()
+        # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
+        # latest fpub so invites survive Quick Tunnel hostname churn.
+        if hub is not None and hub.enabled:
+            live = hub.get_remote_file_public(session.host_node)
+            host = (session.host_node or "").strip()
+            host_up = _canvas_host_reachable(host)
+            candidate = (live or base_url or "").strip().rstrip("/")
+            # Peer gone, or still listed but Quick Tunnel DNS is already dead:
+            # take over on this node's Cloudflare when available.
+            need_claim = (not host_up) or (
+                bool(candidate)
+                and candidate.endswith(".trycloudflare.com")
+                and not _trycloudflare_url_resolves(candidate)
+            )
+            if need_claim:
+                claimed = _try_claim_canvas_locally(session)
+                if claimed is not None:
+                    session = claimed
+                    base_url = ""
+                    try:
+                        _federation_push_canvas_announce(session)
+                    except Exception as e:
+                        print(f"[Canvas] csync after local claim failed: {e!r}")
+                elif live:
+                    base_url = live
+            elif live:
+                base_url = live
+                if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
+                    canvas_sharing.canvas_store.refresh_host_base_url(
+                        session.host_node, live
+                    )
+                    session.host_base_url = live
+        if not base_url:
+            if file_http is None:
+                return
+            base_url = file_http.get_base_url()
+    if not base_url:
+        return
     base_url = base_url.rstrip("/")
     only_key = (only or "").strip().lower()
     for participant, token in session.tokens.items():
@@ -5002,6 +5122,7 @@ def _deliver_canvas_invites(
             key=key,
             room=session.room,
             title=session.title,
+            refreshed=refreshed,
         )
         recipient_lower = participant.lower()
         delivered = False
@@ -5231,8 +5352,12 @@ def _federation_push_all_canvas_announces() -> None:
     for ann in canvas_sharing.canvas_store.list_open_room_announces(
         local_node_id=hub.node_id
     ):
-        if not ann.get("base_url") and file_http is not None:
-            ann["base_url"] = file_http.get_base_url().rstrip("/")
+        # Always prefer live CF/public URL — frozen host_base_url goes stale
+        # whenever Quick Tunnel restarts.
+        if file_http is not None:
+            live = (file_http.get_base_url() or "").strip().rstrip("/")
+            if live:
+                ann["base_url"] = live
         if not ann.get("base_url"):
             continue
         try:
@@ -9250,13 +9375,16 @@ def run_server() -> int:
                         if cur != last:
                             last = cur
                             _federation_sync_file_public()
-                            # Room canvas invites embed the CF hostname; re-csync
-                            # so peers rewrite frozen host_base_url mirrors.
+                            # Room canvas invites embed the CF hostname; re-send
+                            # private invites + csync so clients/peers leave the
+                            # dead trycloudflare URL behind.
                             try:
-                                _federation_push_all_canvas_announces()
+                                _maybe_refresh_canvas_invites_on_public_change(
+                                    cur, reason="cf-watch"
+                                )
                             except Exception as e:
                                 print(
-                                    f"[FileTransfer] canvas announce refresh "
+                                    f"[FileTransfer] canvas invite refresh "
                                     f"after CF change failed: {e}"
                                 )
                             if cur:
@@ -9268,6 +9396,26 @@ def run_server() -> int:
 
             threading.Thread(
                 target=_file_public_watch_task, daemon=True, name="file-public-watch"
+            ).start()
+
+            # After sshchat bounce (cloudflared writes a new Quick Tunnel then
+            # restarts us), open boards still have participants on the old URL.
+            def _boot_canvas_public_refresh():
+                time.sleep(2)
+                if _shutdown_requested:
+                    return
+                try:
+                    cur = _fed_local_file_public()
+                    _maybe_refresh_canvas_invites_on_public_change(
+                        cur, reason="boot"
+                    )
+                except Exception as e:
+                    print(f"[Canvas] boot public refresh failed: {e!r}")
+
+            threading.Thread(
+                target=_boot_canvas_public_refresh,
+                daemon=True,
+                name="canvas-public-boot",
             ).start()
             
             # Start cleanup task for expired transfers
