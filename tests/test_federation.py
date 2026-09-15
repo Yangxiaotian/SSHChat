@@ -2105,11 +2105,10 @@ class FilePublicReachabilityTests(unittest.TestCase):
                 f.write("https://fresh-boot-host.trycloudflare.com\n")
             with mock.patch.dict(
                 os.environ,
-                {
-                    "SSHCHAT_CLOUDFLARED_URL_FILE": path,
-                    "SSHCHAT_CF_URL_REQUIRE_DNS": "0",
-                },
+                {"SSHCHAT_CLOUDFLARED_URL_FILE": path},
+                clear=False,
             ):
+                os.environ.pop("SSHCHAT_CF_URL_REQUIRE_DNS", None)
                 self.assertEqual(
                     fhs.live_cloudflare_base_url(),
                     "https://fresh-boot-host.trycloudflare.com",
@@ -2129,7 +2128,45 @@ class FilePublicReachabilityTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_dead_live_cloudflare_latch_ignored_when_dns_fails(self) -> None:
+    def test_live_cloudflare_latch_kept_when_dns_fails(self) -> None:
+        """Local DNS blips must not drop the latch (would fall back to LAN IP)."""
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("https://latch-host.trycloudflare.com\n")
+            with mock.patch.dict(
+                os.environ,
+                {"SSHCHAT_CLOUDFLARED_URL_FILE": path},
+                clear=False,
+            ):
+                os.environ.pop("SSHCHAT_CF_URL_REQUIRE_DNS", None)
+                with mock.patch.object(
+                    fhs, "_trycloudflare_host_resolves", return_value=False
+                ):
+                    fhs._live_cf_url_cache = (0.0, "", None)
+                    self.assertEqual(
+                        fhs.live_cloudflare_base_url(),
+                        "https://latch-host.trycloudflare.com",
+                    )
+                    srv = fhs.FileHTTPServer(
+                        host="127.0.0.1",
+                        port=8443,
+                        use_https=False,
+                        public_host="stale-old-host.trycloudflare.com",
+                        public_port=443,
+                    )
+                    self.assertEqual(
+                        srv.get_base_url(),
+                        "https://latch-host.trycloudflare.com",
+                    )
+        finally:
+            os.unlink(path)
+
+    def test_require_dns_can_still_ignore_dead_latch(self) -> None:
         import tempfile
         import file_http_server as fhs
 
@@ -2153,8 +2190,8 @@ class FilePublicReachabilityTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_stale_trycloudflare_env_ignored_without_live_file(self) -> None:
-        """Tunnel restart deletes public_url; do not keep serving the dead hostname."""
+    def test_trycloudflare_env_kept_without_live_file(self) -> None:
+        """Missing latch: keep configured CF host (do not demote to LAN IP)."""
         import tempfile
         import file_http_server as fhs
 
@@ -2167,11 +2204,13 @@ class FilePublicReachabilityTests(unittest.TestCase):
                     host="127.0.0.1",
                     port=8443,
                     use_https=False,
-                    public_host="dead-old-host.trycloudflare.com",
+                    public_host="env-host.trycloudflare.com",
                     public_port=443,
                 )
-                self.assertEqual(srv.get_public_host(), "10.0.0.9")
-                self.assertEqual(srv.get_base_url(), "http://10.0.0.9:8443")
+                self.assertEqual(srv.get_public_host(), "env-host.trycloudflare.com")
+                self.assertEqual(
+                    srv.get_base_url(), "https://env-host.trycloudflare.com"
+                )
 
 
 class FederationSendQueueTests(unittest.TestCase):

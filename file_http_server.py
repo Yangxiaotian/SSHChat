@@ -97,7 +97,7 @@ def _detect_lan_ip() -> str:
 # Written by sshchat-cloudflared on each Quick Tunnel start (boot/deploy/restart).
 DEFAULT_CLOUDFLARED_URL_FILE = "/var/lib/sshchat/cloudflared/public_url"
 
-# (expiry_monotonic, latch_raw, validated_or_none) — avoid DNS on every get_base_url().
+# (expiry_monotonic, latch_raw, validated_or_none) — only used when DNS is required.
 _live_cf_url_cache: tuple[float, str, Optional[str]] = (0.0, "", None)
 _LIVE_CF_DNS_CACHE_SEC = 15.0
 
@@ -126,8 +126,9 @@ def live_cloudflare_base_url(
     Prefer this over process env: after reboot the tunnel hostname changes, but
     a long-lived server may still hold the previous SSHCHAT_FILE_PUBLIC_HOST.
 
-    When SSHCHAT_CF_URL_REQUIRE_DNS is not 0 (default), ignore a latch whose
-    hostname no longer resolves — otherwise invites keep pointing at NXDOMAIN.
+    Trust the latch by default (local DNS blips / Clash fake-ip must not demote
+    invites to a LAN IP). Set SSHCHAT_CF_URL_REQUIRE_DNS=1 to ignore a latch
+    whose hostname no longer resolves.
     """
     global _live_cf_url_cache
     url_path = (
@@ -143,8 +144,8 @@ def live_cloudflare_base_url(
         return None
     if not re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
         return None
-    require_dns = os.environ.get("SSHCHAT_CF_URL_REQUIRE_DNS", "1").strip().lower()
-    if require_dns in ("0", "false", "no"):
+    require_dns = os.environ.get("SSHCHAT_CF_URL_REQUIRE_DNS", "0").strip().lower()
+    if require_dns not in ("1", "true", "yes"):
         return raw
     now = time.monotonic()
     exp, cached_raw, cached_result = _live_cf_url_cache
@@ -1726,6 +1727,8 @@ class FileHTTPServer:
 
         Live Cloudflare Quick Tunnel URLs (public_url file) win over env, so a
         boot-time tunnel refresh is visible without waiting for a process restart.
+        Never demote a *.trycloudflare.com host to a LAN IP — keep CF and prefer
+        the live latch so the hostname stays current.
         """
         live = live_cloudflare_base_url()
         if live:
@@ -1738,12 +1741,6 @@ class FileHTTPServer:
         else:
             protocol = "https" if self.use_https else "http"
         host = self._configured_public_host()
-        # Quick Tunnel hostnames die when the helper restarts; without a live
-        # public_url latch, never keep handing out the stale env hostname.
-        if host.endswith(".trycloudflare.com"):
-            host = _detect_lan_ip()
-            port = self.port
-            protocol = "https" if self.use_https else "http"
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"
@@ -1756,10 +1753,7 @@ class FileHTTPServer:
             host = (urlparse(live).hostname or "").strip()
             if host:
                 return host
-        host = self._configured_public_host()
-        if host.endswith(".trycloudflare.com"):
-            return _detect_lan_ip()
-        return host
+        return self._configured_public_host()
 
     def _configured_public_host(self) -> str:
         for candidate in (self.domain, self.public_host):
