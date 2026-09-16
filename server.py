@@ -1742,6 +1742,11 @@ def _conn_needs_seat_swap(conn) -> bool:
 
 
 def _pickle_game_for_storage(game) -> bytes:
+    if isinstance(game, list):
+        return pickle.dumps(
+            [_loads_prepared_game(g) for g in game if g is not None],
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
     swaps: list[tuple[DisconnectedSeat, object]] = []
     for conn, name in _iter_game_conn_seats(game):
         if not _conn_needs_seat_swap(conn):
@@ -1763,7 +1768,16 @@ def _pickle_game_for_storage(game) -> bytes:
             _replace_conn_refs(game, seat, conn)
 
 
+def _loads_prepared_game(game):
+    """Return a picklable snapshot of one game (DisconnectedSeat + no rating_store)."""
+    return pickle.loads(_pickle_game_for_storage(game))
+
+
 def _rebind_game_services(game) -> None:
+    if isinstance(game, list):
+        for g in game:
+            _rebind_game_services(g)
+        return
     if hasattr(game, "rating_store"):
         game.rating_store = rating_store
     if getattr(game, "name", "") == "xiangqi":
@@ -1811,11 +1825,18 @@ def _build_session_payload_locked() -> dict[str, object]:
             continue
         games_blob[room] = base64.b64encode(raw).decode("ascii")
     parked_blob: dict[str, str] = {}
-    for room, game in room_games_parked.items():
-        if game is None or getattr(game, "state", "ended") == "ended":
+    for room, parked in room_games_parked.items():
+        games_list = [
+            g
+            for g in _parked_games_list(parked)
+            if g is not None and getattr(g, "state", "ended") != "ended"
+        ]
+        if not games_list:
             continue
         try:
-            raw = _pickle_game_for_storage(game)
+            # Persist stack as-is (single game or list) so multi-kind parks survive.
+            to_store: object = games_list[0] if len(games_list) == 1 else games_list
+            raw = _pickle_game_for_storage(to_store)
         except Exception as e:
             print(f"skip persisting parked room {room!r} game: {e!r}")
             continue
@@ -7000,7 +7021,8 @@ def _federation_notify_game_end(room: str) -> None:
             _remember_ended_game_locked(room, token)
         room_game_authority[room] = local
         room_game_provisional.discard(room)
-        room_games_parked.pop(room, None)
+        # Keep parked forks: ending the *active* session must not erase a
+        # different game kind parked by a prior federation conflict.
     _persist_after_game_change()
     if hub is None or not hub.enabled:
         return
@@ -7017,6 +7039,12 @@ def _game_progress_score(game) -> int:
     ply = getattr(game, "_xq_ply_log", None)
     if isinstance(ply, list):
         return len(ply)
+    face_up = getattr(game, "face_up", None)
+    if isinstance(face_up, (set, list, tuple)):
+        # Darkchess: flips/moves leave face-up marks; empty waiting boards score 0.
+        n = len(face_up)
+        if n:
+            return n
     board = getattr(game, "board", None)
     if board is not None:
         stack = getattr(board, "move_stack", None)
@@ -7026,6 +7054,33 @@ def _game_progress_score(game) -> int:
             except Exception:
                 pass
     return 0
+
+
+def _parked_games_list(parked) -> list:
+    """Normalize parked slot to a list (legacy single game or multi-park stack)."""
+    if parked is None:
+        return []
+    if isinstance(parked, list):
+        return [g for g in parked if g is not None]
+    return [parked]
+
+
+def _best_parked_game(parked):
+    """Pick the most progressed non-ended parked game, if any."""
+    active = [
+        g
+        for g in _parked_games_list(parked)
+        if getattr(g, "state", "ended") != "ended"
+    ]
+    if not active:
+        return None
+    return max(
+        active,
+        key=lambda g: (
+            _game_progress_score(g),
+            games.game_session_updated_at(g),
+        ),
+    )
 
 
 def _game_conflict_winner(
@@ -7067,6 +7122,17 @@ def _game_sync_should_keep_local(
     we_host = local_auth == local_id
     if we_host and not greq:
         return True
+    local_name = (getattr(local_game, "name", None) or "").strip()
+    remote_name = (getattr(remote_game, "name", None) or "").strip()
+    # Different game kinds in the same room (e.g. darkchess vs doushou): never
+    # let a fresh 0-progress board displace a progressed local session on greq
+    # timestamp alone — that is how #default darkchess got wiped by a peer.
+    if local_name and remote_name and local_name != remote_name:
+        local_score = _game_progress_score(local_game)
+        remote_score = _game_progress_score(remote_game)
+        if local_score != remote_score:
+            return local_score > remote_score
+        # Same progress, different kinds under greq: fall through to token/ts.
     local_ts = games.game_session_updated_at(local_game)
     remote_ts = games.game_session_updated_at(remote_game)
     if local_ts > 0 or remote_ts > 0:
@@ -7078,21 +7144,34 @@ def _game_sync_should_keep_local(
 
 
 def _park_room_game_locked(room: str, game) -> None:
-    """Stash a displaced game so a later partition can restore it."""
+    """Stash a displaced game so a later partition can restore it.
+
+    Multiple different kinds can be parked for one room (stack). A later
+    conflict must not silently drop an earlier darkchess when doushou arrives.
+    """
     if game is None or getattr(game, "state", "ended") == "ended":
         return
-    room_games_parked[room] = game
+    stacked = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not game]
+    stacked.append(game)
+    # Cap stack so a flapping link cannot grow forever.
+    if len(stacked) > 8:
+        stacked = stacked[-8:]
+    room_games_parked[room] = stacked if len(stacked) > 1 else stacked[0]
 
 
 def _promote_parked_game_locked(room: str):
     """Move a parked in-progress game into an idle room. Caller holds lock."""
-    parked = room_games_parked.get(room)
-    if parked is None or getattr(parked, "state", "ended") == "ended":
+    parked = _best_parked_game(room_games_parked.get(room))
+    if parked is None:
         return None
     active = room_games.get(room)
     if active is not None and getattr(active, "state", "ended") != "ended":
         return None
-    room_games_parked.pop(room, None)
+    remaining = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked]
+    if remaining:
+        room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+    else:
+        room_games_parked.pop(room, None)
     _remap_local_game_seats_locked(room, parked)
     _rebind_game_services(parked)
     room_games[room] = parked
@@ -7101,6 +7180,30 @@ def _promote_parked_game_locked(room: str):
     room_game_authority[room] = local
     if not (room_game_tokens.get(room) or "").strip():
         room_game_tokens[room] = secrets.token_hex(16)
+    room_game_provisional.add(room)
+    return parked
+
+
+def _swap_parked_game_locked(room: str):
+    """Swap active ↔ best parked game. Caller holds lock. Returns parked or None."""
+    parked = _best_parked_game(room_games_parked.get(room))
+    if parked is None:
+        return None
+    active = room_games.get(room)
+    remaining = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked]
+    if active is not None and getattr(active, "state", "ended") != "ended":
+        remaining.append(active)
+    if remaining:
+        room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+    else:
+        room_games_parked.pop(room, None)
+    _remap_local_game_seats_locked(room, parked)
+    _rebind_game_services(parked)
+    room_games[room] = parked
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    room_game_authority[room] = local
+    room_game_tokens[room] = secrets.token_hex(16)
     room_game_provisional.add(room)
     return parked
 
@@ -7144,13 +7247,17 @@ def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
                 continue
             if _game_authority_reachable(auth):
                 continue
-            parked = room_games_parked.get(room)
-            parked_ok = (
-                parked is not None and getattr(parked, "state", "ended") != "ended"
-            )
+            parked = _best_parked_game(room_games_parked.get(room))
+            parked_ok = parked is not None
             if not parked_ok:
                 continue
-            room_games_parked.pop(room, None)
+            remaining = [
+                g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked
+            ]
+            if remaining:
+                room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+            else:
+                room_games_parked.pop(room, None)
             _remap_local_game_seats_locked(room, parked)
             _rebind_game_services(parked)
             room_games[room] = parked
@@ -7333,7 +7440,8 @@ def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
             room_games.pop(room, None)
             room_game_authority.pop(room, None)
             room_game_tokens.pop(room, None)
-            room_games_parked.pop(room, None)
+            # Do not clear room_games_parked: parked holds a different displaced
+            # session (e.g. darkchess) that must survive a peer gend for doushou.
             room_game_provisional.discard(room)
     _clear_greq(room)
     if keep_local:
@@ -9089,19 +9197,33 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub in {"restore", "恢复"}:
+        want_swap = any(
+            a.lower() in {"swap", "交换", "--swap"} for a in rest.split()
+        )
         with lock:
-            restored = _restore_idle_parked_games_locked()
-            busy = [
-                r
-                for r, g in room_games_parked.items()
-                if g is not None and getattr(g, "state", "ended") != "ended"
-            ]
+            if want_swap:
+                swapped = _swap_parked_game_locked(room)
+                restored = [(room, swapped)] if swapped is not None else []
+                busy = []
+            else:
+                restored = _restore_idle_parked_games_locked()
+                busy = [
+                    r
+                    for r, g in room_games_parked.items()
+                    if _best_parked_game(g) is not None
+                    and (
+                        room_games.get(r) is not None
+                        and getattr(room_games.get(r), "state", "ended") != "ended"
+                    )
+                ]
         if not restored:
-            if busy:
+            if want_swap:
+                send_line(conn, "[*] 本房没有可交换的暂存对局。\n")
+            elif busy:
                 send_line(
                     conn,
                     "[*] 暂存对局所在房间仍有进行中的棋局，未覆盖。"
-                    "可先 /game end 再 /game restore。\n",
+                    "可先 /game end 再 /game restore，或 /game restore swap 与当前局对换。\n",
                 )
             else:
                 send_line(conn, "[*] 没有可恢复的暂存对局。\n")
@@ -9110,7 +9232,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             broadcast_game(
                 room_name,
                 [
-                    f"{name} 恢复了暂存对局（{getattr(game, 'name', '?')}）。"
+                    f"{name} {'交换并恢复' if want_swap else '恢复了'}暂存对局"
+                    f"（{getattr(game, 'name', '?')}）。"
                     "请用 /game show 查看。"
                 ],
             )
