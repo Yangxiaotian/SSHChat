@@ -4,7 +4,8 @@ Shared room piano — URL + separate key (same security shape as /canvas).
 Flow:
 1. Chat creates a session; each participant gets /piano/<token> + 6-char key.
 2. Opening the page and posting the key mints a short-lived access ticket.
-3. Note events sync via ticket-gated HTTP poll/push.
+3. Note events sync via ticket-gated HTTP: batched POST /notes, long-poll GET /sync,
+   plus pressed-key snapshots for drift correction. Disk persist is debounced.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ RECORDING_TTL_SECONDS = int(
     os.environ.get("SSHCHAT_PIANO_RECORDING_TTL_SECONDS", str(7 * 24 * 3600))
 )
 MAX_RECORDING_EVENTS = int(os.environ.get("SSHCHAT_PIANO_MAX_RECORDING_EVENTS", "5000"))
+# Debounce disk writes for note spam (structural changes still save immediately).
+SAVE_DEBOUNCE_SECONDS = float(os.environ.get("SSHCHAT_PIANO_SAVE_DEBOUNCE", "1.5"))
+# Cap for one POST /notes body and long-poll wait.
+MAX_BATCH_EVENTS = int(os.environ.get("SSHCHAT_PIANO_MAX_BATCH", "64"))
+MAX_SYNC_WAIT_MS = int(os.environ.get("SSHCHAT_PIANO_SYNC_WAIT_MS", "20000"))
 
 
 def _generate_token() -> str:
@@ -111,7 +117,11 @@ class PianoStore:
         self.tickets: Dict[str, PianoAccessTicket] = {}
         self.handoffs: Dict[str, PianoHandoff] = {}
         self.recordings: Dict[str, PianoRecording] = {}
+        # Ephemeral: session_id -> author -> currently held notes (not persisted).
+        self.held: Dict[str, Dict[str, set]] = {}
         self.lock = threading.RLock()
+        self._event_cond = threading.Condition(self.lock)
+        self._save_timer: Optional[threading.Timer] = None
         self._load()
         self._load_recordings()
 
@@ -233,6 +243,75 @@ class PianoStore:
         except Exception as e:
             print(f"[Piano] Failed to save: {e}")
 
+    def _cancel_save_timer_locked(self) -> None:
+        if self._save_timer is not None:
+            try:
+                self._save_timer.cancel()
+            except Exception:
+                pass
+            self._save_timer = None
+
+    def _save_now(self) -> None:
+        """Immediate persist (create/close/auth). Cancels a pending debounced save."""
+        with self.lock:
+            self._cancel_save_timer_locked()
+            self._save()
+
+    def _schedule_save(self) -> None:
+        """Debounce disk writes under note spam. Caller may hold the store lock."""
+        def _fire() -> None:
+            with self.lock:
+                self._save_timer = None
+                self._save()
+
+        with self.lock:
+            self._cancel_save_timer_locked()
+            timer = threading.Timer(max(0.2, SAVE_DEBOUNCE_SECONDS), _fire)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
+
+    def _held_snapshot_locked(self, session_id: str) -> Dict[str, List[str]]:
+        by_author = self.held.get(session_id) or {}
+        return {
+            author: sorted(notes)
+            for author, notes in by_author.items()
+            if notes
+        }
+
+    def _apply_held_event_locked(
+        self, session_id: str, author: str, note: str, action: str
+    ) -> None:
+        by_author = self.held.setdefault(session_id, {})
+        held = by_author.setdefault(author, set())
+        if action == "on":
+            held.add(note)
+        else:
+            held.discard(note)
+        if not held:
+            by_author.pop(author, None)
+        if not by_author:
+            self.held.pop(session_id, None)
+
+    def _set_held_locked(
+        self, session_id: str, author: str, notes: Optional[List[str]]
+    ) -> None:
+        """Replace author's held set (client authoritative snapshot for correction)."""
+        if notes is None:
+            return
+        cleaned: set = set()
+        for raw in notes:
+            note = str(raw or "").strip()
+            if note and len(note) <= 8:
+                cleaned.add(note)
+        by_author = self.held.setdefault(session_id, {})
+        if cleaned:
+            by_author[author] = cleaned
+        else:
+            by_author.pop(author, None)
+        if not by_author:
+            self.held.pop(session_id, None)
+
     def create_session(
         self,
         creator: str,
@@ -277,7 +356,7 @@ class PianoStore:
             self.sessions[session_id] = session
             for token in tokens.values():
                 self.token_to_session[token] = session_id
-            self._save()
+            self._save_now()
         return session
 
     def add_participant(
@@ -301,7 +380,7 @@ class PianoStore:
             session.tokens[name] = token
             session.keys[name] = key
             self.token_to_session[token] = session_id
-            self._save()
+            self._save_now()
             return token, key, ""
 
     def get_by_token(self, token: str) -> Optional[PianoSession]:
@@ -366,7 +445,7 @@ class PianoStore:
                 participant=participant,
                 expires=time.time() + ACCESS_TICKET_TTL_SECONDS,
             )
-            self._save()
+            self._save_now()
             return session, participant, ticket, ""
 
     def create_handoff(self, token: str, key: str) -> Tuple[Optional[str], str]:
@@ -447,7 +526,7 @@ class PianoStore:
                 return None, None, "访问凭据无效，请重新输入密钥"
             if time.time() > entry.expires:
                 self.tickets.pop(ticket, None)
-                self._save()
+                self._save_now()
                 return None, None, "访问凭据已过期，请重新输入密钥"
             participant = self.participant_for_token(session, token)
             if (
@@ -467,51 +546,98 @@ class PianoStore:
         action: str,
         client_ts: Optional[float] = None,
     ) -> Tuple[Optional[dict], str]:
-        note = (note or "").strip()
-        action = (action or "on").strip().lower()
-        if action not in ("on", "off"):
-            return None, "无效动作"
-        # Accept C4, C#4, etc.
-        if not note or len(note) > 8:
-            return None, "无效音符"
+        batch, err = self.push_notes(
+            token,
+            ticket,
+            [{"note": note, "action": action, "ts": client_ts}],
+        )
+        if batch is None:
+            return None, err
+        events = batch.get("events") or []
+        return {
+            "rev": batch.get("rev", 0),
+            "event": events[0] if events else None,
+            "held": batch.get("held") or {},
+        }, ""
+
+    def push_notes(
+        self,
+        token: str,
+        ticket: str,
+        events: Optional[List[dict]] = None,
+        *,
+        held: Optional[List[str]] = None,
+    ) -> Tuple[Optional[dict], str]:
+        """Append a batch of note on/off events; optionally set author's held keys."""
+        raw = list(events or [])
+        if not raw and held is None:
+            return None, "无事件"
+        if len(raw) > MAX_BATCH_EVENTS:
+            return None, f"事件过多（最多 {MAX_BATCH_EVENTS}）"
         session, participant, err = self.resolve_ticket(token, ticket)
         if session is None or participant is None:
             return None, err
-        with self.lock:
+        with self._event_cond:
             session = self.get_by_token(token)
             if session is None:
                 return None, "钢琴链接无效"
             ok, alive_err = self._alive(session)
             if not ok:
                 return None, alive_err
-            ts = time.time()
-            if client_ts is not None:
-                try:
-                    ct = float(client_ts)
-                    if abs(ct - ts) < 60:
-                        ts = ct
-                except (TypeError, ValueError):
-                    pass
-            evt = PianoNoteEvent(
-                seq=session.next_seq,
-                note=note,
-                action=action,
-                author=participant,
-                ts=ts,
-            )
-            session.next_seq += 1
-            session.events.append(evt)
+            now = time.time()
+            out_events: List[dict] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                note = str(item.get("note") or "").strip()
+                action = str(item.get("action") or "on").strip().lower()
+                if action not in ("on", "off") or not note or len(note) > 8:
+                    continue
+                ts = now
+                client_ts = item.get("ts")
+                if client_ts is not None:
+                    try:
+                        ct = float(client_ts)
+                        if abs(ct - now) < 60:
+                            ts = ct
+                    except (TypeError, ValueError):
+                        pass
+                evt = PianoNoteEvent(
+                    seq=session.next_seq,
+                    note=note,
+                    action=action,
+                    author=participant,
+                    ts=ts,
+                )
+                session.next_seq += 1
+                session.events.append(evt)
+                self._apply_held_event_locked(
+                    session.session_id, participant, note, action
+                )
+                out_events.append(asdict(evt))
+            if held is not None:
+                self._set_held_locked(session.session_id, participant, held)
+            if not out_events and held is None:
+                return None, "无效音符"
             if len(session.events) > MAX_EVENTS:
                 session.events = session.events[-MAX_EVENTS:]
-            session.rev += 1
-            self._save()
+            if out_events or held is not None:
+                session.rev += 1
+            self._schedule_save()
+            self._event_cond.notify_all()
             return {
                 "rev": session.rev,
-                "event": asdict(evt),
+                "events": out_events,
+                "held": self._held_snapshot_locked(session.session_id),
             }, ""
 
     def sync_since(
-        self, token: str, ticket: str, since: int
+        self,
+        token: str,
+        ticket: str,
+        since: int,
+        *,
+        wait_ms: int = 0,
     ) -> Tuple[Optional[dict], str]:
         session, participant, err = self.resolve_ticket(token, ticket)
         if session is None or participant is None:
@@ -520,24 +646,54 @@ class PianoStore:
             since_i = max(0, int(since))
         except (TypeError, ValueError):
             since_i = 0
-        with self.lock:
-            events = [
-                asdict(e)
-                for e in session.events
-                if e.seq > since_i
-            ]
-            return {
-                "rev": session.rev,
-                "events": events,
-                "participant": participant,
-                "creator": session.creator,
-                "room": session.room,
-                "title": session.title,
-                "expires": session.expires,
-            }, ""
+        try:
+            wait_i = max(0, min(int(wait_ms), MAX_SYNC_WAIT_MS))
+        except (TypeError, ValueError):
+            wait_i = 0
+        deadline = time.time() + (wait_i / 1000.0) if wait_i else 0.0
+
+        with self._event_cond:
+            # Re-check under the same lock used for waits.
+            while True:
+                live = self.get_by_token(token)
+                if live is None:
+                    return None, "钢琴链接无效"
+                session = live
+                events = [asdict(e) for e in session.events if e.seq > since_i]
+                payload = {
+                    "rev": session.rev,
+                    "events": events,
+                    "held": self._held_snapshot_locked(session.session_id),
+                    "participant": participant,
+                    "creator": session.creator,
+                    "room": session.room,
+                    "title": session.title,
+                    "expires": session.expires,
+                }
+                if events or wait_i <= 0:
+                    return payload, ""
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return payload, ""
+                rev_before = session.rev
+                self._event_cond.wait(timeout=remaining)
+                # Held-only updates bump rev with no new seqs — still return so
+                # peers can apply the pressed-key snapshot immediately.
+                if session.rev != rev_before:
+                    events = [asdict(e) for e in session.events if e.seq > since_i]
+                    return {
+                        "rev": session.rev,
+                        "events": events,
+                        "held": self._held_snapshot_locked(session.session_id),
+                        "participant": participant,
+                        "creator": session.creator,
+                        "room": session.room,
+                        "title": session.title,
+                        "expires": session.expires,
+                    }, ""
 
     def close_session(self, session_id: str, by_user: str) -> Tuple[bool, str]:
-        with self.lock:
+        with self._event_cond:
             session = self.sessions.get(session_id)
             if session is None:
                 return False, "钢琴不存在"
@@ -553,7 +709,10 @@ class PianoStore:
             ]
             for t in dead:
                 self.tickets.pop(t, None)
+            self.held.pop(session_id, None)
+            self._cancel_save_timer_locked()
             self._save()
+            self._event_cond.notify_all()
             return True, ""
 
     def find_open_for_room(self, room: str) -> Optional[PianoSession]:
@@ -638,7 +797,7 @@ class PianoStore:
     def cleanup_expired(self) -> int:
         now = time.time()
         removed = 0
-        with self.lock:
+        with self._event_cond:
             dead_ids = [
                 sid
                 for sid, s in self.sessions.items()
@@ -652,6 +811,7 @@ class PianoStore:
                 removed += 1
                 for token in session.tokens.values():
                     self.token_to_session.pop(token, None)
+                self.held.pop(sid, None)
             dead_tickets = [
                 t for t, entry in self.tickets.items() if entry.expires <= now
             ]
@@ -671,9 +831,12 @@ class PianoStore:
                 self.recordings.pop(rid, None)
             if removed or dead_tickets or dead_recordings:
                 if removed or dead_tickets:
+                    self._cancel_save_timer_locked()
                     self._save()
                 if dead_recordings:
                     self._save_recordings()
+            if removed:
+                self._event_cond.notify_all()
         return removed
 
 

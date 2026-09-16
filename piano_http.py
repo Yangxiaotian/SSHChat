@@ -885,18 +885,22 @@ def generate_piano_page(
 
         let ticket = '';
         let lastSeq = 0;
-        let pollTimer = null;
-        let syncing = false;
+        let syncLoopActive = false;
         let selfName = '';
         const keyEls = Object.create(null);
         const flashTimers = Object.create(null);
         const heldKeys = Object.create(null);
+        const remoteHeld = Object.create(null);
         const ownEventSeqs = new Set();
         let audioCtx = null;
         const audioBuffers = Object.create(null);
         let audioReady = false;
         let unlockPromise = null;
         let pushQueue = Promise.resolve();
+        let pendingPush = [];
+        let flushTimer = null;
+        const FLUSH_MS = 20;
+        const SYNC_WAIT_MS = 20000;
         let remoteTimeBase = null;
         const REMOTE_STALE_MS = 500;
 
@@ -1616,21 +1620,34 @@ def generate_piano_page(
         async function pushNote(note, action, clientTs) {{
             if (!ticket) return;
             const ts = typeof clientTs === 'number' ? clientTs : Date.now() / 1000;
+            pendingPush.push({{ note: note, action: action, ts: ts }});
+            if (flushTimer == null) {{
+                flushTimer = setTimeout(function () {{ void flushNotes(); }}, FLUSH_MS);
+            }}
+        }}
+
+        async function flushNotes() {{
+            flushTimer = null;
+            if (!ticket || !pendingPush.length) return;
+            const batch = pendingPush.splice(0, pendingPush.length);
+            const held = Object.keys(heldKeys);
             pushQueue = pushQueue.then(async function () {{
                 try {{
-                    const res = await fetch('/piano/' + token + '/note', {{
+                    const res = await fetch('/piano/' + token + '/notes', {{
                         method: 'POST',
                         headers: {{
                             'Content-Type': 'application/json',
                             'X-Piano-Ticket': ticket,
                         }},
                         cache: 'no-store',
-                        body: JSON.stringify({{ note: note, action: action, ts: ts }}),
+                        body: JSON.stringify({{ events: batch, held: held }}),
                     }});
                     const data = await res.json().catch(function () {{ return {{}}; }});
-                    const evt = data.event;
-                    if (evt && typeof evt.seq === 'number') {{
-                        ownEventSeqs.add(evt.seq);
+                    const events = data.events || [];
+                    for (const evt of events) {{
+                        if (evt && typeof evt.seq === 'number') {{
+                            ownEventSeqs.add(evt.seq);
+                        }}
                     }}
                 }} catch (_) {{}}
             }});
@@ -1701,8 +1718,10 @@ def generate_piano_page(
         async function startSession(data) {{
             applySession(data);
             await syncOnce(true);
-            if (pollTimer) clearInterval(pollTimer);
-            pollTimer = setInterval(function () {{ void syncOnce(false); }}, 50);
+            if (!syncLoopActive) {{
+                syncLoopActive = true;
+                void syncLoop();
+            }}
         }}
 
         async function auth() {{
@@ -1730,13 +1749,47 @@ def generate_piano_page(
             }}
         }}
 
+        function applyHeldSnapshot(heldMap) {{
+            if (!heldMap || typeof heldMap !== 'object') return;
+            const nextRemote = Object.create(null);
+            for (const author of Object.keys(heldMap)) {{
+                if (selfName && author.toLowerCase() === selfName.toLowerCase()) continue;
+                const list = heldMap[author] || [];
+                for (const note of list) {{
+                    if (!notes[note]) continue;
+                    nextRemote[note] = true;
+                    if (!remoteHeld[note]) {{
+                        playRemoteNote(note);
+                    }}
+                }}
+            }}
+            for (const note of Object.keys(remoteHeld)) {{
+                if (!nextRemote[note]) {{
+                    unflashKey(note);
+                }}
+            }}
+            for (const note of Object.keys(remoteHeld)) delete remoteHeld[note];
+            for (const note of Object.keys(nextRemote)) remoteHeld[note] = true;
+        }}
+
+        async function syncLoop() {{
+            while (syncLoopActive && ticket) {{
+                try {{
+                    await syncOnce(false);
+                }} catch (_) {{
+                    await new Promise(function (r) {{ setTimeout(r, 250); }});
+                }}
+            }}
+        }}
+
         async function syncOnce(initial) {{
-            if (!ticket || syncing) return;
-            syncing = true;
-            if (!initial) setStatus(i18n.statusSync, false);
+            if (!ticket) return;
             try {{
+                const wait = initial ? 0 : SYNC_WAIT_MS;
                 const res = await fetch(
-                    '/piano/' + token + '/sync?since=' + lastSeq + '&ticket=' + encodeURIComponent(ticket),
+                    '/piano/' + token + '/sync?since=' + lastSeq +
+                    '&wait=' + wait +
+                    '&ticket=' + encodeURIComponent(ticket),
                     {{
                         headers: {{ 'X-Piano-Ticket': ticket }},
                         cache: 'no-store',
@@ -1754,13 +1807,15 @@ def generate_piano_page(
                     if (initial) continue;
                     if (!evt.note || !notes[evt.note]) continue;
                     if (ownEventSeqs.has(evt.seq)) continue;
+                    if (evt.action === 'on') remoteHeld[evt.note] = true;
+                    else if (evt.action === 'off') delete remoteHeld[evt.note];
                     scheduleRemoteEvent(evt);
                 }}
+                if (!initial) applyHeldSnapshot(data.held);
                 setStatus(i18n.statusReady, false);
             }} catch (_) {{
                 setStatus(i18n.statusErr, true);
-            }} finally {{
-                syncing = false;
+                throw _;
             }}
         }}
 
@@ -1925,11 +1980,16 @@ def handle_piano_get(handler: "BaseHTTPRequestHandler") -> bool:
         if not ticket:
             ticket = (qs.get("ticket") or [""])[0].strip()
         since_raw = (qs.get("since") or ["0"])[0]
+        wait_raw = (qs.get("wait") or ["0"])[0]
         try:
             since = int(since_raw)
         except ValueError:
             since = 0
-        payload, err = store.sync_since(token, ticket, since)
+        try:
+            wait_ms = int(wait_raw)
+        except ValueError:
+            wait_ms = 0
+        payload, err = store.sync_since(token, ticket, since, wait_ms=wait_ms)
         if payload is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
@@ -1993,6 +2053,28 @@ def handle_piano_post(handler: "BaseHTTPRequestHandler") -> bool:
             note=note,
             action=note_action,
             client_ts=client_ts,
+        )
+        if result is None:
+            handler._send_error_json(403, err)  # type: ignore[attr-defined]
+            return True
+        handler._send_json_response(200, result)  # type: ignore[attr-defined]
+        return True
+
+    if action == "notes":
+        body = handler._read_json_body()  # type: ignore[attr-defined]
+        events = body.get("events")
+        held = body.get("held")
+        if events is not None and not isinstance(events, list):
+            handler._send_error_json(400, "无效事件")  # type: ignore[attr-defined]
+            return True
+        if held is not None and not isinstance(held, list):
+            handler._send_error_json(400, "无效按键状态")  # type: ignore[attr-defined]
+            return True
+        result, err = store.push_notes(
+            token,
+            ticket,
+            events if isinstance(events, list) else [],
+            held=held if isinstance(held, list) else None,
         )
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
