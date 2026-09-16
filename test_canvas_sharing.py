@@ -501,6 +501,9 @@ class CanvasStoreTests(unittest.TestCase):
         # Peers need BinaryFileData[]; passing the files map shows image placeholders.
         self.assertIn("Object.values(remoteFileMap)", page)
         self.assertIn("api.addFiles(fileList)", page)
+        self.assertIn("connectCanvasWs", page)
+        self.assertIn("/ws?ticket=", page)
+        self.assertIn("new WebSocket", page)
 
     def test_image_file_above_legacy_512kb_is_kept(self) -> None:
         """Phone-photo dataURLs often exceed the old 512KB per-file cap."""

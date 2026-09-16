@@ -1,17 +1,20 @@
 """HTML page and request helpers for the shared canvas (served by FileHTTP).
 
 UI: Excalidraw (CDN). Sync: Excalidraw elements JSON over the existing
-URL+key → ticket gate (no Excalidraw room server).
+URL+key → ticket gate, with WebSocket scene push/broadcast (HTTP poll fallback).
 """
 
 from __future__ import annotations
 
 import html
 import json
-from typing import TYPE_CHECKING
+import secrets
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
 import canvas_sharing
+import canvas_ws
+import piano_ws
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -366,14 +369,20 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     let ticket = '';
     let rev = 0;
-    let pollTimer = null;
     let syncing = false;
     let applyingRemote = false;
     let pushTimer = null;
     let pushInFlight = false;
     let localDirty = false;
+    let pendingPushSig = '';
+    let pushAckTimer = null;
     let api = null;
     let lastLocalSig = '';
+    let canvasWs = null;
+    let canvasWsLive = false;
+    let canvasWsForceHttp = false;
+    let canvasWsRetryTimer = null;
+    let httpSyncActive = false;
 
     function setStatus(text, err) {{
         statusEl.textContent = text;
@@ -503,7 +512,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 (data.expires ? '<span>' + i18n.expires + ': ' + fmtExpires(data.expires) + '</span>' : '');
             await mountExcalidraw();
             await syncOnce(true);
-            pollTimer = setInterval(() => syncOnce(false), 1200);
+            connectCanvasWs();
+            ensureHttpSyncLoop();
         }} catch (e) {{
             alert((e && e.message) || i18n.statusErr);
             unlockBtn.disabled = false;
@@ -541,6 +551,19 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         pushTimer = setTimeout(() => {{ void pushScene(); }}, 450);
     }}
 
+    function finishLocalPush(sigAtStart) {{
+        if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+        const liveNow = liveScene();
+        if (sceneSig(liveNow.elements, liveNow.files) === sigAtStart) {{
+            localDirty = false;
+            lastLocalSig = sigAtStart;
+        }} else {{
+            localDirty = true;
+            schedulePush();
+        }}
+        setStatus(i18n.statusReady, false);
+    }}
+
     async function pushScene() {{
         if (!ticket || applyingRemote || !api || pushInFlight) return;
         const live = liveScene();
@@ -548,7 +571,30 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         const files = live.files;
         const sigAtStart = sceneSig(elements, files);
         pushInFlight = true;
+        pendingPushSig = sigAtStart;
         setStatus(i18n.statusSync, false);
+        if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
+            try {{
+                canvasWs.send(JSON.stringify({{
+                    type: 'scene',
+                    elements: elements || [],
+                    files: files || {{}},
+                }}));
+                if (pushAckTimer) clearTimeout(pushAckTimer);
+                pushAckTimer = setTimeout(() => {{
+                    pushAckTimer = null;
+                    if (!pushInFlight) return;
+                    pushInFlight = false;
+                    pendingPushSig = '';
+                    canvasWsLive = false;
+                    localDirty = true;
+                    schedulePush();
+                }}, 12000);
+                return;
+            }} catch (_) {{
+                canvasWsLive = false;
+            }}
+        }}
         try {{
             const res = await fetch('/canvas/' + token + '/scene', {{
                 method: 'POST',
@@ -565,23 +611,174 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
-            const liveNow = liveScene();
-            if (sceneSig(liveNow.elements, liveNow.files) === sigAtStart) {{
-                localDirty = false;
-                lastLocalSig = sigAtStart;
-            }} else {{
-                // User kept drawing during the POST — schedule another push.
-                localDirty = true;
-                schedulePush();
-            }}
-            setStatus(i18n.statusReady, false);
+            finishLocalPush(sigAtStart);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
             localDirty = true;
             schedulePush();
         }} finally {{
             pushInFlight = false;
+            pendingPushSig = '';
         }}
+    }}
+
+    function applyRemotePayload(data) {{
+        if (!data || !api) return;
+        const remoteRev = Number(data.rev || 0);
+        const mtype = String(data.type || data.kind || '');
+        if (mtype === 'clear') {{
+            if (remoteRev < rev) return;
+            applyingRemote = true;
+            try {{
+                if (api.resetScene) api.resetScene();
+                else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                lastLocalSig = sceneSig([], {{}});
+                localDirty = false;
+            }} finally {{
+                applyingRemote = false;
+            }}
+            rev = Math.max(rev, remoteRev);
+            return;
+        }}
+        if (remoteRev < rev) return;
+        const remoteEls = data.elements || [];
+        const live = liveScene();
+        let nextEls;
+        // Empty remote + no local pending ⇒ peer clear / empty board.
+        // Otherwise merge so an older poll cannot wipe unpushed strokes.
+        if (remoteEls.length === 0 && !localDirty && !pushInFlight) {{
+            nextEls = [];
+        }} else {{
+            nextEls = mergeElements(remoteEls, live.elements);
+        }}
+        const nextFiles = Object.assign({{}}, live.files || {{}}, data.files || {{}});
+        const nextSig = sceneSig(nextEls, nextFiles);
+        const curSig = sceneSig(live.elements, live.files);
+        if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
+            applyingRemote = true;
+            try {{
+                // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
+                const remoteFileMap = data.files || {{}};
+                const fileList = Object.values(remoteFileMap).filter(
+                    (f) => f && typeof f === 'object' && f.dataURL
+                );
+                if (fileList.length && api.addFiles) {{
+                    try {{ api.addFiles(fileList); }} catch (_) {{}}
+                }}
+                api.updateScene({{
+                    elements: nextEls,
+                    ...remoteUpdateOpts,
+                }});
+                lastLocalSig = nextSig;
+            }} finally {{
+                applyingRemote = false;
+            }}
+        }}
+        if (remoteRev > rev) rev = remoteRev;
+    }}
+
+    function ensureHttpSyncLoop() {{
+        if (httpSyncActive) return;
+        httpSyncActive = true;
+        void syncLoop();
+    }}
+
+    async function syncLoop() {{
+        while (httpSyncActive && ticket) {{
+            try {{
+                if (canvasWsLive) {{
+                    await syncOnce(false);
+                    await new Promise((r) => setTimeout(r, 2500));
+                }} else {{
+                    await syncOnce(false);
+                    await new Promise((r) => setTimeout(r, 1200));
+                }}
+            }} catch (_) {{
+                await new Promise((r) => setTimeout(r, 400));
+            }}
+        }}
+    }}
+
+    function scheduleCanvasWsRetry() {{
+        if (canvasWsRetryTimer != null || !ticket || canvasWsForceHttp) return;
+        canvasWsRetryTimer = setTimeout(() => {{
+            canvasWsRetryTimer = null;
+            connectCanvasWs();
+        }}, 1500);
+    }}
+
+    function connectCanvasWs() {{
+        if (!ticket || canvasWsForceHttp) return;
+        if (canvasWs && (canvasWs.readyState === 0 || canvasWs.readyState === 1)) return;
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = proto + '//' + location.host + '/canvas/' + token +
+            '/ws?ticket=' + encodeURIComponent(ticket);
+        let ws;
+        try {{
+            ws = new WebSocket(url);
+        }} catch (_) {{
+            canvasWsForceHttp = true;
+            ensureHttpSyncLoop();
+            return;
+        }}
+        canvasWs = ws;
+        ws.onopen = function () {{
+            canvasWsLive = true;
+            setStatus(i18n.statusReady, false);
+        }};
+        ws.onmessage = function (ev) {{
+            let data = null;
+            try {{
+                data = JSON.parse(ev.data);
+            }} catch (_) {{
+                return;
+            }}
+            if (!data || typeof data !== 'object') return;
+            const mtype = String(data.type || '');
+            if (mtype === 'ack') {{
+                if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+                if (typeof data.rev === 'number') rev = data.rev;
+                const sig = pendingPushSig;
+                pushInFlight = false;
+                pendingPushSig = '';
+                if (String(data.kind || '') === 'clear') {{
+                    localDirty = false;
+                    setStatus(i18n.statusReady, false);
+                    return;
+                }}
+                if (sig) finishLocalPush(sig);
+                else setStatus(i18n.statusReady, false);
+                return;
+            }}
+            if (mtype === 'scene' || mtype === 'clear') {{
+                applyRemotePayload(data);
+                setStatus(i18n.statusReady, false);
+                return;
+            }}
+            if (mtype === 'error') {{
+                if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+                pushInFlight = false;
+                pendingPushSig = '';
+                localDirty = true;
+                setStatus(i18n.statusErr, true);
+                schedulePush();
+            }}
+        }};
+        ws.onclose = function () {{
+            canvasWsLive = false;
+            if (canvasWs === ws) canvasWs = null;
+            if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+            if (pushInFlight) {{
+                pushInFlight = false;
+                localDirty = true;
+                schedulePush();
+            }}
+            ensureHttpSyncLoop();
+            scheduleCanvasWsRetry();
+        }};
+        ws.onerror = function () {{
+            try {{ ws.close(); }} catch (_) {{}}
+        }};
     }}
 
     async function syncOnce(initial) {{
@@ -600,45 +797,11 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (!res.ok) throw new Error(data.error || 'sync failed');
             const remoteRev = Number(data.rev || 0);
             if (data.changed && remoteRev >= rev && api) {{
-                const remoteEls = data.elements || [];
-                const live = liveScene();
-                let nextEls;
-                // Empty remote + no local pending ⇒ peer clear / empty board.
-                // Otherwise merge so an older poll cannot wipe unpushed strokes
-                // (the "newest strokes vanish, then come back" race).
-                if (
-                    remoteEls.length === 0 &&
-                    !localDirty &&
-                    !pushInFlight
-                ) {{
-                    nextEls = [];
-                }} else {{
-                    nextEls = mergeElements(remoteEls, live.elements);
-                }}
-                const nextFiles = Object.assign({{}}, live.files || {{}}, data.files || {{}});
-                const nextSig = sceneSig(nextEls, nextFiles);
-                const curSig = sceneSig(live.elements, live.files);
-                if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
-                    applyingRemote = true;
-                    try {{
-                        // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
-                        // Files must be registered before image elements or peers see placeholders.
-                        const remoteFileMap = data.files || {{}};
-                        const fileList = Object.values(remoteFileMap).filter(
-                            (f) => f && typeof f === 'object' && f.dataURL
-                        );
-                        if (fileList.length && api.addFiles) {{
-                            try {{ api.addFiles(fileList); }} catch (_) {{}}
-                        }}
-                        api.updateScene({{
-                            elements: nextEls,
-                            ...remoteUpdateOpts,
-                        }});
-                        lastLocalSig = nextSig;
-                    }} finally {{
-                        applyingRemote = false;
-                    }}
-                }}
+                applyRemotePayload({{
+                    rev: remoteRev,
+                    elements: data.elements || [],
+                    files: data.files || {{}},
+                }});
                 rev = remoteRev;
             }} else if (remoteRev > rev) {{
                 rev = remoteRev;
@@ -655,6 +818,22 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (!ticket) return;
         if (!confirm(i18n.clearConfirm)) return;
         try {{
+            if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
+                if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
+                canvasWs.send(JSON.stringify({{ type: 'clear' }}));
+                applyingRemote = true;
+                try {{
+                    if (api) {{
+                        if (api.resetScene) api.resetScene();
+                        else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                    }}
+                    lastLocalSig = sceneSig([], {{}});
+                    localDirty = false;
+                }} finally {{
+                    applyingRemote = false;
+                }}
+                return;
+            }}
             const res = await fetch('/canvas/' + token + '/clear', {{
                 method: 'POST',
                 headers: {{ 'X-Canvas-Ticket': ticket }},
@@ -756,6 +935,124 @@ def handle_canvas_get(handler: "BaseHTTPRequestHandler") -> bool:
     return True
 
 
+def _broadcast_canvas_update(
+    result: Optional[dict],
+    *,
+    exclude_conn_id: Optional[str] = None,
+    msg_type: str = "scene",
+) -> None:
+    if not result:
+        return
+    session_id = str(result.get("session_id") or "").strip()
+    if not session_id:
+        return
+    payload = {
+        "type": msg_type,
+        "rev": result.get("rev", 0),
+        "author": result.get("author") or "",
+        "elements": result.get("elements") if msg_type != "clear" else [],
+        "files": result.get("files") if msg_type != "clear" else {},
+    }
+    if msg_type == "clear":
+        payload["kind"] = "clear"
+    canvas_ws.canvas_ws_hub.broadcast(
+        session_id,
+        payload,
+        exclude_conn_id=exclude_conn_id,
+    )
+
+
+def _ws_conn_id() -> str:
+    return secrets.token_urlsafe(12)
+
+
+def handle_canvas_websocket(handler: "BaseHTTPRequestHandler") -> bool:
+    """Upgrade GET /canvas/<token>/ws?ticket=... to a WebSocket scene channel."""
+    parsed = urlparse(handler.path)
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 3 or parts[0] != "canvas" or parts[2] != "ws":
+        return False
+
+    upgrade = (handler.headers.get("Upgrade") or "").strip().lower()
+    connection = (handler.headers.get("Connection") or "").lower()
+    sec_key = (handler.headers.get("Sec-WebSocket-Key") or "").strip()
+    if upgrade != "websocket" or "upgrade" not in connection or not sec_key:
+        handler._send_error_json(400, "需要 WebSocket 升级")  # type: ignore[attr-defined]
+        return True
+
+    qs = parse_qs(parsed.query or "")
+    ticket = (qs.get("ticket") or [""])[0].strip()
+    if not ticket:
+        ticket = (handler.headers.get("X-Canvas-Ticket") or "").strip()
+    token = parts[1]
+    store = canvas_sharing.canvas_store
+    session, participant, err = store.resolve_ticket(token, ticket)
+    if session is None or participant is None:
+        handler.send_response(403)
+        handler.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler.end_headers()
+        try:
+            handler.wfile.write((err or "forbidden").encode("utf-8"))
+        except Exception:
+            pass
+        return True
+
+    accept = piano_ws.ws_accept_key(sec_key)
+    handler.send_response(101, "Switching Protocols")
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    try:
+        handler.wfile.flush()
+    except Exception:
+        pass
+    handler.close_connection = True
+
+    sock = handler.connection
+    piano_ws.try_enable_tcp_nodelay(sock)
+    try:
+        sock.settimeout(None)
+    except OSError:
+        pass
+
+    client = canvas_ws.CanvasWsClient(
+        conn_id=_ws_conn_id(),
+        session_id=session.session_id,
+        participant=participant,
+        token=token,
+        sock=sock,
+    )
+
+    def on_scene(
+        ws_client: canvas_ws.CanvasWsClient,
+        elements,
+        files,
+    ) -> Optional[dict]:
+        result, _err = store.apply_scene(
+            ws_client.token,
+            ticket,
+            elements=elements,
+            files=files,
+        )
+        if result is None:
+            return None
+        _broadcast_canvas_update(result, exclude_conn_id=ws_client.conn_id)
+        return result
+
+    def on_clear(ws_client: canvas_ws.CanvasWsClient) -> Optional[dict]:
+        result, _err = store.clear_board(ws_client.token, ticket)
+        if result is None:
+            return None
+        _broadcast_canvas_update(
+            result, exclude_conn_id=ws_client.conn_id, msg_type="clear"
+        )
+        return result
+
+    canvas_ws.run_canvas_ws_session(client, on_scene=on_scene, on_clear=on_clear)
+    return True
+
+
 def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
     """Return True if the request was a canvas POST and was handled."""
     parsed = urlparse(handler.path)
@@ -802,6 +1099,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
+        _broadcast_canvas_update(result)
         handler._send_json_response(200, result)  # type: ignore[attr-defined]
         return True
 
@@ -820,6 +1118,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
         if event is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
+        _broadcast_canvas_update(event, msg_type="clear")
         handler._send_json_response(200, event)  # type: ignore[attr-defined]
         return True
 
