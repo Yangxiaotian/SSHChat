@@ -837,6 +837,7 @@ class CanvasStore:
                 "elements": session.elements,
                 "files": session.files,
                 "author": participant,
+                "session_id": session.session_id,
             }, ""
 
     def add_stroke(
@@ -876,6 +877,7 @@ class CanvasStore:
                 "author": participant,
                 "elements": [],
                 "files": {},
+                "session_id": session.session_id,
             }, ""
 
     def sync_since(
@@ -963,6 +965,21 @@ class CanvasStore:
                 session.rev += 1
                 session.next_seq = session.rev + 1
                 self._save()
+                try:
+                    import canvas_ws
+
+                    canvas_ws.canvas_ws_hub.broadcast(
+                        session.session_id,
+                        {
+                            "type": "clear",
+                            "rev": session.rev,
+                            "author": "",
+                            "elements": [],
+                            "files": {},
+                        },
+                    )
+                except Exception:
+                    pass
                 return True
         return False
 
