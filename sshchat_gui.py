@@ -4038,15 +4038,34 @@ class SSHChatGUI:
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
+        self._refresh_piano_open_keys(url, key)
+        token = _piano_token_from_url(url)
         # Only auto-open if THIS client just clicked 钢琴 — same nick on another
         # device (e.g. iOS) must not reopen a second window here.
         own = self._expecting_own_piano
         self._expecting_own_piano = False
         if own:
             self._open_native_piano(url, key)
+        elif token and token in self._open_piano_tokens:
+            # Quick Tunnel hostname churn: server re-sends invite; reopen so the
+            # old trycloudflare tab is abandoned.
+            self._open_native_piano(
+                url,
+                key,
+                notice="[*] 钢琴公网地址已更新，已用新链接重新打开",
+            )
         else:
             self._offer_piano_open(url, key)
         return True
+
+    def _refresh_piano_open_keys(self, url: str, key: str) -> None:
+        """Update older「打开钢琴」buttons when the server rotates keys/URLs."""
+        tok = _piano_token_from_url(url)
+        if not tok:
+            return
+        for tag, (u, _old) in list(self._piano_open_targets.items()):
+            if _piano_token_from_url(u) == tok:
+                self._piano_open_targets[tag] = (url, key)
 
     def _offer_piano_open(self, url: str, key: str) -> None:
         self._media_tag_seq += 1
@@ -4189,24 +4208,27 @@ class SSHChatGUI:
         except tk.TclError:
             return ""
 
-    def _open_native_piano(self, url: str, key: str) -> None:
+    def _open_native_piano(
+        self, url: str, key: str, *, notice: str | None = None
+    ) -> None:
         # Same as canvas: open the Cloudflare HTTPS page in Chromium --app=;
         # #k= autofills client-side only (never sent to the server).
+        # Do not block reopen — the user may have closed the window; canvas
+        # likewise always opens. Token set only tracks "had open" for tunnel refresh.
         token = _piano_token_from_url(url)
-        if token and token in self._open_piano_tokens:
-            self._append_chat_line("[*] 房间钢琴已在浏览器中打开", local_sent=True)
-            return
+        ok_msg = notice or "[*] 已打开房间钢琴"
+        browser_msg = notice or "[*] 已在系统浏览器打开房间钢琴"
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
                 if token:
                     self._open_piano_tokens.add(token)
-                self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
+                self._append_chat_line(ok_msg, local_sent=True)
             else:
                 webbrowser.open(target)
                 if token:
                     self._open_piano_tokens.add(token)
-                self._append_chat_line("[*] 已在系统浏览器打开房间钢琴", local_sent=True)
+                self._append_chat_line(browser_msg, local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 
