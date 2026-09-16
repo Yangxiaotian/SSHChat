@@ -92,10 +92,13 @@ MESSAGES: dict = {
         "[*] /game pgn              Export PGN for the current/finished game (chess only).",
         "[*] /game undo             Undo: side that moved last requests; opponent /game undo accept undoes one ply "
         "(chess/gomoku/go/xiangqi/doushou; short acc / rej / can; reject refuses, cancel withdraws the request).",
+        "[*] /game draw             Offer a draw; opponent /game draw accept|reject (alias: 求和). "
+        "AI practice games disallow draws. Supported: chess/gomoku/go/xiangqi/doushou/reversi/darkchess.",
         "[*] /game resign           Resign (only while a game is in progress).",
         "[*] /game abort            Abort a game that has not started.",
         "[*] /game end              Room owner may force-end the current game.",
         "[*] /game restore          Restore a game parked by restart/federation into an idle room.",
+        "[*] /game restore swap     Swap the parked game with the active one (keeps both).",
         "[*] /game on <name>        Owner enables a game in this room (same name aliases as new).",
         "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected).",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",
@@ -128,7 +131,7 @@ MESSAGES: dict = {
         "pad_usage": (
             "[*] Usage: /pad <text>     set one line (whitespace collapsed; use /pad edit for newlines)\n"
             "[*]         /pad           show\n"
-            "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim)\n"
+            "[*]         /pad edit      open vim/$EDITOR for multi-line, then upload (alias /pad vim; restricted: no :term/:e/:vimgrep)\n"
             "[*]         /pad clear     clear\n"
             "[*] Federated same-name rooms share one pad (last write wins).\n"
         ),

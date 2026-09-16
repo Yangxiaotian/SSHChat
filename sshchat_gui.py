@@ -108,6 +108,10 @@ _GUI_OPEN_DOWNLOAD_RE = re.compile(
     r"^gui-open\s+download\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
+_GUI_OPEN_CLOCK_RE = re.compile(
+    r"^gui-open\s+clock\s+(https?://\S+)\s*$",
+    re.I,
+)
 _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
@@ -134,7 +138,7 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
@@ -248,6 +252,8 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
         "seats",
         "rating",
         "pgn",
+        "restore",
+        "draw",
     ),
     "/news": ("中文", "国际", "科技", "all", "detail", "详情", "fetch", "全文"),
     "/library": (
@@ -298,6 +304,9 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "draw"): ("accept", "reject", "cancel"),
+    ("/game", "restore"): ("swap",),
+    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
 }
 
 
@@ -486,7 +495,13 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if _SECURE_HTTP_URL_RE.match(t):
         return True
-    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_PIANO_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
+    if (
+        _GUI_OPEN_UPLOAD_RE.match(t)
+        or _GUI_OPEN_CANVAS_RE.match(t)
+        or _GUI_OPEN_PIANO_RE.match(t)
+        or _GUI_OPEN_DOWNLOAD_RE.match(t)
+        or _GUI_OPEN_CLOCK_RE.match(t)
+    ):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
         return True
@@ -743,6 +758,22 @@ def _piano_token_from_url(url: str) -> str:
     if len(parts) >= 2 and parts[0] == "piano":
         return parts[1]
     return ""
+
+
+def _invite_url_endpoint(url: str) -> str:
+    """Normalize invite URL for comparing tunnel host changes (ignore fragment/query)."""
+    parsed = urllib.parse.urlparse((url or "").strip())
+    path = parsed.path.rstrip("/") or "/"
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _invite_url_host_changed(previous: str, current: str) -> bool:
+    """True when a re-delivered invite points at a different public host/path."""
+    prev = _invite_url_endpoint(previous)
+    cur = _invite_url_endpoint(current)
+    if not prev or not cur:
+        return False
+    return prev != cur
 
 
 def _pil_rgb_image(path: Path, max_px: int = _MAX_PREVIEW_SOURCE_PX) -> Any | None:
@@ -2075,6 +2106,10 @@ class SSHChatGUI:
         self._expecting_own_canvas = False
         self._expecting_own_piano = False
         self._open_piano_tokens: set[str] = set()
+        self._open_canvas_tokens: set[str] = set()
+        # token -> last opened invite URL (for tunnel-churn reopen only)
+        self._open_piano_urls: dict[str, str] = {}
+        self._open_canvas_urls: dict[str, str] = {}
         self._paste_timer: str | int | None = None
         self._suggest_win: tk.Misc | None = None
         self._suggest_list: tk.Listbox | None = None
@@ -3448,6 +3483,8 @@ class SSHChatGUI:
             return
         if parsed and parsed[1] == "*" and self._try_handle_piano_invite(parsed[2]):
             return
+        if parsed and parsed[1] == "*" and self._try_handle_clock_invite(parsed[2]):
+            return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*":
@@ -3964,12 +4001,27 @@ class SSHChatGUI:
             return False
         url, key = m.group(1), m.group(2).upper()
         self._refresh_canvas_open_keys(url, key)
+        try:
+            tok = _canvas_token_from_url(url)[1]
+        except ValueError:
+            tok = ""
         own = self._expecting_own_canvas
         self._expecting_own_canvas = False
         if own:
             self._open_native_canvas(url, key)
-        else:
-            self._offer_canvas_open(url, key)
+            return True
+        # Quick Tunnel hostname churn only — same nick on another device must
+        # not spawn a second Chromium window for the same board URL.
+        if tok and tok in self._open_canvas_tokens:
+            prev = self._open_canvas_urls.get(tok, "")
+            if _invite_url_host_changed(prev, url):
+                self._open_native_canvas(
+                    url,
+                    key,
+                    notice="[*] 画布公网地址已更新，已用新链接重新打开",
+                )
+            return True
+        self._offer_canvas_open(url, key)
         return True
 
     def _refresh_canvas_open_keys(self, url: str, key: str) -> None:
@@ -3987,20 +4039,55 @@ class SSHChatGUI:
             except ValueError:
                 continue
 
+    def _try_handle_clock_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_CLOCK_RE.match(body.strip())
+        if not m:
+            return False
+        url = m.group(1)
+        self._append_chat_line("[*] 打开棋钟…", local_sent=True)
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
+        self._set_status("棋钟已在浏览器打开")
+        self._alert_beep()
+        return True
+
     def _try_handle_piano_invite(self, body: str) -> bool:
         m = _GUI_OPEN_PIANO_RE.match(body.strip())
         if not m:
             return False
         url, key = m.group(1), m.group(2).upper()
+        self._refresh_piano_open_keys(url, key)
+        token = _piano_token_from_url(url)
         # Only auto-open if THIS client just clicked 钢琴 — same nick on another
         # device (e.g. iOS) must not reopen a second window here.
         own = self._expecting_own_piano
         self._expecting_own_piano = False
         if own:
             self._open_native_piano(url, key)
+        elif token and token in self._open_piano_tokens:
+            prev = self._open_piano_urls.get(token, "")
+            if _invite_url_host_changed(prev, url):
+                # Quick Tunnel hostname churn: reopen so the old tab is abandoned.
+                self._open_native_piano(
+                    url,
+                    key,
+                    notice="[*] 钢琴公网地址已更新，已用新链接重新打开",
+                )
+            # Same URL re-delivered (other device joined) — keep existing window.
         else:
             self._offer_piano_open(url, key)
         return True
+
+    def _refresh_piano_open_keys(self, url: str, key: str) -> None:
+        """Update older「打开钢琴」buttons when the server rotates keys/URLs."""
+        tok = _piano_token_from_url(url)
+        if not tok:
+            return
+        for tag, (u, _old) in list(self._piano_open_targets.items()):
+            if _piano_token_from_url(u) == tok:
+                self._piano_open_targets[tag] = (url, key)
 
     def _offer_piano_open(self, url: str, key: str) -> None:
         self._media_tag_seq += 1
@@ -4109,15 +4196,29 @@ class SSHChatGUI:
                 f"[*] 已接收: {name}（显示失败: {e}）", local_sent=True
             )
 
-    def _open_native_canvas(self, url: str, key: str) -> None:
+    def _open_native_canvas(
+        self, url: str, key: str, *, notice: str | None = None
+    ) -> None:
         # Excalidraw board is the web page; #k= autofills client-side only.
+        try:
+            tok = _canvas_token_from_url(url)[1]
+        except ValueError:
+            tok = ""
+        ok_msg = notice or "[*] 已打开共享画布"
+        browser_msg = notice or "[*] 已在系统浏览器打开共享画布"
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
-                self._append_chat_line("[*] 已打开共享画布", local_sent=True)
+                if tok:
+                    self._open_canvas_tokens.add(tok)
+                    self._open_canvas_urls[tok] = url
+                self._append_chat_line(ok_msg, local_sent=True)
             else:
                 webbrowser.open(target)
-                self._append_chat_line("[*] 已在系统浏览器打开共享画布", local_sent=True)
+                if tok:
+                    self._open_canvas_tokens.add(tok)
+                    self._open_canvas_urls[tok] = url
+                self._append_chat_line(browser_msg, local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
@@ -4131,24 +4232,29 @@ class SSHChatGUI:
         except tk.TclError:
             return ""
 
-    def _open_native_piano(self, url: str, key: str) -> None:
+    def _open_native_piano(
+        self, url: str, key: str, *, notice: str | None = None
+    ) -> None:
         # Same as canvas: open the Cloudflare HTTPS page in Chromium --app=;
         # #k= autofills client-side only (never sent to the server).
+        # Do not block reopen — the user may have closed the window; canvas
+        # likewise always opens. Token set only tracks "had open" for tunnel refresh.
         token = _piano_token_from_url(url)
-        if token and token in self._open_piano_tokens:
-            self._append_chat_line("[*] 房间钢琴已在浏览器中打开", local_sent=True)
-            return
+        ok_msg = notice or "[*] 已打开房间钢琴"
+        browser_msg = notice or "[*] 已在系统浏览器打开房间钢琴"
         try:
             target = f"{url}#k={urllib.parse.quote(str(key or '').upper())}"
             if _open_canvas_app_window(target, maximized=True):
                 if token:
                     self._open_piano_tokens.add(token)
-                self._append_chat_line("[*] 已打开房间钢琴", local_sent=True)
+                    self._open_piano_urls[token] = url
+                self._append_chat_line(ok_msg, local_sent=True)
             else:
                 webbrowser.open(target)
                 if token:
                     self._open_piano_tokens.add(token)
-                self._append_chat_line("[*] 已在系统浏览器打开房间钢琴", local_sent=True)
+                    self._open_piano_urls[token] = url
+                self._append_chat_line(browser_msg, local_sent=True)
         except Exception as e:
             self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 
@@ -4512,6 +4618,9 @@ class SSHChatGUI:
         self._expecting_names = False
         self._expecting_own_piano = False
         self._open_piano_tokens.clear()
+        self._open_canvas_tokens.clear()
+        self._open_piano_urls.clear()
+        self._open_canvas_urls.clear()
         if clear_log:
             self._rooms_order = ["default"]
             self._active_room = "default"

@@ -19,7 +19,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -35,6 +37,7 @@ class WebInviteActivity : AppCompatActivity() {
     private var maximized = false
     private var isCanvas = false
     private var isPiano = false
+    private var isClock = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,7 +50,8 @@ class WebInviteActivity : AppCompatActivity() {
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "SSHChat" }
         isCanvas = intent.getBooleanExtra(EXTRA_CANVAS, false)
         isPiano = intent.getBooleanExtra(EXTRA_PIANO, false)
-        if (url.isBlank() || key.isBlank()) {
+        isClock = intent.getBooleanExtra(EXTRA_CLOCK, false)
+        if (url.isBlank() || (!isClock && key.isBlank())) {
             Toast.makeText(this, "无效邀请", Toast.LENGTH_SHORT).show()
             finish()
             return
@@ -56,8 +60,21 @@ class WebInviteActivity : AppCompatActivity() {
         binding.tvTitle.text = title
         binding.btnClose.setOnClickListener { finish() }
         binding.btnCloseFloating.setOnClickListener { finish() }
-        binding.btnMaximize.setOnClickListener { setMaximized(true) }
+        binding.btnMaximize.setOnClickListener { setMaximized(true, showFloatingChrome = !isPiano && !isClock) }
         binding.btnRestore.setOnClickListener { setMaximized(false) }
+        // Keep floating close/restore above WebView and clear of cutout / status edge.
+        ViewCompat.setOnApplyWindowInsetsListener(binding.floatingChrome) { v, insets ->
+            val bars = insets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            val lp = v.layoutParams as FrameLayout.LayoutParams
+            val base = (12 * resources.displayMetrics.density).toInt()
+            lp.topMargin = base + bars.top
+            lp.marginEnd = base + bars.right
+            v.layoutParams = lp
+            insets
+        }
+        binding.floatingChrome.bringToFront()
 
         binding.web.settings.apply {
             javaScriptEnabled = true
@@ -65,6 +82,8 @@ class WebInviteActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             mediaPlaybackRequiresUserGesture = false
         }
+        // Piano/clock close lives in the page toolbar — do not overlay keys/clock faces.
+        val pageOwnsClose = isPiano || isClock
         binding.web.addJavascriptInterface(NativeBridge(this), "SSHChatNative")
         binding.web.webChromeClient = WebChromeClient()
         val safeKey = key.replace("\\", "\\\\").replace("'", "\\'")
@@ -72,38 +91,50 @@ class WebInviteActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
 
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                // Before deferred ES modules run — canvas page reads this after CDN load.
-                view.evaluateJavascript("window.__SSHCHAT_KEY='$safeKey';", null)
+                view.evaluateJavascript("window.__SSHCHAT_EMBEDDED__=true;", null)
+                if (!isClock) {
+                    // Before deferred ES modules run — canvas page reads this after CDN load.
+                    view.evaluateJavascript("window.__SSHCHAT_KEY='$safeKey';", null)
+                }
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
-                // Retry until board unlocks: Excalidraw listeners bind only after esm.sh loads.
-                attemptUnlock(view, 0)
+                if (!isClock) {
+                    // Retry until board unlocks: Excalidraw listeners bind only after esm.sh loads.
+                    attemptUnlock(view, 0)
+                }
             }
         }
         binding.web.loadUrl(url)
 
-        // Canvas / piano start maximized so the page fills the screen.
-        if (isCanvas || isPiano) {
-            setMaximized(true)
+        // Canvas / piano / clock start maximized so the page fills the screen.
+        if (isCanvas || isPiano || isClock) {
+            setMaximized(true, showFloatingChrome = !pageOwnsClose)
         }
         if (isPiano) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
     }
 
-    private fun setMaximized(on: Boolean) {
+    private fun setMaximized(on: Boolean, showFloatingChrome: Boolean = true) {
         maximized = on
         binding.toolbar.visibility = if (on) View.GONE else View.VISIBLE
-        binding.floatingChrome.visibility = if (on) View.VISIBLE else View.GONE
+        val chrome = on && showFloatingChrome && !isPiano && !isClock
+        binding.floatingChrome.visibility = if (chrome) View.VISIBLE else View.GONE
+        if (chrome) {
+            binding.floatingChrome.bringToFront()
+            binding.floatingChrome.requestApplyInsets()
+        }
 
         WindowCompat.setDecorFitsSystemWindows(window, !on)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (on) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // Full immersive without TRANSIENT swipe-to-show: that edge gesture
+            // ate taps on the top-right close button for piano/clock.
             controller.hide(WindowInsetsCompat.Type.systemBars())
             controller.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             controller.show(WindowInsetsCompat.Type.systemBars())
@@ -112,7 +143,7 @@ class WebInviteActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (maximized && isCanvas) {
+        if (maximized && (isCanvas || isClock)) {
             setMaximized(false)
             return
         }
@@ -177,6 +208,11 @@ class WebInviteActivity : AppCompatActivity() {
 
     private class NativeBridge(private val activity: WebInviteActivity) {
         @JavascriptInterface
+        fun close() {
+            activity.runOnUiThread { activity.finish() }
+        }
+
+        @JavascriptInterface
         fun saveBlob(base64: String, filename: String, mime: String) {
             activity.runOnUiThread {
                 try {
@@ -227,6 +263,7 @@ class WebInviteActivity : AppCompatActivity() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_CANVAS = "canvas"
         private const val EXTRA_PIANO = "piano"
+        private const val EXTRA_CLOCK = "clock"
 
         fun canvas(ctx: Context, url: String, key: String): Intent =
             Intent(ctx, WebInviteActivity::class.java)
@@ -249,5 +286,13 @@ class WebInviteActivity : AppCompatActivity() {
                 .putExtra(EXTRA_KEY, key)
                 .putExtra(EXTRA_TITLE, "上传文件")
                 .putExtra(EXTRA_CANVAS, false)
+
+        fun clock(ctx: Context, url: String): Intent =
+            Intent(ctx, WebInviteActivity::class.java)
+                .putExtra(EXTRA_URL, url)
+                .putExtra(EXTRA_KEY, "")
+                .putExtra(EXTRA_TITLE, "棋钟")
+                .putExtra(EXTRA_CANVAS, true)
+                .putExtra(EXTRA_CLOCK, true)
     }
 }

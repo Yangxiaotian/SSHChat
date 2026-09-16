@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import piano_sharing
+import piano_ws
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -233,6 +234,7 @@ PIANO_TEXTS = {
         "replay_restart": "Restart",
         "replay_not_found": "Recording not found or expired",
         "replay_loading": "Loading replay…",
+        "close": "Close",
     },
     "zh": {
         "title": "SSHChat 房间钢琴",
@@ -275,6 +277,7 @@ PIANO_TEXTS = {
         "replay_restart": "重播",
         "replay_not_found": "录制不存在或已过期",
         "replay_loading": "正在加载重放…",
+        "close": "关闭",
     },
 }
 
@@ -824,6 +827,7 @@ def generate_piano_page(
                     <button type="button" class="tb-btn" id="restartBtn" disabled>{html.escape(S['replay_restart'])}</button>
                     <button type="button" class="tb-btn" id="exportBtn" disabled>{html.escape(S['export'])}</button>
                     <button type="button" class="tb-btn" id="shareBtn" disabled>{html.escape(S['share'])}</button>
+                    <button type="button" class="tb-btn" id="closeBtn" hidden>{html.escape(S['close'])}</button>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="loading" id="loading">{html.escape(S['loading'])}</div>
@@ -882,20 +886,32 @@ def generate_piano_page(
 
         let ticket = '';
         let lastSeq = 0;
-        let pollTimer = null;
-        let syncing = false;
+        let syncLoopActive = false;
         let selfName = '';
         const keyEls = Object.create(null);
         const flashTimers = Object.create(null);
         const heldKeys = Object.create(null);
+        const remoteHeld = Object.create(null);
         const ownEventSeqs = new Set();
         let audioCtx = null;
         const audioBuffers = Object.create(null);
         let audioReady = false;
         let unlockPromise = null;
         let pushQueue = Promise.resolve();
-        let remoteTimeBase = null;
-        const REMOTE_STALE_MS = 500;
+        let pendingPush = [];
+        let flushTimer = null;
+        const FLUSH_MS = 16;
+        const SYNC_WAIT_MS = 20000;
+        // Live remote play: schedule within each sync batch from "now", not a
+        // global wall-clock timebase (that made late batches dump as stutter).
+        const BATCH_GAP_CAP_MS = 800;
+        // If a sync dump spans longer than this, keep only the recent tail so
+        // the peer hears live notes instead of a compressed catch-up burst.
+        const LIVE_CATCHUP_MS = 280;
+        let pianoWs = null;
+        let pianoWsLive = false;
+        let pianoWsRetryTimer = null;
+        let pianoWsForceHttp = false;
 
         let isRecording = false;
         let recordStartMs = 0;
@@ -1240,6 +1256,35 @@ def generate_piano_page(
         restartBtn.addEventListener('click', restartPlayback);
         exportBtn.addEventListener('click', function () {{ void exportRecording(); }});
         shareBtn.addEventListener('click', function () {{ void shareRecording(); }});
+        (function wireClose() {{
+            const closeBtn = document.getElementById('closeBtn');
+            if (!closeBtn) return;
+            function hasNativeClose() {{
+                if (window.__SSHCHAT_EMBEDDED__) return true;
+                try {{
+                    if (window.SSHChatNative && window.SSHChatNative.close) return true;
+                }} catch (_) {{}}
+                return false;
+            }}
+            function reveal() {{
+                if (!hasNativeClose()) return;
+                closeBtn.hidden = false;
+            }}
+            closeBtn.addEventListener('click', function () {{
+                try {{
+                    if (window.SSHChatNative && window.SSHChatNative.close) {{
+                        window.SSHChatNative.close();
+                        return;
+                    }}
+                }} catch (_) {{}}
+                try {{
+                    window.webkit.messageHandlers.sshchatClose.postMessage({{}});
+                }} catch (_) {{}}
+            }});
+            reveal();
+            setTimeout(reveal, 50);
+            setTimeout(reveal, 300);
+        }})();
 
         function setStatus(text, err) {{
             statusEl.textContent = text;
@@ -1432,28 +1477,44 @@ def generate_piano_page(
             void unlockAudio();
         }}
 
-        function resetRemoteTimeBase(evtTs) {{
-            const ts = typeof evtTs === 'number' ? evtTs : 0;
-            const perf = performance.now();
-            if (!remoteTimeBase) {{
-                remoteTimeBase = {{ serverTs: ts, perfMs: perf }};
-                return;
+        function scheduleRemoteBatch(events) {{
+            if (!events || !events.length) return;
+            let tLast = null;
+            for (let i = events.length - 1; i >= 0; i--) {{
+                if (typeof events[i].ts === 'number') {{
+                    tLast = events[i].ts;
+                    break;
+                }}
             }}
-            const expected = remoteTimeBase.perfMs + (ts - remoteTimeBase.serverTs) * 1000;
-            if (perf - expected > REMOTE_STALE_MS) {{
-                remoteTimeBase = {{ serverTs: ts, perfMs: perf }};
+            let playEvents = events;
+            if (tLast != null && LIVE_CATCHUP_MS > 0) {{
+                const cut = tLast - LIVE_CATCHUP_MS / 1000;
+                const tail = events.filter(function (evt) {{
+                    return typeof evt.ts !== 'number' || evt.ts >= cut;
+                }});
+                if (tail.length) playEvents = tail;
             }}
-        }}
-
-        function scheduleRemoteEvent(evt) {{
-            const ts = typeof evt.ts === 'number' ? evt.ts : 0;
-            resetRemoteTimeBase(ts);
-            const when = remoteTimeBase.perfMs + (ts - remoteTimeBase.serverTs) * 1000;
-            const delay = Math.max(0, when - performance.now());
-            if (evt.action === 'on') {{
-                setTimeout(function () {{ playRemoteNote(evt.note); }}, delay);
-            }} else if (evt.action === 'off') {{
-                setTimeout(function () {{ unflashKey(evt.note); }}, delay);
+            let t0 = null;
+            for (const evt of playEvents) {{
+                if (typeof evt.ts === 'number') {{
+                    t0 = evt.ts;
+                    break;
+                }}
+            }}
+            if (t0 == null) t0 = 0;
+            const start = performance.now();
+            for (const evt of playEvents) {{
+                const ts = typeof evt.ts === 'number' ? evt.ts : t0;
+                let delay = (ts - t0) * 1000;
+                if (!(delay > 0)) delay = 0;
+                if (delay > BATCH_GAP_CAP_MS) delay = BATCH_GAP_CAP_MS;
+                const when = start + delay;
+                const wait = Math.max(0, when - performance.now());
+                if (evt.action === 'on') {{
+                    setTimeout(function () {{ playRemoteNote(evt.note); }}, wait);
+                }} else if (evt.action === 'off') {{
+                    setTimeout(function () {{ unflashKey(evt.note); }}, wait);
+                }}
             }}
         }}
 
@@ -1584,21 +1645,46 @@ def generate_piano_page(
         async function pushNote(note, action, clientTs) {{
             if (!ticket) return;
             const ts = typeof clientTs === 'number' ? clientTs : Date.now() / 1000;
+            pendingPush.push({{ note: note, action: action, ts: ts }});
+            if (flushTimer == null) {{
+                flushTimer = setTimeout(function () {{ void flushNotes(); }}, FLUSH_MS);
+            }}
+        }}
+
+        async function flushNotes() {{
+            flushTimer = null;
+            if (!ticket || !pendingPush.length) return;
+            const batch = pendingPush.splice(0, pendingPush.length);
+            const held = Object.keys(heldKeys);
+            if (pianoWsLive && pianoWs && pianoWs.readyState === 1) {{
+                try {{
+                    pianoWs.send(JSON.stringify({{
+                        type: 'notes',
+                        events: batch,
+                        held: held,
+                    }}));
+                    return;
+                }} catch (_) {{
+                    pianoWsLive = false;
+                }}
+            }}
             pushQueue = pushQueue.then(async function () {{
                 try {{
-                    const res = await fetch('/piano/' + token + '/note', {{
+                    const res = await fetch('/piano/' + token + '/notes', {{
                         method: 'POST',
                         headers: {{
                             'Content-Type': 'application/json',
                             'X-Piano-Ticket': ticket,
                         }},
                         cache: 'no-store',
-                        body: JSON.stringify({{ note: note, action: action, ts: ts }}),
+                        body: JSON.stringify({{ events: batch, held: held }}),
                     }});
                     const data = await res.json().catch(function () {{ return {{}}; }});
-                    const evt = data.event;
-                    if (evt && typeof evt.seq === 'number') {{
-                        ownEventSeqs.add(evt.seq);
+                    const events = data.events || [];
+                    for (const evt of events) {{
+                        if (evt && typeof evt.seq === 'number') {{
+                            ownEventSeqs.add(evt.seq);
+                        }}
                     }}
                 }} catch (_) {{}}
             }});
@@ -1669,8 +1755,99 @@ def generate_piano_page(
         async function startSession(data) {{
             applySession(data);
             await syncOnce(true);
-            if (pollTimer) clearInterval(pollTimer);
-            pollTimer = setInterval(function () {{ void syncOnce(false); }}, 50);
+            connectPianoWs();
+            ensureHttpSyncLoop();
+        }}
+
+        function ensureHttpSyncLoop() {{
+            if (syncLoopActive) return;
+            syncLoopActive = true;
+            void syncLoop();
+        }}
+
+        function schedulePianoWsRetry() {{
+            if (pianoWsRetryTimer != null || !ticket || pianoWsForceHttp) return;
+            pianoWsRetryTimer = setTimeout(function () {{
+                pianoWsRetryTimer = null;
+                connectPianoWs();
+            }}, 1500);
+        }}
+
+        function connectPianoWs() {{
+            if (!ticket || pianoWsForceHttp) return;
+            if (pianoWs && (pianoWs.readyState === 0 || pianoWs.readyState === 1)) return;
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = proto + '//' + location.host + '/piano/' + token +
+                '/ws?ticket=' + encodeURIComponent(ticket);
+            let ws;
+            try {{
+                ws = new WebSocket(url);
+            }} catch (_) {{
+                pianoWsForceHttp = true;
+                ensureHttpSyncLoop();
+                return;
+            }}
+            pianoWs = ws;
+            ws.onopen = function () {{
+                pianoWsLive = true;
+                setStatus(i18n.statusReady, false);
+            }};
+            ws.onmessage = function (ev) {{
+                let data = null;
+                try {{
+                    data = JSON.parse(ev.data);
+                }} catch (_) {{
+                    return;
+                }}
+                if (!data || typeof data !== 'object') return;
+                const mtype = String(data.type || '');
+                if (mtype === 'ack') {{
+                    const events = data.events || [];
+                    for (const evt of events) {{
+                        if (evt && typeof evt.seq === 'number') ownEventSeqs.add(evt.seq);
+                        if (typeof evt.seq === 'number' && evt.seq > lastSeq) lastSeq = evt.seq;
+                    }}
+                    return;
+                }}
+                if (mtype === 'events') {{
+                    applyRemoteEventPayload(data, false);
+                    return;
+                }}
+                if (mtype === 'error') {{
+                    setStatus(i18n.statusErr, true);
+                }}
+            }};
+            ws.onclose = function () {{
+                pianoWsLive = false;
+                if (pianoWs === ws) pianoWs = null;
+                ensureHttpSyncLoop();
+                schedulePianoWsRetry();
+            }};
+            ws.onerror = function () {{
+                try {{ ws.close(); }} catch (_) {{}}
+            }};
+        }}
+
+        function applyRemoteEventPayload(data, initial) {{
+            const events = (data.events || []).slice().sort(function (a, b) {{
+                return (a.seq || 0) - (b.seq || 0);
+            }});
+            const remoteEvents = [];
+            for (const evt of events) {{
+                if (typeof evt.seq === 'number' && evt.seq > lastSeq) {{
+                    lastSeq = evt.seq;
+                }}
+                if (initial) continue;
+                if (!evt.note || !notes[evt.note]) continue;
+                if (ownEventSeqs.has(evt.seq)) continue;
+                // Do NOT skip by author==selfName: same nick on phone+Tk shares
+                // one participant name; the other device must still hear notes.
+                if (evt.action === 'on') remoteHeld[evt.note] = true;
+                else if (evt.action === 'off') delete remoteHeld[evt.note];
+                remoteEvents.push(evt);
+            }}
+            if (!initial && remoteEvents.length) scheduleRemoteBatch(remoteEvents);
+            if (!initial) applyHeldSnapshot(data.held);
         }}
 
         async function auth() {{
@@ -1698,13 +1875,64 @@ def generate_piano_page(
             }}
         }}
 
-        async function syncOnce(initial) {{
-            if (!ticket || syncing) return;
-            syncing = true;
-            if (!initial) setStatus(i18n.statusSync, false);
+        function applyHeldSnapshot(heldMap) {{
+            // Visual / stuck-key correction only. Do not re-trigger audio for keys
+            // already driven by the event batch (that caused double hits / stutter).
+            if (!heldMap || typeof heldMap !== 'object') return;
+            const nextRemote = Object.create(null);
+            for (const author of Object.keys(heldMap)) {{
+                if (selfName && author.toLowerCase() === selfName.toLowerCase()) continue;
+                const list = heldMap[author] || [];
+                for (const note of list) {{
+                    if (!notes[note]) continue;
+                    nextRemote[note] = true;
+                }}
+            }}
+            for (const note of Object.keys(remoteHeld)) {{
+                if (!nextRemote[note]) {{
+                    unflashKey(note);
+                }}
+            }}
+            for (const note of Object.keys(nextRemote)) {{
+                if (!remoteHeld[note]) {{
+                    // Missed note-on (e.g. brief gap) — catch up audio once.
+                    playRemoteNote(note);
+                }}
+            }}
+            for (const note of Object.keys(remoteHeld)) delete remoteHeld[note];
+            for (const note of Object.keys(nextRemote)) remoteHeld[note] = true;
+        }}
+
+        async function syncLoop() {{
+            while (syncLoopActive && ticket) {{
+                // Even with a live WebSocket, keep a short HTTP sync as backup
+                // (Cloudflare/WS glitches otherwise look like "无法同步").
+                try {{
+                    if (pianoWsLive) {{
+                        await syncOnce(false, 0);
+                        await new Promise(function (r) {{ setTimeout(r, 2000); }});
+                    }} else {{
+                        await syncOnce(false);
+                    }}
+                }} catch (_) {{
+                    await new Promise(function (r) {{ setTimeout(r, 250); }});
+                }}
+            }}
+        }}
+
+        async function syncOnce(initial, waitOverride) {{
+            if (!ticket) return;
             try {{
+                let wait = 0;
+                if (typeof waitOverride === 'number') {{
+                    wait = waitOverride;
+                }} else if (!initial && !pianoWsLive) {{
+                    wait = SYNC_WAIT_MS;
+                }}
                 const res = await fetch(
-                    '/piano/' + token + '/sync?since=' + lastSeq + '&ticket=' + encodeURIComponent(ticket),
+                    '/piano/' + token + '/sync?since=' + lastSeq +
+                    '&wait=' + wait +
+                    '&ticket=' + encodeURIComponent(ticket),
                     {{
                         headers: {{ 'X-Piano-Ticket': ticket }},
                         cache: 'no-store',
@@ -1712,23 +1940,11 @@ def generate_piano_page(
                 );
                 const data = await res.json().catch(function () {{ return {{}}; }});
                 if (!res.ok) throw new Error(data.error || 'sync failed');
-                const events = (data.events || []).slice().sort(function (a, b) {{
-                    return (a.seq || 0) - (b.seq || 0);
-                }});
-                for (const evt of events) {{
-                    if (typeof evt.seq === 'number' && evt.seq > lastSeq) {{
-                        lastSeq = evt.seq;
-                    }}
-                    if (initial) continue;
-                    if (!evt.note || !notes[evt.note]) continue;
-                    if (ownEventSeqs.has(evt.seq)) continue;
-                    scheduleRemoteEvent(evt);
-                }}
+                applyRemoteEventPayload(data, !!initial);
                 setStatus(i18n.statusReady, false);
             }} catch (_) {{
                 setStatus(i18n.statusErr, true);
-            }} finally {{
-                syncing = false;
+                throw _;
             }}
         }}
 
@@ -1759,6 +1975,115 @@ def generate_piano_page(
     </script>
 </body>
 </html>"""
+
+
+def _broadcast_piano_notes(
+    result: Optional[dict],
+    *,
+    exclude_conn_id: Optional[str] = None,
+) -> None:
+    if not result:
+        return
+    session_id = str(result.get("session_id") or "").strip()
+    if not session_id:
+        return
+    events = result.get("events")
+    if not events and result.get("event"):
+        events = [result["event"]]
+    piano_ws.piano_ws_hub.broadcast(
+        session_id,
+        {
+            "type": "events",
+            "rev": result.get("rev", 0),
+            "events": events or [],
+            "held": result.get("held") or {},
+        },
+        exclude_conn_id=exclude_conn_id,
+    )
+
+
+def _ws_conn_id() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(12)
+
+
+def handle_piano_websocket(handler: "BaseHTTPRequestHandler") -> bool:
+    """Upgrade GET /piano/<token>/ws?ticket=... to a WebSocket note channel."""
+    parsed = urlparse(handler.path)
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 3 or parts[0] != "piano" or parts[2] != "ws":
+        return False
+
+    upgrade = (handler.headers.get("Upgrade") or "").strip().lower()
+    connection = (handler.headers.get("Connection") or "").lower()
+    sec_key = (handler.headers.get("Sec-WebSocket-Key") or "").strip()
+    if upgrade != "websocket" or "upgrade" not in connection or not sec_key:
+        handler._send_error_json(400, "需要 WebSocket 升级")  # type: ignore[attr-defined]
+        return True
+
+    qs = parse_qs(parsed.query or "")
+    ticket = (qs.get("ticket") or [""])[0].strip()
+    if not ticket:
+        ticket = (handler.headers.get("X-Piano-Ticket") or "").strip()
+    token = parts[1]
+    store = piano_sharing.piano_store
+    session, participant, err = store.resolve_ticket(token, ticket)
+    if session is None or participant is None:
+        handler.send_response(403)
+        handler.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler.end_headers()
+        try:
+            handler.wfile.write((err or "forbidden").encode("utf-8"))
+        except Exception:
+            pass
+        return True
+
+    accept = piano_ws.ws_accept_key(sec_key)
+    handler.send_response(101, "Switching Protocols")
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    try:
+        handler.wfile.flush()
+    except Exception:
+        pass
+    handler.close_connection = True
+
+    sock = handler.connection
+    piano_ws.try_enable_tcp_nodelay(sock)
+    try:
+        sock.settimeout(None)
+    except OSError:
+        pass
+
+    client = piano_ws.PianoWsClient(
+        conn_id=_ws_conn_id(),
+        session_id=session.session_id,
+        participant=participant,
+        token=token,
+        sock=sock,
+    )
+
+    def on_notes(
+        ws_client: piano_ws.PianoWsClient,
+        events: list,
+        held: Optional[list],
+    ) -> Optional[dict]:
+        result, _push_err = store.push_notes(
+            ws_client.token,
+            ticket,
+            events,
+            held=held,
+        )
+        if result is None:
+            return None
+        _broadcast_piano_notes(result, exclude_conn_id=ws_client.conn_id)
+        return result
+
+    piano_ws.run_piano_ws_session(client, on_notes=on_notes)
+    return True
 
 
 def handle_piano_static_get(handler: "BaseHTTPRequestHandler") -> bool:
@@ -1893,11 +2218,16 @@ def handle_piano_get(handler: "BaseHTTPRequestHandler") -> bool:
         if not ticket:
             ticket = (qs.get("ticket") or [""])[0].strip()
         since_raw = (qs.get("since") or ["0"])[0]
+        wait_raw = (qs.get("wait") or ["0"])[0]
         try:
             since = int(since_raw)
         except ValueError:
             since = 0
-        payload, err = store.sync_since(token, ticket, since)
+        try:
+            wait_ms = int(wait_raw)
+        except ValueError:
+            wait_ms = 0
+        payload, err = store.sync_since(token, ticket, since, wait_ms=wait_ms)
         if payload is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
@@ -1965,6 +2295,30 @@ def handle_piano_post(handler: "BaseHTTPRequestHandler") -> bool:
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]
             return True
+        _broadcast_piano_notes(result)
+        handler._send_json_response(200, result)  # type: ignore[attr-defined]
+        return True
+
+    if action == "notes":
+        body = handler._read_json_body()  # type: ignore[attr-defined]
+        events = body.get("events")
+        held = body.get("held")
+        if events is not None and not isinstance(events, list):
+            handler._send_error_json(400, "无效事件")  # type: ignore[attr-defined]
+            return True
+        if held is not None and not isinstance(held, list):
+            handler._send_error_json(400, "无效按键状态")  # type: ignore[attr-defined]
+            return True
+        result, err = store.push_notes(
+            token,
+            ticket,
+            events if isinstance(events, list) else [],
+            held=held if isinstance(held, list) else None,
+        )
+        if result is None:
+            handler._send_error_json(403, err)  # type: ignore[attr-defined]
+            return True
+        _broadcast_piano_notes(result)
         handler._send_json_response(200, result)  # type: ignore[attr-defined]
         return True
 

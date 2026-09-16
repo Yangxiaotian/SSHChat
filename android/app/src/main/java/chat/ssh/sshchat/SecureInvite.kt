@@ -5,7 +5,7 @@ package chat.ssh.sshchat
  * GUI clients collapse (same idea as sshchat_gui._is_secure_invite_noise).
  */
 object SecureInvite {
-    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD }
+    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD, CLOCK }
 
     data class Open(val kind: Kind, val url: String, val key: String)
 
@@ -22,12 +22,12 @@ object SecureInvite {
     }
 
     private val guiOpen = Regex(
-        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$""",
+        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$""",
         RegexOption.IGNORE_CASE,
     )
 
     private val bannerStart = Regex(
-        """^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)""",
+        """^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)""",
         RegexOption.IGNORE_CASE,
     )
     private val bannerEnd = Regex("""^=+\s*$""")
@@ -40,6 +40,11 @@ object SecureInvite {
         RegexOption.IGNORE_CASE,
     )
     private val httpOnly = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
+    /** Bare invite URL line for /clock/<token> (no key; Kindle/mobile). */
+    private val clockUrlOnly = Regex(
+        """^https?://\S+/clock/[A-Za-z0-9_-]+/?$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val metaLine = Regex(
         """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|""" +
             """From|Sender|Filename|Size|Room|Recipients?)\s*[:：]""",
@@ -83,9 +88,19 @@ object SecureInvite {
             "canvas" -> Kind.CANVAS
             "piano" -> Kind.PIANO
             "upload" -> Kind.UPLOAD
+            "clock" -> Kind.CLOCK
             else -> return null
         }
-        return Open(kind, m.groupValues[2], m.groupValues[3].uppercase())
+        val key = m.groupValues.getOrNull(3).orEmpty().uppercase()
+        if (kind != Kind.CLOCK && key.length != 6) return null
+        return Open(kind, m.groupValues[2], key)
+    }
+
+    /** Fallback when the server only printed the clock URL (no gui-open yet). */
+    fun parseClockUrl(line: String): String? {
+        val t = normalize(line)
+        val m = clockUrlOnly.matchEntire(t) ?: return null
+        return m.value.trimEnd('/')
     }
 
     /** Server rejected /sendfile before issuing gui-open upload. */

@@ -192,6 +192,8 @@ export const enMessages: MessageTree = {
       seats: 'Seats',
       undo: 'Request undo',
       undoAccept: 'Accept undo',
+      draw: 'Offer draw',
+      drawAccept: 'Accept draw',
       pgn: 'PGN',
       resign: 'Resign',
       abort: 'Abort',

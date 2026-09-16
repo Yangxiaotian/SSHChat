@@ -55,6 +55,21 @@ class ClockTests(unittest.TestCase):
         self.assertIn("toggleSetup()", page)
         # Top half is rotated so the player across the table can read upright.
         self.assertIn("rotate(180deg)", page)
+        self.assertIn('id="closeBtn"', page)
+        self.assertIn("closePage()", page)
+
+    def test_invite_includes_gui_open_clock(self):
+        from unittest import mock
+
+        import server
+
+        session = self._session()
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            text = server._clock_invite_text(session, rejoined=False, lang="zh")
+        url = f"https://example.trycloudflare.com/clock/{session.token}"
+        self.assertIn(f"gui-open clock {url}", text)
 
 
 if __name__ == "__main__":

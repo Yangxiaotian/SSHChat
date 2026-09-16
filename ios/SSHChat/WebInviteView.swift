@@ -9,6 +9,8 @@ struct WebInviteView: View {
     var startsMaximized: Bool = false
     /// Piano: allow landscape while this view is visible.
     var allowLandscape: Bool = false
+    /// Chess clock has no unlock key.
+    var isClock: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var maximized = false
 
@@ -37,25 +39,30 @@ struct WebInviteView: View {
 
     private var maximizedShell: some View {
         ZStack(alignment: .topTrailing) {
-            KeyInjectingWebView(url: url, key: key.uppercased())
-                .ignoresSafeArea()
-            HStack(spacing: 12) {
-                Button("关闭") { dismiss() }
+            KeyInjectingWebView(
+                url: url,
+                key: key.uppercased(),
+                isClock: isClock,
+                onClose: { dismiss() }
+            )
+            .ignoresSafeArea()
+            // Piano/clock close is in the page UI (toolbar / mid bar).
+            if !isClock && !allowLandscape {
+                floatingCloseChrome(showRestore: false)
             }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
-            .padding(.top, 8)
-            .padding(.trailing, 12)
         }
-        .statusBarHidden(true)
+        .statusBarHidden(isClock || allowLandscape)
         .persistentSystemOverlays(.hidden)
     }
 
     private var navigationShell: some View {
         NavigationStack {
-            KeyInjectingWebView(url: url, key: key.uppercased())
+            KeyInjectingWebView(
+                url: url,
+                key: key.uppercased(),
+                isClock: isClock,
+                onClose: { dismiss() }
+            )
                 .ignoresSafeArea(edges: maximized ? .all : .bottom)
                 .navigationTitle(maximized ? "" : title)
                 .navigationBarTitleDisplayMode(.inline)
@@ -75,43 +82,70 @@ struct WebInviteView: View {
                 .statusBarHidden(maximized)
                 .overlay(alignment: .topTrailing) {
                     if maximized {
-                        HStack(spacing: 12) {
-                            Button("还原") {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    maximized = false
-                                }
-                            }
-                            Button("关闭") { dismiss() }
-                        }
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.top, 8)
-                        .padding(.trailing, 12)
+                        floatingCloseChrome(showRestore: true)
                     }
                 }
         }
+    }
+
+    /// Large, opaque chrome so WKWebView / notch edge taps do not eat the hit.
+    @ViewBuilder
+    private func floatingCloseChrome(showRestore: Bool) -> some View {
+        HStack(spacing: 10) {
+            if showRestore {
+                Button("还原") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        maximized = false
+                    }
+                }
+                .frame(minWidth: 56, minHeight: 44)
+            }
+            Button("关闭") { dismiss() }
+                .frame(minWidth: 56, minHeight: 44)
+        }
+        .font(.body.weight(.semibold))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .contentShape(Capsule())
+        .padding(.top, 12)
+        .padding(.trailing, 12)
     }
 }
 
 private struct KeyInjectingWebView: UIViewRepresentable {
     let url: String
     let key: String
+    var isClock: Bool = false
+    var onClose: () -> Void = {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(key: key) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(key: key, isClock: isClock, onClose: onClose)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Set before page JS (incl. deferred ES modules) so canvas can auth
-        // after Excalidraw finishes loading from CDN — not on a premature click.
         let safe = Self.jsStringLiteral(key)
-        let boot = WKUserScript(
-            source: """
+        // Always expose close(); canvas/piano also get key + saveBlob.
+        let bootSource: String
+        if isClock {
+            bootSource = """
+            window.__SSHCHAT_EMBEDDED__ = true;
+            window.SSHChatNative = window.SSHChatNative || {};
+            window.SSHChatNative.close = function() {
+                window.webkit.messageHandlers.sshchatClose.postMessage({});
+            };
+            """
+        } else {
+            bootSource = """
+            window.__SSHCHAT_EMBEDDED__ = true;
             window.__SSHCHAT_KEY='\(safe)';
             window.SSHChatNative = window.SSHChatNative || {};
+            window.SSHChatNative.close = function() {
+                window.webkit.messageHandlers.sshchatClose.postMessage({});
+            };
             window.SSHChatNative.saveBlob = function(b64, filename, mime) {
                 window.webkit.messageHandlers.sshchatSave.postMessage({
                     b64: b64,
@@ -119,12 +153,16 @@ private struct KeyInjectingWebView: UIViewRepresentable {
                     mime: mime || 'audio/mpeg'
                 });
             };
-            """,
+            """
+        }
+        let boot = WKUserScript(
+            source: bootSource,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(boot)
         config.userContentController.add(context.coordinator, name: "sshchatSave")
+        config.userContentController.add(context.coordinator, name: "sshchatClose")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
@@ -135,10 +173,13 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         return web
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onClose = onClose
+    }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "sshchatSave")
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "sshchatClose")
     }
 
     private static func jsStringLiteral(_ value: String) -> String {
@@ -149,11 +190,15 @@ private struct KeyInjectingWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let key: String
+        let isClock: Bool
+        var onClose: () -> Void
         private var unlockDone = false
         weak var webView: WKWebView?
 
-        init(key: String) {
+        init(key: String, isClock: Bool, onClose: @escaping () -> Void) {
             self.key = key
+            self.isClock = isClock
+            self.onClose = onClose
             super.init()
             NotificationCenter.default.addObserver(
                 self,
@@ -171,6 +216,12 @@ private struct KeyInjectingWebView: UIViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            if message.name == "sshchatClose" {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onClose()
+                }
+                return
+            }
             guard message.name == "sshchatSave",
                   let body = message.body as? [String: Any],
                   let b64 = body["b64"] as? String,
@@ -210,13 +261,14 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !isClock else { return }
             // Fallback for upload pages / older canvas HTML: retry until gate opens
             // or Excalidraw module binds unlock listeners (CDN can take seconds).
             attemptUnlock(webView, attempt: 0)
         }
 
         private func attemptUnlock(_ webView: WKWebView, attempt: Int) {
-            guard !unlockDone, attempt < 40 else { return }
+            guard !isClock, !unlockDone, attempt < 40 else { return }
             let safe = KeyInjectingWebView.jsStringLiteral(key)
             let js = """
             (function(){

@@ -101,6 +101,8 @@ _GAME_SUBCOMMANDS = {
     "seats": None,
     "rating": None,
     "pgn": None,
+    "restore": None,
+    "draw": None,
 }
 
 _NEWS_SUBCOMMANDS = {
@@ -222,6 +224,9 @@ _SUBCOMMANDS_BY_CMD = {
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "draw"): ("accept", "reject", "cancel"),
+    ("/game", "restore"): ("swap",),
+    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
     ("/game", "new"): _GAME_NAMES,
     ("/game", "on"): _GAME_NAMES,
     ("/game", "off"): _GAME_NAMES,
@@ -854,10 +859,209 @@ def _pick_pad_editor() -> str | None:
         val = (os.environ.get(key) or "").strip()
         if val:
             return val
-    for cand in ("vim", "nvim", "nano", "vi"):
+    # Prefer rvim (already restricted) when available.
+    for cand in ("rvim", "vim", "nvim", "nano", "vi"):
         if shutil.which(cand):
             return cand
     return None
+
+
+def _pad_editor_unrestricted() -> bool:
+    return (os.environ.get("SSHCHAT_PAD_UNRESTRICTED") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _vim_script_string(path: str) -> str:
+    """Quote a filesystem path for embedding in Vimscript."""
+    return "'" + path.replace("'", "''") + "'"
+
+
+def _write_pad_vim_lock_rc(pad_path: str) -> str:
+    """Write a one-shot vimrc that only allows reading/editing the pad file.
+
+    -Z alone still permits :e / :vimgrep / :r on other paths; this closes that.
+    :help under $VIMRUNTIME remains allowed.
+    """
+    rc_path = pad_path + ".vimrc"
+    pad_lit = _vim_script_string(os.path.realpath(pad_path))
+    rc_path_lit = _vim_script_string(os.path.realpath(rc_path))
+    content = f"""set nocompatible
+set modelines=0
+set secure
+set noswapfile
+set noundofile
+set viminfo=
+set nobackup
+set nowritebackup
+set noshelltemp
+filetype plugin off
+let s:pad = resolve({pad_lit})
+let s:rc = resolve({rc_path_lit})
+function! s:Allowed(path) abort
+  let f = resolve(a:path)
+  if empty(f) || f ==# s:pad || f ==# s:rc
+    return 1
+  endif
+  let rt = resolve($VIMRUNTIME)
+  if !empty(rt) && stridx(f, rt . '/') == 0
+    return 1
+  endif
+  return 0
+endfunction
+function! s:GuardRead() abort
+  if !s:Allowed(expand('<afile>:p'))
+    throw 'E145: only the pad file may be read'
+  endif
+endfunction
+function! s:GuardBuf() abort
+  if s:Allowed(expand('%:p'))
+    return
+  endif
+  echoerr 'E145: only the pad buffer is allowed'
+  silent! execute 'keepalt edit' fnameescape(s:pad)
+endfunction
+augroup sshchat_pad_lock
+  autocmd!
+  autocmd BufReadPre,FileReadPre,FilterReadPre,BufNewFile * call s:GuardRead()
+  autocmd BufEnter,WinEnter * call s:GuardBuf()
+augroup END
+"""
+    with open(rc_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return rc_path
+
+
+def _pad_editor_is_vim_family(base: str) -> bool:
+    if base in ("rvim", "rview", "vim", "vi", "vimx", "view", "nvim"):
+        return True
+    if base.startswith("nvim") or base.startswith("vim."):
+        return True
+    return False
+
+
+def _pad_editor_argv(editor: str, pad_path: str = "", lock_rc: str = "") -> list[str]:
+    """Build editor argv; block shell escapes and opening other files.
+
+    Override with SSHCHAT_PAD_UNRESTRICTED=1 if you truly need an unrestricted editor.
+    """
+    cmd = editor.split()
+    if not cmd or _pad_editor_unrestricted():
+        return cmd
+    base = os.path.basename(cmd[0]).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+
+    if _pad_editor_is_vim_family(base) and lock_rc:
+        # -u replaces user vimrc; --noplugin avoids netrw/:Explore etc.
+        locked = [cmd[0], "-u", lock_rc, "-i", "NONE", "-n", "--noplugin"]
+        if base not in ("rvim", "rview") and base != "nvim" and not base.startswith("nvim"):
+            if "-Z" not in cmd[1:] and "--restricted" not in cmd[1:]:
+                locked.insert(1, "-Z")
+        if base == "nvim" or base.startswith("nvim"):
+            false = shutil.which("false") or "/usr/bin/false"
+            locked[1:1] = [
+                "--cmd",
+                f"set shell={false}",
+                "--cmd",
+                "lua vim.fn.termopen=function() error('E145: restricted',0) end",
+            ]
+        # Keep any user-supplied flags after the binary name (e.g. EDITOR='vim -N').
+        locked.extend(cmd[1:])
+        return locked
+
+    if base in ("rvim", "rview"):
+        return cmd
+    if base == "nvim" or base.startswith("nvim"):
+        false = shutil.which("false") or "/usr/bin/false"
+        return [
+            cmd[0],
+            "--cmd",
+            f"set shell={false}",
+            "--cmd",
+            "lua vim.fn.termopen=function() error('E145: restricted',0) end",
+            *cmd[1:],
+        ]
+    if base in ("vim", "vi", "vimx", "view") or base.startswith("vim."):
+        if "-Z" not in cmd[1:] and "--restricted" not in cmd[1:]:
+            return [cmd[0], "-Z", *cmd[1:]]
+    return cmd
+
+
+def _snapshot_tty_attrs():
+    """Save stdin termios so we can restore after an external editor."""
+    try:
+        import termios
+
+        if not sys.stdin.isatty():
+            return None
+        return termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return None
+
+
+def _restore_tty_after_editor(attrs) -> None:
+    """Undo vim/nano terminal damage so prompt_toolkit can take input again.
+
+    After :wq (especially with a large paste), vim may leave bracketed-paste /
+    mouse / alt-screen modes on; the next prompt then looks alive but /names
+    and other commands appear dead.
+    """
+    try:
+        import termios
+
+        if attrs is not None and sys.stdin.isatty():
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attrs)
+    except Exception:
+        pass
+    # Belt-and-suspenders when termios restore is incomplete (common on SSH PTYs).
+    try:
+        if sys.stdin.isatty() and shutil.which("stty"):
+            subprocess.call(
+                ["stty", "sane"],
+                stdin=sys.stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception:
+        pass
+    real = _get_real_stdout() or sys.stdout
+    try:
+        # Leave alt screen, disable mouse / bracketed paste, show cursor, reset SGR.
+        seq = (
+            b"\x1b[?1049l"  # alt screen off
+            b"\x1b[?2004l"  # bracketed paste off
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"  # mouse off
+            b"\x1b[?25h"  # cursor on
+            b"\x1b[0m\r\n"
+        )
+        if hasattr(real, "buffer"):
+            real.buffer.write(seq)
+            real.flush()
+        else:
+            real.write(seq.decode("ascii"))
+            real.flush()
+    except Exception:
+        pass
+    try:
+        from prompt_toolkit.application import get_app_or_none
+
+        app = get_app_or_none()
+        if app is not None:
+            try:
+                app.renderer.reset()
+            except Exception:
+                pass
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _clear_stdout_proxy_pending()
 
 
 def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
@@ -891,6 +1095,9 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         return
 
     path = ""
+    lock_rc = ""
+    tty_attrs = None
+    new_text: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -903,14 +1110,24 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
             if current and not current.endswith("\n"):
                 tf.write("\n")
             path = tf.name
-        print(f"[*] Opening editor ({editor}). Save & quit to upload.")
+        if not _pad_editor_unrestricted():
+            base = os.path.basename(editor.split()[0]).lower()
+            if base.endswith(".exe"):
+                base = base[:-4]
+            if _pad_editor_is_vim_family(base):
+                lock_rc = _write_pad_vim_lock_rc(path)
+        cmd = _pad_editor_argv(editor, path, lock_rc)
+        mode = "unrestricted" if _pad_editor_unrestricted() else "restricted"
+        print(f"[*] Opening editor ({' '.join(cmd)}; {mode}). Save & quit to upload.")
         # Flush prompt_toolkit stdout proxy so vim gets a clean TTY.
         _clear_stdout_proxy_pending()
         sys.stdout.flush()
         sys.stderr.flush()
-        # $EDITOR may be "vim" or "vim -n"; split like a shell only on spaces.
-        cmd = editor.split()
-        rc = subprocess.call(cmd + [path])
+        tty_attrs = _snapshot_tty_attrs()
+        try:
+            rc = subprocess.call(cmd + [path])
+        finally:
+            _restore_tty_after_editor(tty_attrs)
         if rc != 0:
             print(f"[*] Editor exited with code {rc}; pad not uploaded.")
             return
@@ -920,12 +1137,15 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
         print(f"[*] Pad edit failed: {e!r}")
         return
     finally:
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        for p in (path, lock_rc):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
+    if new_text is None:
+        return
     if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
         "\r\n", "\n"
     ).replace("\r", "\n").rstrip("\n"):
@@ -1300,12 +1520,16 @@ def _clear_with_prompt_toolkit_output() -> bool:
 
 
 def _write_real_clear_csi() -> None:
+    """Emit ANSI clear to the stream the SSH client renders.
+
+    Do not require isatty(): ``ssh host cmd`` (no -t) uses pipes, but the local
+    terminal still interprets CSI in that pipe output — gating on isatty made
+    /cls a no-op in that common forced-command path.
+    """
     real = _get_real_stdout()
     if real is None:
-        return
+        real = sys.stdout
     try:
-        if not real.isatty():
-            return
         if hasattr(real, "buffer"):
             real.buffer.write(_CLEAR_CSI)
         else:
@@ -1321,10 +1545,9 @@ def _raw_terminal_clear() -> None:
 
 def _clear_terminal_with_prompt_sync() -> None:
     """Clear screen without desyncing prompt_toolkit's prompt rendering."""
-    if not _terminal_is_tty():
-        return
     _clear_stdout_proxy_pending()
-    _clear_with_prompt_toolkit_output()
+    if _terminal_is_tty():
+        _clear_with_prompt_toolkit_output()
     _write_real_clear_csi()
 
 
@@ -1441,6 +1664,7 @@ def main():
     use_prompt_toolkit = sys.stdin.isatty() and sys.stdout.isatty()
     if not use_prompt_toolkit:
         print("[*] non-interactive terminal detected; fallback input mode")
+        print("[*] Tip: ssh -t <user>@host  (allocate a TTY for Tab complete / clearer /cls)")
 
     if use_prompt_toolkit:
         # GUI / Paramiko / some PTYs do not answer CPR (cursor position requests);

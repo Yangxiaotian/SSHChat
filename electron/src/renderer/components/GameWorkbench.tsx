@@ -23,10 +23,27 @@ import { isInviteNoise } from '../lib/secureLinks';
 
 function detectGameKind(text: string): GameKind {
   const t = text.toLowerCase();
-  if (t.includes('doushou') || t.includes('jungle') || t.includes('animal chess') || t.includes('斗兽棋') || t.includes('斗兽')) return 'doushou';
-  if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋') || t.includes('象棋')) return 'xiangqi';
-  // These ids contain the generic "chess" token; resolve them first.
-  if (t.includes('darkchess') || t.includes('dark chess') || t.includes('flipchess') || t.includes('暗棋') || t.includes('翻翻棋')) return 'darkchess';
+  // Most-specific ids first. Darkchess boards mention 象 and "Dark Chess"
+  // contains "chess"; never let generic 象棋/chess/斗兽 steal them.
+  if (
+    t.includes('darkchess') ||
+    t.includes('dark chess') ||
+    t.includes('flipchess') ||
+    t.includes('暗棋') ||
+    t.includes('翻翻棋') ||
+    t.includes('翻棋')
+  ) {
+    return 'darkchess';
+  }
+  if (
+    t.includes('doushou') ||
+    t.includes('jungle') ||
+    t.includes('animal chess') ||
+    t.includes('斗兽棋')
+  ) {
+    return 'doushou';
+  }
+  if (t.includes('xiangqi') || t.includes('cchess') || t.includes('中国象棋')) return 'xiangqi';
   if (t.includes('junqi') || t.includes('army chess') || t.includes('landbattle') || t.includes('军棋')) return 'junqi';
   if (t.includes('chess') || t.includes('国际象棋')) return 'chess';
   if (t.includes('gomoku') || t.includes('五子棋')) return 'gomoku';
@@ -49,6 +66,8 @@ const cnToGameKind: Record<string, GameKind> = {
   '黑白棋': 'reversi',
   '暗棋': 'darkchess',
   '翻翻棋': 'darkchess',
+  '翻棋': 'darkchess',
+  'dark chess': 'darkchess',
   '海战棋': 'battleship',
   '军棋': 'junqi',
   '中国象棋': 'xiangqi',
@@ -64,12 +83,56 @@ const cnToGameKind: Record<string, GameKind> = {
 };
 
 function extractBoardBlock(systemLines: string[]): { board: string; game: GameKind } {
-  const headers = ['animal chess', 'doushou', '斗兽棋', 'xiangqi', '中国象棋', 'darkchess', '暗棋', '翻翻棋', 'junqi', '军棋', 'chess', '国际象棋', 'gomoku', '五子棋', 'reversi', '黑白棋', 'battleship', '海战棋', 'go', '围棋', 'sanguo', 'werewolf', 'drawguess', 'holdem', 'zjh', 'niutou', '三国杀', '狼人杀', '你画我猜', '德州扑克', '炸金花', '牛头王'];
+  // Longer / more-specific headers first so "Dark Chess board" ≠ chess,
+  // and "Animal Chess board" ≠ a bare chess token.
+  const headers = [
+    'dark chess',
+    'darkchess',
+    '暗棋',
+    '翻翻棋',
+    '翻棋',
+    'animal chess',
+    'doushou',
+    '斗兽棋',
+    'xiangqi',
+    '中国象棋',
+    'junqi',
+    '军棋',
+    'chess',
+    '国际象棋',
+    'gomoku',
+    '五子棋',
+    'reversi',
+    '黑白棋',
+    'battleship',
+    '海战棋',
+    'go',
+    '围棋',
+    'sanguo',
+    'werewolf',
+    'drawguess',
+    'holdem',
+    'zjh',
+    'niutou',
+    '三国杀',
+    '狼人杀',
+    '你画我猜',
+    '德州扑克',
+    '炸金花',
+    '牛头王',
+  ];
   let start = -1;
   let game: GameKind = 'none';
   for (let i = systemLines.length - 1; i >= 0; i--) {
     const line = systemLines[i].toLowerCase();
-    const hit = headers.find((h) => line.includes(`${h} `) || line.includes(`${h}(`) || line.includes(`${h}对局`) || line.includes(`${h}棋盘`) || line.includes(`${h} board`));
+    const hit = headers.find(
+      (h) =>
+        line.includes(`${h} `) ||
+        line.includes(`${h}(`) ||
+        line.includes(`${h}对局`) ||
+        line.includes(`${h}棋盘`) ||
+        line.includes(`${h} board`),
+    );
     if (hit) {
       start = i;
       game = cnToGameKind[hit] || (hit as GameKind);
@@ -99,7 +162,27 @@ function extractBoardBlock(systemLines: string[]): { board: string; game: GameKi
     if (/^\[\d{2}:\d{2}:\d{2}\]/.test(trimmed) && out.length > 0) break;
     out.push(line);
   }
-  return { board: out.join('\n'), game };
+  const board = out.join('\n');
+  return { board, game: refineGameByBoardShape(board, game) };
+}
+
+/** 4×8 face-down grid ⇒ darkchess; 9×7 animals/terrain ⇒ doushou. */
+function refineGameByBoardShape(board: string, fallback: GameKind): GameKind {
+  const lines = board.split('\n');
+  let darkRows = 0;
+  let douRows = 0;
+  for (const line of lines) {
+    const darkTok =
+      (line.match(/!?[+-](?:[将士象车马炮卒]|[GAERHCS])/g) || []).length +
+      (line.match(/!?[.?]/g) || []).length;
+    if (/^\s*[1-4]\s+/.test(line) && darkTok >= 8) darkRows += 1;
+    const douTok = (line.match(/!?[+-][鼠猫狗狼豹虎狮象RCDWPTLE]/g) || []).length;
+    const terrain = (line.match(/(?:红穴|黑穴|红陷|黑陷|河|rD|bD|rT|bT|RV)/g) || []).length;
+    if (/^\s*[1-9]\s+/.test(line) && douTok + terrain >= 5) douRows += 1;
+  }
+  if (darkRows >= 2) return 'darkchess';
+  if (douRows >= 3) return 'doushou';
+  return fallback;
 }
 
 function isXiangqiBoardLine(line: string): boolean {
@@ -137,7 +220,7 @@ function isLikelyGameLine(line: string): boolean {
   if (/^doushou\s+|斗兽棋棋盘|Animal Chess board/i.test(line.trim())) return true;
   if (/^reversi\s+game|黑白棋棋盘/.test(line.trim())) return true;
   if (/^\s*\d+\s+(?:[#!o.])(?:\s+(?:[#!o.])){7}\s*$/.test(line)) return true;
-  if (/^darkchess\s+game|darkchess\s+对局|暗棋棋盘/.test(line.trim())) return true;
+  if (/^darkchess\s+game|darkchess\s+对局|暗棋棋盘|Dark Chess board/i.test(line.trim())) return true;
   // Darkchess rows: fixed-width or spaced; zh 将士… or en G/A/E…; optional ! last mark
   if (
     /^\s*[1-4]\s+/.test(line) &&
@@ -201,6 +284,11 @@ function isLikelyGameLine(line: string): boolean {
     '围棋',
     '中国象棋',
     '斗兽棋',
+    // Keep bare '象棋' out — darkchess legends mention 象 + 棋盘 nearby.
+    '暗棋',
+    '翻翻棋',
+    '翻棋',
+    'dark chess',
     '德州扑克',
     '炸金花',
     '牛头王',
@@ -586,7 +674,11 @@ export default function GameWorkbench() {
     const gameLines = scopedLines.filter(isLikelyGameLine);
     const parsed = extractBoardBlock(gameLines);
     if (parsed.game === 'none' && parsed.board) {
-      return { board: parsed.board, game: detectGameKind(parsed.board), systemLines: scopedLines };
+      return {
+        board: parsed.board,
+        game: refineGameByBoardShape(parsed.board, detectGameKind(parsed.board)),
+        systemLines: scopedLines,
+      };
     }
     if (parsed.game !== 'none') return { ...parsed, systemLines: scopedLines };
     const openGame = inferOpenGame(scopedLines);

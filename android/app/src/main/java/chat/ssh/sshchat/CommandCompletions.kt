@@ -12,7 +12,7 @@ object CommandCompletions {
     private val SUBS = mapOf(
         "/game" to listOf(
             "help", "list", "new", "join", "show", "move", "resign",
-            "undo", "abort", "end", "on", "off", "seats", "rating", "pgn",
+            "undo", "abort", "end", "on", "off", "seats", "rating", "pgn", "restore", "draw",
         ),
         "/news" to listOf("中文", "国际", "科技", "all", "detail", "详情", "fetch", "全文"),
         "/library" to listOf(
@@ -35,6 +35,9 @@ object CommandCompletions {
 
     private val NESTED = mapOf(
         ("/game" to "undo") to listOf("accept", "reject", "cancel"),
+        ("/game" to "draw") to listOf("accept", "reject", "cancel"),
+        ("/game" to "restore") to listOf("swap"),
+        ("/game" to "move") to listOf("flip", "move", "翻", "翻子", "走", "移动"),
     )
 
     private val ROOM_ARG_CMDS = setOf("/join", "/switch", "/part")

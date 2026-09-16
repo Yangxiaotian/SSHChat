@@ -1742,6 +1742,11 @@ def _conn_needs_seat_swap(conn) -> bool:
 
 
 def _pickle_game_for_storage(game) -> bytes:
+    if isinstance(game, list):
+        return pickle.dumps(
+            [_loads_prepared_game(g) for g in game if g is not None],
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
     swaps: list[tuple[DisconnectedSeat, object]] = []
     for conn, name in _iter_game_conn_seats(game):
         if not _conn_needs_seat_swap(conn):
@@ -1763,7 +1768,16 @@ def _pickle_game_for_storage(game) -> bytes:
             _replace_conn_refs(game, seat, conn)
 
 
+def _loads_prepared_game(game):
+    """Return a picklable snapshot of one game (DisconnectedSeat + no rating_store)."""
+    return pickle.loads(_pickle_game_for_storage(game))
+
+
 def _rebind_game_services(game) -> None:
+    if isinstance(game, list):
+        for g in game:
+            _rebind_game_services(g)
+        return
     if hasattr(game, "rating_store"):
         game.rating_store = rating_store
     if getattr(game, "name", "") == "xiangqi":
@@ -1811,11 +1825,18 @@ def _build_session_payload_locked() -> dict[str, object]:
             continue
         games_blob[room] = base64.b64encode(raw).decode("ascii")
     parked_blob: dict[str, str] = {}
-    for room, game in room_games_parked.items():
-        if game is None or getattr(game, "state", "ended") == "ended":
+    for room, parked in room_games_parked.items():
+        games_list = [
+            g
+            for g in _parked_games_list(parked)
+            if g is not None and getattr(g, "state", "ended") != "ended"
+        ]
+        if not games_list:
             continue
         try:
-            raw = _pickle_game_for_storage(game)
+            # Persist stack as-is (single game or list) so multi-kind parks survive.
+            to_store: object = games_list[0] if len(games_list) == 1 else games_list
+            raw = _pickle_game_for_storage(to_store)
         except Exception as e:
             print(f"skip persisting parked room {room!r} game: {e!r}")
             continue
@@ -3986,10 +4007,32 @@ def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
     except Exception as e:
         print(f"[Canvas] refresh_host_base_url error: {e!r}")
         return
-    if n:
-        print(
-            f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
-        )
+    if not n:
+        return
+    print(
+        f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
+    )
+    # Clients still hold the old trycloudflare invite; push fresh URLs.
+    host = (node_id or "").strip()
+    try:
+        with canvas_sharing.canvas_store.lock:
+            sessions = [
+                s
+                for s in canvas_sharing.canvas_store.sessions.values()
+                if not s.closed
+                and not s.parked
+                and (s.host_node or "").strip() == host
+            ]
+        for session in sessions:
+            try:
+                _deliver_canvas_invites(session, refreshed=True)
+            except Exception as e:
+                print(
+                    f"[Canvas] re-invite after peer CF change failed "
+                    f"({session.session_id[:12]}…): {e!r}"
+                )
+    except Exception as e:
+        print(f"[Canvas] peer CF re-invite sweep failed: {e!r}")
 
 
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
@@ -4910,14 +4953,21 @@ def _canvas_invite_message(
     key: str,
     room: Optional[str],
     title: str = "",
+    refreshed: bool = False,
 ) -> str:
     where = f"房间 #{room}" if room else "私密画布"
     title_line = f"[*] 标题: {title}\n" if title else ""
+    refresh_line = (
+        "[*] 公网地址已更新（旧 trycloudflare 链接已失效，请用下面新网址）\n"
+        if refreshed
+        else ""
+    )
     return (
         f"[*] ========== 共享画布 ==========\n"
         f"[*] 发起人: {creator}\n"
         f"[*] 范围: {where}\n"
         f"{title_line}"
+        f"{refresh_line}"
         f"[*]\n"
         f"[*] 画布网址:\n"
         f"[*] {url}\n"
@@ -4934,10 +4984,150 @@ def _canvas_invite_message(
     )
 
 
+_LAST_CANVAS_PUBLIC_BASE = ""
+
+
+def _canvas_public_base_state_path() -> str:
+    return (
+        os.environ.get("SSHCHAT_CANVAS_PUBLIC_BASE_FILE", "").strip()
+        or "/var/lib/sshchat/cloudflared/last_canvas_invite_base"
+    )
+
+
+def _load_last_canvas_public_base() -> str:
+    try:
+        with open(_canvas_public_base_state_path(), "r", encoding="utf-8") as f:
+            return (f.read() or "").strip().rstrip("/")
+    except OSError:
+        return ""
+
+
+def _save_last_canvas_public_base(base: str) -> None:
+    path = _canvas_public_base_state_path()
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write((base or "").strip().rstrip("/") + "\n")
+    except OSError as e:
+        print(f"[Canvas] could not save public base state: {e!r}")
+
+
+def _rediscover_canvas_invites_for_public_change(reason: str = "") -> int:
+    """Re-send canvas URL+key to participants when the public base URL moves."""
+    try:
+        with canvas_sharing.canvas_store.lock:
+            sessions = [
+                s
+                for s in canvas_sharing.canvas_store.sessions.values()
+                if not s.closed and not s.parked
+            ]
+    except Exception as e:
+        print(f"[Canvas] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_canvas_invites(session, refreshed=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Canvas] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Canvas] re-delivered invites for {n} board(s){suffix}")
+    return n
+
+
+def _rediscover_piano_invites_for_public_change(reason: str = "") -> int:
+    """Re-send piano URL+key when the Quick Tunnel hostname moves."""
+    try:
+        with piano_sharing.piano_store.lock:
+            sessions = [
+                s
+                for s in piano_sharing.piano_store.sessions.values()
+                if not s.closed
+            ]
+    except Exception as e:
+        print(f"[Piano] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_piano_invites(session, refreshed=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Piano] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Piano] re-delivered invites for {n} session(s){suffix}")
+    return n
+
+
+def _rediscover_clock_invites_for_public_change(reason: str = "") -> int:
+    """Re-send clock page URLs when the Quick Tunnel hostname moves."""
+    try:
+        sessions = [
+            s
+            for s in clock_sharing.clock_store.sessions.values()
+            if not s.closed
+        ]
+    except Exception as e:
+        print(f"[Clock] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_clock_url(session, rejoined=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Clock] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Clock] re-delivered invites for {n} session(s){suffix}")
+    return n
+
+
+def _maybe_refresh_canvas_invites_on_public_change(
+    cur: str, *, reason: str
+) -> None:
+    """If live public base changed since last invite wave, re-deliver + csync."""
+    global _LAST_CANVAS_PUBLIC_BASE
+    cur = (cur or "").strip().rstrip("/")
+    prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
+    if not cur:
+        return
+    if cur == prev:
+        _LAST_CANVAS_PUBLIC_BASE = cur
+        return
+    _rediscover_canvas_invites_for_public_change(reason)
+    _rediscover_piano_invites_for_public_change(reason)
+    _rediscover_clock_invites_for_public_change(reason)
+    try:
+        _federation_push_all_canvas_announces()
+    except Exception as e:
+        print(f"[Canvas] csync after public change failed: {e!r}")
+    _LAST_CANVAS_PUBLIC_BASE = cur
+    _save_last_canvas_public_base(cur)
+
+
 def _deliver_canvas_invites(
     session: canvas_sharing.CanvasSession,
     *,
     only: Optional[str] = None,
+    refreshed: bool = False,
 ) -> None:
     """Privately deliver each participant their canvas URL + key.
 
@@ -4951,44 +5141,54 @@ def _deliver_canvas_invites(
             if live is not None:
                 session.keys = dict(live.keys)
                 session.keys_rotated_at = live.keys_rotated_at
-    base_url = (session.host_base_url or "").strip()
     hub = federation.get_hub()
-    # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
-    # latest fpub so invites survive Quick Tunnel hostname churn.
-    if session.host_node and hub is not None and hub.enabled:
-        live = hub.get_remote_file_public(session.host_node)
-        host = (session.host_node or "").strip()
-        host_up = _canvas_host_reachable(host)
-        candidate = (live or base_url or "").strip().rstrip("/")
-        # Peer gone, or still listed but Quick Tunnel DNS is already dead:
-        # take over on this node's Cloudflare when available.
-        need_claim = (not host_up) or (
-            bool(candidate)
-            and candidate.endswith(".trycloudflare.com")
-            and not _trycloudflare_url_resolves(candidate)
-        )
-        if need_claim:
-            claimed = _try_claim_canvas_locally(session)
-            if claimed is not None:
-                session = claimed
-                base_url = ""
-                try:
-                    _federation_push_canvas_announce(session)
-                except Exception as e:
-                    print(f"[Canvas] csync after local claim failed: {e!r}")
-            elif live:
-                base_url = live
-        elif live:
-            base_url = live
-            if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
-                canvas_sharing.canvas_store.refresh_host_base_url(
-                    session.host_node, live
-                )
-                session.host_base_url = live
-    if not base_url:
+    base_url = ""
+    # Local boards always use the live FileHTTP/CF URL — never a frozen
+    # host_base_url from an earlier Quick Tunnel hostname.
+    if not (session.host_node or "").strip():
         if file_http is None:
             return
-        base_url = file_http.get_base_url()
+        base_url = (file_http.get_base_url() or "").strip()
+    else:
+        base_url = (session.host_base_url or "").strip()
+        # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
+        # latest fpub so invites survive Quick Tunnel hostname churn.
+        if hub is not None and hub.enabled:
+            live = hub.get_remote_file_public(session.host_node)
+            host = (session.host_node or "").strip()
+            host_up = _canvas_host_reachable(host)
+            candidate = (live or base_url or "").strip().rstrip("/")
+            # Peer gone, or still listed but Quick Tunnel DNS is already dead:
+            # take over on this node's Cloudflare when available.
+            need_claim = (not host_up) or (
+                bool(candidate)
+                and candidate.endswith(".trycloudflare.com")
+                and not _trycloudflare_url_resolves(candidate)
+            )
+            if need_claim:
+                claimed = _try_claim_canvas_locally(session)
+                if claimed is not None:
+                    session = claimed
+                    base_url = ""
+                    try:
+                        _federation_push_canvas_announce(session)
+                    except Exception as e:
+                        print(f"[Canvas] csync after local claim failed: {e!r}")
+                elif live:
+                    base_url = live
+            elif live:
+                base_url = live
+                if (session.host_base_url or "").rstrip("/") != live.rstrip("/"):
+                    canvas_sharing.canvas_store.refresh_host_base_url(
+                        session.host_node, live
+                    )
+                    session.host_base_url = live
+        if not base_url:
+            if file_http is None:
+                return
+            base_url = file_http.get_base_url()
+    if not base_url:
+        return
     base_url = base_url.rstrip("/")
     only_key = (only or "").strip().lower()
     for participant, token in session.tokens.items():
@@ -5002,6 +5202,7 @@ def _deliver_canvas_invites(
             key=key,
             room=session.room,
             title=session.title,
+            refreshed=refreshed,
         )
         recipient_lower = participant.lower()
         delivered = False
@@ -5231,8 +5432,12 @@ def _federation_push_all_canvas_announces() -> None:
     for ann in canvas_sharing.canvas_store.list_open_room_announces(
         local_node_id=hub.node_id
     ):
-        if not ann.get("base_url") and file_http is not None:
-            ann["base_url"] = file_http.get_base_url().rstrip("/")
+        # Always prefer live CF/public URL — frozen host_base_url goes stale
+        # whenever Quick Tunnel restarts.
+        if file_http is not None:
+            live = (file_http.get_base_url() or "").strip().rstrip("/")
+            if live:
+                ann["base_url"] = live
         if not ann.get("base_url"):
             continue
         try:
@@ -5701,11 +5906,18 @@ def _piano_invite_message(
     key: str,
     room: Optional[str],
     title: str = "",
+    refreshed: bool = False,
 ) -> str:
     where = f"房间 #{room}" if room else "私密钢琴"
     title_line = f"[*] 标题: {title}\n" if title else ""
+    refresh_line = (
+        "[*] 公网地址已更新（旧 trycloudflare 链接已失效，请用下面新网址）\n"
+        if refreshed
+        else ""
+    )
     return (
         f"[*] ========== 房间钢琴 ==========\n"
+        f"{refresh_line}"
         f"[*] 发起人: {creator}\n"
         f"[*] 范围: {where}\n"
         f"{title_line}"
@@ -5730,6 +5942,7 @@ def _deliver_piano_invites(
     session: piano_sharing.PianoSession,
     *,
     only: Optional[str] = None,
+    refreshed: bool = False,
 ) -> None:
     if file_http is None:
         return
@@ -5747,6 +5960,7 @@ def _deliver_piano_invites(
             key=key,
             room=session.room,
             title=session.title,
+            refreshed=refreshed,
         )
         recipient_lower = participant.lower()
         delivered = False
@@ -5983,7 +6197,9 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
             "[*] Open this URL in the Kindle browser (no scripts):\n"
             f"[*] {url}\n"
             "[*] After you move, tap your own side. Top and bottom, no color names.\n"
+            "[*] 4. GUI/mobile clients auto-open from the line below.\n"
             "[*] =================================\n"
+            f"[*] gui-open clock {url}\n"
         )
     lead = "已加入现有棋钟。" if rejoined else "棋钟已准备好。"
     return (
@@ -5993,7 +6209,9 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
         "[*] 用 Kindle 浏览器打开下面的网址（本页不用脚本）：\n"
         f"[*] {url}\n"
         "[*] 走完棋的一方点自己这边。上方和下方，不写红黑或白黑。\n"
+        "[*] 4. 图形/手机客户端会折叠成按钮，可一键打开。\n"
         "[*] ===========================\n"
+        f"[*] gui-open clock {url}\n"
     )
 
 
@@ -6871,7 +7089,8 @@ def _federation_notify_game_end(room: str) -> None:
             _remember_ended_game_locked(room, token)
         room_game_authority[room] = local
         room_game_provisional.discard(room)
-        room_games_parked.pop(room, None)
+        # Keep parked forks: ending the *active* session must not erase a
+        # different game kind parked by a prior federation conflict.
     _persist_after_game_change()
     if hub is None or not hub.enabled:
         return
@@ -6888,6 +7107,12 @@ def _game_progress_score(game) -> int:
     ply = getattr(game, "_xq_ply_log", None)
     if isinstance(ply, list):
         return len(ply)
+    face_up = getattr(game, "face_up", None)
+    if isinstance(face_up, (set, list, tuple)):
+        # Darkchess: flips/moves leave face-up marks; empty waiting boards score 0.
+        n = len(face_up)
+        if n:
+            return n
     board = getattr(game, "board", None)
     if board is not None:
         stack = getattr(board, "move_stack", None)
@@ -6897,6 +7122,33 @@ def _game_progress_score(game) -> int:
             except Exception:
                 pass
     return 0
+
+
+def _parked_games_list(parked) -> list:
+    """Normalize parked slot to a list (legacy single game or multi-park stack)."""
+    if parked is None:
+        return []
+    if isinstance(parked, list):
+        return [g for g in parked if g is not None]
+    return [parked]
+
+
+def _best_parked_game(parked):
+    """Pick the most progressed non-ended parked game, if any."""
+    active = [
+        g
+        for g in _parked_games_list(parked)
+        if getattr(g, "state", "ended") != "ended"
+    ]
+    if not active:
+        return None
+    return max(
+        active,
+        key=lambda g: (
+            _game_progress_score(g),
+            games.game_session_updated_at(g),
+        ),
+    )
 
 
 def _game_conflict_winner(
@@ -6938,6 +7190,17 @@ def _game_sync_should_keep_local(
     we_host = local_auth == local_id
     if we_host and not greq:
         return True
+    local_name = (getattr(local_game, "name", None) or "").strip()
+    remote_name = (getattr(remote_game, "name", None) or "").strip()
+    # Different game kinds in the same room (e.g. darkchess vs doushou): never
+    # let a fresh 0-progress board displace a progressed local session on greq
+    # timestamp alone — that is how #default darkchess got wiped by a peer.
+    if local_name and remote_name and local_name != remote_name:
+        local_score = _game_progress_score(local_game)
+        remote_score = _game_progress_score(remote_game)
+        if local_score != remote_score:
+            return local_score > remote_score
+        # Same progress, different kinds under greq: fall through to token/ts.
     local_ts = games.game_session_updated_at(local_game)
     remote_ts = games.game_session_updated_at(remote_game)
     if local_ts > 0 or remote_ts > 0:
@@ -6949,21 +7212,34 @@ def _game_sync_should_keep_local(
 
 
 def _park_room_game_locked(room: str, game) -> None:
-    """Stash a displaced game so a later partition can restore it."""
+    """Stash a displaced game so a later partition can restore it.
+
+    Multiple different kinds can be parked for one room (stack). A later
+    conflict must not silently drop an earlier darkchess when doushou arrives.
+    """
     if game is None or getattr(game, "state", "ended") == "ended":
         return
-    room_games_parked[room] = game
+    stacked = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not game]
+    stacked.append(game)
+    # Cap stack so a flapping link cannot grow forever.
+    if len(stacked) > 8:
+        stacked = stacked[-8:]
+    room_games_parked[room] = stacked if len(stacked) > 1 else stacked[0]
 
 
 def _promote_parked_game_locked(room: str):
     """Move a parked in-progress game into an idle room. Caller holds lock."""
-    parked = room_games_parked.get(room)
-    if parked is None or getattr(parked, "state", "ended") == "ended":
+    parked = _best_parked_game(room_games_parked.get(room))
+    if parked is None:
         return None
     active = room_games.get(room)
     if active is not None and getattr(active, "state", "ended") != "ended":
         return None
-    room_games_parked.pop(room, None)
+    remaining = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked]
+    if remaining:
+        room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+    else:
+        room_games_parked.pop(room, None)
     _remap_local_game_seats_locked(room, parked)
     _rebind_game_services(parked)
     room_games[room] = parked
@@ -6972,6 +7248,30 @@ def _promote_parked_game_locked(room: str):
     room_game_authority[room] = local
     if not (room_game_tokens.get(room) or "").strip():
         room_game_tokens[room] = secrets.token_hex(16)
+    room_game_provisional.add(room)
+    return parked
+
+
+def _swap_parked_game_locked(room: str):
+    """Swap active ↔ best parked game. Caller holds lock. Returns parked or None."""
+    parked = _best_parked_game(room_games_parked.get(room))
+    if parked is None:
+        return None
+    active = room_games.get(room)
+    remaining = [g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked]
+    if active is not None and getattr(active, "state", "ended") != "ended":
+        remaining.append(active)
+    if remaining:
+        room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+    else:
+        room_games_parked.pop(room, None)
+    _remap_local_game_seats_locked(room, parked)
+    _rebind_game_services(parked)
+    room_games[room] = parked
+    hub = federation.get_hub()
+    local = hub.node_id if hub is not None else _local_node_id()
+    room_game_authority[room] = local
+    room_game_tokens[room] = secrets.token_hex(16)
     room_game_provisional.add(room)
     return parked
 
@@ -7015,13 +7315,17 @@ def _fed_handle_unreachable_game_authority(_down_peer: str = "") -> None:
                 continue
             if _game_authority_reachable(auth):
                 continue
-            parked = room_games_parked.get(room)
-            parked_ok = (
-                parked is not None and getattr(parked, "state", "ended") != "ended"
-            )
+            parked = _best_parked_game(room_games_parked.get(room))
+            parked_ok = parked is not None
             if not parked_ok:
                 continue
-            room_games_parked.pop(room, None)
+            remaining = [
+                g for g in _parked_games_list(room_games_parked.get(room)) if g is not parked
+            ]
+            if remaining:
+                room_games_parked[room] = remaining if len(remaining) > 1 else remaining[0]
+            else:
+                room_games_parked.pop(room, None)
             _remap_local_game_seats_locked(room, parked)
             _rebind_game_services(parked)
             room_games[room] = parked
@@ -7204,7 +7508,8 @@ def _fed_on_game_end(room: str, authority: str, token: str = "") -> None:
             room_games.pop(room, None)
             room_game_authority.pop(room, None)
             room_game_tokens.pop(room, None)
-            room_games_parked.pop(room, None)
+            # Do not clear room_games_parked: parked holds a different displaced
+            # session (e.g. darkchess) that must survive a peer gend for doushou.
             room_game_provisional.discard(room)
     _clear_greq(room)
     if keep_local:
@@ -7374,6 +7679,8 @@ def _fed_execute_game_cmd(
 ) -> None:
     local = _local_node_id()
     sub = sub.lower()
+    if sub in {"求和"}:
+        sub = "draw"
     with lock:
         auth_now = (room_game_authority.get(room) or local).strip() or local
     if auth_now != local:
@@ -7501,6 +7808,27 @@ def _fed_execute_game_cmd(
         _finish_game_action(room, game, actor, priv, bcast, False, send_boards=bool(bcast))
         return
 
+    if sub == "draw":
+        if game is None or actor is None or not hasattr(game, "request_draw"):
+            return
+        draw_action, draw_err = games.parse_draw_action(rest)
+        if draw_err:
+            _route_game_private(room, actor, [draw_err])
+            return
+        with lock:
+            if draw_action == "accept":
+                priv, bcast, ended = game.accept_draw(actor)
+            elif draw_action == "reject":
+                priv, bcast, ended = game.reject_draw(actor)
+            elif draw_action == "cancel":
+                priv, bcast, ended = game.cancel_draw(actor)
+            else:
+                priv, bcast, ended = game.request_draw(actor)
+        _finish_game_action(
+            room, game, actor, priv, bcast, ended, send_boards=bool(bcast)
+        )
+        return
+
     if sub == "abort":
         if game is None or actor is None:
             return
@@ -7595,6 +7923,7 @@ def _should_forward_game(room: str, sub: str) -> bool:
         "move",
         "resign",
         "undo",
+        "draw",
         "abort",
         "end",
     ):
@@ -7739,6 +8068,7 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     # Canvas invites are system blocks (gui-open canvas); keep them unwrapped
     # so GUI clients can auto-open. Regular PMs still get the PM prefix.
     canvas_invite = "gui-open canvas " in (text or "")
+    clock_invite = "gui-open clock " in (text or "")
     later_note = (from_name or "").strip().lower() == _LATER_OFFLINE_SENDER
     for peer_conn, _ in targets:
         if later_note:
@@ -7750,7 +8080,7 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
                     text=text,
                 ),
             )
-        elif canvas_invite:
+        elif canvas_invite or clock_invite:
             payload = text if text.endswith("\n") else f"{text}\n"
             send_line(peer_conn, payload)
         else:
@@ -8135,6 +8465,7 @@ def handle_command(conn, payload: str) -> None:
             return
 
         newly_joined = False
+        switched = False
         with lock:
             if conn not in clients:
                 return
@@ -8147,7 +8478,9 @@ def handle_command(conn, payload: str) -> None:
                 if was_empty:
                     room_owners[new_room] = conn
                 newly_joined = True
-            clients[conn]["current_room"] = new_room
+            if new_room != prev_room:
+                clients[conn]["current_room"] = new_room
+                switched = True
             _sync_live_session_locked(conn)
 
         if newly_joined:
@@ -8175,10 +8508,14 @@ def handle_command(conn, payload: str) -> None:
                     send_line(conn, f"[*] 本房正在进行一局 {game_label}，用 /game show 查看。\n")
                     if seats_info:
                         send_line(conn, "\n".join(seats_info) + "\n")
-        elif new_room == current_room:
+        elif not switched:
             send_line(conn, f"[*] Already active in #{new_room}\n")
         else:
-            send_line(conn, f"[*] Switched from #{current_room} to #{new_room}\n")
+            hub = federation.get_hub()
+            if hub is not None and hub.enabled:
+                # /join to an already-joined room is a switch; peers need current_room.
+                hub.notify_switch(name, new_room)
+            send_line(conn, f"[*] Switched from #{prev_room} to #{new_room}\n")
             send_room_announcement_preview(conn, new_room)
             send_room_pad_preview(conn, new_room)
             send_room_poll_preview(conn, new_room)
@@ -8525,6 +8862,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     sub, _, rest = raw.partition(" ")
     sub = sub.lower()
     rest = rest.strip()
+    if sub in {"求和"}:
+        sub = "draw"
 
     if sub == "end" and _should_forward_game(room, sub):
         # Ownership is local. The game authority's room_owners handle is not
@@ -8904,6 +9243,36 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         _finish_game_action(room, game, conn, priv, bcast, False, send_boards=bool(bcast))
         return
 
+    if sub == "draw":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            if not hasattr(game, "request_draw"):
+                send_line(
+                    conn,
+                    "[*] 当前对局不支持求和（仅 chess、gomoku、go、xiangqi、"
+                    "doushou、reversi、darkchess）。\n",
+                )
+                return
+            draw_action, draw_err = games.parse_draw_action(rest)
+            if draw_err:
+                send_line(conn, f"[*] {draw_err}\n")
+                return
+            if draw_action == "accept":
+                priv, bcast, ended = game.accept_draw(conn)
+            elif draw_action == "reject":
+                priv, bcast, ended = game.reject_draw(conn)
+            elif draw_action == "cancel":
+                priv, bcast, ended = game.cancel_draw(conn)
+            else:
+                priv, bcast, ended = game.request_draw(conn)
+        _finish_game_action(
+            room, game, conn, priv, bcast, ended, send_boards=bool(bcast)
+        )
+        return
+
     if sub == "abort":
         with lock:
             game = room_games.get(room)
@@ -8952,19 +9321,33 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
         return
 
     if sub in {"restore", "恢复"}:
+        want_swap = any(
+            a.lower() in {"swap", "交换", "--swap"} for a in rest.split()
+        )
         with lock:
-            restored = _restore_idle_parked_games_locked()
-            busy = [
-                r
-                for r, g in room_games_parked.items()
-                if g is not None and getattr(g, "state", "ended") != "ended"
-            ]
+            if want_swap:
+                swapped = _swap_parked_game_locked(room)
+                restored = [(room, swapped)] if swapped is not None else []
+                busy = []
+            else:
+                restored = _restore_idle_parked_games_locked()
+                busy = [
+                    r
+                    for r, g in room_games_parked.items()
+                    if _best_parked_game(g) is not None
+                    and (
+                        room_games.get(r) is not None
+                        and getattr(room_games.get(r), "state", "ended") != "ended"
+                    )
+                ]
         if not restored:
-            if busy:
+            if want_swap:
+                send_line(conn, "[*] 本房没有可交换的暂存对局。\n")
+            elif busy:
                 send_line(
                     conn,
                     "[*] 暂存对局所在房间仍有进行中的棋局，未覆盖。"
-                    "可先 /game end 再 /game restore。\n",
+                    "可先 /game end 再 /game restore，或 /game restore swap 与当前局对换。\n",
                 )
             else:
                 send_line(conn, "[*] 没有可恢复的暂存对局。\n")
@@ -8973,7 +9356,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             broadcast_game(
                 room_name,
                 [
-                    f"{name} 恢复了暂存对局（{getattr(game, 'name', '?')}）。"
+                    f"{name} {'交换并恢复' if want_swap else '恢复了'}暂存对局"
+                    f"（{getattr(game, 'name', '?')}）。"
                     "请用 /game show 查看。"
                 ],
             )
@@ -9058,25 +9442,39 @@ def handle_client(conn, addr) -> None:
             previous_session = _load_recent_session_locked(name)
             inherited_rooms: set[str] = set()
             active_room = DEFAULT_ROOM
+            session_active = ""
+            if previous_session is not None:
+                inherited_rooms.update(previous_session.get("rooms") or set())
+                previous_active = previous_session.get("current_room")
+                if isinstance(previous_active, str) and previous_active.strip():
+                    session_active = previous_active.strip()
+            peer_active = ""
             if same_name_peers:
                 for peer in same_name_peers:
                     peer_info = clients.get(peer)
                     if not peer_info:
                         continue
                     inherited_rooms.update(peer_info["rooms"])
-                    if active_room == DEFAULT_ROOM:
-                        active_room = peer_info["current_room"]
-            elif previous_session is not None:
-                inherited_rooms.update(previous_session.get("rooms") or set())
-                previous_active = previous_session.get("current_room")
-                if isinstance(previous_active, str) and previous_active:
-                    active_room = previous_active
-                restored_from_session = True
+                    if not peer_active:
+                        cur = str(peer_info.get("current_room") or "").strip()
+                        if cur:
+                            peer_active = cur
+            fed_active = ""
             if hub is not None and hub.enabled:
                 inherited_rooms.update(hub.rooms_for_name(name))
-                fed_active = hub.active_room_for_name(name)
-                if fed_active and active_room == DEFAULT_ROOM:
-                    active_room = fed_active
+                remote_active = hub.active_room_for_name(name)
+                if isinstance(remote_active, str) and remote_active.strip():
+                    fed_active = remote_active.strip()
+            # Active room: live federated same-nick > last local session
+            # (updated on every /join|/switch) > other local device > default.
+            # Do not let a stale idle peer overwrite a fresher remembered room.
+            if fed_active:
+                active_room = fed_active
+            elif session_active:
+                active_room = session_active
+                restored_from_session = True
+            elif peer_active:
+                active_room = peer_active
             inherited_rooms.add(DEFAULT_ROOM)
             if active_room not in inherited_rooms:
                 inherited_rooms.add(active_room)
@@ -9107,6 +9505,7 @@ def handle_client(conn, addr) -> None:
                 f"*#{r}" if r == active_room else f"#{r}"
                 for r in sorted(inherited_rooms)
             ]
+            _sync_live_session_locked(conn)
 
         print(f"{name} joined #{active_room} (tcp_peer={addr[0]!r}:{addr[1]})")
 
@@ -9228,13 +9627,16 @@ def run_server() -> int:
                         if cur != last:
                             last = cur
                             _federation_sync_file_public()
-                            # Room canvas invites embed the CF hostname; re-csync
-                            # so peers rewrite frozen host_base_url mirrors.
+                            # Room canvas invites embed the CF hostname; re-send
+                            # private invites + csync so clients/peers leave the
+                            # dead trycloudflare URL behind.
                             try:
-                                _federation_push_all_canvas_announces()
+                                _maybe_refresh_canvas_invites_on_public_change(
+                                    cur, reason="cf-watch"
+                                )
                             except Exception as e:
                                 print(
-                                    f"[FileTransfer] canvas announce refresh "
+                                    f"[FileTransfer] canvas invite refresh "
                                     f"after CF change failed: {e}"
                                 )
                             if cur:
@@ -9246,6 +9648,26 @@ def run_server() -> int:
 
             threading.Thread(
                 target=_file_public_watch_task, daemon=True, name="file-public-watch"
+            ).start()
+
+            # After sshchat bounce (cloudflared writes a new Quick Tunnel then
+            # restarts us), open boards still have participants on the old URL.
+            def _boot_canvas_public_refresh():
+                time.sleep(2)
+                if _shutdown_requested:
+                    return
+                try:
+                    cur = _fed_local_file_public()
+                    _maybe_refresh_canvas_invites_on_public_change(
+                        cur, reason="boot"
+                    )
+                except Exception as e:
+                    print(f"[Canvas] boot public refresh failed: {e!r}")
+
+            threading.Thread(
+                target=_boot_canvas_public_refresh,
+                daemon=True,
+                name="canvas-public-boot",
             ).start()
             
             # Start cleanup task for expired transfers
