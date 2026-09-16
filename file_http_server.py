@@ -1469,6 +1469,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         """Handle the upload/download pages and ticketed file fetches."""
         if piano_http.handle_piano_websocket(self):
             return
+        if canvas_http.handle_canvas_websocket(self):
+            return
         if clock_http.handle_clock_get(self):
             return
         if piano_http.handle_piano_static_get(self):

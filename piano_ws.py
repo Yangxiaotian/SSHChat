@@ -62,7 +62,9 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def decode_frame(sock: socket.socket) -> tuple[int, bytes]:
+def decode_frame(
+    sock: socket.socket, *, max_payload: int = 1_000_000
+) -> tuple[int, bytes]:
     """Read one WebSocket data frame. Returns (opcode, payload)."""
     hdr = _recv_exact(sock, 2)
     b0, b1 = hdr[0], hdr[1]
@@ -73,8 +75,8 @@ def decode_frame(sock: socket.socket) -> tuple[int, bytes]:
         length = struct.unpack("!H", _recv_exact(sock, 2))[0]
     elif length == 127:
         length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
-        if length > 1_000_000:
-            raise ValueError("websocket frame too large")
+    if length > max_payload:
+        raise ValueError("websocket frame too large")
     mask_key = _recv_exact(sock, 4) if masked else b""
     payload = _recv_exact(sock, length) if length else b""
     if masked:
