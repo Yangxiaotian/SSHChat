@@ -9,6 +9,7 @@ Provides:
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
+- Piano WS:        GET  /piano/<token>/ws        - WebSocket note push/broadcast (ticket auth)
 - Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
@@ -97,6 +98,26 @@ def _detect_lan_ip() -> str:
 # Written by sshchat-cloudflared on each Quick Tunnel start (boot/deploy/restart).
 DEFAULT_CLOUDFLARED_URL_FILE = "/var/lib/sshchat/cloudflared/public_url"
 
+# (expiry_monotonic, latch_raw, validated_or_none) — only used when DNS is required.
+_live_cf_url_cache: tuple[float, str, Optional[str]] = (0.0, "", None)
+_LIVE_CF_DNS_CACHE_SEC = 15.0
+
+
+def _trycloudflare_host_resolves(host: str, *, timeout: float = 1.5) -> bool:
+    """True when *host* still has DNS (Quick Tunnel names vanish when the tunnel dies)."""
+    host = (host or "").strip().rstrip(".")
+    if not host:
+        return False
+    prev = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        return True
+    except OSError:
+        return False
+    finally:
+        socket.setdefaulttimeout(prev)
+
 
 def live_cloudflare_base_url(
     path: Optional[str] = None,
@@ -105,7 +126,12 @@ def live_cloudflare_base_url(
 
     Prefer this over process env: after reboot the tunnel hostname changes, but
     a long-lived server may still hold the previous SSHCHAT_FILE_PUBLIC_HOST.
+
+    Trust the latch by default (local DNS blips / Clash fake-ip must not demote
+    invites to a LAN IP). Set SSHCHAT_CF_URL_REQUIRE_DNS=1 to ignore a latch
+    whose hostname no longer resolves.
     """
+    global _live_cf_url_cache
     url_path = (
         (path or "").strip()
         or os.environ.get("SSHCHAT_CLOUDFLARED_URL_FILE", "").strip()
@@ -115,9 +141,22 @@ def live_cloudflare_base_url(
         with open(url_path, "r", encoding="utf-8") as f:
             raw = (f.read() or "").strip()
     except OSError:
+        _live_cf_url_cache = (0.0, "", None)
         return None
-    if re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+    if not re.fullmatch(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", raw):
+        return None
+    require_dns = os.environ.get("SSHCHAT_CF_URL_REQUIRE_DNS", "0").strip().lower()
+    if require_dns not in ("1", "true", "yes"):
         return raw
+    now = time.monotonic()
+    exp, cached_raw, cached_result = _live_cf_url_cache
+    if cached_raw == raw and now < exp:
+        return cached_result
+    host = raw[len("https://") :]
+    if _trycloudflare_host_resolves(host):
+        _live_cf_url_cache = (now + _LIVE_CF_DNS_CACHE_SEC, raw, raw)
+        return raw
+    _live_cf_url_cache = (now + _LIVE_CF_DNS_CACHE_SEC, raw, None)
     return None
 
 
@@ -1428,6 +1467,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if piano_http.handle_piano_websocket(self):
+            return
         if clock_http.handle_clock_get(self):
             return
         if piano_http.handle_piano_static_get(self):
@@ -1689,6 +1730,8 @@ class FileHTTPServer:
 
         Live Cloudflare Quick Tunnel URLs (public_url file) win over env, so a
         boot-time tunnel refresh is visible without waiting for a process restart.
+        Never demote a *.trycloudflare.com host to a LAN IP — keep CF and prefer
+        the live latch so the hostname stays current.
         """
         live = live_cloudflare_base_url()
         if live:
@@ -1701,12 +1744,6 @@ class FileHTTPServer:
         else:
             protocol = "https" if self.use_https else "http"
         host = self._configured_public_host()
-        # Quick Tunnel hostnames die when the helper restarts; without a live
-        # public_url latch, never keep handing out the stale env hostname.
-        if host.endswith(".trycloudflare.com"):
-            host = _detect_lan_ip()
-            port = self.port
-            protocol = "https" if self.use_https else "http"
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"
@@ -1719,10 +1756,7 @@ class FileHTTPServer:
             host = (urlparse(live).hostname or "").strip()
             if host:
                 return host
-        host = self._configured_public_host()
-        if host.endswith(".trycloudflare.com"):
-            return _detect_lan_ip()
-        return host
+        return self._configured_public_host()
 
     def _configured_public_host(self) -> str:
         for candidate in (self.domain, self.public_host):

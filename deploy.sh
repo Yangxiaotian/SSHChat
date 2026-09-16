@@ -505,8 +505,8 @@ apply_data_plane_permissions() {
     fi
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$u:$g" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
@@ -664,8 +664,8 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/scripts"
@@ -980,7 +980,7 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py clock_sharing.py clock_http.py; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py piano_ws.py clock_sharing.py clock_http.py; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
 ensure_piano_samples "$SCRIPT_DIR/piano_samples" || exit 1
@@ -1085,7 +1085,7 @@ copy_app_file() {
 }
 for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
   library.py dict_lookup.py session_store.py federation.py offline_messages.py \
-  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py \
+  file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py piano_sharing.py piano_http.py piano_ws.py \
   clock_sharing.py clock_http.py i18n.py locale_store.py; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
@@ -1102,6 +1102,12 @@ done
 install -m 0755 -d "$PREFIX/scripts"
 copy_app_file "$SCRIPT_DIR/scripts/ensure-federation-user.sh" "$PREFIX/scripts/ensure-federation-user.sh"
 chmod +x "$PREFIX/chat.sh" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh" "$PREFIX/federation-bridge.sh" "$PREFIX/scripts/ensure-federation-user.sh"
+# So ``ssh user@localhost free`` still gets a TTY (Tab completion). Client-side.
+if [[ -d /etc/ssh/ssh_config.d && -f "$SCRIPT_DIR/ssh/sshchat-request-tty.conf" ]]; then
+  cp "$SCRIPT_DIR/ssh/sshchat-request-tty.conf" /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf
+  chmod 644 /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf
+  echo "info: installed /etc/ssh/ssh_config.d/100-sshchat-request-tty.conf (RequestTTY yes for localhost)" >&2
+fi
 # Drop any stale .pyc / __pycache__ so the next import never resurrects an
 # older games.py / server.py from cache.
 find "$PREFIX" -maxdepth 2 -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
@@ -1200,8 +1206,8 @@ PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import file_http_server" || {
   echo "error: file_http_server failed to import (often missing cgi on Python 3.13+; need legacy-cgi)" >&2
   exit 1
 }
-PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import piano_sharing, piano_http" || {
-  echo "error: piano modules failed to import (need piano_sharing.py, piano_http.py, piano_samples/)" >&2
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import piano_sharing, piano_http, piano_ws" || {
+  echo "error: piano modules failed to import (need piano_sharing.py, piano_http.py, piano_ws.py, piano_samples/)" >&2
   exit 1
 }
 PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import clock_sharing, clock_http" || {

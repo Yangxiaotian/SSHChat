@@ -190,6 +190,8 @@ export const zhMessages = {
       seats: '查看席位',
       undo: '申请悔棋',
       undoAccept: '同意悔棋',
+      draw: '求和',
+      drawAccept: '同意求和',
       pgn: 'PGN',
       resign: '认输',
       abort: '终止对局',

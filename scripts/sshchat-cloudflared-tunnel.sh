@@ -15,6 +15,11 @@ STATE_DIR=/var/lib/sshchat/cloudflared
 STORAGE_DIR=/var/lib/sshchat/files
 
 mkdir -p "$STATE_DIR" "$STORAGE_DIR"
+# sshchat (User=sshchat) must write last_canvas_invite_base here; cloudflared (root) writes public_url.
+if getent group sshchat >/dev/null 2>&1; then
+  chgrp sshchat "$STATE_DIR" 2>/dev/null || true
+  chmod 775 "$STATE_DIR" 2>/dev/null || true
+fi
 LOG_FILE="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/public_url"
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
@@ -69,6 +74,10 @@ update_public_host() {
   local host="${url#https://}"
   host="${host%%/*}"
   printf '%s\n' "$url" >"$URL_FILE"
+  if getent group sshchat >/dev/null 2>&1; then
+    chgrp sshchat "$URL_FILE" 2>/dev/null || true
+    chmod 664 "$URL_FILE" 2>/dev/null || true
+  fi
   echo "[sshchat-cloudflared] public URL: $url"
   [[ -f "$ENV_FILE" ]] || { echo "[sshchat-cloudflared] missing env $ENV_FILE"; return 1; }
   local current owner mode

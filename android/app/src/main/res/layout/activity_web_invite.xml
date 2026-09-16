@@ -25,16 +25,19 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginEnd="8dp"
+            android:minHeight="48dp"
             android:text="最大化" />
 
         <Button
             android:id="@+id/btnClose"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:minHeight="48dp"
             android:text="关闭" />
     </LinearLayout>
 
     <FrameLayout
+        android:id="@+id/webHost"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -44,32 +47,41 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- Floating chrome when toolbar is hidden in maximized mode -->
+        <!-- Floating chrome when toolbar is hidden in maximized mode.
+             Kept above WebView with elevation; insets applied in code so taps
+             are not eaten by immersive status-bar edge gestures / cutouts. -->
         <LinearLayout
             android:id="@+id/floatingChrome"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="top|end"
-            android:layout_margin="10dp"
+            android:layout_margin="12dp"
             android:orientation="horizontal"
-            android:background="#CC222222"
-            android:padding="4dp"
+            android:background="#E6222222"
+            android:padding="6dp"
+            android:elevation="24dp"
+            android:clickable="true"
+            android:focusable="true"
             android:visibility="gone">
 
             <Button
                 android:id="@+id/btnRestore"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:minWidth="64dp"
+                android:minHeight="48dp"
                 android:text="还原"
-                android:textSize="12sp" />
+                android:textSize="14sp" />
 
             <Button
                 android:id="@+id/btnCloseFloating"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
+                android:layout_marginStart="6dp"
+                android:minWidth="64dp"
+                android:minHeight="48dp"
                 android:text="关闭"
-                android:textSize="12sp" />
+                android:textSize="14sp" />
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

@@ -205,6 +205,22 @@ class ClientDndTest(unittest.TestCase):
             client_mod._get_real_stdout = original
         self.assertEqual(raw.getvalue(), client_mod._CLEAR_CSI)
 
+    def test_write_real_clear_csi_works_without_tty(self) -> None:
+        """ssh without -t: stdout is a pipe (isatty False) but CSI must still emit."""
+        import io
+
+        raw = io.BytesIO()
+        real = io.TextIOWrapper(raw, encoding="ascii", newline="\n")
+        real.isatty = lambda: False  # type: ignore[attr-defined]
+        original = client_mod._get_real_stdout
+        client_mod._get_real_stdout = lambda: real
+        try:
+            client_mod._write_real_clear_csi()
+            client_mod._terminal_hard_clear()
+        finally:
+            client_mod._get_real_stdout = original
+        self.assertEqual(raw.getvalue(), client_mod._CLEAR_CSI * 2)
+
     def test_dnd_subcommand_completion(self) -> None:
         from prompt_toolkit.document import Document
 

@@ -90,10 +90,13 @@ MESSAGES: dict = {
         "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
         "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
         "（chess/gomoku/go/xiangqi/doushou；简写 acc / rej / can；reject 拒绝，cancel 取消请求）。",
+        "[*] /game draw             求和：任一方发起，对方 /game draw accept|reject（别名：求和）。"
+        "AI 练习局不可求和。支持：chess/gomoku/go/xiangqi/doushou/reversi/darkchess。",
         "[*] /game resign           认负（仅对局进行中）。",
         "[*] /game abort            终止未开始的对局。",
         "[*] /game end              房主可强制结束当前对局。",
         "[*] /game restore          把因重启/联邦冲突暂存的对局恢复到空房间（别名：恢复）。",
+        "[*] /game restore swap     与当前进行中的对局对换暂存局（不丢任何一局）。",
         "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
         "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
         "[*] holdem（德州扑克）中英指令对照：",
@@ -124,7 +127,7 @@ MESSAGES: dict = {
         "pad_usage": (
             "[*] 用法：/pad <文字>     写入一行（空格合并；带换行请用 /pad edit）\n"
             "[*]         /pad           查看\n"
-            "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim）\n"
+            "[*]         /pad edit      终端用 vim/$EDITOR 编辑多行后再上传（别名 /pad vim；限制模式禁 :term/:e/:vimgrep）\n"
             "[*]         /pad clear     清除\n"
             "[*] 联邦同名房间共享同一份剪贴板（后写覆盖）。\n"
         ),

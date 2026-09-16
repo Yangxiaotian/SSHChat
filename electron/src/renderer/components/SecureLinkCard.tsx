@@ -16,6 +16,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const loc = locale === 'zh' ? 'zh' : 'en';
   const openCanvas = useChatStore((s) => s.openCanvas);
   const openPiano = useChatStore((s) => s.openPiano);
+  const canvasSession = useChatStore((s) => s.canvasSession);
   const expectingOwnCanvas = useChatStore((s) => s.expectingOwnCanvas);
   const canvasRequestAt = useChatStore((s) => s.canvasRequestAt);
   const expectingOwnPiano = useChatStore((s) => s.expectingOwnPiano);
@@ -35,6 +36,16 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
         : payload.kind === 'upload'
           ? t('secureLink.uploadHint')
           : t('secureLink.downloadHint');
+
+  const canvasTokenFromUrl = (url: string): string => {
+    try {
+      const parts = new URL(url).pathname.split('/').filter(Boolean);
+      if (parts[0] === 'canvas' && parts[1]) return parts[1];
+    } catch {
+      /* ignore */
+    }
+    return '';
+  };
 
   const onOpen = async () => {
     if (busy) return;
@@ -93,8 +104,30 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
     payload.key,
     payload.kind,
     payload.url,
+    payload.receivedAt,
     setExpectingOwnCanvas,
     setExpectingOwnPiano,
+  ]);
+
+  // Quick Tunnel hostname churn: if this board is already open, swap to the
+  // new trycloudflare URL so the iframe does not stay on NXDOMAIN.
+  useEffect(() => {
+    if (payload.kind !== 'canvas' || !canvasSession) return;
+    const nextTok = canvasTokenFromUrl(payload.url);
+    const openTok = canvasTokenFromUrl(canvasSession.url);
+    if (
+      nextTok &&
+      nextTok === openTok &&
+      (payload.url !== canvasSession.url || payload.key !== canvasSession.key)
+    ) {
+      openCanvas({ url: payload.url, key: payload.key });
+    }
+  }, [
+    canvasSession,
+    openCanvas,
+    payload.key,
+    payload.kind,
+    payload.url,
   ]);
 
   return (

@@ -1202,7 +1202,18 @@ class MainActivity : AppCompatActivity() {
                         startActivity(WebInviteActivity.upload(this, open.url, open.key))
                     }
                 }
+                SecureInvite.Kind.CLOCK -> {
+                    MessageAlert.play(this)
+                    appendLine("[*] 打开棋钟…")
+                    startActivity(WebInviteActivity.clock(this, open.url))
+                }
             }
+            return
+        }
+        SecureInvite.parseClockUrl(stripped)?.let { clockUrl ->
+            MessageAlert.play(this)
+            appendLine("[*] 打开棋钟…")
+            startActivity(WebInviteActivity.clock(this, clockUrl))
             return
         }
         if (pendingUpload != null && SecureInvite.isSendfileFailure(stripped)) {
