@@ -835,6 +835,19 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        if let clockUrl = SecureInvite.parseClockUrl(stripped) {
+            MessageAlert.play()
+            appendText("[*] 打开棋钟…")
+            webInvite = WebInvitePayload(
+                title: "棋钟",
+                url: clockUrl,
+                key: "",
+                isCanvas: true,
+                isClock: true
+            )
+            return
+        }
+
         if pendingUpload != nil, SecureInvite.isSendfileFailure(stripped) {
             cancelUploadWait()
             pendingUpload = nil

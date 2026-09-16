@@ -52,6 +52,21 @@ enum SecureInvite {
         }
     }
 
+    /// Fallback when the server only printed the clock URL (no gui-open yet).
+    static func parseClockUrl(_ line: String) -> String? {
+        let t = normalize(line)
+        guard let re = try? NSRegularExpression(
+            pattern: #"^https?://\S+/clock/[A-Za-z0-9_-]+/?$"#,
+            options: [.caseInsensitive]
+        ),
+        let m = re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+        let r = Range(m.range, in: t)
+        else { return nil }
+        var url = String(t[r])
+        while url.hasSuffix("/") { url.removeLast() }
+        return url
+    }
+
     static func parseGuiOpen(_ line: String) -> Open? {
         let t = normalize(line)
         let range = NSRange(t.startIndex..., in: t)

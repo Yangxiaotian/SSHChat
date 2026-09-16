@@ -40,6 +40,11 @@ object SecureInvite {
         RegexOption.IGNORE_CASE,
     )
     private val httpOnly = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
+    /** Bare invite URL line for /clock/<token> (no key; Kindle/mobile). */
+    private val clockUrlOnly = Regex(
+        """^https?://\S+/clock/[A-Za-z0-9_-]+/?$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val metaLine = Regex(
         """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|""" +
             """From|Sender|Filename|Size|Room|Recipients?)\s*[:：]""",
@@ -89,6 +94,13 @@ object SecureInvite {
         val key = m.groupValues.getOrNull(3).orEmpty().uppercase()
         if (kind != Kind.CLOCK && key.length != 6) return null
         return Open(kind, m.groupValues[2], key)
+    }
+
+    /** Fallback when the server only printed the clock URL (no gui-open yet). */
+    fun parseClockUrl(line: String): String? {
+        val t = normalize(line)
+        val m = clockUrlOnly.matchEntire(t) ?: return null
+        return m.value.trimEnd('/')
     }
 
     /** Server rejected /sendfile before issuing gui-open upload. */
