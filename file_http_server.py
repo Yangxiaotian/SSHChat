@@ -9,6 +9,7 @@ Provides:
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
 - Shared canvas:   GET/POST /canvas/<token>/...  - Collaborative board (URL + separate key)
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
+- Piano WS:        GET  /piano/<token>/ws        - WebSocket note push/broadcast (ticket auth)
 - Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
@@ -1466,6 +1467,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        if piano_http.handle_piano_websocket(self):
+            return
         if clock_http.handle_clock_get(self):
             return
         if piano_http.handle_piano_static_get(self):

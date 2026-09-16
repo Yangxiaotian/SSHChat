@@ -558,6 +558,7 @@ class PianoStore:
             "rev": batch.get("rev", 0),
             "event": events[0] if events else None,
             "held": batch.get("held") or {},
+            "session_id": batch.get("session_id") or "",
         }, ""
 
     def push_notes(
@@ -629,6 +630,7 @@ class PianoStore:
                 "rev": session.rev,
                 "events": out_events,
                 "held": self._held_snapshot_locked(session.session_id),
+                "session_id": session.session_id,
             }, ""
 
     def sync_since(
