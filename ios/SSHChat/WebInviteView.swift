@@ -9,6 +9,8 @@ struct WebInviteView: View {
     var startsMaximized: Bool = false
     /// Piano: allow landscape while this view is visible.
     var allowLandscape: Bool = false
+    /// Chess clock has no unlock key.
+    var isClock: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var maximized = false
 
@@ -37,7 +39,7 @@ struct WebInviteView: View {
 
     private var maximizedShell: some View {
         ZStack(alignment: .topTrailing) {
-            KeyInjectingWebView(url: url, key: key.uppercased())
+            KeyInjectingWebView(url: url, key: key.uppercased(), isClock: isClock)
                 .ignoresSafeArea()
             HStack(spacing: 12) {
                 Button("关闭") { dismiss() }
@@ -55,7 +57,7 @@ struct WebInviteView: View {
 
     private var navigationShell: some View {
         NavigationStack {
-            KeyInjectingWebView(url: url, key: key.uppercased())
+            KeyInjectingWebView(url: url, key: key.uppercased(), isClock: isClock)
                 .ignoresSafeArea(edges: maximized ? .all : .bottom)
                 .navigationTitle(maximized ? "" : title)
                 .navigationBarTitleDisplayMode(.inline)
@@ -98,32 +100,35 @@ struct WebInviteView: View {
 private struct KeyInjectingWebView: UIViewRepresentable {
     let url: String
     let key: String
+    var isClock: Bool = false
 
-    func makeCoordinator() -> Coordinator { Coordinator(key: key) }
+    func makeCoordinator() -> Coordinator { Coordinator(key: key, isClock: isClock) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Set before page JS (incl. deferred ES modules) so canvas can auth
-        // after Excalidraw finishes loading from CDN — not on a premature click.
-        let safe = Self.jsStringLiteral(key)
-        let boot = WKUserScript(
-            source: """
-            window.__SSHCHAT_KEY='\(safe)';
-            window.SSHChatNative = window.SSHChatNative || {};
-            window.SSHChatNative.saveBlob = function(b64, filename, mime) {
-                window.webkit.messageHandlers.sshchatSave.postMessage({
-                    b64: b64,
-                    filename: filename,
-                    mime: mime || 'audio/mpeg'
-                });
-            };
-            """,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        )
-        config.userContentController.addUserScript(boot)
+        if !isClock {
+            // Set before page JS (incl. deferred ES modules) so canvas can auth
+            // after Excalidraw finishes loading from CDN — not on a premature click.
+            let safe = Self.jsStringLiteral(key)
+            let boot = WKUserScript(
+                source: """
+                window.__SSHCHAT_KEY='\(safe)';
+                window.SSHChatNative = window.SSHChatNative || {};
+                window.SSHChatNative.saveBlob = function(b64, filename, mime) {
+                    window.webkit.messageHandlers.sshchatSave.postMessage({
+                        b64: b64,
+                        filename: filename,
+                        mime: mime || 'audio/mpeg'
+                    });
+                };
+                """,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+            config.userContentController.addUserScript(boot)
+        }
         config.userContentController.add(context.coordinator, name: "sshchatSave")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
@@ -149,11 +154,13 @@ private struct KeyInjectingWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let key: String
+        let isClock: Bool
         private var unlockDone = false
         weak var webView: WKWebView?
 
-        init(key: String) {
+        init(key: String, isClock: Bool) {
             self.key = key
+            self.isClock = isClock
             super.init()
             NotificationCenter.default.addObserver(
                 self,
@@ -210,13 +217,14 @@ private struct KeyInjectingWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !isClock else { return }
             // Fallback for upload pages / older canvas HTML: retry until gate opens
             // or Excalidraw module binds unlock listeners (CDN can take seconds).
             attemptUnlock(webView, attempt: 0)
         }
 
         private func attemptUnlock(_ webView: WKWebView, attempt: Int) {
-            guard !unlockDone, attempt < 40 else { return }
+            guard !isClock, !unlockDone, attempt < 40 else { return }
             let safe = KeyInjectingWebView.jsStringLiteral(key)
             let js = """
             (function(){

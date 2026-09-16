@@ -35,6 +35,7 @@ class WebInviteActivity : AppCompatActivity() {
     private var maximized = false
     private var isCanvas = false
     private var isPiano = false
+    private var isClock = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,7 +48,8 @@ class WebInviteActivity : AppCompatActivity() {
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "SSHChat" }
         isCanvas = intent.getBooleanExtra(EXTRA_CANVAS, false)
         isPiano = intent.getBooleanExtra(EXTRA_PIANO, false)
-        if (url.isBlank() || key.isBlank()) {
+        isClock = intent.getBooleanExtra(EXTRA_CLOCK, false)
+        if (url.isBlank() || (!isClock && key.isBlank())) {
             Toast.makeText(this, "无效邀请", Toast.LENGTH_SHORT).show()
             finish()
             return
@@ -72,19 +74,23 @@ class WebInviteActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
 
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                // Before deferred ES modules run — canvas page reads this after CDN load.
-                view.evaluateJavascript("window.__SSHCHAT_KEY='$safeKey';", null)
+                if (!isClock) {
+                    // Before deferred ES modules run — canvas page reads this after CDN load.
+                    view.evaluateJavascript("window.__SSHCHAT_KEY='$safeKey';", null)
+                }
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
-                // Retry until board unlocks: Excalidraw listeners bind only after esm.sh loads.
-                attemptUnlock(view, 0)
+                if (!isClock) {
+                    // Retry until board unlocks: Excalidraw listeners bind only after esm.sh loads.
+                    attemptUnlock(view, 0)
+                }
             }
         }
         binding.web.loadUrl(url)
 
-        // Canvas / piano start maximized so the page fills the screen.
-        if (isCanvas || isPiano) {
+        // Canvas / piano / clock start maximized so the page fills the screen.
+        if (isCanvas || isPiano || isClock) {
             setMaximized(true)
         }
         if (isPiano) {
@@ -112,7 +118,7 @@ class WebInviteActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (maximized && isCanvas) {
+        if (maximized && (isCanvas || isClock)) {
             setMaximized(false)
             return
         }
@@ -227,6 +233,7 @@ class WebInviteActivity : AppCompatActivity() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_CANVAS = "canvas"
         private const val EXTRA_PIANO = "piano"
+        private const val EXTRA_CLOCK = "clock"
 
         fun canvas(ctx: Context, url: String, key: String): Intent =
             Intent(ctx, WebInviteActivity::class.java)
@@ -249,5 +256,13 @@ class WebInviteActivity : AppCompatActivity() {
                 .putExtra(EXTRA_KEY, key)
                 .putExtra(EXTRA_TITLE, "上传文件")
                 .putExtra(EXTRA_CANVAS, false)
+
+        fun clock(ctx: Context, url: String): Intent =
+            Intent(ctx, WebInviteActivity::class.java)
+                .putExtra(EXTRA_URL, url)
+                .putExtra(EXTRA_KEY, "")
+                .putExtra(EXTRA_TITLE, "棋钟")
+                .putExtra(EXTRA_CANVAS, true)
+                .putExtra(EXTRA_CLOCK, true)
     }
 }

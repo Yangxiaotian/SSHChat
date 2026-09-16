@@ -6108,7 +6108,9 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
             "[*] Open this URL in the Kindle browser (no scripts):\n"
             f"[*] {url}\n"
             "[*] After you move, tap your own side. Top and bottom, no color names.\n"
+            "[*] 4. GUI/mobile clients auto-open from the line below.\n"
             "[*] =================================\n"
+            f"[*] gui-open clock {url}\n"
         )
     lead = "已加入现有棋钟。" if rejoined else "棋钟已准备好。"
     return (
@@ -6118,7 +6120,9 @@ def _clock_invite_text(session: clock_sharing.ClockSession, *, rejoined: bool, l
         "[*] 用 Kindle 浏览器打开下面的网址（本页不用脚本）：\n"
         f"[*] {url}\n"
         "[*] 走完棋的一方点自己这边。上方和下方，不写红黑或白黑。\n"
+        "[*] 4. 图形/手机客户端会折叠成按钮，可一键打开。\n"
         "[*] ===========================\n"
+        f"[*] gui-open clock {url}\n"
     )
 
 
@@ -7864,6 +7868,7 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
     # Canvas invites are system blocks (gui-open canvas); keep them unwrapped
     # so GUI clients can auto-open. Regular PMs still get the PM prefix.
     canvas_invite = "gui-open canvas " in (text or "")
+    clock_invite = "gui-open clock " in (text or "")
     later_note = (from_name or "").strip().lower() == _LATER_OFFLINE_SENDER
     for peer_conn, _ in targets:
         if later_note:
@@ -7875,7 +7880,7 @@ def _fed_on_pm(to_name: str, from_name: str, text: str) -> None:
                     text=text,
                 ),
             )
-        elif canvas_invite:
+        elif canvas_invite or clock_invite:
             payload = text if text.endswith("\n") else f"{text}\n"
             send_line(peer_conn, payload)
         else:

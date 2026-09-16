@@ -1,7 +1,7 @@
 import Foundation
 
 enum SecureInvite {
-    enum Kind { case download, canvas, piano, upload }
+    enum Kind { case download, canvas, piano, upload, clock }
 
     struct Open {
         let kind: Kind
@@ -22,14 +22,15 @@ enum SecureInvite {
     }
 
     private static let guiOpen = try! NSRegularExpression(
-        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload)\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$"#,
+        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$"#,
         options: [.caseInsensitive]
     )
 
     static func absorbFileMeta(_ line: String, into meta: inout FileMeta) {
         let t = normalize(line)
-        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件")
+        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("棋钟") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件")
             || t.lowercased().hasPrefix("shared canvas") || t.lowercased().hasPrefix("room piano")
+            || t.lowercased().hasPrefix("chess clock")
             || t.lowercased().hasPrefix("file upload")
             || t.lowercased().hasPrefix("new file")
         {
@@ -54,10 +55,9 @@ enum SecureInvite {
     static func parseGuiOpen(_ line: String) -> Open? {
         let t = normalize(line)
         let range = NSRange(t.startIndex..., in: t)
-        guard let m = guiOpen.firstMatch(in: t, range: range), m.numberOfRanges == 4,
+        guard let m = guiOpen.firstMatch(in: t, range: range), m.numberOfRanges >= 3,
               let kindR = Range(m.range(at: 1), in: t),
-              let urlR = Range(m.range(at: 2), in: t),
-              let keyR = Range(m.range(at: 3), in: t)
+              let urlR = Range(m.range(at: 2), in: t)
         else { return nil }
         let kind: Kind
         switch t[kindR].lowercased() {
@@ -65,9 +65,18 @@ enum SecureInvite {
         case "canvas": kind = .canvas
         case "piano": kind = .piano
         case "upload": kind = .upload
+        case "clock": kind = .clock
         default: return nil
         }
-        return Open(kind: kind, url: String(t[urlR]), key: String(t[keyR]).uppercased())
+        let keyRange = m.range(at: 3)
+        let key: String
+        if keyRange.location != NSNotFound, let keyR = Range(keyRange, in: t) {
+            key = String(t[keyR]).uppercased()
+        } else {
+            key = ""
+        }
+        if kind != .clock && key.count != 6 { return nil }
+        return Open(kind: kind, url: String(t[urlR]), key: key)
     }
 
     static func isInviteNoise(_ line: String) -> Bool {
@@ -76,8 +85,8 @@ enum SecureInvite {
         if parseGuiOpen(t) != nil { return true }
         let lower = t.lowercased()
         if t.hasPrefix("===") { return true }
-        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件") { return true }
-        if lower.hasPrefix("shared canvas") || lower.hasPrefix("room piano") || lower.hasPrefix("file upload") || lower.hasPrefix("new file") { return true }
+        if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("棋钟") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件") { return true }
+        if lower.hasPrefix("shared canvas") || lower.hasPrefix("room piano") || lower.hasPrefix("chess clock") || lower.hasPrefix("file upload") || lower.hasPrefix("new file") { return true }
         if t.range(of: #"^=+\s*$"#, options: .regularExpression) != nil { return true }
         if t.range(of: #"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true

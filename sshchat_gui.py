@@ -108,6 +108,10 @@ _GUI_OPEN_DOWNLOAD_RE = re.compile(
     r"^gui-open\s+download\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
     re.I,
 )
+_GUI_OPEN_CLOCK_RE = re.compile(
+    r"^gui-open\s+clock\s+(https?://\S+)\s*$",
+    re.I,
+)
 _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
@@ -134,7 +138,7 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
@@ -486,7 +490,13 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if _SECURE_HTTP_URL_RE.match(t):
         return True
-    if _GUI_OPEN_UPLOAD_RE.match(t) or _GUI_OPEN_CANVAS_RE.match(t) or _GUI_OPEN_PIANO_RE.match(t) or _GUI_OPEN_DOWNLOAD_RE.match(t):
+    if (
+        _GUI_OPEN_UPLOAD_RE.match(t)
+        or _GUI_OPEN_CANVAS_RE.match(t)
+        or _GUI_OPEN_PIANO_RE.match(t)
+        or _GUI_OPEN_DOWNLOAD_RE.match(t)
+        or _GUI_OPEN_CLOCK_RE.match(t)
+    ):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
         return True
@@ -3449,6 +3459,8 @@ class SSHChatGUI:
             return
         if parsed and parsed[1] == "*" and self._try_handle_piano_invite(parsed[2]):
             return
+        if parsed and parsed[1] == "*" and self._try_handle_clock_invite(parsed[2]):
+            return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*":
@@ -4001,6 +4013,20 @@ class SSHChatGUI:
                     self._canvas_open_targets[tag] = (url, key)
             except ValueError:
                 continue
+
+    def _try_handle_clock_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_CLOCK_RE.match(body.strip())
+        if not m:
+            return False
+        url = m.group(1)
+        self._append_chat_line("[*] 打开棋钟…", local_sent=True)
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
+        self._set_status("棋钟已在浏览器打开")
+        self._alert_beep()
+        return True
 
     def _try_handle_piano_invite(self, body: str) -> bool:
         m = _GUI_OPEN_PIANO_RE.match(body.strip())

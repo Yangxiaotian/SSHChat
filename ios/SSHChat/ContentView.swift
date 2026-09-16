@@ -91,6 +91,8 @@ final class ChatViewModel: ObservableObject {
         var isCanvas: Bool = false
         /// Piano prefers landscape on phone (GarageBand-style split keyboard).
         var allowLandscape: Bool = false
+        /// Chess clock has no unlock key.
+        var isClock: Bool = false
     }
 
     private static let chatFontKey = "chat_font_sp"
@@ -819,6 +821,16 @@ final class ChatViewModel: ObservableObject {
                     appendText("[*] 打开上传页…")
                     webInvite = WebInvitePayload(title: "上传文件", url: open.url, key: open.key)
                 }
+            case .clock:
+                MessageAlert.play()
+                appendText("[*] 打开棋钟…")
+                webInvite = WebInvitePayload(
+                    title: "棋钟",
+                    url: open.url,
+                    key: "",
+                    isCanvas: true,
+                    isClock: true
+                )
             }
             return
         }
@@ -1067,7 +1079,8 @@ struct ContentView: View {
                 url: invite.url,
                 key: invite.key,
                 startsMaximized: true,
-                allowLandscape: invite.allowLandscape
+                allowLandscape: invite.allowLandscape,
+                isClock: invite.isClock
             )
         }
         .sheet(item: Binding(
