@@ -101,6 +101,8 @@ _GAME_SUBCOMMANDS = {
     "seats": None,
     "rating": None,
     "pgn": None,
+    "restore": None,
+    "draw": None,
 }
 
 _NEWS_SUBCOMMANDS = {
@@ -222,6 +224,9 @@ _SUBCOMMANDS_BY_CMD = {
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "draw"): ("accept", "reject", "cancel"),
+    ("/game", "restore"): ("swap",),
+    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
     ("/game", "new"): _GAME_NAMES,
     ("/game", "on"): _GAME_NAMES,
     ("/game", "off"): _GAME_NAMES,

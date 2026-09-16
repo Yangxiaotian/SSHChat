@@ -708,6 +708,9 @@ class BoardUndoMixin:
 
     def _undo_clear_pending(self) -> None:
         self._undo_requester_conn = None
+        # A successful move / undo resolution also drops any pending draw offer.
+        if hasattr(self, "_draw_requester_conn"):
+            self._draw_requester_conn = None
 
     def _undo_queue_private(self, conn, lines: list[str]) -> None:
         if conn is None or not lines:
@@ -749,6 +752,8 @@ class BoardUndoMixin:
         last_conn = self._undo_last_mover_conn()
         if last_conn is None or conn is not last_conn:
             return (["只有上一步的走子方可以请求悔棋。"], [], False)
+        if getattr(self, "_draw_requester_conn", None) is not None:
+            return (["当前有求和请求待处理，请先处理或取消后再悔棋。"], [], False)
         if self._undo_requester_conn is not None:
             if self._undo_requester_conn is conn:
                 return (
@@ -846,6 +851,187 @@ class BoardUndoMixin:
         return ([], [f"{name} 取消了悔棋请求。"], False)
 
 
+_DRAW_ACTION_ALIASES = {
+    "accept": "accept",
+    "同意": "accept",
+    "acc": "accept",
+    "yes": "accept",
+    "y": "accept",
+    "reject": "reject",
+    "拒绝": "reject",
+    "no": "reject",
+    "rej": "reject",
+    "n": "reject",
+    "cancel": "cancel",
+    "取消": "cancel",
+    "can": "cancel",
+}
+
+_DRAW_ACTION_HINT = (
+    "求和子命令用法：/game draw accept | reject | cancel"
+    "（简写 acc / rej / can；别名 /game 求和）"
+)
+
+
+def parse_draw_action(rest: str) -> tuple[Optional[str], Optional[str]]:
+    """Map /game draw 后的参数；返回 (action, error)。"""
+    token = (rest or "").strip().lower()
+    if not token:
+        return "request", None
+    if token in _DRAW_ACTION_ALIASES:
+        return _DRAW_ACTION_ALIASES[token], None
+    matches = {
+        action
+        for key, action in _DRAW_ACTION_ALIASES.items()
+        if key.startswith(token) or token.startswith(key)
+    }
+    if len(matches) == 1:
+        return matches.pop(), None
+    return None, _DRAW_ACTION_HINT
+
+
+class BoardDrawMixin:
+    """求和：任一方 /game draw，对方 /game draw accept 后平局结束。"""
+
+    supports_draw = True
+
+    def _draw_clear_pending(self) -> None:
+        self._draw_requester_conn = None
+
+    def _draw_queue_private(self, conn, lines: list[str]) -> None:
+        if conn is None or not lines:
+            return
+        if not hasattr(self, "_extra_privates"):
+            self._extra_privates = []
+        self._extra_privates.append((conn, lines))
+
+    def drain_extra_privates(self):
+        out = getattr(self, "_extra_privates", [])
+        self._extra_privates = []
+        return out
+
+    def _draw_is_ai_game(self) -> bool:
+        return getattr(self, "ai_level", None) is not None
+
+    def _draw_opponent_conn(self, conn):
+        if hasattr(self, "_undo_opponent_conn"):
+            return self._undo_opponent_conn(conn)
+        raise NotImplementedError
+
+    def _draw_player_name(self, conn) -> str:
+        if hasattr(self, "_undo_player_name"):
+            return self._undo_player_name(conn)
+        raise NotImplementedError
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        """End as draw and return broadcast lines (incl. rating settle)."""
+        raise NotImplementedError
+
+    def request_draw(self, conn) -> GameResult:
+        if self._draw_is_ai_game():
+            return (["AI 练习局不支持求和。"], [], False)
+        if self.state != "playing":
+            return (["对局未进行中，无法求和。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方，无法求和。"], [], False)
+        if getattr(self, "_undo_requester_conn", None) is not None:
+            return (["当前有悔棋请求待处理，请先处理或取消后再求和。"], [], False)
+        if getattr(self, "_draw_requester_conn", None) is not None:
+            if self._draw_requester_conn is conn:
+                return (
+                    [
+                        "你已发起求和请求，等对方 "
+                        "/game draw accept 或 /game draw reject。"
+                    ],
+                    [],
+                    False,
+                )
+            return (["已有求和请求待对方处理。"], [], False)
+        self._draw_requester_conn = conn
+        opp = self._draw_opponent_conn(conn)
+        opp_name = self._draw_player_name(opp) if opp else "对方"
+        req_name = self._draw_player_name(conn)
+        if opp is not None:
+            self._draw_queue_private(
+                opp,
+                [
+                    f"{req_name} 请求求和。",
+                    "请用 /game draw accept 同意，或 /game draw reject 拒绝。",
+                ],
+            )
+        return (
+            [f"已向 {opp_name} 发起求和请求，等对方同意或拒绝。"],
+            [
+                f"{req_name} 请求求和，"
+                f"请 {opp_name} 执行 /game draw accept 同意，"
+                "或 /game draw reject 拒绝。"
+            ],
+            False,
+        )
+
+    def accept_draw(self, conn) -> GameResult:
+        if self.state != "playing":
+            return (["对局未进行中。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方。"], [], False)
+        if getattr(self, "_draw_requester_conn", None) is None:
+            return (["当前没有待处理的求和请求。"], [], False)
+        if conn is self._draw_requester_conn:
+            return (
+                [
+                    "你是求和请求方，请等对方 /game draw accept，"
+                    "或 /game draw cancel 取消请求。"
+                ],
+                [],
+                False,
+            )
+        requester = self._draw_requester_conn
+        req_name = self._draw_player_name(requester)
+        ac_name = self._draw_player_name(conn)
+        self._draw_clear_pending()
+        if hasattr(self, "_undo_clear_pending"):
+            self._undo_clear_pending()
+        self.state = "ended"
+        bcast = self._draw_agreed_lines(req_name, ac_name)
+        self._draw_queue_private(requester, [f"{ac_name} 已同意求和，本局平局。"])
+        return ([f"你已同意 {req_name} 的求和，本局平局。"], bcast, True)
+
+    def reject_draw(self, conn) -> GameResult:
+        if getattr(self, "_draw_requester_conn", None) is None:
+            return (["当前没有待处理的求和请求。"], [], False)
+        if not self.is_seated(conn):
+            return (["你不是对局双方。"], [], False)
+        if conn is self._draw_requester_conn:
+            return (
+                ["对方尚未回应；可用 /game draw cancel 取消你的求和请求。"],
+                [],
+                False,
+            )
+        req_name = self._draw_player_name(self._draw_requester_conn)
+        ac_name = self._draw_player_name(conn)
+        self._draw_queue_private(
+            self._draw_requester_conn, [f"{ac_name} 已拒绝你的求和请求。"]
+        )
+        self._draw_clear_pending()
+        return (
+            [],
+            [f"{ac_name} 拒绝了 {req_name} 的求和请求。"],
+            False,
+        )
+
+    def cancel_draw(self, conn) -> GameResult:
+        if getattr(self, "_draw_requester_conn", None) is None:
+            return (["当前没有求和请求可取消。"], [], False)
+        if conn is not self._draw_requester_conn:
+            return (["只有求和请求方可以 /game draw cancel 取消。"], [], False)
+        name = self._draw_player_name(conn)
+        opp = self._draw_opponent_conn(conn)
+        if opp is not None:
+            self._draw_queue_private(opp, [f"{name} 已取消求和请求。"])
+        self._draw_clear_pending()
+        return ([], [f"{name} 取消了求和请求。"], False)
+
+
 def _color_label(color: bool) -> str:
     return "白" if color == _chess.WHITE else "黑"
 
@@ -924,7 +1110,7 @@ def _format_outcome(outcome) -> str:
     return f"对局结束：和棋（{reason}） 1/2-1/2"
 
 
-class ChessGame(BoardUndoMixin):
+class ChessGame(BoardUndoMixin, BoardDrawMixin):
     """Two-seat chess. Creator = white; joiner = black."""
 
     name = "chess"
@@ -963,6 +1149,7 @@ class ChessGame(BoardUndoMixin):
             else "等另一位玩家用 /game join 加入。"
         )
         self._undo_clear_pending()
+        self._draw_clear_pending()
 
     def _undo_has_moves(self) -> bool:
         return bool(self.board.move_stack)
@@ -1005,6 +1192,13 @@ class ChessGame(BoardUndoMixin):
             f"轮到 {_color_label(color)}方 {who}"
             f"（第 {self.board.fullmove_number} 手）{suffix}"
         )
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        self._result_header = "1/2-1/2"
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平 1/2-1/2。",
+            *self._settle_ratings(0.5),
+        ]
 
     def color_of(self, conn) -> Optional[bool]:
         if conn is self.white_conn:
@@ -1548,7 +1742,7 @@ def _gomoku_render(
     return lines
 
 
-class GomokuGame(BoardUndoMixin):
+class GomokuGame(BoardUndoMixin, BoardDrawMixin):
     """15×15 Renju-style gomoku. Creator = black (先手); joiner = white.
 
     Black: 长连 / 四四 / 三三 禁手，且仅「恰好五连」取胜；白方无禁手。
@@ -1629,6 +1823,12 @@ class GomokuGame(BoardUndoMixin):
         next_is_black = self._turn == 1
         nm = self.black_name if next_is_black else self.white_name
         return f"轮到 {'黑' if next_is_black else '白'}方 {nm} 落子"
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平。",
+            *self._settle_ratings(0.5),
+        ]
 
     def _seat_conn(self, who: int):
         return self.black_conn if who == 1 else self.white_conn
@@ -2034,7 +2234,7 @@ def _go_render(
     return lines
 
 
-class GoGame(BoardUndoMixin):
+class GoGame(BoardUndoMixin, BoardDrawMixin):
     """19×19 Go. Creator = black; joiner = white."""
 
     name = "go"
@@ -2147,6 +2347,12 @@ class GoGame(BoardUndoMixin):
 
     def _undo_turn_line(self) -> str:
         return self._turn_line()
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平。",
+            *self._settle_ratings(0.5),
+        ]
 
     def _seat_conn(self, who: int):
         return self.black_conn if who == 1 else self.white_conn
@@ -2405,7 +2611,7 @@ def _reversi_render(
     return lines
 
 
-class ReversiGame:
+class ReversiGame(BoardDrawMixin):
     """Standard 8x8 Reversi. Creator is black; joiner is white."""
 
     name = "reversi"
@@ -2436,6 +2642,7 @@ class ReversiGame:
         self._last: Optional[tuple[int, int]] = None
         self._last_player: Optional[int] = None
         self.join_blurb = "Waiting for another player to join with /game join."
+        self._draw_clear_pending()
 
     def who_of(self, conn) -> Optional[int]:
         if conn is self.black_conn:
@@ -2446,6 +2653,26 @@ class ReversiGame:
 
     def is_seated(self, conn) -> bool:
         return self.who_of(conn) is not None
+
+    def _draw_opponent_conn(self, conn):
+        who = self.who_of(conn)
+        if who is None:
+            return None
+        return self.white_conn if who == 1 else self.black_conn
+
+    def _draw_player_name(self, conn) -> str:
+        who = self.who_of(conn)
+        if who == 1:
+            return self.black_name
+        if who == 2:
+            return self.white_name or "White"
+        return "?"
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} accepts the draw offer from {req_name}.",
+            *self._settle_ratings(0.5),
+        ]
 
     def _name_of(self, player: int) -> str:
         return self.black_name if player == 1 else self.white_name or "White"
@@ -2532,6 +2759,7 @@ class ReversiGame:
             self._passes += 1
             self._last = None
             self._last_player = None
+            self._draw_clear_pending()
             name = self._name_of(player)
             lines = [f"{name} passes."]
             if self._passes >= 2:
@@ -2556,6 +2784,7 @@ class ReversiGame:
         self._last_player = player
         self._passes = 0
         self.turn = 3 - player
+        self._draw_clear_pending()
         lines = [
             f"{self._name_of(player)} plays ({row + 1}, {col + 1}) and flips {len(flips)}.",
         ]
@@ -2763,7 +2992,7 @@ def _darkchess_render_board(
     return lines
 
 
-class DarkchessGame:
+class DarkchessGame(BoardDrawMixin):
     """Two-player Chinese Dark Chess with private face-down pieces."""
 
     name = "darkchess"
@@ -2796,6 +3025,7 @@ class DarkchessGame:
         self._last: Optional[dict] = None
         self._last_player: Optional[int] = None
         self.join_blurb = "等另一位玩家用 /game join 加入。"
+        self._draw_clear_pending()
 
     def who_of(self, conn) -> Optional[int]:
         if conn is self.first_conn:
@@ -2806,6 +3036,26 @@ class DarkchessGame:
 
     def is_seated(self, conn) -> bool:
         return self.who_of(conn) is not None
+
+    def _draw_opponent_conn(self, conn):
+        who = self.who_of(conn)
+        if who is None:
+            return None
+        return self.second_conn if who == 1 else self.first_conn
+
+    def _draw_player_name(self, conn) -> str:
+        who = self.who_of(conn)
+        if who == 1:
+            return self.first_name
+        if who == 2:
+            return self.second_name or "玩家2"
+        return "?"
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平。",
+            *self._settle_ratings(0.5),
+        ]
 
     def _player_name(self, player: int) -> str:
         return self.first_name if player == 1 else self.second_name or "玩家2"
@@ -2821,7 +3071,7 @@ class DarkchessGame:
             self.rating_store, self.name, [self.first_name, self.second_name]
         )
 
-    def _settle_ratings(self, winner: int) -> list[str]:
+    def _settle_ratings(self, score_first: float) -> list[str]:
         if not self.second_name:
             return []
         return _format_rating_result_lines(
@@ -2829,7 +3079,7 @@ class DarkchessGame:
             self.name,
             self.first_name,
             self.second_name,
-            1.0 if winner == 1 else 0.0,
+            score_first,
             ranked=True,
         )
 
@@ -2880,7 +3130,7 @@ class DarkchessGame:
         self.state = "ended"
         return winner, [
             f"{self._player_name(winner)} 获胜：对方无子可动。",
-            *self._settle_ratings(winner),
+            *self._settle_ratings(1.0 if winner == 1 else 0.0),
         ]
 
     def try_join(self, conn, name: str) -> GameResult:
@@ -2949,6 +3199,7 @@ class DarkchessGame:
             }
             self._last_player = player
             self.turn = 3 - player
+            self._draw_clear_pending()
             lines = [summary + "。"]
             lines.append(self._turn_line())
             return ([], lines, False)
@@ -3016,6 +3267,7 @@ class DarkchessGame:
         }
         self._last_player = player
         self.turn = 3 - player
+        self._draw_clear_pending()
         lines = [summary + "。"]
         finished = self._finish_if_needed()
         if finished:
@@ -3037,7 +3289,7 @@ class DarkchessGame:
             [],
             [
                 f"{name} 认负；{self._player_name(winner)} 获胜。",
-                *self._settle_ratings(winner),
+                *self._settle_ratings(1.0 if winner == 1 else 0.0),
             ],
             True,
         )
@@ -3110,7 +3362,7 @@ class DarkchessGame:
                 [],
                 [
                     f"{name} 离开；{self._player_name(winner)} 获胜。",
-                    *self._settle_ratings(winner),
+                    *self._settle_ratings(1.0 if winner == 1 else 0.0),
                 ],
                 True,
             )
@@ -4621,7 +4873,7 @@ def _xq_render(
     return lines
 
 
-class XiangqiGame(BoardUndoMixin):
+class XiangqiGame(BoardUndoMixin, BoardDrawMixin):
     """Chinese chess (xiangqi). Creator = red (先手); joiner = black."""
 
     name = "xiangqi"
@@ -4707,6 +4959,12 @@ class XiangqiGame(BoardUndoMixin):
         if side == _XQ_BLACK:
             return self.black_name or "黑方"
         return "?"
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平。",
+            *self._settle_ratings(0.5),
+        ]
 
     def _undo_pop_last_move(self) -> bool:
         self._ensure_compat_state()
@@ -12007,7 +12265,7 @@ def _doushou_render(
     return lines
 
 
-class DoushouGame(BoardUndoMixin):
+class DoushouGame(BoardUndoMixin, BoardDrawMixin):
     """斗兽棋：7x9，红方先手，无机器人。"""
 
     name = "doushou"
@@ -12090,6 +12348,12 @@ class DoushouGame(BoardUndoMixin):
 
     def _undo_turn_line(self) -> str:
         return f"轮到 {_doushou_side_zh(self._turn)} {self._name_of_side(self._turn)} 行棋"
+
+    def _draw_agreed_lines(self, req_name: str, ac_name: str) -> list[str]:
+        return [
+            f"{ac_name} 同意求和，与 {req_name} 战平。",
+            *self._settle_ratings(0.5),
+        ]
 
     def _rating_lines(self) -> list[str]:
         return _format_rating_lines(self.rating_store, self.name, [self.red_name, self.black_name])

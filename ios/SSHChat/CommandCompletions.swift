@@ -51,7 +51,7 @@ enum CommandCompletions {
     private static let subs: [String: [String]] = [
         "/game": [
             "help", "list", "new", "join", "show", "move", "resign",
-            "undo", "abort", "end", "on", "off", "seats", "rating", "pgn",
+            "undo", "abort", "end", "on", "off", "seats", "rating", "pgn", "restore", "draw",
         ],
         "/news": ["中文", "国际", "科技", "all", "detail", "详情", "fetch", "全文"],
         "/library": [
@@ -74,6 +74,9 @@ enum CommandCompletions {
 
     private static let nested: [String: [String]] = [
         "/game undo": ["accept", "reject", "cancel"],
+        "/game draw": ["accept", "reject", "cancel"],
+        "/game restore": ["swap"],
+        "/game move": ["flip", "move", "翻", "翻子", "走", "移动"],
     ]
 
     private static let roomArgCmds: Set<String> = ["/join", "/switch", "/part"]

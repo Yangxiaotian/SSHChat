@@ -55,6 +55,9 @@ function longestCommonPrefix(values: string[]): string {
 }
 
 const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
+const GAME_DRAW_ACTIONS = ['accept', 'reject', 'cancel'] as const;
+const GAME_RESTORE_ACTIONS = ['swap'] as const;
+const GAME_MOVE_ACTIONS = ['flip', 'move', '翻', '翻子', '走', '移动'] as const;
 const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
 const USER_OR_ROOM_ARG_CMDS = new Set(['/msg', '/sendfile', '/file']);
 const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
@@ -63,7 +66,7 @@ const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
 const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
   '/game': [
     'help', 'list', 'new', 'join', 'show', 'move', 'resign', 'undo', 'abort', 'end',
-    'on', 'off', 'seats', 'rating', 'pgn',
+    'on', 'off', 'seats', 'rating', 'pgn', 'restore', 'draw',
   ],
   '/news': ['中文', '国际', '科技', 'all', 'detail', '详情', 'fetch', '全文'],
   '/library': [
@@ -201,6 +204,47 @@ function buildSuggestions(
     }));
   }
 
+  const gameDrawPrefix = '/game draw';
+  if (value.toLowerCase().startsWith(gameDrawPrefix)) {
+    const tail = value.slice(gameDrawPrefix.length).trimStart().toLowerCase();
+    return GAME_DRAW_ACTIONS.filter(
+      (action) => !tail || action.startsWith(tail),
+    ).map((action) => ({
+      value: `${gameDrawPrefix} ${action}`,
+      desc: 'draw action',
+      source: 'command' as const,
+    }));
+  }
+
+  const gameRestorePrefix = '/game restore';
+  if (value.toLowerCase().startsWith(gameRestorePrefix)) {
+    const tail = value.slice(gameRestorePrefix.length).trimStart().toLowerCase();
+    return GAME_RESTORE_ACTIONS.filter(
+      (action) => !tail || action.startsWith(tail),
+    ).map((action) => ({
+      value: `${gameRestorePrefix} ${action}`,
+      desc: 'restore action',
+      source: 'command' as const,
+    }));
+  }
+
+  const gameMovePrefix = '/game move';
+  if (value.toLowerCase().startsWith(gameMovePrefix)) {
+    // Only suggest verbs right after "/game move"; leave coords alone.
+    const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+    const trailingSpace = value.endsWith(' ');
+    if (parts.length === 2 || (parts.length === 3 && !trailingSpace)) {
+      const tail = (parts.length === 3 ? parts[2] : '').toLowerCase();
+      return GAME_MOVE_ACTIONS.filter(
+        (action) => !tail || action.toLowerCase().startsWith(tail),
+      ).map((action) => ({
+        value: `${gameMovePrefix} ${action}`,
+        desc: 'move action',
+        source: 'command' as const,
+      }));
+    }
+  }
+
   if (value.startsWith('/') && !value.includes(' ')) {
     const lower = value.toLowerCase();
     return commands
@@ -331,10 +375,22 @@ export default function InputBar() {
     setActiveSuggestion(0);
     const isTopLevelCommand = value.startsWith('/') && !value.includes(' ');
     const isGameUndoCommand = value.toLowerCase().startsWith('/game undo');
+    const isGameDrawCommand = value.toLowerCase().startsWith('/game draw');
+    const isGameRestoreCommand = value.toLowerCase().startsWith('/game restore');
+    const gameMoveParts = value.trimEnd().split(/\s+/).filter(Boolean);
+    const isGameMoveVerbCommand = value.toLowerCase().startsWith('/game move')
+      && (gameMoveParts.length === 2 || (gameMoveParts.length === 3 && !value.endsWith(' ')));
     const isSubCommand = subcommandSuggestions(value).length > 0;
     const isNameArgCommand = nameArgSuggestions(value, roomNames, users).length > 0;
     setShowSuggestions(
-      mentions.length > 0 || isTopLevelCommand || isGameUndoCommand || isSubCommand || isNameArgCommand
+      mentions.length > 0
+        || isTopLevelCommand
+        || isGameUndoCommand
+        || isGameDrawCommand
+        || isGameRestoreCommand
+        || isGameMoveVerbCommand
+        || isSubCommand
+        || isNameArgCommand
         ? merged.length > 0
         : merged.length > 0 && value.trim().length > 0,
     );
@@ -359,6 +415,12 @@ export default function InputBar() {
     const canTabComplete =
       (value.startsWith('/') && !value.includes(' ')) ||
       value.toLowerCase().startsWith('/game undo') ||
+      value.toLowerCase().startsWith('/game draw') ||
+      value.toLowerCase().startsWith('/game restore') ||
+      (value.toLowerCase().startsWith('/game move') && (() => {
+        const parts = value.trimEnd().split(/\s+/).filter(Boolean);
+        return parts.length === 2 || (parts.length === 3 && !value.endsWith(' '));
+      })()) ||
       subcommandSuggestions(value).length > 0 ||
       nameArgSuggestions(value, roomNames, users).length > 0;
 

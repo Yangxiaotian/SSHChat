@@ -92,6 +92,8 @@ MESSAGES: dict = {
         "[*] /game pgn              Export PGN for the current/finished game (chess only).",
         "[*] /game undo             Undo: side that moved last requests; opponent /game undo accept undoes one ply "
         "(chess/gomoku/go/xiangqi/doushou; short acc / rej / can; reject refuses, cancel withdraws the request).",
+        "[*] /game draw             Offer a draw; opponent /game draw accept|reject (alias: 求和). "
+        "AI practice games disallow draws. Supported: chess/gomoku/go/xiangqi/doushou/reversi/darkchess.",
         "[*] /game resign           Resign (only while a game is in progress).",
         "[*] /game abort            Abort a game that has not started.",
         "[*] /game end              Room owner may force-end the current game.",

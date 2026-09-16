@@ -252,6 +252,8 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
         "seats",
         "rating",
         "pgn",
+        "restore",
+        "draw",
     ),
     "/news": ("中文", "国际", "科技", "all", "detail", "详情", "fetch", "全文"),
     "/library": (
@@ -302,6 +304,9 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
+    ("/game", "draw"): ("accept", "reject", "cancel"),
+    ("/game", "restore"): ("swap",),
+    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
 }
 
 

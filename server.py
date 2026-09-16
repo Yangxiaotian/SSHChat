@@ -7611,6 +7611,8 @@ def _fed_execute_game_cmd(
 ) -> None:
     local = _local_node_id()
     sub = sub.lower()
+    if sub in {"求和"}:
+        sub = "draw"
     with lock:
         auth_now = (room_game_authority.get(room) or local).strip() or local
     if auth_now != local:
@@ -7738,6 +7740,27 @@ def _fed_execute_game_cmd(
         _finish_game_action(room, game, actor, priv, bcast, False, send_boards=bool(bcast))
         return
 
+    if sub == "draw":
+        if game is None or actor is None or not hasattr(game, "request_draw"):
+            return
+        draw_action, draw_err = games.parse_draw_action(rest)
+        if draw_err:
+            _route_game_private(room, actor, [draw_err])
+            return
+        with lock:
+            if draw_action == "accept":
+                priv, bcast, ended = game.accept_draw(actor)
+            elif draw_action == "reject":
+                priv, bcast, ended = game.reject_draw(actor)
+            elif draw_action == "cancel":
+                priv, bcast, ended = game.cancel_draw(actor)
+            else:
+                priv, bcast, ended = game.request_draw(actor)
+        _finish_game_action(
+            room, game, actor, priv, bcast, ended, send_boards=bool(bcast)
+        )
+        return
+
     if sub == "abort":
         if game is None or actor is None:
             return
@@ -7832,6 +7855,7 @@ def _should_forward_game(room: str, sub: str) -> bool:
         "move",
         "resign",
         "undo",
+        "draw",
         "abort",
         "end",
     ):
@@ -8770,6 +8794,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     sub, _, rest = raw.partition(" ")
     sub = sub.lower()
     rest = rest.strip()
+    if sub in {"求和"}:
+        sub = "draw"
 
     if sub == "end" and _should_forward_game(room, sub):
         # Ownership is local. The game authority's room_owners handle is not
@@ -9147,6 +9173,36 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             else:
                 priv, bcast, _ = game.request_undo(conn)
         _finish_game_action(room, game, conn, priv, bcast, False, send_boards=bool(bcast))
+        return
+
+    if sub == "draw":
+        with lock:
+            game = room_games.get(room)
+            if game is None:
+                send_line(conn, "[*] 本房没有进行中的对局。\n")
+                return
+            if not hasattr(game, "request_draw"):
+                send_line(
+                    conn,
+                    "[*] 当前对局不支持求和（仅 chess、gomoku、go、xiangqi、"
+                    "doushou、reversi、darkchess）。\n",
+                )
+                return
+            draw_action, draw_err = games.parse_draw_action(rest)
+            if draw_err:
+                send_line(conn, f"[*] {draw_err}\n")
+                return
+            if draw_action == "accept":
+                priv, bcast, ended = game.accept_draw(conn)
+            elif draw_action == "reject":
+                priv, bcast, ended = game.reject_draw(conn)
+            elif draw_action == "cancel":
+                priv, bcast, ended = game.cancel_draw(conn)
+            else:
+                priv, bcast, ended = game.request_draw(conn)
+        _finish_game_action(
+            room, game, conn, priv, bcast, ended, send_boards=bool(bcast)
+        )
         return
 
     if sub == "abort":

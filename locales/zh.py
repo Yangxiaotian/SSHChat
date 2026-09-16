@@ -90,6 +90,8 @@ MESSAGES: dict = {
         "[*] /game pgn              导出当前/已结束棋局的 PGN（仅 chess）。",
         "[*] /game undo             悔棋：上一步走子方发起，对方 /game undo accept 同意后撤销一步"
         "（chess/gomoku/go/xiangqi/doushou；简写 acc / rej / can；reject 拒绝，cancel 取消请求）。",
+        "[*] /game draw             求和：任一方发起，对方 /game draw accept|reject（别名：求和）。"
+        "AI 练习局不可求和。支持：chess/gomoku/go/xiangqi/doushou/reversi/darkchess。",
         "[*] /game resign           认负（仅对局进行中）。",
         "[*] /game abort            终止未开始的对局。",
         "[*] /game end              房主可强制结束当前对局。",
