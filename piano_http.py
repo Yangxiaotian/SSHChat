@@ -1840,10 +1840,8 @@ def generate_piano_page(
                 if (initial) continue;
                 if (!evt.note || !notes[evt.note]) continue;
                 if (ownEventSeqs.has(evt.seq)) continue;
-                if (evt.author && selfName &&
-                    String(evt.author).toLowerCase() === selfName.toLowerCase()) {{
-                    continue;
-                }}
+                // Do NOT skip by author==selfName: same nick on phone+Tk shares
+                // one participant name; the other device must still hear notes.
                 if (evt.action === 'on') remoteHeld[evt.note] = true;
                 else if (evt.action === 'off') delete remoteHeld[evt.note];
                 remoteEvents.push(evt);
@@ -1907,22 +1905,30 @@ def generate_piano_page(
 
         async function syncLoop() {{
             while (syncLoopActive && ticket) {{
-                if (pianoWsLive) {{
-                    await new Promise(function (r) {{ setTimeout(r, 1000); }});
-                    continue;
-                }}
+                // Even with a live WebSocket, keep a short HTTP sync as backup
+                // (Cloudflare/WS glitches otherwise look like "无法同步").
                 try {{
-                    await syncOnce(false);
+                    if (pianoWsLive) {{
+                        await syncOnce(false, 0);
+                        await new Promise(function (r) {{ setTimeout(r, 2000); }});
+                    }} else {{
+                        await syncOnce(false);
+                    }}
                 }} catch (_) {{
                     await new Promise(function (r) {{ setTimeout(r, 250); }});
                 }}
             }}
         }}
 
-        async function syncOnce(initial) {{
+        async function syncOnce(initial, waitOverride) {{
             if (!ticket) return;
             try {{
-                const wait = initial || pianoWsLive ? 0 : SYNC_WAIT_MS;
+                let wait = 0;
+                if (typeof waitOverride === 'number') {{
+                    wait = waitOverride;
+                }} else if (!initial && !pianoWsLive) {{
+                    wait = SYNC_WAIT_MS;
+                }}
                 const res = await fetch(
                     '/piano/' + token + '/sync?since=' + lastSeq +
                     '&wait=' + wait +
