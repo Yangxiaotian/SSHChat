@@ -34,6 +34,7 @@ _TEXTS = {
         "setup": "时间",
         "hide": "收起",
         "full": "全屏",
+        "close": "关闭",
         "base": "每方",
         "inc": "加秒",
         "closed": "棋钟已关闭或过期。请在聊天里重新发送 /clock。",
@@ -56,6 +57,7 @@ _TEXTS = {
         "setup": "Time",
         "hide": "Hide",
         "full": "Full",
+        "close": "Close",
         "base": "Each",
         "inc": "Inc",
         "closed": "This clock is closed or expired. Send /clock again in chat.",
@@ -269,6 +271,7 @@ html, body {{
     <a href="#" onclick="return toggleSetup();" id="setupBtn">{html.escape(text['setup'])}</a>
     <a href="#" onclick="return goFull();">{html.escape(text['full'])}</a>
     <a href="/clock/{token}?lang={other_lang}">{html.escape(other_label)}</a>
+    <a href="#" id="closeBtn" hidden onclick="return closePage();">{html.escape(text['close'])}</a>
   </div>
   <div id="bottom" class="side" onclick="hit('bottom')">
     <div class="name" id="bottomName"></div>
@@ -491,6 +494,37 @@ function goFull() {{
   }}
   return false;
 }}
+
+function hasNativeClose() {{
+  if (window.__SSHCHAT_EMBEDDED__) return true;
+  try {{
+    if (window.SSHChatNative && window.SSHChatNative.close) return true;
+  }} catch (e) {{}}
+  return false;
+}}
+
+function closePage() {{
+  try {{
+    if (window.SSHChatNative && window.SSHChatNative.close) {{
+      window.SSHChatNative.close();
+      return false;
+    }}
+  }} catch (e) {{}}
+  try {{
+    window.webkit.messageHandlers.sshchatClose.postMessage({{}});
+  }} catch (e) {{}}
+  return false;
+}}
+
+(function () {{
+  function revealClose() {{
+    var btn = document.getElementById("closeBtn");
+    if (btn && hasNativeClose()) btn.hidden = false;
+  }}
+  revealClose();
+  setTimeout(revealClose, 50);
+  setTimeout(revealClose, 300);
+}})();
 
 loadLocal();
 if (S.running) arm(S.running);

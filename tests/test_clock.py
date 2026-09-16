@@ -55,6 +55,8 @@ class ClockTests(unittest.TestCase):
         self.assertIn("toggleSetup()", page)
         # Top half is rotated so the player across the table can read upright.
         self.assertIn("rotate(180deg)", page)
+        self.assertIn('id="closeBtn"', page)
+        self.assertIn("closePage()", page)
 
     def test_invite_includes_gui_open_clock(self):
         from unittest import mock

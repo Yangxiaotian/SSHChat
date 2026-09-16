@@ -233,6 +233,7 @@ PIANO_TEXTS = {
         "replay_restart": "Restart",
         "replay_not_found": "Recording not found or expired",
         "replay_loading": "Loading replay…",
+        "close": "Close",
     },
     "zh": {
         "title": "SSHChat 房间钢琴",
@@ -275,6 +276,7 @@ PIANO_TEXTS = {
         "replay_restart": "重播",
         "replay_not_found": "录制不存在或已过期",
         "replay_loading": "正在加载重放…",
+        "close": "关闭",
     },
 }
 
@@ -824,6 +826,7 @@ def generate_piano_page(
                     <button type="button" class="tb-btn" id="restartBtn" disabled>{html.escape(S['replay_restart'])}</button>
                     <button type="button" class="tb-btn" id="exportBtn" disabled>{html.escape(S['export'])}</button>
                     <button type="button" class="tb-btn" id="shareBtn" disabled>{html.escape(S['share'])}</button>
+                    <button type="button" class="tb-btn" id="closeBtn" hidden>{html.escape(S['close'])}</button>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="loading" id="loading">{html.escape(S['loading'])}</div>
@@ -1240,6 +1243,35 @@ def generate_piano_page(
         restartBtn.addEventListener('click', restartPlayback);
         exportBtn.addEventListener('click', function () {{ void exportRecording(); }});
         shareBtn.addEventListener('click', function () {{ void shareRecording(); }});
+        (function wireClose() {{
+            const closeBtn = document.getElementById('closeBtn');
+            if (!closeBtn) return;
+            function hasNativeClose() {{
+                if (window.__SSHCHAT_EMBEDDED__) return true;
+                try {{
+                    if (window.SSHChatNative && window.SSHChatNative.close) return true;
+                }} catch (_) {{}}
+                return false;
+            }}
+            function reveal() {{
+                if (!hasNativeClose()) return;
+                closeBtn.hidden = false;
+            }}
+            closeBtn.addEventListener('click', function () {{
+                try {{
+                    if (window.SSHChatNative && window.SSHChatNative.close) {{
+                        window.SSHChatNative.close();
+                        return;
+                    }}
+                }} catch (_) {{}}
+                try {{
+                    window.webkit.messageHandlers.sshchatClose.postMessage({{}});
+                }} catch (_) {{}}
+            }});
+            reveal();
+            setTimeout(reveal, 50);
+            setTimeout(reveal, 300);
+        }})();
 
         function setStatus(text, err) {{
             statusEl.textContent = text;
