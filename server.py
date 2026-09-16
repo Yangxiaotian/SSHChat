@@ -5043,6 +5043,63 @@ def _rediscover_canvas_invites_for_public_change(reason: str = "") -> int:
     return n
 
 
+def _rediscover_piano_invites_for_public_change(reason: str = "") -> int:
+    """Re-send piano URL+key when the Quick Tunnel hostname moves."""
+    try:
+        with piano_sharing.piano_store.lock:
+            sessions = [
+                s
+                for s in piano_sharing.piano_store.sessions.values()
+                if not s.closed
+            ]
+    except Exception as e:
+        print(f"[Piano] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_piano_invites(session, refreshed=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Piano] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Piano] re-delivered invites for {n} session(s){suffix}")
+    return n
+
+
+def _rediscover_clock_invites_for_public_change(reason: str = "") -> int:
+    """Re-send clock page URLs when the Quick Tunnel hostname moves."""
+    try:
+        sessions = [
+            s
+            for s in clock_sharing.clock_store.sessions.values()
+            if not s.closed
+        ]
+    except Exception as e:
+        print(f"[Clock] rediscover list failed: {e!r}")
+        return 0
+    if not sessions:
+        return 0
+    n = 0
+    for session in sessions:
+        try:
+            _deliver_clock_url(session, rejoined=True)
+            n += 1
+        except Exception as e:
+            print(
+                f"[Clock] re-invite failed ({session.session_id[:12]}…): {e!r}"
+            )
+    if n:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Clock] re-delivered invites for {n} session(s){suffix}")
+    return n
+
+
 def _maybe_refresh_canvas_invites_on_public_change(
     cur: str, *, reason: str
 ) -> None:
@@ -5056,6 +5113,8 @@ def _maybe_refresh_canvas_invites_on_public_change(
         _LAST_CANVAS_PUBLIC_BASE = cur
         return
     _rediscover_canvas_invites_for_public_change(reason)
+    _rediscover_piano_invites_for_public_change(reason)
+    _rediscover_clock_invites_for_public_change(reason)
     try:
         _federation_push_all_canvas_announces()
     except Exception as e:
@@ -5847,11 +5906,18 @@ def _piano_invite_message(
     key: str,
     room: Optional[str],
     title: str = "",
+    refreshed: bool = False,
 ) -> str:
     where = f"房间 #{room}" if room else "私密钢琴"
     title_line = f"[*] 标题: {title}\n" if title else ""
+    refresh_line = (
+        "[*] 公网地址已更新（旧 trycloudflare 链接已失效，请用下面新网址）\n"
+        if refreshed
+        else ""
+    )
     return (
         f"[*] ========== 房间钢琴 ==========\n"
+        f"{refresh_line}"
         f"[*] 发起人: {creator}\n"
         f"[*] 范围: {where}\n"
         f"{title_line}"
@@ -5876,6 +5942,7 @@ def _deliver_piano_invites(
     session: piano_sharing.PianoSession,
     *,
     only: Optional[str] = None,
+    refreshed: bool = False,
 ) -> None:
     if file_http is None:
         return
@@ -5893,6 +5960,7 @@ def _deliver_piano_invites(
             key=key,
             room=session.room,
             title=session.title,
+            refreshed=refreshed,
         )
         recipient_lower = participant.lower()
         delivered = False
