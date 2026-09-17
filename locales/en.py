@@ -28,7 +28,7 @@ MESSAGES: dict = {
         "/later 30m text; /later tomorrow 09:00 text; /later list; /later cancel <n>.\n",
         "[*] /lang [en|zh]   Switch UI language (default English; preference saved per nickname).\n",
         "[*]\n",
-        "[*] /game ...      Room games (chess, gomoku, xiangqi, sanguo). /game list /new /join …; owner /game on|off.\n",
+        "[*] /game ...      Room games (chess, gomoku, xiangqi, sanguo). /game list /new /join …; owner /game on|off [all], /game list off.\n",
         "[*]              See /game help for details. sanguo is available; its UI text may still be Chinese in this release.\n",
         "[*] /news [zh|world|tech|all] [count]  RSS titles and summaries; default 3 per category.\n",
         "[*] /news detail <category> <index>  Longer summary from the RSS item (alias: 详情).\n",
@@ -64,6 +64,7 @@ MESSAGES: dict = {
     ],
     "game_help_lines": [
         "[*] /game list             List games enabled (online) in this room.",
+        "[*] /game list off         Owner: list games disabled in this room (aliases offline).",
         "[*] /game new <name>       Start a game in the current room; starter takes seat 1 "
         "(chess: White; gomoku/go/xiangqi/doushou: Black/Black/Red/Red to move; sanguo: host).",
         "[*] /game new <name> ai [easy|normal|hard]  AI practice game (chess/gomoku/xiangqi only); "
@@ -99,8 +100,8 @@ MESSAGES: dict = {
         "[*] /game end              Room owner may force-end the current game.",
         "[*] /game restore          Restore a game parked by restart/federation into an idle room.",
         "[*] /game restore swap     Swap the parked game with the active one (keeps both).",
-        "[*] /game on <name>        Owner enables a game in this room (same name aliases as new).",
-        "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected).",
+        "[*] /game on <name>        Owner enables a game in this room (same name aliases as new); /game on all enables every game.",
+        "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected); /game off all disables every game.",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",
         "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <amt> raise <amt> | 弃牌 fold | 全下 allin",
         "[*]   bots: bot <easy|hard|pro>; after start, /game show 帮助 shows the full help again.",
@@ -243,7 +244,27 @@ MESSAGES: dict = {
             " (xiangqi alias cchess; sanguo aliases sgs/三国杀)\n"
         ),
         "game_list_empty": (
-            "[*] No games enabled in this room; owner can /game on <name>.\n"
+            "[*] No games enabled in this room; owner can /game on <name> or /game on all.\n"
+        ),
+        "game_list_offline": "[*] Disabled in this room: {games}\n",
+        "game_list_offline_empty": "[*] No games are disabled in this room.\n",
+        "game_list_offline_denied": "[*] Only the room owner can list disabled games.\n",
+        "game_on_off_usage": (
+            "[*] Usage: /game {verb} <name|all>\n"
+        ),
+        "game_owner_only_catalog": "[*] Only the room owner can enable or disable games.\n",
+        "game_unknown": "[*] Unknown game {name!r}; available: {games}\n",
+        "game_already_on": "[*] {game} is already enabled in this room.\n",
+        "game_turned_on": "[*] Enabled {game}; it appears in /game list.\n",
+        "game_already_off": "[*] {game} is already disabled in this room.\n",
+        "game_turned_off": "[*] Disabled {game}; it no longer appears in /game list.\n",
+        "game_off_blocked_active": (
+            "[*] {game} is still in progress here; /game end or finish it before disabling.\n"
+        ),
+        "game_on_all": "[*] Enabled all games ({n}); see /game list.\n",
+        "game_off_all": "[*] Disabled all games ({n}); /game list is empty.\n",
+        "game_off_all_kept_active": (
+            "[*] Disabled other games ({n}); in-progress {game} stays enabled.\n"
         ),
         "game_forward_fail": "[*] Cannot reach the node hosting this game; try again later.\n",
         "game_cmd_fail": (

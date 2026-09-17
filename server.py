@@ -1445,6 +1445,18 @@ def _enabled_games_for_room_locked(room: str) -> set[str]:
     return enabled
 
 
+def _is_room_game_owner_locked(room: str, conn, name: str) -> bool:
+    """True if *conn* may manage this room's game catalog; may rebind owner seat."""
+    owner_conn = room_owners.get(room)
+    same_owner_account = (
+        owner_conn in clients
+        and clients[owner_conn]["name"].strip().lower() == name.strip().lower()
+    )
+    if same_owner_account and owner_conn is not conn:
+        room_owners[room] = conn
+    return owner_conn is conn or same_owner_account
+
+
 def _drop_game_if_room_empty_locked(room: str) -> None:
     """Caller holds lock; drop ended/inactive games when the room has no clients."""
     game = room_games.get(room)
@@ -8931,6 +8943,22 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             return
 
     if sub == "list":
+        mode = rest.split()[0].lower() if rest else ""
+        if mode in ("off", "offline", "下线"):
+            with lock:
+                if not _is_room_game_owner_locked(room, conn, name):
+                    send_line(conn, _ts(conn, "game_list_offline_denied"))
+                    return
+                enabled = _enabled_games_for_room_locked(room)
+                offline = [n for n in games.all_game_names() if n not in enabled]
+            if offline:
+                send_line(
+                    conn,
+                    _ts(conn, "game_list_offline", games=", ".join(offline)),
+                )
+            else:
+                send_line(conn, _ts(conn, "game_list_offline_empty"))
+            return
         with lock:
             enabled = _enabled_games_for_room_locked(room)
             names = games.list_game_names(enabled)
@@ -8970,40 +8998,77 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
     if sub in ("on", "off", "上线", "下线"):
         enable = sub in ("on", "上线")
         if not rest:
-            send_line(conn, f"[*] 用法：/game {'on' if enable else 'off'} <名称>\n")
+            send_line(conn, _ts(conn, "game_on_off_usage", verb="on" if enable else "off"))
             return
-        game_name = games.resolve_game_name(rest.split()[0].lower())
+        target = rest.split()[0].lower()
+        if target in ("all", "全部", "*"):
+            n = 0
+            removed = 0
+            active_name = ""
+            with lock:
+                if not _is_room_game_owner_locked(room, conn, name):
+                    send_line(conn, _ts(conn, "game_owner_only_catalog"))
+                    return
+                enabled = _enabled_games_for_room_locked(room)
+                if enable:
+                    enabled.clear()
+                    enabled.update(games.GAMES)
+                    n = len(enabled)
+                else:
+                    game = room_games.get(room)
+                    if (
+                        game is not None
+                        and getattr(game, "state", "ended") != "ended"
+                    ):
+                        active_name = str(getattr(game, "name", "") or "")
+                    before = set(enabled)
+                    enabled.clear()
+                    if active_name and active_name in games.GAMES:
+                        enabled.add(active_name)
+                    removed = len(before - enabled)
+                _mark_sessions_dirty()
+            if enable:
+                send_line(conn, _ts(conn, "game_on_all", n=n))
+            elif active_name and active_name in games.GAMES:
+                send_line(
+                    conn,
+                    _ts(
+                        conn,
+                        "game_off_all_kept_active",
+                        n=removed,
+                        game=active_name,
+                    ),
+                )
+            else:
+                send_line(conn, _ts(conn, "game_off_all", n=removed))
+            return
+        game_name = games.resolve_game_name(target)
         if game_name not in games.GAMES:
             send_line(
                 conn,
-                f"[*] 未知游戏 {game_name!r}；可用："
-                + ", ".join(games.all_game_names())
-                + "\n",
+                _ts(
+                    conn,
+                    "game_unknown",
+                    name=game_name,
+                    games=", ".join(games.all_game_names()),
+                ),
             )
             return
         with lock:
-            owner_conn = room_owners.get(room)
-            same_owner_account = (
-                owner_conn in clients
-                and clients[owner_conn]["name"].strip().lower() == name.strip().lower()
-            )
-            is_owner = owner_conn is conn or same_owner_account
-            if not is_owner:
-                send_line(conn, "[*] 只有房主可以上下线游戏。\n")
+            if not _is_room_game_owner_locked(room, conn, name):
+                send_line(conn, _ts(conn, "game_owner_only_catalog"))
                 return
-            if same_owner_account and owner_conn is not conn:
-                room_owners[room] = conn
             enabled = _enabled_games_for_room_locked(room)
             if enable:
                 if game_name in enabled:
-                    send_line(conn, f"[*] {game_name} 已在本房上线。\n")
+                    send_line(conn, _ts(conn, "game_already_on", game=game_name))
                 else:
                     enabled.add(game_name)
-                    send_line(conn, f"[*] 已上线 {game_name}，/game list 可见。\n")
+                    send_line(conn, _ts(conn, "game_turned_on", game=game_name))
                 _mark_sessions_dirty()
                 return
             if game_name not in enabled:
-                send_line(conn, f"[*] {game_name} 已在本房下线。\n")
+                send_line(conn, _ts(conn, "game_already_off", game=game_name))
                 return
             game = room_games.get(room)
             if (
@@ -9013,12 +9078,11 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             ):
                 send_line(
                     conn,
-                    f"[*] 本房仍有进行中的 {game_name} 对局；"
-                    "请先 /game end 或等对局结束再下线。\n",
+                    _ts(conn, "game_off_blocked_active", game=game_name),
                 )
                 return
             enabled.discard(game_name)
-        send_line(conn, f"[*] 已下线 {game_name}，/game list 不再显示。\n")
+        send_line(conn, _ts(conn, "game_turned_off", game=game_name))
         _mark_sessions_dirty()
         return
 

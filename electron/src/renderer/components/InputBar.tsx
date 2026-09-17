@@ -58,6 +58,8 @@ const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
 const GAME_DRAW_ACTIONS = ['accept', 'reject', 'cancel'] as const;
 const GAME_RESTORE_ACTIONS = ['swap'] as const;
 const GAME_MOVE_ACTIONS = ['flip', 'move', '翻', '翻子', '走', '移动'] as const;
+const GAME_LIST_ACTIONS = ['off', 'offline'] as const;
+const GAME_CATALOG_ACTIONS = ['all'] as const;
 const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
 const USER_OR_ROOM_ARG_CMDS = new Set(['/msg', '/sendfile', '/file']);
 const USER_ARG_CMDS = new Set(['/leave', '/unmsg']);
@@ -240,6 +242,31 @@ function buildSuggestions(
       ).map((action) => ({
         value: `${gameMovePrefix} ${action}`,
         desc: 'move action',
+        source: 'command' as const,
+      }));
+    }
+  }
+
+  const gameListPrefix = '/game list';
+  if (value.toLowerCase().startsWith(gameListPrefix)) {
+    const tail = value.slice(gameListPrefix.length).trimStart().toLowerCase();
+    return GAME_LIST_ACTIONS.filter(
+      (action) => !tail || action.startsWith(tail),
+    ).map((action) => ({
+      value: `${gameListPrefix} ${action}`,
+      desc: 'list filter',
+      source: 'command' as const,
+    }));
+  }
+
+  for (const prefix of ['/game on', '/game off'] as const) {
+    if (value.toLowerCase().startsWith(prefix)) {
+      const tail = value.slice(prefix.length).trimStart().toLowerCase();
+      return GAME_CATALOG_ACTIONS.filter(
+        (action) => !tail || action.startsWith(tail),
+      ).map((action) => ({
+        value: `${prefix} ${action}`,
+        desc: 'catalog',
         source: 'command' as const,
       }));
     }

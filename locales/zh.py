@@ -28,7 +28,7 @@ MESSAGES: dict = {
         "/later 30m 文本；/later 明天 09:00 文本；/later list；/later cancel <编号>。\n",
         "[*] /lang [en|zh]   切换界面语言（默认英文；偏好按昵称保存）。\n",
         "[*]\n",
-        "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off 上下线。\n",
+        "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off [all]、/game list off。\n",
         "[*]              详细用法用 /game help 查看。\n",
         "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
         "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
@@ -64,6 +64,7 @@ MESSAGES: dict = {
     ],
     "game_help_lines": [
         "[*] /game list             列出本房已上线、可玩的游戏。",
+        "[*] /game list off         房主查看本房已下线游戏（别名 offline/下线）。",
         "[*] /game new <名称>       在当前房间开一局；发起人坐第一席"
         "（chess: 白；gomoku/go/xiangqi/doushou: 黑/黑/红/红先手；sanguo: 房主）。",
         "[*] /game new <名称> ai [easy|normal|hard]  棋类开启 AI 练习局（仅 chess/gomoku/xiangqi）；"
@@ -97,8 +98,8 @@ MESSAGES: dict = {
         "[*] /game end              房主可强制结束当前对局。",
         "[*] /game restore          把因重启/联邦冲突暂存的对局恢复到空房间（别名：恢复）。",
         "[*] /game restore swap     与当前进行中的对局对换暂存局（不丢任何一局）。",
-        "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
-        "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
+        "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）；/game on all 上线全部。",
+        "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部。",
         "[*] holdem（德州扑克）中英指令对照：",
         "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
         "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
@@ -238,7 +239,27 @@ MESSAGES: dict = {
             "（xiangqi 别名 cchess；sanguo 别名 sgs/三国杀）\n"
         ),
         "game_list_empty": (
-            "[*] 本房暂无已上线游戏；房主可用 /game on <名称> 上线。\n"
+            "[*] 本房暂无已上线游戏；房主可用 /game on <名称> 或 /game on all 上线。\n"
+        ),
+        "game_list_offline": "[*] 本房已下线：{games}\n",
+        "game_list_offline_empty": "[*] 本房没有已下线的游戏。\n",
+        "game_list_offline_denied": "[*] 只有房主可以查看已下线游戏列表。\n",
+        "game_on_off_usage": (
+            "[*] 用法：/game {verb} <名称|all>\n"
+        ),
+        "game_owner_only_catalog": "[*] 只有房主可以上下线游戏。\n",
+        "game_unknown": "[*] 未知游戏 {name!r}；可用：{games}\n",
+        "game_already_on": "[*] {game} 已在本房上线。\n",
+        "game_turned_on": "[*] 已上线 {game}，/game list 可见。\n",
+        "game_already_off": "[*] {game} 已在本房下线。\n",
+        "game_turned_off": "[*] 已下线 {game}，/game list 不再显示。\n",
+        "game_off_blocked_active": (
+            "[*] 本房仍有进行中的 {game} 对局；请先 /game end 或等对局结束再下线。\n"
+        ),
+        "game_on_all": "[*] 已上线全部游戏（共 {n} 个），/game list 可见。\n",
+        "game_off_all": "[*] 已下线全部游戏（{n} 个）；/game list 为空。\n",
+        "game_off_all_kept_active": (
+            "[*] 已下线其他游戏（{n} 个）；进行中的 {game} 仍保持上线。\n"
         ),
         "game_forward_fail": "[*] 无法连接对局所在节点，请稍后重试。\n",
         "game_cmd_fail": (

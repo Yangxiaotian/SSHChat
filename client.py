@@ -228,8 +228,9 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "restore"): ("swap",),
     ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
     ("/game", "new"): _GAME_NAMES,
-    ("/game", "on"): _GAME_NAMES,
-    ("/game", "off"): _GAME_NAMES,
+    ("/game", "on"): ("all",) + _GAME_NAMES,
+    ("/game", "off"): ("all",) + _GAME_NAMES,
+    ("/game", "list"): ("off", "offline"),
 }
 
 # Learned from /rooms, /names, and chat traffic for Tab completion.

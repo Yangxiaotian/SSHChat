@@ -38,6 +38,9 @@ object CommandCompletions {
         ("/game" to "draw") to listOf("accept", "reject", "cancel"),
         ("/game" to "restore") to listOf("swap"),
         ("/game" to "move") to listOf("flip", "move", "翻", "翻子", "走", "移动"),
+        ("/game" to "list") to listOf("off", "offline"),
+        ("/game" to "on") to listOf("all"),
+        ("/game" to "off") to listOf("all"),
     )
 
     private val ROOM_ARG_CMDS = setOf("/join", "/switch", "/part")
