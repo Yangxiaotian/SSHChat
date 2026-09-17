@@ -2598,15 +2598,18 @@ def _reversi_legal_moves(board: list[list[int]], player: int) -> list[tuple[int,
 def _reversi_render(
     board: list[list[int]], *, last: Optional[tuple[int, int]] = None
 ) -> list[str]:
-    lines = ["    " + " ".join(str(i) for i in range(1, REVERSI_SIZE + 1))]
+    # Same column geometry as gomoku/go: each cell is "{token:>2} " so the
+    # header digits sit above the stone glyphs (not left-shifted by one).
+    hdr = "   " + "".join(f"{i:>2} " for i in range(1, REVERSI_SIZE + 1))
+    lines = [hdr]
     for row, cells in enumerate(board):
         tokens = []
         for col, cell in enumerate(cells):
             token = "#" if cell == 1 else "o" if cell == 2 else "."
             if last == (row, col):
                 token = f"!{token}"
-            tokens.append(token)
-        lines.append(f"{row + 1:>2}  " + " ".join(f"{token:>2}" for token in tokens))
+            tokens.append(f"{token:>2} ")
+        lines.append(f"{row + 1:>2} " + "".join(tokens))
     lines.append("Legend: # Black  o White  . Empty  ! opponent last")
     return lines
 

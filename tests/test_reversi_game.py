@@ -38,6 +38,20 @@ class ReversiGameTests(unittest.TestCase):
         self.assertNotIn("!#", black_view)
         self.assertIn("!#", white_view)
 
+    def test_column_header_aligns_above_stones(self):
+        from games import _reversi_render
+
+        board = [[0] * 8 for _ in range(8)]
+        board[0][0] = 1
+        board[0][7] = 2
+        hdr, row1, *_ = _reversi_render(board)
+        # Digits and stone glyphs share the same columns within each 3-wide cell.
+        for col in range(8):
+            digit_i = 3 + col * 3 + 1  # rightmost char of "{i:>2} "
+            stone_i = 3 + col * 3 + 1
+            self.assertEqual(hdr[digit_i], str(col + 1))
+            self.assertIn(row1[stone_i], "#o.")
+
 
 if __name__ == "__main__":
     unittest.main()

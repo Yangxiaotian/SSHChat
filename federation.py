@@ -276,6 +276,8 @@ class FederationHub:
         self.get_local_file_public = get_local_file_public
         # origin_node, announce_dict — room canvas advertise / conflict merge
         self.on_canvas_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
+        # origin_node, announce_dict — room piano advertise / conflict merge
+        self.on_piano_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
         # origin_node, room, text, rev — room /pad LWW sync
         self.on_pad_sync: Optional[Callable[[str, str, str, int], None]] = None
         # node_id, base_url — peer public file URL changed (refresh canvas mirrors)
@@ -298,6 +300,8 @@ class FederationHub:
         self._remote_catalogs: dict[str, list[dict[str, Any]]] = {}
         # node_id -> {"base_url": str, "seen_at": float} for public file endpoints
         self._remote_file_pubs: dict[str, dict[str, Any]] = {}
+        # Sticky federation CF host (node_id); elect min id when unset/gone.
+        self._sticky_file_host: Optional[str] = None
         self._seen_lock = threading.Lock()
         self._seen_keys: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -916,6 +920,26 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
+    def sync_piano_announce(self, announce: dict[str, Any]) -> None:
+        """Fan-out an open room-piano advertisement (pisync)."""
+        if not self.enabled or not self._peers:
+            return
+        if not isinstance(announce, dict):
+            return
+        room = str(announce.get("room") or "").strip()
+        sid = str(announce.get("session_id") or "").strip()
+        if not room or not sid:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(announce, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"pisync\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
     def sync_pad(self, room: str, text: str, rev: int) -> None:
         """Fan-out room /pad content (psync); empty text means cleared."""
         if not self.enabled or not self._peers:
@@ -935,11 +959,59 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
-    def pick_file_public_peer(self) -> Optional[tuple[str, str]]:
-        """Return (node_id, base_url) for the newest advertised public file host.
+    def pick_federation_file_host(self) -> Optional[tuple[str, str]]:
+        """Return (node_id, base_url) for the sticky shared Cloudflare host.
 
-        Prefers a direct neighbor when timestamps tie; skips self.
+        Candidates: this node's reachable public URL (if any) plus still-routable
+        peer fpub advertisements. Keep sticky node_id while it remains a
+        candidate (URL may refresh). Otherwise elect lexicographically smallest
+        node_id so every peer converges on the same host.
         """
+        if not self.enabled:
+            return None
+        candidates: dict[str, str] = {}
+        if self.get_local_file_public is not None:
+            try:
+                local = str(self.get_local_file_public() or "").strip().rstrip("/")
+            except Exception as e:
+                print(f"federation: get_local_file_public error: {e!r}")
+                local = ""
+            if local and local != "-":
+                candidates[self.node_id] = local
+        for node_id, info in list(self._remote_file_pubs.items()):
+            if node_id == self.node_id:
+                continue
+            if node_id not in self._routes and node_id not in self._peers:
+                continue
+            url = str((info or {}).get("base_url") or "").strip().rstrip("/")
+            if not url or url == "-":
+                continue
+            candidates[node_id] = url
+        if not candidates:
+            self._sticky_file_host = None
+            return None
+        sticky = (self._sticky_file_host or "").strip()
+        if sticky and sticky in candidates:
+            return sticky, candidates[sticky]
+        elected = min(candidates.keys())
+        prev = self._sticky_file_host
+        self._sticky_file_host = elected
+        if prev != elected:
+            print(
+                f"federation: sticky file host -> {elected} "
+                f"({candidates[elected]})"
+            )
+        return elected, candidates[elected]
+
+    def pick_file_public_peer(self) -> Optional[tuple[str, str]]:
+        """Return (node_id, base_url) for a peer Cloudflare host (never self).
+
+        Prefers the sticky federation host when it is a remote peer; otherwise
+        falls back to the newest advertised remote fpub.
+        """
+        sticky = self.pick_federation_file_host()
+        if sticky is not None and sticky[0] != self.node_id:
+            return sticky
         best: Optional[tuple[float, int, str, str]] = None
         # rank: (seen_at, direct_neighbor_boost, node_id, url)
         for node_id, info in list(self._remote_file_pubs.items()):
@@ -2068,6 +2140,36 @@ class FederationHub:
                     self.on_canvas_sync(origin, announce)
                 except Exception as e:
                     print(f"federation: on_canvas_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "pisync":
+            # pisync\torigin\tb64(announce_json)\tnonce
+            cparts = line.split("\t", 3)
+            if len(cparts) < 3:
+                return
+            if self._remember_seen(line):
+                return
+            origin, blob = cparts[1], cparts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            announce: dict[str, Any] = {}
+            try:
+                raw = base64.b64decode(blob.encode("ascii"))
+                parsed = json.loads(raw.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    announce = parsed
+            except Exception as e:
+                print(f"federation: pisync decode error: {e!r}")
+                return
+            host = str(announce.get("host_node") or "").strip()
+            if host and host != self.node_id:
+                self._learn_route(host, peer_node)
+            if self.on_piano_sync is not None:
+                try:
+                    self.on_piano_sync(origin, announce)
+                except Exception as e:
+                    print(f"federation: on_piano_sync error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "psync":

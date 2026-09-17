@@ -1781,7 +1781,7 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertTrue(first._closed)
         self.assertIs(hub._peers["node-b"], second)
 
-    def test_pick_newest_file_public_peer(self) -> None:
+    def test_pick_sticky_file_public_peer_prefers_min_node_id(self) -> None:
         hub = federation.FederationHub(
             12345,
             server.lock,
@@ -1803,8 +1803,11 @@ class FederationServerIntegrationTests(unittest.TestCase):
             "base_url": "https://new.trycloudflare.com",
             "seen_at": 200.0,
         }
+        # Sticky elects lexicographically smallest remote (node-b), not newest.
         picked = hub.pick_file_public_peer()
-        self.assertEqual(picked, ("node-c", "https://new.trycloudflare.com"))
+        self.assertEqual(picked, ("node-b", "https://old.trycloudflare.com"))
+        sticky = hub.pick_federation_file_host()
+        self.assertEqual(sticky, ("node-b", "https://old.trycloudflare.com"))
 
     def test_file_host_rpc_roundtrip(self) -> None:
         chat_a = self._free_port()
