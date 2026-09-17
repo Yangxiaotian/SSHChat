@@ -2284,6 +2284,153 @@ class FederationSendQueueTests(unittest.TestCase):
         # Prior timeout restored even after failure.
         self.assertIsNone(sock.timeouts[-1])
 
+    def test_heartbeat_timeout_closes_idle_peer(self) -> None:
+        closed: list[str] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(
+            hub,
+            "iPhone",
+            lambda _data: None,
+            close_transport=lambda: closed.append("iPhone"),
+        )
+        hub._peers["iPhone"] = link
+        hub._remote_join("iPhone", "bob", "default")
+        link.last_rx = time.monotonic() - (federation._FED_HEARTBEAT_TIMEOUT + 5)
+
+        with mock.patch.object(federation, "_FED_HEARTBEAT_INTERVAL", 20.0), mock.patch.object(
+            federation, "_FED_HEARTBEAT_TIMEOUT", 60.0
+        ):
+            hub._tick_heartbeats()
+
+        self.assertTrue(link._closed)
+        self.assertEqual(closed, ["iPhone"])
+
+    def test_heartbeat_sends_ping_when_idle(self) -> None:
+        sent: list[bytes] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "iPhone", sent.append)
+        hub._peers["iPhone"] = link
+        link.last_rx = time.monotonic() - (federation._FED_HEARTBEAT_INTERVAL + 1)
+
+        with mock.patch.object(federation, "_FED_HEARTBEAT_INTERVAL", 20.0), mock.patch.object(
+            federation, "_FED_HEARTBEAT_TIMEOUT", 60.0
+        ):
+            hub._tick_heartbeats()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not any(b == b"ping\n" for b in sent):
+            time.sleep(0.02)
+        self.assertFalse(link._closed)
+        self.assertTrue(any(b == b"ping\n" for b in sent), sent)
+        link.close()
+
+    def test_presence_refresh_fans_out_changed_roster(self) -> None:
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        users = [{"name": "alice", "rooms": ["default"], "current_room": "default"}]
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: list(users),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = FakeLink()
+        hub._peers["node-b"] = link  # type: ignore[assignment]
+        hub._last_presence_refresh = 0.0
+
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 1)
+        self.assertTrue(link.lines[0].startswith("presence\tnode-a\t"))
+
+        # Unchanged roster is flood-deduped — no second send.
+        hub._last_presence_refresh = 0.0
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 1)
+
+        users.clear()
+        hub._last_presence_refresh = 0.0
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 2)
+        self.assertIn("[]", link.lines[1])
+
+    def test_presence_bulk_clears_stale_remote_users(self) -> None:
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub._remote_join("iPhone", "ghost", "default")
+        self.assertIn("ghost", hub.names_in_room("default"))
+        hub._remote_presence_bulk("iPhone", "[]")
+        self.assertEqual(hub.names_in_room("default"), [])
+
+    def test_remove_client_notifies_leave_despite_remote_same_nick(self) -> None:
+        """Remote same-nick must not suppress federated leave for this node."""
+        leaves: list[tuple[str, str]] = []
+        local_notices: list[tuple[str, bytes]] = []
+
+        class FakeHub:
+            enabled = True
+
+            def same_name_in_room(self, room, name, local_same):
+                return True  # ghost / multi-device peer still listed
+
+            def notify_leave(self, name, room):
+                leaves.append((name, room))
+
+        alice = DummyConn()
+        with server.lock:
+            server.clients[alice] = {
+                "name": "yxt",
+                "rooms": {"default"},
+                "current_room": "default",
+            }
+            server.rooms.setdefault("default", set()).add(alice)
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()), mock.patch.object(
+            server, "broadcast_room", side_effect=lambda room, msg, **kw: local_notices.append((room, msg))
+        ):
+            server.remove_client(alice)
+        self.assertEqual(leaves, [("yxt", "default")])
+        # Local leave notice suppressed while remote same nick is still visible.
+        self.assertEqual(local_notices, [])
+
 
 if __name__ == "__main__":
     unittest.main()

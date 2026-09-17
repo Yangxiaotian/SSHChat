@@ -33,6 +33,18 @@ _FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5"
 # Outbound queue per peer: join/leave/chat fanout returns immediately to callers
 # (e.g. local SSH clients). Writer thread drains with _FED_SEND_TIMEOUT.
 _FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
+# Active heartbeat: ping idle peers; close half-open links (common with iSH /
+# ZeroTier / phone sleep) so /fed and remote presence do not stay stale.
+_FED_HEARTBEAT_INTERVAL = float(
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_SECONDS", "20") or "20"
+)
+_FED_HEARTBEAT_TIMEOUT = float(
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_TIMEOUT", "60") or "60"
+)
+# Re-announce local roster so peers drop ghosts after a missed leave frame.
+_FED_PRESENCE_REFRESH = float(
+    os.environ.get("SSHCHAT_FED_PRESENCE_REFRESH_SECONDS", "60") or "60"
+)
 
 
 def _node_id() -> str:
@@ -99,6 +111,27 @@ def _sendall_timeout(sock, data: bytes, timeout: float | None = None) -> None:
                 pass
 
 
+def _enable_tcp_keepalive(sock: socket.socket) -> None:
+    """Best-effort TCP keepalive so half-open peer links die without app traffic."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    # Linux / some BSDs: idle 30s, then probe every 10s, drop after 3 fails.
+    for opt, value in (
+        ("TCP_KEEPIDLE", 30),
+        ("TCP_KEEPINTVL", 10),
+        ("TCP_KEEPCNT", 3),
+    ):
+        const = getattr(socket, opt, None)
+        if const is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, const, value)
+        except OSError:
+            pass
+
+
 class RemoteUser:
     """Presence for a user connected on a peer node."""
 
@@ -126,11 +159,21 @@ class _PeerLink:
     underlying object is a socket.
     """
 
-    def __init__(self, hub: FederationHub, node_id: str, send_fn: Callable[[bytes], None]) -> None:
+    def __init__(
+        self,
+        hub: FederationHub,
+        node_id: str,
+        send_fn: Callable[[bytes], None],
+        *,
+        close_transport: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.hub = hub
         self.node_id = node_id
         self._send_fn = send_fn
+        self._close_transport = close_transport
         self._closed = False
+        self.last_rx = time.monotonic()
+        self._ping_sent_at = 0.0
         qmax = max(16, _FED_SEND_QUEUE_MAX)
         self._send_q: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=qmax)
         self._writer = threading.Thread(
@@ -139,6 +182,9 @@ class _PeerLink:
             daemon=True,
         )
         self._writer.start()
+
+    def note_rx(self) -> None:
+        self.last_rx = time.monotonic()
 
     def send_line(self, line: str) -> None:
         if self._closed:
@@ -161,8 +207,16 @@ class _PeerLink:
             self._send_q.put_nowait(None)
         except queue.Full:
             pass
+        closer = self._close_transport
+        self._close_transport = None
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
     def handle_line(self, line: str) -> None:
+        self.note_rx()
         self.hub._on_peer_line(self.node_id, line)
 
     def _write_loop(self) -> None:
@@ -309,6 +363,7 @@ class FederationHub:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._peers_mtime: Optional[float] = None
+        self._last_presence_refresh = 0.0
         # Load initial peer list (outbound threads start in start()).
         self._ingest_peer_configs(self._load_peers(), start_outbound=False)
 
@@ -334,9 +389,18 @@ class FederationHub:
             )
             wt.start()
             self._threads.append(wt)
+        if _FED_HEARTBEAT_INTERVAL > 0 or _FED_PRESENCE_REFRESH > 0:
+            ht = threading.Thread(
+                target=self._heartbeat_loop, name="fed-heartbeat", daemon=True
+            )
+            ht.start()
+            self._threads.append(ht)
         print(
             f"federation: node={self.node_id!r} listen=0.0.0.0:{self.port} "
-            f"peers={len(self._peer_configs_by_id)} outbound_started={started}"
+            f"peers={len(self._peer_configs_by_id)} outbound_started={started} "
+            f"heartbeat={_FED_HEARTBEAT_INTERVAL:.0f}s/"
+            f"{_FED_HEARTBEAT_TIMEOUT:.0f}s "
+            f"presence_refresh={_FED_PRESENCE_REFRESH:.0f}s"
         )
 
     def stop(self) -> None:
@@ -473,6 +537,81 @@ class FederationHub:
                 self.reload_peers()
             except Exception as e:
                 print(f"federation: peers watch reload error: {e!r}")
+
+    def _heartbeat_loop(self) -> None:
+        """Ping idle peers, drop silent links, and periodically refresh presence."""
+        # Wake often enough to honor the smaller of heartbeat / presence intervals.
+        candidates = [
+            x
+            for x in (_FED_HEARTBEAT_INTERVAL, _FED_PRESENCE_REFRESH, 5.0)
+            if x and x > 0
+        ]
+        sleep_for = max(1.0, min(candidates) if candidates else 5.0)
+        while not self._stop.wait(sleep_for):
+            try:
+                self._tick_heartbeats()
+            except Exception as e:
+                print(f"federation: heartbeat tick error: {e!r}")
+            try:
+                self._tick_presence_refresh()
+            except Exception as e:
+                print(f"federation: presence refresh error: {e!r}")
+
+    def _tick_heartbeats(self) -> None:
+        """Send ping to idle peers; close links with no inbound traffic."""
+        if _FED_HEARTBEAT_INTERVAL <= 0 or _FED_HEARTBEAT_TIMEOUT <= 0:
+            return
+        now = time.monotonic()
+        for node_id, link in list(self._peers.items()):
+            if not isinstance(link, _PeerLink) or link._closed:
+                continue
+            idle = now - float(getattr(link, "last_rx", now))
+            if idle >= _FED_HEARTBEAT_TIMEOUT:
+                print(
+                    f"federation: peer {node_id} heartbeat timeout "
+                    f"({idle:.0f}s idle); closing link"
+                )
+                link.close()
+                continue
+            if idle < _FED_HEARTBEAT_INTERVAL:
+                continue
+            # Avoid spamming ping while still waiting for a recent one.
+            ping_at = float(getattr(link, "_ping_sent_at", 0.0) or 0.0)
+            if ping_at > link.last_rx and (now - ping_at) < _FED_HEARTBEAT_INTERVAL:
+                continue
+            link._ping_sent_at = now
+            link.send_line("ping\n")
+
+    def _tick_presence_refresh(self) -> None:
+        """Re-broadcast local roster when it changed (or on first refresh)."""
+        if _FED_PRESENCE_REFRESH <= 0 or not self._peers:
+            return
+        now = time.monotonic()
+        if (
+            self._last_presence_refresh > 0
+            and (now - self._last_presence_refresh) < _FED_PRESENCE_REFRESH
+        ):
+            return
+        self._last_presence_refresh = now
+        self._broadcast_local_presence()
+
+    def _broadcast_local_presence(self) -> None:
+        """Announce current local users so peers can drop missed-leave ghosts."""
+        if not self.enabled or not self._peers:
+            return
+        try:
+            users = self.get_local_clients()
+        except Exception as e:
+            print(f"federation: presence refresh get_local_clients error: {e!r}")
+            return
+        if not isinstance(users, list):
+            return
+        blob = json.dumps(users, ensure_ascii=False)
+        line = f"presence\t{self.node_id}\t{blob}\n"
+        # Unchanged roster is already in flood-dedup; skip identical re-sends.
+        if self._remember_seen(line):
+            return
+        self._fanout(line)
 
     def _load_peers(self) -> list[dict[str, Any]]:
         path = _peers_path()
@@ -2505,6 +2644,7 @@ class FederationHub:
                 conn, addr = s.accept()
             except OSError:
                 break
+            _enable_tcp_keepalive(conn)
             threading.Thread(
                 target=self._serve_inbound,
                 args=(conn, addr),
@@ -2544,7 +2684,19 @@ class FederationHub:
                 def _send(data: bytes, _c=conn) -> None:
                     _sendall_timeout(_c, data)
 
-                link = _PeerLink(self, peer_node, _send)
+                def _close_transport(_c=conn) -> None:
+                    try:
+                        _c.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        _c.close()
+                    except Exception:
+                        pass
+
+                link = _PeerLink(
+                    self, peer_node, _send, close_transport=_close_transport
+                )
                 is_new = self._register_peer(peer_node, link)
                 # Handshake @fed-ok must go out immediately (not via the queue)
                 # so the peer can finish connecting even if the writer is busy.
@@ -2635,6 +2787,7 @@ class FederationHub:
         if mode == "tcp":
             sock = socket.create_connection((host, fed_port), timeout=15)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            _enable_tcp_keepalive(sock)
             return self._wrap_socket_proc(sock)
 
         ssh_port = int(peer.get("ssh_port") or 22)
@@ -2712,6 +2865,22 @@ class FederationHub:
                 send_sock.write(data)
                 send_sock.flush()
 
+        def _close_transport() -> None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            for end in (send_sock, conn):
+                try:
+                    if hasattr(end, "shutdown"):
+                        end.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    end.close()
+                except Exception:
+                    pass
+
         def _recv(n: int) -> bytes:
             if hasattr(conn, "recv"):
                 return conn.recv(n)
@@ -2747,7 +2916,9 @@ class FederationHub:
                 if not line.startswith("@fed-ok"):
                     break
                 parts = line.split("\t")
-                link = _PeerLink(self, peer_node, _send)
+                link = _PeerLink(
+                    self, peer_node, _send, close_transport=_close_transport
+                )
                 is_new = self._register_peer(peer_node, link)
                 registered = True
                 # Apply any peer lines already buffered with @fed-ok (usually

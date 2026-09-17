@@ -9282,17 +9282,22 @@ def remove_client(conn) -> None:
     hub = federation.get_hub()
     for room in joined_rooms:
         same_local = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
+        if same_local:
+            # Another local session still holds this room — stay "online".
+            continue
         remote_same = (
             hub is not None
             and hub.enabled
-            and hub.same_name_in_room(room, name, bool(same_local))
+            and hub.same_name_in_room(room, name, False)
         )
-        if same_local or remote_same:
-            continue
         leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
         # Local delivery only: federation uses notify_leave (presence), not msg,
-        # otherwise peers see the leave line twice.
-        broadcast_room(room, leave_msg, skip_federation=True)
+        # otherwise peers see the leave line twice. Skip the local notice when the
+        # same nick is still visible via federation (multi-device), but always
+        # federate leave so peers drop this node's (origin, nick) presence —
+        # otherwise a remote ghost of the same nick suppresses leave forever.
+        if not remote_same:
+            broadcast_room(room, leave_msg, skip_federation=True)
         if hub is not None and hub.enabled:
             hub.notify_leave(name, room)
     for room, lines in game_notices:
@@ -9518,14 +9523,15 @@ def handle_command(conn, payload: str) -> None:
         remote_same = (
             hub is not None
             and hub.enabled
-            and hub.same_name_in_room(target_room, name, bool(same_name_peer))
+            and hub.same_name_in_room(target_room, name, False)
         )
-        if not same_name_peer and not remote_same:
-            broadcast_room(
-                target_room,
-                f"[!] {name} left #{target_room}\n".encode("utf-8"),
-                skip_federation=True,
-            )
+        if not same_name_peer:
+            if not remote_same:
+                broadcast_room(
+                    target_room,
+                    f"[!] {name} left #{target_room}\n".encode("utf-8"),
+                    skip_federation=True,
+                )
             if hub is not None and hub.enabled:
                 hub.notify_leave(name, target_room)
         if switched_to:
