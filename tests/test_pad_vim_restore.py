@@ -19,22 +19,24 @@ class PadEditorRestoreTests(unittest.TestCase):
             path = tf.name
         try:
             rc = client._write_pad_vim_lock_rc(path)
-            text = open(rc, encoding="utf-8").read()
+            with open(rc, encoding="utf-8") as f:
+                text = f.read()
             self.assertIn("set mouse=", text)
             self.assertIn("set t_BE=", text)
             self.assertIn("set nopaste", text)
+            self.assertIn("VimLeavePre", text)
+            self.assertIn("exiting", text)
             os.unlink(rc)
         finally:
             os.unlink(path)
 
-    def test_restore_sets_prompt_reset_flag(self) -> None:
-        client._NEED_PROMPT_RESET.clear()
+    def test_restore_does_not_set_obsolete_prompt_reset_flag(self) -> None:
         with mock.patch.object(client, "_get_real_stdout", return_value=None):
             with mock.patch.object(client, "_clear_stdout_proxy_pending"):
                 with mock.patch.object(client, "_flush_stdin_after_editor"):
+                    # Must not raise; quiet restore only.
                     client._restore_tty_after_editor(None)
-        self.assertTrue(client._NEED_PROMPT_RESET.is_set())
-        client._NEED_PROMPT_RESET.clear()
+        self.assertFalse(hasattr(client, "_NEED_PROMPT_RESET") and client._NEED_PROMPT_RESET.is_set())
 
     def test_upload_refuses_overlong_pad(self) -> None:
         # Exercise the length gate used by _run_pad_edit without spawning vim.

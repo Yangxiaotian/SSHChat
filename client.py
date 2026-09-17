@@ -922,6 +922,10 @@ function! s:GuardRead() abort
   endif
 endfunction
 function! s:GuardBuf() abort
+  " Do not fight :q / VimLeave — only bounce foreign buffers while editing.
+  if get(v:, 'exiting', 0)
+    return
+  endif
   if s:Allowed(expand('%:p'))
     return
   endif
@@ -932,6 +936,7 @@ augroup sshchat_pad_lock
   autocmd!
   autocmd BufReadPre,FileReadPre,FilterReadPre,BufNewFile * call s:GuardRead()
   autocmd BufEnter,WinEnter * call s:GuardBuf()
+  autocmd VimLeavePre * autocmd! sshchat_pad_lock
 augroup END
 """
     with open(rc_path, "w", encoding="utf-8") as f:
@@ -1008,7 +1013,6 @@ def _snapshot_tty_attrs():
 
 
 _PAD_MAX_CHARS = 8000  # keep in sync with server.MAX_PAD_LEN
-_NEED_PROMPT_RESET = threading.Event()
 
 
 def _flush_stdin_after_editor() -> None:
@@ -1021,34 +1025,14 @@ def _flush_stdin_after_editor() -> None:
         termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
     except Exception:
         pass
-    try:
-        import fcntl
-        import os as _os
-        import select
-
-        fd = sys.stdin.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | _os.O_NONBLOCK)
-        try:
-            while True:
-                ready, _, _ = select.select([fd], [], [], 0)
-                if not ready:
-                    break
-                chunk = _os.read(fd, 4096)
-                if not chunk:
-                    break
-        finally:
-            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-    except Exception:
-        pass
 
 
 def _restore_tty_after_editor(attrs) -> None:
     """Undo vim/nano terminal damage so prompt_toolkit can take input again.
 
-    After :wq (especially with a large paste), vim may leave bracketed-paste /
-    mouse / alt-screen modes on and unread CSI in stdin; the next prompt then
-    looks alive but /names and other commands appear dead.
+    After :wq / :q, vim may leave bracketed-paste / mouse / alt-screen on.
+    Keep this quiet: no renderer.reset/invalidate (those spam under patch_stdout)
+    and no PromptSession recreate loop.
     """
     try:
         import termios
@@ -1057,7 +1041,6 @@ def _restore_tty_after_editor(attrs) -> None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attrs)
     except Exception:
         pass
-    # Belt-and-suspenders when termios restore is incomplete (common on SSH PTYs).
     try:
         if sys.stdin.isatty() and shutil.which("stty"):
             subprocess.call(
@@ -1072,13 +1055,14 @@ def _restore_tty_after_editor(attrs) -> None:
     real = _get_real_stdout() or sys.stdout
     try:
         # Leave alt screen, disable mouse / bracketed paste / focus, show cursor.
+        # No trailing \\r\\n — that was redrawing as endless blank/prompt noise.
         seq = (
-            b"\x1b[?1049l"  # alt screen off
-            b"\x1b[?2004l"  # bracketed paste off
-            b"\x1b[?1004l"  # focus events off
-            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"  # mouse off
-            b"\x1b[?25h"  # cursor on
-            b"\x1b[0m\r\n"
+            b"\x1b[?1049l"
+            b"\x1b[?2004l"
+            b"\x1b[?1004l"
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+            b"\x1b[?25h"
+            b"\x1b[0m"
         )
         if hasattr(real, "buffer"):
             real.buffer.write(seq)
@@ -1088,23 +1072,7 @@ def _restore_tty_after_editor(attrs) -> None:
             real.flush()
     except Exception:
         pass
-    try:
-        from prompt_toolkit.application import get_app_or_none
-
-        app = get_app_or_none()
-        if app is not None:
-            try:
-                app.renderer.reset()
-            except Exception:
-                pass
-            try:
-                app.invalidate()
-            except Exception:
-                pass
-    except Exception:
-        pass
     _clear_stdout_proxy_pending()
-    _NEED_PROMPT_RESET.set()
 
 
 def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
@@ -1718,28 +1686,16 @@ def main():
     if use_prompt_toolkit:
         # GUI / Paramiko / some PTYs do not answer CPR (cursor position requests);
         # prompt_toolkit then prints a noisy WARNING on each prompt without this.
-
-        def _make_prompt_session() -> PromptSession:
-            return PromptSession(
-                output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
-                completer=_COMMAND_COMPLETER,
-                complete_while_typing=True,
-            )
-
-        ptk_session = _make_prompt_session()
+        ptk_session = PromptSession(
+            output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
+            completer=_COMMAND_COMPLETER,
+            complete_while_typing=True,
+        )
         with patch_stdout():
             while True:
                 if _STOP.is_set():
                     print("[INFO] disconnected")
                     break
-                if _NEED_PROMPT_RESET.is_set():
-                    _NEED_PROMPT_RESET.clear()
-                    # vim may leave prompt_toolkit's renderer/TTY state unusable;
-                    # a fresh session is more reliable than renderer.reset alone.
-                    try:
-                        ptk_session = _make_prompt_session()
-                    except Exception:
-                        pass
                 try:
                     msg = ptk_session.prompt("> ")
 
