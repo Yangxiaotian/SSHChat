@@ -467,6 +467,98 @@ def _pad_line_count(text: str) -> int:
     return max(1, len(text.splitlines())) if text else 0
 
 
+def _local_fed_user_rows() -> list[tuple[str, str]]:
+    """Unique local (name, current_room), sorted by nickname."""
+    by_key: dict[str, tuple[str, str]] = {}
+    with lock:
+        for info in clients.values():
+            name = (info.get("name") or "").strip()
+            if not name:
+                continue
+            room = (info.get("current_room") or "default").strip() or "default"
+            by_key[name.casefold()] = (name, room)
+    return sorted(by_key.values(), key=lambda row: row[0].casefold())
+
+
+def _format_fed_user_clause(rows: list[tuple[str, str]]) -> str:
+    return ", ".join(f"{name}(#{room})" for name, room in rows)
+
+
+def _send_fed_users(conn, hub) -> None:
+    """Append local + remote federation presence lines after peer status."""
+    local_rows = _local_fed_user_rows()
+    remote_by_node = hub.remote_users_by_node()
+    total = len(local_rows) + sum(len(v) for v in remote_by_node.values())
+    if total == 0:
+        send_line(conn, _ts(conn, "fed_users_empty"))
+        return
+    send_line(conn, _ts(conn, "fed_users_header", n=total))
+    send_line(
+        conn,
+        _ts(
+            conn,
+            "fed_users_node",
+            node=hub.node_id,
+            n=len(local_rows),
+            users=_format_fed_user_clause(local_rows) if local_rows else "-",
+        ),
+    )
+    for node_id, rows in remote_by_node.items():
+        send_line(
+            conn,
+            _ts(
+                conn,
+                "fed_users_node",
+                node=node_id,
+                n=len(rows),
+                users=_format_fed_user_clause(rows),
+            ),
+        )
+
+
+def _handle_fed(conn, payload: str) -> None:
+    """Show federation peers and online users (/fed, /peers, /federation)."""
+    raw = payload.split(None, 1)
+    arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    if arg in ("help", "?", "帮助"):
+        send_line(conn, _ts(conn, "fed_usage"))
+        return
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        send_line(conn, _ts(conn, "fed_disabled"))
+        return
+    direct = hub.direct_peer_ids()
+    n = len(direct)
+    if n == 0:
+        send_line(conn, _ts(conn, "fed_none"))
+        _send_fed_users(conn, hub)
+        return
+    peers_clause = _ts(conn, "fed_status_peers", peers=", ".join(direct))
+    send_line(
+        conn,
+        _ts(
+            conn,
+            "fed_status",
+            self=hub.node_id,
+            n=n,
+            peers_clause=peers_clause,
+        ),
+    )
+    direct_set = set(direct)
+    reachable = [p for p in hub.known_peer_ids() if p not in direct_set]
+    if reachable:
+        send_line(
+            conn,
+            _ts(
+                conn,
+                "fed_reachable",
+                n=len(reachable),
+                peers=", ".join(reachable),
+            ),
+        )
+    _send_fed_users(conn, hub)
+
+
 def _send_pad_view(conn, room: str, text: str) -> None:
     lines = text.splitlines()
     if len(lines) <= 1:
@@ -9468,6 +9560,10 @@ def handle_command(conn, payload: str) -> None:
         )
         return
 
+    if cmd in ("/fed", "/peers", "/federation"):
+        _handle_fed(conn, payload)
+        return
+
     if cmd in ("/clear", "/cls"):
         send_line(conn, _CLEAR_SCREEN)
         send_line(conn, _SCREEN_CLEARED_ACK)
@@ -10341,7 +10437,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:

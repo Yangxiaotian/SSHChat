@@ -4,6 +4,7 @@ package chat.ssh.sshchat
 object CommandCompletions {
     private val TOP = listOf(
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
+        "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
         "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
@@ -28,6 +29,9 @@ object CommandCompletions {
         "/lang" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
         "/language" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
         "/pad" to listOf("clear", "edit", "vim", "help", "show"),
+        "/fed" to listOf("help"),
+        "/peers" to listOf("help"),
+        "/federation" to listOf("help"),
         "/poll" to listOf("new", "close", "help", "show"),
         "/later" to listOf("list", "ls", "show", "cancel", "help"),
         "/clock" to listOf("help", "close", "new"),

@@ -78,6 +78,7 @@ export const enMessages: MessageTree = {
       help: 'Show help',
       names: 'List users in room',
       rooms: 'List joined rooms',
+      fed: 'Show direct online federation peers',
       join: 'Join a room',
       switch: 'Switch active room',
       part: 'Leave a room',

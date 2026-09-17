@@ -316,6 +316,10 @@ class FederationHub:
     def peer_count(self) -> int:
         return len(self._peers)
 
+    def direct_peer_ids(self) -> list[str]:
+        """Node ids with a live direct link (sorted)."""
+        return sorted(self._peers.keys())
+
     def start(self) -> None:
         if not self.enabled:
             print("federation: disabled (SSHCHAT_FEDERATION_DISABLE=1)")
@@ -1242,6 +1246,17 @@ class FederationHub:
     def names_in_room(self, room: str) -> list[str]:
         keys = self._room_remotes.get(room, ())
         return sorted({self._remote_users[k].name for k in keys if k in self._remote_users})
+
+    def remote_users_by_node(self) -> dict[str, list[tuple[str, str]]]:
+        """Presence snapshot: node_id -> sorted [(name, current_room), ...]."""
+        grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for u in self._remote_users.values():
+            room = (u.current_room or "default").strip() or "default"
+            grouped[u.node_id].append((u.name, room))
+        return {
+            node: sorted(rows, key=lambda r: _nick_key(r[0]))
+            for node, rows in sorted(grouped.items(), key=lambda kv: _nick_key(kv[0]))
+        }
 
     def same_name_in_room(self, room: str, name: str, local_has_other: bool) -> bool:
         """True if same nickname exists on a peer in this room."""

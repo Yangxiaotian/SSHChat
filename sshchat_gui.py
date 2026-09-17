@@ -209,6 +209,9 @@ _TOP_COMMANDS = (
     "/names",
     "/users",
     "/rooms",
+    "/fed",
+    "/peers",
+    "/federation",
     "/join",
     "/switch",
     "/part",
@@ -300,6 +303,9 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
     "/pad": ("clear", "edit", "vim", "help", "show"),
     "/later": ("list", "ls", "show", "cancel", "help"),
     "/clock": ("help", "close", "new"),
+    "/fed": ("help",),
+    "/peers": ("help",),
+    "/federation": ("help",),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {

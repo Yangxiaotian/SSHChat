@@ -143,6 +143,9 @@ _TOP_COMMANDS = (
     "/names",
     "/users",
     "/rooms",
+    "/fed",
+    "/peers",
+    "/federation",
     "/join",
     "/switch",
     "/part",
@@ -207,6 +210,10 @@ _CLOCK_SUBCOMMANDS = {
     "new": None,
 }
 
+_FED_SUBCOMMANDS = {
+    "help": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -220,6 +227,9 @@ _SUBCOMMANDS_BY_CMD = {
     "/pad": sorted(_PAD_SUBCOMMANDS),
     "/later": sorted(_LATER_SUBCOMMANDS),
     "/clock": sorted(_CLOCK_SUBCOMMANDS),
+    "/fed": sorted(_FED_SUBCOMMANDS),
+    "/peers": sorted(_FED_SUBCOMMANDS),
+    "/federation": sorted(_FED_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -1650,7 +1660,7 @@ def main():
 
     print("[OK] connected as " + name)
     print(
-        "Commands: /names  /rooms  /join <room>  /switch <room>  "
+        "Commands: /names  /rooms  /fed  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/canvas | /canvas <nick> | /canvas #<room>  "

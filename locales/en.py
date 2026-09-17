@@ -11,6 +11,7 @@ MESSAGES: dict = {
         "[*] /part <room>    Leave a room; you must keep at least one (cannot leave the last).\n",
         "[*] /rooms         List rooms you joined; * marks the active room.\n",
         "[*] /names or /users  List nicknames in the active room (same command).\n",
+        "[*] /fed or /peers    Show federation peers and online users (alias /federation).\n",
         "[*]\n",
         "[*] /msg #<room> <text>   Send one line to a room without switching (# means room).\n",
         "[*] /msg <nick> <text>   PM: delivered live if online; otherwise left as a leave-message for next login.\n",
@@ -228,6 +229,20 @@ MESSAGES: dict = {
         ),
         "fed_connected": (
             "[*] Federation connected to {n} node(s) (same nick/rooms merge across servers).\n"
+        ),
+        "fed_disabled": "[*] Federation is disabled on this node (SSHCHAT_FEDERATION_DISABLE).\n",
+        "fed_none": "[*] Federation is on, but no direct peers are online.\n",
+        "fed_status": (
+            "[*] Federation: this node {self}; {n} direct peer(s) online"
+            "{peers_clause}.\n"
+        ),
+        "fed_status_peers": ": {peers}",
+        "fed_reachable": "[*] Reachable via routes (incl. multi-hop): {n} — {peers}\n",
+        "fed_users_header": "[*] Federation online users ({n}):\n",
+        "fed_users_node": "[*]   {node} ({n}): {users}\n",
+        "fed_users_empty": "[*] Federation online users: none.\n",
+        "fed_usage": (
+            "[*] Usage: /fed or /peers  show federation peers and online users (alias /federation).\n"
         ),
         "multi_terminal": (
             "[*] Another terminal for this account is online; rooms synced and resume-play is available.\n"

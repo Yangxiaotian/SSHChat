@@ -76,6 +76,7 @@ export const zhMessages = {
       help: '显示帮助',
       names: '列出当前房间用户',
       rooms: '列出已加入房间',
+      fed: '查看联邦直连在线节点',
       join: '加入房间',
       switch: '切换活跃房间',
       part: '退出房间',
