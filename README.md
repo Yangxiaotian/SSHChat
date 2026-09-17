@@ -84,7 +84,7 @@ iSH server notes: [docs/en/deploy-ish.md](docs/en/deploy-ish.md) · [DEPLOY-iSH.
 
 ## Mini-games
 
-Games are **per room** (one active match at a time). Host can `/game on|off <name>`.
+Games are **per room** (one active match at a time). Host can `/game on|off <name|all>`; `/game list off` lists disabled games (owner only).
 
 | Id | Notes | Aliases |
 |----|-------|---------|
