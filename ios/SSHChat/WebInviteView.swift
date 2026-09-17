@@ -38,19 +38,15 @@ struct WebInviteView: View {
     }
 
     private var maximizedShell: some View {
-        ZStack(alignment: .topTrailing) {
-            KeyInjectingWebView(
-                url: url,
-                key: key.uppercased(),
-                isClock: isClock,
-                onClose: { dismiss() }
-            )
-            .ignoresSafeArea()
-            // Piano/clock close is in the page UI (toolbar / mid bar).
-            if !isClock && !allowLandscape {
-                floatingCloseChrome(showRestore: false)
-            }
-        }
+        // Close lives in the page toolbar (canvas/piano/clock) so a floating
+        // overlay does not cover sync status / keys / clock faces.
+        KeyInjectingWebView(
+            url: url,
+            key: key.uppercased(),
+            isClock: isClock,
+            onClose: { dismiss() }
+        )
+        .ignoresSafeArea()
         .statusBarHidden(isClock || allowLandscape)
         .persistentSystemOverlays(.hidden)
     }

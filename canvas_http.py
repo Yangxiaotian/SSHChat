@@ -53,8 +53,9 @@ CANVAS_TEXTS = {
         "you": "You",
         "room": "Room",
         "expires": "Expires",
-        "clear": "Clear board",
+        "clear": "Clear",
         "clear_confirm": "Clear the shared board for everyone?",
+        "close": "Close",
         "hint": "Powered by Excalidraw. Edits sync to other participants.",
         "status_ready": "Connected",
         "status_sync": "Syncing…",
@@ -75,8 +76,9 @@ CANVAS_TEXTS = {
         "you": "你",
         "room": "房间",
         "expires": "过期",
-        "clear": "清空画布",
+        "clear": "清空",
         "clear_confirm": "确定清空共享画布？（所有人都会清空）",
+        "close": "关闭",
         "hint": "基于 Excalidraw。图形/文字会同步给其他参与者。",
         "status_ready": "已连接",
         "status_sync": "同步中…",
@@ -216,11 +218,21 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         .toolbar {{
             display: flex;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 8px;
             align-items: center;
             margin-bottom: 8px;
             flex-shrink: 0;
         }}
+        .tb-btn {{
+            background: rgba(47,111,106,0.14);
+            color: var(--accent-2);
+            border: 0;
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+        }}
+        .tb-btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
         .meta {{
             font-size: 13px;
             opacity: 0.7;
@@ -252,6 +264,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             border-radius: 999px;
             background: rgba(47,111,106,0.12);
             color: var(--accent-2);
+            flex-shrink: 0;
         }}
         .status.err {{ background: rgba(196,92,38,0.15); color: var(--accent); }}
         .loading {{
@@ -333,7 +346,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             <div class="board" id="board">
                 <div class="meta" id="meta"></div>
                 <div class="toolbar">
-                    <button class="secondary" id="clearBtn" type="button">{html.escape(S['clear'])}</button>
+                    <button class="tb-btn" id="clearBtn" type="button">{html.escape(S['clear'])}</button>
+                    <button class="tb-btn" id="closeBtn" type="button" hidden>{html.escape(S['close'])}</button>
                     <span class="status" id="status">{html.escape(S['status_ready'])}</span>
                 </div>
                 <div class="stage">
@@ -857,6 +871,38 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             setStatus(i18n.statusErr, true);
         }}
     }});
+
+    // Embedded clients (Android/iOS/Electron) expose SSHChatNative.close —
+    // show a compact toolbar close instead of a floating overlay that covers sync status.
+    (function wireClose() {{
+        const closeBtn = document.getElementById('closeBtn');
+        if (!closeBtn) return;
+        function hasNativeClose() {{
+            if (window.__SSHCHAT_EMBEDDED__) return true;
+            try {{
+                if (window.SSHChatNative && window.SSHChatNative.close) return true;
+            }} catch (_) {{}}
+            return false;
+        }}
+        function reveal() {{
+            if (!hasNativeClose()) return;
+            closeBtn.hidden = false;
+        }}
+        closeBtn.addEventListener('click', function () {{
+            try {{
+                if (window.SSHChatNative && window.SSHChatNative.close) {{
+                    window.SSHChatNative.close();
+                    return;
+                }}
+            }} catch (_) {{}}
+            try {{
+                window.webkit.messageHandlers.sshchatClose.postMessage({{}});
+            }} catch (_) {{}}
+        }});
+        reveal();
+        setTimeout(reveal, 50);
+        setTimeout(reveal, 300);
+    }})();
 
     unlockBtn.addEventListener('click', () => {{ void auth(); }});
     keyInput.addEventListener('keydown', (e) => {{
