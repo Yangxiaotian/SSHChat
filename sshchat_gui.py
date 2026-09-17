@@ -307,6 +307,9 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "draw"): ("accept", "reject", "cancel"),
     ("/game", "restore"): ("swap",),
     ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
+    ("/game", "list"): ("off", "offline"),
+    ("/game", "on"): ("all",),
+    ("/game", "off"): ("all",),
 }
 
 

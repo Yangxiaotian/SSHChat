@@ -522,7 +522,7 @@ npm run build:portable
 
 游戏按**房间**隔离：每个房间同一时间最多一局。开局、走子、局面显示都会广播到当前房间；旁观者可以用 `/game show` 查看。
 
-**可玩游戏一览**（`/game list`；房主可用 `/game on|off <名称>` 在本房上下线）：
+**可玩游戏一览**（`/game list`；房主可用 `/game on|off <名称|all>` 在本房上下线，`/game list off` 查看已下线）：
 
 | 名称 | 说明 | 常用别名 |
 |------|------|----------|
@@ -540,6 +540,7 @@ npm run build:portable
 **通用命令：**
 
 - `/game list`：列出本房已上线、可玩的游戏。
+- `/game list off`：房主查看本房已下线游戏（别名 `offline`）。
 - `/game new <名称>`：在当前房间开一局；发起人坐第一席（棋类：chess 白 / gomoku·go·xiangqi 黑或红先手；sanguo 为房主）。
 - `/game new <名称> ai [easy\|normal\|hard]`：棋类 AI 练习局（仅 `chess` / `gomoku` / `go` / `xiangqi`）；**不计入持久化积分**。
 - `/game join`：加入对局（棋类为第二席；sanguo 可 2～6 人 join 后房主 `/game move 开始`；狼人杀等多人局按提示 join）。
@@ -552,7 +553,7 @@ npm run build:portable
 - `/game resign`：认负。
 - `/game abort`：终止尚未开始的对局。
 - `/game end`：房主强制结束当前房间对局。
-- `/game on <名称>` / `/game off <名称>`：房主在本房上线/下线某游戏（进行中的该局不受影响）。
+- `/game on <名称>` / `/game off <名称>`：房主在本房上线/下线某游戏（进行中的该局不受影响）；`/game on all` / `/game off all` 一次全部上线/下线。
 
 **棋类走法摘要：**
 
