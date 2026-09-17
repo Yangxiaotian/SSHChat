@@ -899,6 +899,9 @@ set viminfo=
 set nobackup
 set nowritebackup
 set noshelltemp
+set mouse=
+set t_BE=
+set nopaste
 filetype plugin off
 let s:pad = resolve({pad_lit})
 let s:rc = resolve({rc_path_lit})
@@ -1004,12 +1007,48 @@ def _snapshot_tty_attrs():
         return None
 
 
+_PAD_MAX_CHARS = 8000  # keep in sync with server.MAX_PAD_LEN
+_NEED_PROMPT_RESET = threading.Event()
+
+
+def _flush_stdin_after_editor() -> None:
+    """Drop unread key/paste bytes vim left in the TTY input queue."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+    try:
+        import fcntl
+        import os as _os
+        import select
+
+        fd = sys.stdin.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | _os.O_NONBLOCK)
+        try:
+            while True:
+                ready, _, _ = select.select([fd], [], [], 0)
+                if not ready:
+                    break
+                chunk = _os.read(fd, 4096)
+                if not chunk:
+                    break
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+    except Exception:
+        pass
+
+
 def _restore_tty_after_editor(attrs) -> None:
     """Undo vim/nano terminal damage so prompt_toolkit can take input again.
 
     After :wq (especially with a large paste), vim may leave bracketed-paste /
-    mouse / alt-screen modes on; the next prompt then looks alive but /names
-    and other commands appear dead.
+    mouse / alt-screen modes on and unread CSI in stdin; the next prompt then
+    looks alive but /names and other commands appear dead.
     """
     try:
         import termios
@@ -1029,12 +1068,14 @@ def _restore_tty_after_editor(attrs) -> None:
             )
     except Exception:
         pass
+    _flush_stdin_after_editor()
     real = _get_real_stdout() or sys.stdout
     try:
-        # Leave alt screen, disable mouse / bracketed paste, show cursor, reset SGR.
+        # Leave alt screen, disable mouse / bracketed paste / focus, show cursor.
         seq = (
             b"\x1b[?1049l"  # alt screen off
             b"\x1b[?2004l"  # bracketed paste off
+            b"\x1b[?1004l"  # focus events off
             b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"  # mouse off
             b"\x1b[?25h"  # cursor on
             b"\x1b[0m\r\n"
@@ -1063,6 +1104,7 @@ def _restore_tty_after_editor(attrs) -> None:
     except Exception:
         pass
     _clear_stdout_proxy_pending()
+    _NEED_PROMPT_RESET.set()
 
 
 def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
@@ -1147,17 +1189,23 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
 
     if new_text is None:
         return
-    if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
-        "\r\n", "\n"
-    ).replace("\r", "\n").rstrip("\n"):
+    normalized = new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    if normalized == current.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n"):
         print("[*] Pad unchanged.")
         return
-    encoded = base64.urlsafe_b64encode(new_text.encode("utf-8")).decode("ascii")
+    if len(normalized) > _PAD_MAX_CHARS:
+        print(
+            f"[*] Pad too long ({len(normalized)} chars; max {_PAD_MAX_CHARS}). "
+            "Not uploaded — trim in the editor and try /pad edit again."
+        )
+        return
+    encoded = base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii")
     try:
         sock.send(f"[{my_name}] /pad load {encoded}\n".encode("utf-8"))
     except Exception:
         print("[*] Failed to upload pad.")
         return
+    print("[*] Pad uploaded.")
 
 
 def _try_handle_local_command(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
@@ -1670,16 +1718,28 @@ def main():
     if use_prompt_toolkit:
         # GUI / Paramiko / some PTYs do not answer CPR (cursor position requests);
         # prompt_toolkit then prints a noisy WARNING on each prompt without this.
-        ptk_session = PromptSession(
-            output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
-            completer=_COMMAND_COMPLETER,
-            complete_while_typing=True,
-        )
+
+        def _make_prompt_session() -> PromptSession:
+            return PromptSession(
+                output=Vt100_Output(sys.stdout, _terminal_size, enable_cpr=False),
+                completer=_COMMAND_COMPLETER,
+                complete_while_typing=True,
+            )
+
+        ptk_session = _make_prompt_session()
         with patch_stdout():
             while True:
                 if _STOP.is_set():
                     print("[INFO] disconnected")
                     break
+                if _NEED_PROMPT_RESET.is_set():
+                    _NEED_PROMPT_RESET.clear()
+                    # vim may leave prompt_toolkit's renderer/TTY state unusable;
+                    # a fresh session is more reliable than renderer.reset alone.
+                    try:
+                        ptk_session = _make_prompt_session()
+                    except Exception:
+                        pass
                 try:
                     msg = ptk_session.prompt("> ")
 

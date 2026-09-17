@@ -2175,6 +2175,30 @@ def _load_persisted_sessions() -> None:
 # Bound blocking sends so one slow/stuck SSH client cannot stall every handler
 # that broadcasts into the same room (symptoms: /names and joins hang forever).
 _SEND_TIMEOUT_SECONDS = float(os.environ.get("SSHCHAT_SEND_TIMEOUT", "5") or "5")
+# Chat lines are short; /pad load base64 can be larger (MAX_PAD_LEN * 4/3 + prefix).
+_MAX_CLIENT_LINE_BYTES = max(
+    65536,
+    int(os.environ.get("SSHCHAT_MAX_CLIENT_LINE", str(MAX_PAD_LEN * 2 + 4096)) or 0),
+)
+
+
+def _discard_client_line_remainder(conn, buffer: bytes) -> bytes:
+    """Drop bytes until the next newline so an oversize frame cannot desync the stream."""
+    while b"\n" not in buffer:
+        try:
+            chunk = conn.recv(4096)
+        except OSError as e:
+            if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
+                return b""
+            raise
+        if not chunk:
+            return b""
+        nl = chunk.find(b"\n")
+        if nl >= 0:
+            return chunk[nl + 1 :]
+        # Keep discarding; do not grow buffer.
+    _, rest = buffer.split(b"\n", 1)
+    return rest
 
 
 def _socket_send(conn, data: bytes) -> None:
@@ -10226,7 +10250,7 @@ def handle_client(conn, addr) -> None:
             if not chunk:
                 return
             buffer += chunk
-            if len(buffer) > 65536:
+            if len(buffer) > _MAX_CLIENT_LINE_BYTES:
                 return
         first, buffer = buffer.split(b"\n", 1)
         name = _parse_handshake_line(first.decode("utf-8", errors="replace"))
@@ -10361,7 +10385,15 @@ def handle_client(conn, addr) -> None:
             _federation_sync_library_bookmarks(name)
 
         while True:
-            if not buffer:
+            # Always read more when the current buffer has no complete line.
+            # Previously we skipped recv while buffer was non-empty, which busy-
+            # looped forever on any /pad load (or other command) split across
+            # TCP chunks — client looked alive but /pad and /names never replied.
+            if b"\n" not in buffer:
+                if len(buffer) > _MAX_CLIENT_LINE_BYTES:
+                    send_line(conn, "[*] 消息过长。\n")
+                    buffer = _discard_client_line_remainder(conn, buffer)
+                    continue
                 try:
                     chunk = conn.recv(4096)
                 except OSError as e:
@@ -10371,13 +10403,11 @@ def handle_client(conn, addr) -> None:
                 if not chunk:
                     break
                 buffer += chunk
+                continue
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 if line:
                     process_client_line(conn, line)
-            if len(buffer) > 65536:
-                send_line(conn, "[*] 消息过长。\n")
-                buffer = b""
 
     except Exception as e:
         print("connection error:", e)
