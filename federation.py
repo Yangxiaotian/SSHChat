@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import select
 import socket
 import subprocess
 import threading
@@ -23,7 +24,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 PROTOCOL_VERSION = "1"
-_DISCONNECT_ERRNOS = {32, 54, 57, 104}
+# 9=EBADF: writer close_transport() while reader is in recv().
+_DISCONNECT_ERRNOS = {9, 32, 54, 57, 104}
 _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
 _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
 # Bound flood dedup memory (graph cycles / rebroadcast).
@@ -81,34 +83,56 @@ def _nick_key(name: str) -> str:
 
 
 def _sendall_timeout(sock, data: bytes, timeout: float | None = None) -> None:
-    """sendall with a temporary timeout; restore the prior socket timeout after.
+    """Send all bytes with a deadline without sock.settimeout().
 
-    Pipes / file objects without gettimeout/settimeout fall back to bare sendall.
+    Federation sessions share one TCP socket across a reader thread and a writer
+    thread. Changing the socket timeout from the writer wakes a blocking recv()
+    with TimeoutError and falsely drops healthy peers (seen as rapid
+    Mathematics.local join/leave storms on slow SSH-forwarded links).
     """
     if not data:
         return
     if timeout is None:
         timeout = _FED_SEND_TIMEOUT
-    old = None
-    has_timeout_api = hasattr(sock, "gettimeout") and hasattr(sock, "settimeout")
-    if has_timeout_api:
-        try:
-            old = sock.gettimeout()
-        except Exception:
-            old = None
-        try:
-            if timeout > 0:
-                sock.settimeout(timeout)
-        except Exception:
-            has_timeout_api = False
-    try:
+    if timeout is not None and float(timeout) <= 0:
         sock.sendall(data)
-    finally:
-        if has_timeout_api:
-            try:
-                sock.settimeout(old)
-            except Exception:
-                pass
+        return
+
+    fileno = getattr(sock, "fileno", None)
+    can_select = False
+    if callable(fileno):
+        try:
+            fd = fileno()
+            can_select = isinstance(fd, int) and fd >= 0
+        except Exception:
+            can_select = False
+    if not can_select:
+        # Test doubles / non-socket transports: blocking sendall, no timeout API.
+        sock.sendall(data)
+        return
+
+    deadline = time.monotonic() + float(timeout)
+    view = memoryview(data)
+    while len(view):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out")
+        try:
+            _readable, writable, errored = select.select([], [sock], [sock], remaining)
+        except (TypeError, ValueError, OSError):
+            sock.sendall(bytes(view))
+            return
+        if errored and sock in errored and not writable:
+            raise OSError("socket error during federation send")
+        if not writable:
+            raise TimeoutError("timed out")
+        try:
+            sent = sock.send(view)
+        except BlockingIOError:
+            continue
+        if sent == 0:
+            raise BrokenPipeError("socket send returned 0")
+        view = view[sent:]
 
 
 def _enable_tcp_keepalive(sock: socket.socket) -> None:
@@ -1426,8 +1450,24 @@ class FederationHub:
         return not already_up
 
     def _notify_peer_up(self, peer_node: str) -> None:
-        """Local peer just connected: tell local users and other online peers."""
-        self._emit_peer_event("up", peer_node, reporter=self.node_id, relay=True)
+        """Local peer just connected: tell local users and other online peers.
+
+        Run off the session thread so the read loop can drain inbound data while
+        catch-up (offline clears, games, catalogs) is queued — otherwise both
+        sides fill the TCP window on slow links and the link flaps.
+        """
+
+        def _run() -> None:
+            try:
+                self._emit_peer_event(
+                    "up", peer_node, reporter=self.node_id, relay=True
+                )
+            except Exception as e:
+                print(f"federation: peer-up notify error ({peer_node}): {e!r}")
+
+        threading.Thread(
+            target=_run, name=f"fed-up-{peer_node}", daemon=True
+        ).start()
 
     def _notify_peer_down(self, peer_node: str) -> None:
         """Local peer just disconnected: tell local users and other online peers."""

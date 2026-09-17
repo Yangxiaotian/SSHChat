@@ -179,6 +179,11 @@ _shutting_down = False
 _shutdown_requested = False
 _listen_socket: Optional[socket.socket] = None
 _fed_hub: Optional[federation.FederationHub] = None
+# Skip re-flooding offline clears/leaves when a flaky peer reconnects rapidly.
+_PEER_UP_CATCHUP_DEBOUNCE = float(
+    os.environ.get("SSHCHAT_FED_PEER_UP_DEBOUNCE", "120") or "120"
+)
+_peer_up_offline_catchup_at: dict[str, float] = {}
 _library_watch_thread: Optional[threading.Thread] = None
 _library_watch_stop = threading.Event()
 _library_last_state: Optional[tuple[set[str], float]] = None
@@ -8826,6 +8831,78 @@ def _fed_on_join_notice(room: str, msg: bytes) -> None:
     broadcast_room(room, msg, skip_federation=True)
 
 
+def _federation_peer_up_catchup(peer_node: str) -> None:
+    """Heavy link-up sync; offline mailbox flood is debounced across flaps."""
+    # Pull before push on link-up so a partitioned replica (common on
+    # WSL) does not fan-out a stale board before seeing the real host.
+    try:
+        _federation_reconcile_restored_games()
+    except Exception as e:
+        print(f"federation: peer-up game reconcile error: {e!r}")
+    try:
+        _federation_broadcast_ended_tombstones()
+    except Exception as e:
+        print(f"federation: peer-up ended-tombstone gend error: {e!r}")
+    try:
+        _federation_push_all_game_snapshots()
+    except Exception as e:
+        print(f"federation: peer-up game catch-up error: {e!r}")
+    try:
+        # Newcomer with no local board still needs the peer's in-progress
+        # game (push alone can lose a race with our own ended tombstone).
+        _federation_greq_occupied_rooms()
+    except Exception as e:
+        print(f"federation: peer-up occupied greq error: {e!r}")
+    try:
+        _federation_sync_library_catalog()
+    except Exception as e:
+        print(f"federation: peer-up library catalog sync error: {e!r}")
+    try:
+        _federation_sync_file_public()
+    except Exception as e:
+        print(f"federation: peer-up file public sync error: {e!r}")
+
+    now = time.monotonic()
+    last = float(_peer_up_offline_catchup_at.get(peer_node, 0.0) or 0.0)
+    push_offline = (
+        _PEER_UP_CATCHUP_DEBOUNCE <= 0
+        or last <= 0
+        or (now - last) >= _PEER_UP_CATCHUP_DEBOUNCE
+    )
+    if push_offline:
+        _peer_up_offline_catchup_at[peer_node] = now
+        try:
+            _federation_push_all_offline_clears()
+        except Exception as e:
+            print(f"federation: peer-up offline clear sync error: {e!r}")
+        try:
+            _federation_push_all_offline_leaves()
+        except Exception as e:
+            print(f"federation: peer-up offline leave sync error: {e!r}")
+    else:
+        print(
+            f"federation: skip offline catch-up for {peer_node} "
+            f"(debounced {now - last:.0f}s < {_PEER_UP_CATCHUP_DEBOUNCE:.0f}s)"
+        )
+
+    try:
+        _federation_sync_ratings(rating_store.export_entries())
+    except Exception as e:
+        print(f"federation: peer-up ratings sync error: {e!r}")
+    try:
+        _federation_push_all_canvas_announces()
+    except Exception as e:
+        print(f"federation: peer-up canvas catch-up error: {e!r}")
+    try:
+        _federation_push_all_piano_announces()
+    except Exception as e:
+        print(f"federation: peer-up piano catch-up error: {e!r}")
+    try:
+        _federation_push_all_pads()
+    except Exception as e:
+        print(f"federation: peer-up pad catch-up error: {e!r}")
+
+
 def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
     """Tell all local chat users when a federation node comes or goes."""
     hub = federation.get_hub()
@@ -8835,60 +8912,15 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
     if event == "up":
         if reporter == local_id:
             text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
-            # Pull before push on link-up so a partitioned replica (common on
-            # WSL) does not fan-out a stale board before seeing the real host.
+            # Announce first; catch-up can take seconds and must not delay the notice
+            # (and runs on a fed-up thread so the session reader stays free).
+            broadcast_local_notice(text)
             try:
-                _federation_reconcile_restored_games()
+                _federation_peer_up_catchup(peer_node)
             except Exception as e:
-                print(f"federation: peer-up game reconcile error: {e!r}")
-            try:
-                _federation_broadcast_ended_tombstones()
-            except Exception as e:
-                print(f"federation: peer-up ended-tombstone gend error: {e!r}")
-            try:
-                _federation_push_all_game_snapshots()
-            except Exception as e:
-                print(f"federation: peer-up game catch-up error: {e!r}")
-            try:
-                # Newcomer with no local board still needs the peer's in-progress
-                # game (push alone can lose a race with our own ended tombstone).
-                _federation_greq_occupied_rooms()
-            except Exception as e:
-                print(f"federation: peer-up occupied greq error: {e!r}")
-            try:
-                _federation_sync_library_catalog()
-            except Exception as e:
-                print(f"federation: peer-up library catalog sync error: {e!r}")
-            try:
-                _federation_sync_file_public()
-            except Exception as e:
-                print(f"federation: peer-up file public sync error: {e!r}")
-            try:
-                _federation_push_all_offline_clears()
-            except Exception as e:
-                print(f"federation: peer-up offline clear sync error: {e!r}")
-            try:
-                _federation_push_all_offline_leaves()
-            except Exception as e:
-                print(f"federation: peer-up offline leave sync error: {e!r}")
-            try:
-                _federation_sync_ratings(rating_store.export_entries())
-            except Exception as e:
-                print(f"federation: peer-up ratings sync error: {e!r}")
-            try:
-                _federation_push_all_canvas_announces()
-            except Exception as e:
-                print(f"federation: peer-up canvas catch-up error: {e!r}")
-            try:
-                _federation_push_all_piano_announces()
-            except Exception as e:
-                print(f"federation: peer-up piano catch-up error: {e!r}")
-            try:
-                _federation_push_all_pads()
-            except Exception as e:
-                print(f"federation: peer-up pad catch-up error: {e!r}")
-        else:
-            text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
+                print(f"federation: peer-up catch-up error: {e!r}")
+            return
+        text = f"[*] 联邦节点 {peer_node} 已加入（由 {reporter} 通报）\n"
     elif event == "down":
         if reporter == local_id:
             text = f"[*] 联邦节点 {peer_node} 已退出（与本机断开）\n"

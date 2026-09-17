@@ -47,6 +47,7 @@ class FederationProtocolTests(unittest.TestCase):
         server.disconnected_sessions.clear()
         federation._hub = None
         server._fed_hub = None
+        server._peer_up_offline_catchup_at.clear()
 
     def _free_port(self) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -491,6 +492,11 @@ class FederationProtocolTests(unittest.TestCase):
         hub._peers["node-c"] = link_c
 
         hub._notify_peer_up("node-c")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not any(
+            e == ("up", "node-c", "node-a") for e in events
+        ):
+            time.sleep(0.01)
         self.assertEqual(events[-1], ("up", "node-c", "node-a"))
         # Other online peers get nodeup; the subject peer itself does not.
         self.assertTrue(any(l.startswith("nodeup\tnode-a\tnode-c") for l in link_b.lines))
@@ -877,6 +883,47 @@ class FederationServerIntegrationTests(unittest.TestCase):
                     server._fed_on_peer_event("up", "node-b", "node-a")
         # peer-up catch-up push + reconcile re-push for local-authority rooms
         self.assertEqual(pushed, [("lobby", "node-a"), ("lobby", "node-a")])
+
+    def test_peer_up_offline_catchup_debounced(self) -> None:
+        clears: list[int] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 1
+
+            def sync_game(self, *a, **k):
+                return None
+
+            def sync_library_catalog(self, books=None):
+                return None
+
+            def sync_file_public(self, base_url=None):
+                return None
+
+            def request_game(self, room: str) -> None:
+                return None
+
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
+                return None
+
+            def sync_ratings(self, entries=None):
+                return None
+
+        server._peer_up_offline_catchup_at.clear()
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "broadcast_local_notice"):
+                with mock.patch.object(
+                    server, "_federation_push_all_offline_clears",
+                    side_effect=lambda: clears.append(1),
+                ):
+                    with mock.patch.object(
+                        server, "_federation_push_all_offline_leaves"
+                    ):
+                        with mock.patch.object(server, "_PEER_UP_CATCHUP_DEBOUNCE", 120.0):
+                            server._fed_on_peer_event("up", "Math.local", "node-a")
+                            server._fed_on_peer_event("up", "Math.local", "node-a")
+        self.assertEqual(clears, [1])
 
     def test_game_request_pushes_snapshot(self) -> None:
         pushed: list[str] = []
@@ -1775,6 +1822,9 @@ class FederationServerIntegrationTests(unittest.TestCase):
         first = FakeLink("node-b")
         self.assertTrue(hub._register_peer("node-b", first))
         hub._notify_peer_up("node-b")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not events:
+            time.sleep(0.01)
         second = FakeLink("node-b")
         self.assertFalse(hub._register_peer("node-b", second))
         self.assertEqual(events, [("up", "node-b", "node-a")])
@@ -2256,33 +2306,74 @@ class FederationSendQueueTests(unittest.TestCase):
         self.assertTrue(sent[0].startswith(b"join\t"))
         link.close()
 
-    def test_sendall_timeout_applies_socket_timeout(self) -> None:
-        """_sendall_timeout must set a temporary timeout around sendall."""
+    def test_sendall_timeout_does_not_set_socket_timeout(self) -> None:
+        """Non-selectable transports use sendall and must not call settimeout."""
 
         class TrackingSock:
             def __init__(self) -> None:
                 self.timeouts: list[float | None] = []
-                self._timeout: float | None = None
                 self.sent: list[bytes] = []
 
             def gettimeout(self) -> float | None:
-                return self._timeout
+                return None
 
             def settimeout(self, value: float | None) -> None:
                 self.timeouts.append(value)
-                self._timeout = value
 
             def sendall(self, data: bytes) -> None:
-                if self._timeout == 0.3:
-                    raise TimeoutError("timed out")
                 self.sent.append(data)
 
         sock = TrackingSock()
-        with self.assertRaises(TimeoutError):
-            federation._sendall_timeout(sock, b"hello", timeout=0.3)
-        self.assertEqual(sock.timeouts[0], 0.3)
-        # Prior timeout restored even after failure.
-        self.assertIsNone(sock.timeouts[-1])
+        federation._sendall_timeout(sock, b"hello", timeout=0.3)
+        self.assertEqual(sock.sent, [b"hello"])
+        self.assertEqual(sock.timeouts, [])
+
+    def test_sendall_timeout_does_not_wake_concurrent_recv(self) -> None:
+        """Writer deadline must not interrupt a concurrent blocking recv()."""
+        s1, s2 = socket.socketpair()
+        try:
+            s1.settimeout(None)
+            err: list[BaseException] = []
+            done = threading.Event()
+
+            def reader() -> None:
+                try:
+                    s1.recv(4096)
+                except BaseException as e:
+                    err.append(e)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=reader, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            federation._sendall_timeout(s1, b"ping\n", timeout=0.5)
+            time.sleep(0.2)
+            self.assertFalse(done.is_set(), "recv should still be blocked")
+            self.assertEqual(err, [])
+            s2.sendall(b"wake\n")
+            self.assertTrue(done.wait(2.0))
+            self.assertEqual(err, [])
+        finally:
+            s1.close()
+            s2.close()
+
+    def test_sendall_timeout_raises_when_peer_not_draining(self) -> None:
+        s1, s2 = socket.socketpair()
+        try:
+            s1.setblocking(False)
+            payload = b"x" * 65536
+            try:
+                while True:
+                    s1.send(payload)
+            except BlockingIOError:
+                pass
+            s1.setblocking(True)
+            with self.assertRaises(TimeoutError):
+                federation._sendall_timeout(s1, payload, timeout=0.2)
+        finally:
+            s1.close()
+            s2.close()
 
     def test_heartbeat_timeout_closes_idle_peer(self) -> None:
         closed: list[str] = []
