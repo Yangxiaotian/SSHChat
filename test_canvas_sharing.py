@@ -504,6 +504,9 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("connectCanvasWs", page)
         self.assertIn("/ws?ticket=", page)
         self.assertIn("new WebSocket", page)
+        self.assertIn('id="closeBtn"', page)
+        self.assertIn("SSHChatNative", page)
+        self.assertIn("__SSHCHAT_EMBEDDED__", page)
 
     def test_image_file_above_legacy_512kb_is_kept(self) -> None:
         """Phone-photo dataURLs often exceed the old 512KB per-file cap."""

@@ -60,7 +60,11 @@ class WebInviteActivity : AppCompatActivity() {
         binding.tvTitle.text = title
         binding.btnClose.setOnClickListener { finish() }
         binding.btnCloseFloating.setOnClickListener { finish() }
-        binding.btnMaximize.setOnClickListener { setMaximized(true, showFloatingChrome = !isPiano && !isClock) }
+        // Canvas/piano/clock close lives in the page toolbar — do not overlay sync status / keys.
+        val pageOwnsClose = isCanvas || isPiano || isClock
+        binding.btnMaximize.setOnClickListener {
+            setMaximized(true, showFloatingChrome = !pageOwnsClose)
+        }
         binding.btnRestore.setOnClickListener { setMaximized(false) }
         // Keep floating close/restore above WebView and clear of cutout / status edge.
         ViewCompat.setOnApplyWindowInsetsListener(binding.floatingChrome) { v, insets ->
@@ -82,8 +86,6 @@ class WebInviteActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             mediaPlaybackRequiresUserGesture = false
         }
-        // Piano/clock close lives in the page toolbar — do not overlay keys/clock faces.
-        val pageOwnsClose = isPiano || isClock
         binding.web.addJavascriptInterface(NativeBridge(this), "SSHChatNative")
         binding.web.webChromeClient = WebChromeClient()
         val safeKey = key.replace("\\", "\\\\").replace("'", "\\'")
@@ -119,7 +121,8 @@ class WebInviteActivity : AppCompatActivity() {
     private fun setMaximized(on: Boolean, showFloatingChrome: Boolean = true) {
         maximized = on
         binding.toolbar.visibility = if (on) View.GONE else View.VISIBLE
-        val chrome = on && showFloatingChrome && !isPiano && !isClock
+        // Page-owned close (canvas/piano/clock): never show floating overlay.
+        val chrome = on && showFloatingChrome && !(isCanvas || isPiano || isClock)
         binding.floatingChrome.visibility = if (chrome) View.VISIBLE else View.GONE
         if (chrome) {
             binding.floatingChrome.bringToFront()
