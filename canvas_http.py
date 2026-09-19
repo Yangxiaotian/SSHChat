@@ -413,14 +413,11 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     // clone/stringify does not steal frames from Excalidraw input.
     let drawingActive = false;
     let pendingRemote = null;
-    let strokeIdleTimer = null;
     // Piano uses ~16ms note flush; canvas payloads are larger — keep WS snappy
     // but avoid main-thread clone storms (tool clicks / clear felt frozen).
     const PUSH_MS_WS = 48;
     const PUSH_MS_DRAWING = 160;
     const PUSH_MS_HTTP = 280;
-    // Coalesce lift-pen work so rapid handwriting does not updateScene every glyph.
-    const STROKE_IDLE_MS = 120;
 
     function adoptSceneGen(value) {{
         const g = Number(value);
@@ -449,7 +446,6 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         resetSyncWatermark();
         pendingRemote = null;
         drawingActive = false;
-        if (strokeIdleTimer) {{ clearTimeout(strokeIdleTimer); strokeIdleTimer = null; }}
         lastLocalSig = sceneSig([], {{}});
         localDirty = false;
         // Excalidraw may emit a late onChange with pre-clear elements; ignore
@@ -474,18 +470,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     function endStrokeGesture() {{
         const wasDrawing = drawingActive;
         drawingActive = false;
-        if (!wasDrawing) {{
-            if (localDirty) schedulePush(0);
-            return;
-        }}
-        // Defer heavy flush/push so the next stroke can start without a hitch.
-        if (strokeIdleTimer) clearTimeout(strokeIdleTimer);
-        strokeIdleTimer = setTimeout(() => {{
-            strokeIdleTimer = null;
-            flushPendingRemote();
-            if (localDirty) schedulePush(0);
-            else setStatus(i18n.statusReady, false);
-        }}, STROKE_IDLE_MS);
+        if (wasDrawing) flushPendingRemote();
+        if (localDirty) schedulePush(0);
+        else setStatus(i18n.statusReady, false);
     }}
 
     function showLoadError(msg) {{
