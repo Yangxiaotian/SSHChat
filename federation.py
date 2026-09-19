@@ -37,15 +37,16 @@ _FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5"
 _FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
 # Active heartbeat: ping idle peers; close half-open links (common with iSH /
 # ZeroTier / phone sleep) so /fed and remote presence do not stay stale.
+# Defaults are deliberately loose for high-latency VPN links — override via env.
 _FED_HEARTBEAT_INTERVAL = float(
-    os.environ.get("SSHCHAT_FED_HEARTBEAT_SECONDS", "20") or "20"
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_SECONDS", "45") or "45"
 )
 _FED_HEARTBEAT_TIMEOUT = float(
-    os.environ.get("SSHCHAT_FED_HEARTBEAT_TIMEOUT", "60") or "60"
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_TIMEOUT", "150") or "150"
 )
 # Re-announce local roster so peers drop ghosts after a missed leave frame.
 _FED_PRESENCE_REFRESH = float(
-    os.environ.get("SSHCHAT_FED_PRESENCE_REFRESH_SECONDS", "60") or "60"
+    os.environ.get("SSHCHAT_FED_PRESENCE_REFRESH_SECONDS", "120") or "120"
 )
 
 
