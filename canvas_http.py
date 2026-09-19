@@ -409,9 +409,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let canvasWsForceHttp = false;
     let canvasWsRetryTimer = null;
     let httpSyncActive = false;
+    // True while the primary pointer is down on the board — ease sync load so
+    // clone/stringify does not steal frames from Excalidraw input.
+    let drawingActive = false;
+    let pendingRemote = null;
     // Piano uses ~16ms note flush; canvas payloads are larger — keep WS snappy
     // but avoid main-thread clone storms (tool clicks / clear felt frozen).
     const PUSH_MS_WS = 48;
+    const PUSH_MS_DRAWING = 160;
     const PUSH_MS_HTTP = 280;
 
     function adoptSceneGen(value) {{
@@ -439,6 +444,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     function markBoardClearedLocally() {{
         abortPendingPush();
         resetSyncWatermark();
+        pendingRemote = null;
+        drawingActive = false;
         lastLocalSig = sceneSig([], {{}});
         localDirty = false;
         // Excalidraw may emit a late onChange with pre-clear elements; ignore
@@ -447,8 +454,25 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function setStatus(text, err) {{
+        // Avoid layout thrash mid-stroke (status flips were visible as pen stalls).
+        if (drawingActive && !err) return;
         statusEl.textContent = text;
         statusEl.classList.toggle('err', !!err);
+    }}
+
+    function flushPendingRemote() {{
+        if (!pendingRemote) return;
+        const data = pendingRemote;
+        pendingRemote = null;
+        applyRemotePayload(data);
+    }}
+
+    function endStrokeGesture() {{
+        const wasDrawing = drawingActive;
+        drawingActive = false;
+        if (wasDrawing) flushPendingRemote();
+        if (localDirty) schedulePush(0);
+        else setStatus(i18n.statusReady, false);
     }}
 
     function showLoadError(msg) {{
@@ -823,16 +847,23 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }},
         }}));
         loadingEl.style.display = 'none';
-        // Lift pen / touch end: flush only when we already owe a sync — do NOT
-        // mark dirty on every toolbar tap (pen tool / UI clicks live here too).
+        // Track pen-down on the draw surface so sync yields to stroke input.
         if (!el.__sshchatStrokeFlush) {{
             el.__sshchatStrokeFlush = true;
-            const flushTail = () => {{
-                if (!ticket || applyingRemote || clearInFlight || !localDirty) return;
-                schedulePush(0);
-            }};
+            el.addEventListener('pointerdown', (ev) => {{
+                if (ev.isPrimary === false) return;
+                if (ev.button != null && ev.button !== 0) return;
+                const t = ev.target;
+                // Toolbar/UI lives in the same root — only treat canvas as drawing.
+                if (!t || (t.tagName !== 'CANVAS' && !(t.closest && t.closest('canvas')))) {{
+                    return;
+                }}
+                drawingActive = true;
+            }}, true);
+            const flushTail = () => {{ endStrokeGesture(); }};
             el.addEventListener('pointerup', flushTail, true);
             el.addEventListener('pointercancel', flushTail, true);
+            el.addEventListener('lostpointercapture', flushTail, true);
             el.addEventListener('touchend', flushTail, true);
         }}
     }}
@@ -841,9 +872,16 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (pushTimer) clearTimeout(pushTimer);
         // Debounce uploads; always read the live scene when the timer fires so
         // mid-debounce strokes are not dropped from the POST body.
-        const ms = typeof delayMs === 'number'
-            ? delayMs
-            : (canvasWsLive ? PUSH_MS_WS : PUSH_MS_HTTP);
+        let ms;
+        if (typeof delayMs === 'number') {{
+            ms = delayMs;
+        }} else if (!canvasWsLive) {{
+            ms = PUSH_MS_HTTP;
+        }} else if (drawingActive) {{
+            ms = PUSH_MS_DRAWING;
+        }} else {{
+            ms = PUSH_MS_WS;
+        }}
         pushTimer = setTimeout(() => {{ void pushScene(); }}, ms);
     }}
 
@@ -855,7 +893,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         const leftover = buildScenePatch(liveNow.elements, liveNow.files);
         if (!leftover.empty) {{
             localDirty = true;
-            schedulePush(canvasWsLive ? 0 : undefined);
+            // While drawing, back off — immediate re-push fights the pen for the
+            // main thread. pointerup still forces a trailing flush.
+            if (drawingActive) schedulePush(PUSH_MS_DRAWING);
+            else schedulePush(canvasWsLive ? 0 : undefined);
         }} else {{
             localDirty = false;
             lastLocalSig = sceneSig(liveNow.elements, liveNow.files);
@@ -893,12 +934,34 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         setStatus(i18n.statusSync, false);
         if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
             try {{
-                canvasWs.send(JSON.stringify({{
-                    type: 'scene',
-                    elements: snapEls,
-                    files: snapFiles,
-                    scene_gen: genAtStart,
-                }}));
+                const sendNow = () => {{
+                    try {{
+                        if (!canvasWs || canvasWs.readyState !== 1) {{
+                            canvasWsLive = false;
+                            pushInFlight = false;
+                            localDirty = true;
+                            schedulePush();
+                            return;
+                        }}
+                        canvasWs.send(JSON.stringify({{
+                            type: 'scene',
+                            elements: snapEls,
+                            files: snapFiles,
+                            scene_gen: genAtStart,
+                        }}));
+                    }} catch (_) {{
+                        canvasWsLive = false;
+                        pushInFlight = false;
+                        localDirty = true;
+                        schedulePush();
+                    }}
+                }};
+                // Let Excalidraw paint the newest point before we block on stringify/send.
+                if (drawingActive && typeof requestAnimationFrame === 'function') {{
+                    requestAnimationFrame(sendNow);
+                }} else {{
+                    sendNow();
+                }}
                 if (pushAckTimer) clearTimeout(pushAckTimer);
                 pushAckTimer = setTimeout(() => {{
                     pushAckTimer = null;
@@ -956,6 +1019,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         const remoteRev = Number(data.rev || 0);
         const mtype = String(data.type || data.kind || '');
         if (mtype === 'clear') {{
+            pendingRemote = null;
+            drawingActive = false;
             if (remoteRev < rev) return;
             markBoardClearedLocally();
             clearInFlight = false;
@@ -970,6 +1035,30 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 applyingRemote = false;
             }}
             rev = Math.max(rev, remoteRev);
+            return;
+        }}
+        // Never updateScene while the pen is down — that stalls Excalidraw input.
+        if (drawingActive) {{
+            if (!pendingRemote) {{
+                pendingRemote = data;
+            }} else {{
+                pendingRemote = {{
+                    rev: Math.max(Number(pendingRemote.rev) || 0, remoteRev),
+                    scene_gen: data.scene_gen != null
+                        ? data.scene_gen
+                        : pendingRemote.scene_gen,
+                    type: data.type || pendingRemote.type,
+                    elements: mergeElements(
+                        pendingRemote.elements || [],
+                        data.elements || []
+                    ),
+                    files: Object.assign(
+                        {{}},
+                        pendingRemote.files || {{}},
+                        data.files || {{}}
+                    ),
+                }};
+            }}
             return;
         }}
         if (remoteRev < rev) return;

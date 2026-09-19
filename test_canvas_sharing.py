@@ -623,6 +623,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("/ws?ticket=", page)
         self.assertIn("new WebSocket", page)
         self.assertIn("PUSH_MS_WS", page)
+        self.assertIn("PUSH_MS_DRAWING", page)
+        self.assertIn("drawingActive", page)
         self.assertIn("buildScenePatch", page)
         self.assertIn("elementSyncSig", page)
         self.assertIn("cloneJson", page)
