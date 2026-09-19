@@ -880,13 +880,24 @@ class CanvasStore:
             session.next_seq = session.rev + 1
             # Stroke spam: debounce fsync so WS push stays responsive.
             self._schedule_save()
+            # Broadcast post-merge truth for touched ids — never echo a stale
+            # client patch that lost to a newer tombstone already on the server.
+            touched = {
+                el.get("id")
+                for el in cleaned
+                if isinstance(el, dict) and isinstance(el.get("id"), str)
+            }
+            patch_elements = [
+                el
+                for el in merged
+                if isinstance(el, dict) and el.get("id") in touched
+            ]
             return {
                 "rev": session.rev,
                 "scene_gen": session.scene_gen,
                 "elements": session.elements,
                 "files": session.files,
-                # Peers merge by id/version — broadcast only the applied patch.
-                "patch_elements": cleaned,
+                "patch_elements": patch_elements,
                 "patch_files": file_patch if file_patch is not None else {},
                 "author": participant,
                 "session_id": session.session_id,

@@ -138,6 +138,32 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(second["patch_elements"][0]["id"], "b")
         self.assertEqual(second["patch_elements"][0]["width"], 50)
 
+    def test_stale_live_patch_broadcasts_merged_tombstone(self) -> None:
+        """Broadcast post-merge truth so peers never receive a losing live copy."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="stale"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        self.store.apply_scene(at, a_ticket, elements=[_el("s1", 1)])
+        self.store.apply_scene(
+            at, a_ticket, elements=[_el("s1", 2, isDeleted=True)]
+        )
+        result, err = self.store.apply_scene(
+            bt, b_ticket, elements=[_el("s1", 1, isDeleted=False)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["elements"][0]["isDeleted"])
+        self.assertEqual(result["elements"][0]["version"], 2)
+        self.assertEqual(len(result["patch_elements"]), 1)
+        self.assertTrue(result["patch_elements"][0]["isDeleted"])
+        self.assertEqual(result["patch_elements"][0]["version"], 2)
+
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="erase"
@@ -568,6 +594,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("new WebSocket", page)
         self.assertIn("PUSH_MS_WS", page)
         self.assertIn("buildScenePatch", page)
+        self.assertIn("makeTombstone", page)
+        self.assertIn("shouldAcceptRemoteEl", page)
         self.assertIn('id="closeBtn"', page)
         self.assertIn("SSHChatNative", page)
         self.assertIn("__SSHCHAT_EMBEDDED__", page)

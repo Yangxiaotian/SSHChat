@@ -401,6 +401,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     // Server watermark: rank/file ids we believe the hub already has.
     let syncedRank = Object.create(null);
     let syncedFiles = Object.create(null);
+    // Ids we already told the server are deleted (or saw deleted from peers).
+    let syncedDeleted = Object.create(null);
     let canvasWs = null;
     let canvasWsLive = false;
     let canvasWsForceHttp = false;
@@ -428,6 +430,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     function resetSyncWatermark() {{
         syncedRank = Object.create(null);
         syncedFiles = Object.create(null);
+        syncedDeleted = Object.create(null);
     }}
 
     function markBoardClearedLocally() {{
@@ -519,10 +522,51 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         return b || a;
     }}
 
+    function rankVersion(rank) {{
+        return Math.max(0, Math.floor(Number(rank) / 1e13) || 0);
+    }}
+
+    function makeTombstone(id, syncedRankVal) {{
+        // Undo may drop an element with no isDeleted marker. Emit a synthetic
+        // tombstone so merge-based sync cannot resurrect the server copy.
+        const version = rankVersion(syncedRankVal) + 1;
+        return {{
+            id: id,
+            type: 'rectangle',
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            angle: 0,
+            strokeColor: 'transparent',
+            backgroundColor: 'transparent',
+            fillStyle: 'solid',
+            strokeWidth: 1,
+            strokeStyle: 'solid',
+            roughness: 0,
+            opacity: 0,
+            groupIds: [],
+            frameId: null,
+            roundness: null,
+            seed: 1,
+            version: version,
+            versionNonce: (Date.now() % 1000000000) + 1,
+            isDeleted: true,
+            boundElements: null,
+            updated: Date.now(),
+            link: null,
+            locked: false,
+        }};
+    }}
+
     function markLocalPushed(els, files) {{
         for (const el of els || []) {{
             if (el && typeof el.id === 'string' && el.id) {{
-                syncedRank[el.id] = elementRank(el);
+                const r = elementRank(el);
+                const prev = syncedRank[el.id];
+                if (prev == null || r >= prev) syncedRank[el.id] = r;
+                if (el.isDeleted) syncedDeleted[el.id] = true;
+                else delete syncedDeleted[el.id];
             }}
         }}
         for (const fid of Object.keys(files || {{}})) {{
@@ -538,18 +582,52 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const r = elementRank(el);
             const prev = syncedRank[el.id];
             if (prev == null || r > prev) syncedRank[el.id] = r;
+            if (el.isDeleted) syncedDeleted[el.id] = true;
+            else delete syncedDeleted[el.id];
         }}
         for (const fid of Object.keys(remoteFiles || {{}})) {{
             syncedFiles[fid] = true;
         }}
     }}
 
+    function shouldAcceptRemoteEl(el, liveById) {{
+        if (!el || typeof el.id !== 'string' || !el.id) return false;
+        const live = liveById[el.id];
+        const remoteRank = elementRank(el);
+        if (live) {{
+            const liveRank = elementRank(live);
+            if (remoteRank > liveRank) return true;
+            if (remoteRank < liveRank) return false;
+            // Tie: only take a remote tombstone over a live copy.
+            return !!(el.isDeleted && !live.isDeleted);
+        }}
+        // Missing locally.
+        if (syncedDeleted[el.id]) {{
+            // We already believe it is deleted — ignore stale live echoes.
+            if (el.isDeleted) return false;
+            return remoteRank > (syncedRank[el.id] || 0);
+        }}
+        if (syncedRank[el.id] != null) {{
+            // Vanished via undo (awaiting/sending tombstone): suppress stale copies.
+            return remoteRank > syncedRank[el.id];
+        }}
+        return true;
+    }}
+
     function buildScenePatch(elements, files) {{
         const dirtyEls = [];
+        const liveIds = Object.create(null);
         for (const el of elements || []) {{
             if (!el || typeof el.id !== 'string' || !el.id) continue;
+            liveIds[el.id] = true;
             const r = elementRank(el);
             if (syncedRank[el.id] !== r) dirtyEls.push(el);
+        }}
+        // Synced ids missing from the live scene (undo) need an explicit tombstone.
+        for (const id of Object.keys(syncedRank)) {{
+            if (liveIds[id]) continue;
+            if (syncedDeleted[id]) continue;
+            dirtyEls.push(makeTombstone(id, syncedRank[id]));
         }}
         const dirtyFiles = {{}};
         const fileMap = files || {{}};
@@ -795,20 +873,36 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         adoptSceneGen(data.scene_gen);
         const remoteEls = data.elements || [];
         const remoteFiles = data.files || {{}};
-        noteRemoteSynced(remoteEls, remoteFiles);
         const live = liveScene();
+        const liveById = Object.create(null);
+        for (const el of live.elements || []) {{
+            if (el && typeof el.id === 'string' && el.id) liveById[el.id] = el;
+        }}
+        // Drop stale echoes (own strokes / pre-erase copies) so updateScene
+        // does not redraw them as 重笔 or resurrect undone strokes.
+        const accepted = [];
+        for (const el of remoteEls) {{
+            if (shouldAcceptRemoteEl(el, liveById)) accepted.push(el);
+        }}
+        const fileKeys = Object.keys(remoteFiles || {{}});
+        if (accepted.length === 0 && fileKeys.length === 0) {{
+            if (remoteRev > rev) rev = remoteRev;
+            return;
+        }}
+        noteRemoteSynced(accepted, remoteFiles);
         let nextEls;
         // Empty remote + no local pending ⇒ peer clear / empty board.
         // Otherwise merge so an older poll cannot wipe unpushed strokes.
         if (remoteEls.length === 0 && !localDirty && !pushInFlight) {{
             nextEls = [];
         }} else {{
-            nextEls = mergeElements(remoteEls, live.elements);
+            // Live as base: keep in-progress strokes; apply only accepted remote.
+            nextEls = mergeElements(live.elements, accepted);
         }}
         const nextFiles = Object.assign({{}}, live.files || {{}}, remoteFiles);
         const nextSig = sceneSig(nextEls, nextFiles);
         const curSig = sceneSig(live.elements, live.files);
-        if (nextSig !== curSig || (remoteFiles && Object.keys(remoteFiles).length)) {{
+        if (nextSig !== curSig || fileKeys.length) {{
             applyingRemote = true;
             try {{
                 // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
