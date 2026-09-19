@@ -247,17 +247,19 @@ enum ChatLineParsers {
     /// Bare CSI fragment. No-param: only `ABCDHJK`. Tag-colliding finals (`T`/`S`/…) need digits.
     /// Lookahead keeps `[root]` / `[TXT]` / `[HINT]`.
     private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"#
+    /// Incomplete CSI when the final byte was lost (e.g. `[2` / `[0;` before `[*]`).
+    private static let incompleteCsi = #"(?:\[[0-9;?]+)"#
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private static let ptyCrumbsBeforeTag = try! NSRegularExpression(
-        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|"# + incompleteCsi + #"|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))"#
     )
     /// Entire prefix before `[*]` is only CSI crumbs (not a nick like `[alice]`).
     private static let ptyNoiseOnlyPrefix = try! NSRegularExpression(
-        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|[?\uFFFD0-9; \t])+$"#
+        pattern: #"^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|"# + bareCsiFragment + #"|"# + incompleteCsi + #"|[?\uFFFD0-9; \t])+$"#
     )
     /// Bare CSI at line start when ESC/`?` was eaten (e.g. `[2K` / `[K` before `[*] 9 …`).
     private static let bareCsiPrefix = try! NSRegularExpression(
-        pattern: #"^(?:"# + bareCsiFragment + #")+"#
+        pattern: #"^(?:"# + bareCsiFragment + #"|"# + incompleteCsi + #")+"#
     )
 
     /// Strip local clock / prompt prefixes before parsing chat.
@@ -479,7 +481,7 @@ enum ChatLineParsers {
     static func parseGameStarBody(_ line: String) -> String? {
         let t = normalizeForParse(line)
         if let body = matchGameStarBody(t) { return body }
-        // Last resort: junk/CSI before [*] — keep when prefix is noise OR body looks like a board row.
+        // Last resort: junk/CSI before [*] — keep when prefix is noise OR body looks like board/news/lib.
         if let star = t.range(of: "[*]"), star.lowerBound > t.startIndex {
             let prefix = String(t[..<star.lowerBound])
             let pr = NSRange(prefix.startIndex..., in: prefix)
@@ -487,7 +489,9 @@ enum ChatLineParsers {
             if ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil {
                 return matchGameStarBody(rest)
             }
-            if let body = matchGameStarBody(rest), looksLikeGameBoardContent(body) {
+            if let body = matchGameStarBody(rest),
+               looksLikeGameBoardContent(body) || looksLikeStarListContent(body)
+            {
                 return body
             }
         }
@@ -509,6 +513,16 @@ enum ChatLineParsers {
         return nil
     }
 
+    /// /news titles, section headers, indented summaries; /lib catalog rows.
+    private static func looksLikeStarListContent(_ body: String) -> Bool {
+        if body.hasPrefix("    ") || body.hasPrefix("\t") { return true }
+        let t = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("---") { return true }
+        if t.range(of: #"^\d+\.\s+\[[^\]]+]"#, options: .regularExpression) != nil { return true }
+        if t.range(of: #"^\[\w+]\s+\S"#, options: .regularExpression) != nil { return true }
+        return false
+    }
+
     /// Board row text with `[*]` / PTY crumbs removed (used when heuristics match before star parse).
     static func boardLineText(from line: String) -> String {
         if let body = parseGameStarBody(line) { return body }
@@ -521,16 +535,10 @@ enum ChatLineParsers {
             t = String(t[r.upperBound...])
         }
         if let star = t.range(of: "[*]") {
+            // Always drop [*] — incomplete CSI like `[2` before [*] left orphans on /news rows.
             var after = String(t[star.upperBound...])
             if after.first == " " { after = String(after.dropFirst()) }
-            let prefix = String(t[..<star.lowerBound])
-            let pr = NSRange(prefix.startIndex..., in: prefix)
-            if prefix.isEmpty
-                || ptyNoiseOnlyPrefix.firstMatch(in: prefix, range: pr) != nil
-                || looksLikeGameBoardContent(after)
-            {
-                return after.trimmingCharacters(in: .newlines)
-            }
+            return after.trimmingCharacters(in: .newlines)
         }
         return t.trimmingCharacters(in: .newlines)
     }
