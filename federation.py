@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import queue
 import re
 import select
 import socket
@@ -31,10 +30,26 @@ _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "
 # Bound flood dedup memory (graph cycles / rebroadcast).
 _SEEN_MAX = int(os.environ.get("SSHCHAT_FED_SEEN_MAX", "4096"))
 # Bound federation sendall so a congested peer cannot stall forever.
-_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5")
+# Slow VPN/SSH forwards (ZeroTier) often need tens of seconds for large frames.
+_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "30") or "30")
 # Outbound queue per peer: join/leave/chat fanout returns immediately to callers
 # (e.g. local SSH clients). Writer thread drains with _FED_SEND_TIMEOUT.
-_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
+# Larger default absorbs bursty presence/catalog pushes on high-latency links.
+_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "2048") or "2048")
+# Bulk / refreshable frames — drop under congestion instead of closing the link.
+_FED_DROPPABLE_KINDS = frozenset(
+    {
+        "presence",
+        "lcatalog",
+        "lmarks",
+        "lcap",
+        "rrating",
+        "fpub",
+        "csync",
+        "pisync",
+        "psync",
+    }
+)
 # Active heartbeat: ping idle peers; close half-open links (common with iSH /
 # ZeroTier / phone sleep) so /fed and remote presence do not stay stale.
 # Defaults are deliberately loose for high-latency VPN links — override via env.
@@ -175,6 +190,24 @@ class RemoteUser:
         self.current_room = current_room
 
 
+def _frame_kind(data: bytes) -> str:
+    """Return the leading frame token (before tab/newline), lowercased."""
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    for sep in ("\t", "\n", "\r", " "):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+            break
+    return text.strip().lower()
+
+
+def _is_droppable_frame(data: bytes) -> bool:
+    """True for bulk/refreshable frames safe to drop when the peer is slow."""
+    return _frame_kind(data) in _FED_DROPPABLE_KINDS
+
+
 class _PeerLink:
     """One bidirectional federation link to a peer node.
 
@@ -182,6 +215,10 @@ class _PeerLink:
     handlers (join welcome, /names, /rooms) never block on a congested peer
     TCP window. The writer applies ``SSHCHAT_FED_SEND_TIMEOUT`` when the
     underlying object is a socket.
+
+    When the outbound queue is full (slow ZeroTier / SSH forwards), drop
+    refreshable bulk frames (presence, catalogs, …) instead of tearing down
+    the link — chat/PM/game frames still force a close if they cannot fit.
     """
 
     def __init__(
@@ -199,8 +236,11 @@ class _PeerLink:
         self._closed = False
         self.last_rx = time.monotonic()
         self._ping_sent_at = 0.0
-        qmax = max(16, _FED_SEND_QUEUE_MAX)
-        self._send_q: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=qmax)
+        self._qmax = max(16, _FED_SEND_QUEUE_MAX)
+        self._send_buf: deque[Optional[bytes]] = deque()
+        self._send_cv = threading.Condition()
+        self._drop_log_at = 0.0
+        self._drops_since_log = 0
         self._writer = threading.Thread(
             target=self._write_loop,
             name=f"fed-send-{node_id}",
@@ -211,29 +251,82 @@ class _PeerLink:
     def note_rx(self) -> None:
         self.last_rx = time.monotonic()
 
+    def _log_drops(self, n: int, *, dropped_new: bool = False) -> None:
+        if n <= 0:
+            return
+        self._drops_since_log += n
+        now = time.monotonic()
+        if now - self._drop_log_at < 10.0:
+            return
+        self._drop_log_at = now
+        total = self._drops_since_log
+        self._drops_since_log = 0
+        why = "dropped new bulk frame(s)" if dropped_new else "dropped queued bulk frame(s)"
+        print(
+            f"federation: {why} for {self.node_id} "
+            f"(congested; {total} since last log); keeping link"
+        )
+
+    def _drop_queued_droppable_locked(self) -> int:
+        """Remove droppable frames from the outbound buffer. Caller holds _send_cv."""
+        if not self._send_buf:
+            return 0
+        kept: deque[Optional[bytes]] = deque()
+        dropped = 0
+        for item in self._send_buf:
+            if item is None or not _is_droppable_frame(item):
+                kept.append(item)
+            else:
+                dropped += 1
+        if dropped:
+            self._send_buf = kept
+        return dropped
+
     def send_line(self, line: str) -> None:
         if self._closed:
             return
         data = line.encode("utf-8")
-        try:
-            self._send_q.put_nowait(data)
-        except queue.Full:
-            print(
-                f"federation: send queue full for {self.node_id} "
-                f"(peer congested); closing link"
-            )
-            self.close()
+        closer: Optional[Callable[[], None]] = None
+        with self._send_cv:
+            if self._closed:
+                return
+            if len(self._send_buf) >= self._qmax:
+                dropped = self._drop_queued_droppable_locked()
+                self._log_drops(dropped)
+            if len(self._send_buf) >= self._qmax:
+                if _is_droppable_frame(data):
+                    self._log_drops(1, dropped_new=True)
+                    return
+                print(
+                    f"federation: send queue full for {self.node_id} "
+                    f"(critical frame, peer congested); closing link"
+                )
+                # Avoid re-entering close() while holding _send_cv.
+                self._closed = True
+                self._send_buf.append(None)
+                self._send_cv.notify()
+                closer = self._close_transport
+                self._close_transport = None
+            else:
+                self._send_buf.append(data)
+                self._send_cv.notify()
+                return
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._send_q.put_nowait(None)
-        except queue.Full:
-            pass
-        closer = self._close_transport
-        self._close_transport = None
+        closer: Optional[Callable[[], None]] = None
+        with self._send_cv:
+            if self._closed:
+                return
+            self._closed = True
+            self._send_buf.append(None)
+            self._send_cv.notify()
+            closer = self._close_transport
+            self._close_transport = None
         if closer is not None:
             try:
                 closer()
@@ -246,12 +339,14 @@ class _PeerLink:
 
     def _write_loop(self) -> None:
         while True:
-            try:
-                item = self._send_q.get(timeout=0.5)
-            except queue.Empty:
-                if self._closed:
-                    break
-                continue
+            with self._send_cv:
+                while not self._send_buf and not self._closed:
+                    self._send_cv.wait(timeout=0.5)
+                if not self._send_buf:
+                    if self._closed:
+                        break
+                    continue
+                item = self._send_buf.popleft()
             if item is None:
                 break
             if self._closed:

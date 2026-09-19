@@ -183,7 +183,13 @@ _fed_hub: Optional[federation.FederationHub] = None
 _PEER_UP_CATCHUP_DEBOUNCE = float(
     os.environ.get("SSHCHAT_FED_PEER_UP_DEBOUNCE", "120") or "120"
 )
+# Hold chat join/leave notices briefly so ZeroTier flap storms stay quiet.
+_PEER_ANNOUNCE_DEBOUNCE = float(
+    os.environ.get("SSHCHAT_FED_PEER_ANNOUNCE_DEBOUNCE", "20") or "20"
+)
 _peer_up_offline_catchup_at: dict[str, float] = {}
+_peer_announce_timers: dict[str, threading.Timer] = {}
+_peer_announce_lock = threading.Lock()
 _library_watch_thread: Optional[threading.Thread] = None
 _library_watch_stop = threading.Event()
 _library_last_state: Optional[tuple[set[str], float]] = None
@@ -8904,13 +8910,32 @@ def _federation_peer_up_catchup(peer_node: str) -> None:
 
 
 def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
-    """Tell all local chat users when a federation node comes or goes."""
+    """Tell all local chat users when a federation node comes or goes.
+
+    Chat notices for direct (local) up/down are debounced so a flapping
+    ZeroTier/SSH peer does not spam join/leave every few seconds. Catch-up and
+    authority cleanup still run immediately.
+    """
     hub = federation.get_hub()
     local_id = hub.node_id if hub is not None else _local_node_id()
     peer_node = (peer_node or "").strip() or "?"
     reporter = (reporter or "").strip() or "?"
     if event == "up":
         if reporter == local_id:
+            # Cancel a pending "已退出" if the peer bounced back quickly.
+            with _peer_announce_lock:
+                pending = _peer_announce_timers.pop(peer_node, None)
+                if pending is not None:
+                    try:
+                        pending.cancel()
+                    except Exception:
+                        pass
+                    # Silent recovery — still catch up, no chat spam.
+                    try:
+                        _federation_peer_up_catchup(peer_node)
+                    except Exception as e:
+                        print(f"federation: peer-up catch-up error: {e!r}")
+                    return
             text = f"[*] 联邦节点 {peer_node} 已加入（与本机已连通）\n"
             # Announce first; catch-up can take seconds and must not delay the notice
             # (and runs on a fed-up thread so the session reader stays free).
@@ -8940,6 +8965,25 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
             _fed_handle_unreachable_piano_authority(peer_node)
         except Exception as e:
             print(f"federation: peer-down piano park/restore error: {e!r}")
+        if reporter == local_id and _PEER_ANNOUNCE_DEBOUNCE > 0:
+            # Defer the chat notice; up within the window cancels it.
+            def _announce_down(pn: str = peer_node, msg: str = text) -> None:
+                with _peer_announce_lock:
+                    _peer_announce_timers.pop(pn, None)
+                broadcast_local_notice(msg)
+
+            with _peer_announce_lock:
+                old = _peer_announce_timers.pop(peer_node, None)
+                if old is not None:
+                    try:
+                        old.cancel()
+                    except Exception:
+                        pass
+                timer = threading.Timer(_PEER_ANNOUNCE_DEBOUNCE, _announce_down)
+                timer.daemon = True
+                _peer_announce_timers[peer_node] = timer
+                timer.start()
+            return
     else:
         return
     broadcast_local_notice(text)

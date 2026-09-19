@@ -2306,6 +2306,93 @@ class FederationSendQueueTests(unittest.TestCase):
         self.assertTrue(sent[0].startswith(b"join\t"))
         link.close()
 
+    def test_congested_queue_drops_bulk_not_link(self) -> None:
+        """Full queue drops presence/catalog frames instead of closing."""
+        block = threading.Event()
+        sent: list[bytes] = []
+
+        def slow_send(data: bytes) -> None:
+            block.wait(5.0)
+            sent.append(data)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "node-b", slow_send)
+        link._qmax = 4
+        hub._peers["node-b"] = link
+        # Fill with droppable bulk frames while writer is blocked on first send.
+        link.send_line("presence\tnode-a\t[]\n")
+        time.sleep(0.05)  # let writer pick first frame and block
+        for i in range(20):
+            link.send_line(f"lcatalog\tnode-a\tYQ==\t{i}\n")
+            link.send_line("presence\tnode-a\t[]\n")
+        self.assertFalse(link._closed, "bulk congestion must not close the link")
+        # Critical chat frame must still be accepted (after dropping bulk).
+        link.send_line("msg\tnode-a\tdefault\thello\n")
+        self.assertFalse(link._closed)
+        with link._send_cv:
+            kinds = [
+                federation._frame_kind(x)
+                for x in link._send_buf
+                if isinstance(x, (bytes, bytearray))
+            ]
+        self.assertIn("msg", kinds)
+        block.set()
+        link.close()
+
+    def test_congested_queue_critical_still_closes(self) -> None:
+        """If only critical frames fill the queue, close rather than stall forever."""
+        block = threading.Event()
+        started = threading.Event()
+
+        def slow_send(data: bytes) -> None:
+            started.set()
+            block.wait(5.0)
+
+        closed = threading.Event()
+
+        def on_close() -> None:
+            closed.set()
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(
+            hub, "node-b", slow_send, close_transport=on_close
+        )
+        link._qmax = 3
+        link.send_line("msg\tnode-a\tdefault\ta\n")
+        self.assertTrue(started.wait(2.0), "writer did not start")
+        for i in range(20):
+            link.send_line(f"msg\tnode-a\tdefault\tb{i}\n")
+            if link._closed:
+                break
+        self.assertTrue(link._closed)
+        self.assertTrue(closed.wait(1.0))
+        block.set()
+
+    def test_is_droppable_frame_kinds(self) -> None:
+        self.assertTrue(federation._is_droppable_frame(b"presence\tx\t[]\n"))
+        self.assertTrue(federation._is_droppable_frame(b"lcatalog\tx\tYQ==\t1\n"))
+        self.assertFalse(federation._is_droppable_frame(b"msg\tx\tr\thi\n"))
+        self.assertFalse(federation._is_droppable_frame(b"ping\n"))
+        self.assertFalse(federation._is_droppable_frame(b"join\tx\ta\tr\n"))
+
     def test_sendall_timeout_does_not_set_socket_timeout(self) -> None:
         """Non-selectable transports use sendall and must not call settimeout."""
 
