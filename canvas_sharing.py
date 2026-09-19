@@ -737,6 +737,30 @@ class CanvasStore:
             nonce = 0
         return version, nonce
 
+    @staticmethod
+    def _points_len(el: dict) -> int:
+        pts = el.get("points")
+        return len(pts) if isinstance(pts, list) else 0
+
+    @classmethod
+    def _prefer_richer_element(cls, existing: dict, incoming: dict) -> dict:
+        """Same version/nonce: keep richer freehand / newer updated, not a shrink."""
+        pa = cls._points_len(existing)
+        pb = cls._points_len(incoming)
+        if pb != pa:
+            return incoming if pb > pa else existing
+        try:
+            ua = int(existing.get("updated") or 0)
+        except (TypeError, ValueError):
+            ua = 0
+        try:
+            ub = int(incoming.get("updated") or 0)
+        except (TypeError, ValueError):
+            ub = 0
+        if ub != ua:
+            return incoming if ub > ua else existing
+        return incoming
+
     def _sanitize_elements(self, elements) -> Optional[List[dict]]:
         if not isinstance(elements, list):
             return None
@@ -811,7 +835,9 @@ class CanvasStore:
                 elif old.get("isDeleted") and not el.get("isDeleted"):
                     by_id[eid] = old
                 else:
-                    by_id[eid] = el
+                    # Same live/deleted state: do not let a shorter mid-stroke
+                    # patch shrink points already stored on the server.
+                    by_id[eid] = self._prefer_richer_element(old, el)
         # Keep deleted markers so peers can tombstone; cap list size.
         merged = list(by_id.values())
         if len(merged) > MAX_ELEMENTS:

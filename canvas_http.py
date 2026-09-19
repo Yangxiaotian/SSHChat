@@ -400,6 +400,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let lastLocalSig = '';
     // Server watermark: rank/file ids we believe the hub already has.
     let syncedRank = Object.create(null);
+    let syncedSig = Object.create(null);
     let syncedFiles = Object.create(null);
     // Ids we already told the server are deleted (or saw deleted from peers).
     let syncedDeleted = Object.create(null);
@@ -429,6 +430,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     function resetSyncWatermark() {{
         syncedRank = Object.create(null);
+        syncedSig = Object.create(null);
         syncedFiles = Object.create(null);
         syncedDeleted = Object.create(null);
     }}
@@ -489,18 +491,48 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function sceneSig(elements, files) {{
-        // Cheap change detector — enough to skip no-op pushes.
+        // Include points/updated — freehand often grows points without bumping version.
         const n = (elements || []).length;
         let v = 0;
-        for (const el of elements || []) v += (el.version || 0);
+        let pts = 0;
+        let upd = 0;
+        for (const el of elements || []) {{
+            v += (el.version || 0);
+            pts += Array.isArray(el.points) ? el.points.length : 0;
+            upd += Number(el.updated) || 0;
+        }}
         const fk = files ? Object.keys(files).length : 0;
-        return n + ':' + v + ':' + fk;
+        return n + ':' + v + ':' + pts + ':' + upd + ':' + fk;
     }}
 
     function elementRank(el) {{
         const version = Number(el && el.version) || 0;
         const nonce = Number(el && el.versionNonce) || 0;
         return version * 1e13 + nonce;
+    }}
+
+    function elementPointsLen(el) {{
+        return Array.isArray(el && el.points) ? el.points.length : 0;
+    }}
+
+    function elementSyncSig(el) {{
+        if (!el) return '';
+        return (
+            elementRank(el) + ':' +
+            (Number(el.updated) || 0) + ':' +
+            elementPointsLen(el) + ':' +
+            (el.isDeleted ? 1 : 0) + ':' +
+            (Number(el.width) || 0) + ':' +
+            (Number(el.height) || 0)
+        );
+    }}
+
+    function elementRicherThan(a, b) {{
+        // Same version/nonce: keep the stroke with more geometry / newer stamp.
+        const pa = elementPointsLen(a);
+        const pb = elementPointsLen(b);
+        if (pa !== pb) return pa > pb;
+        return (Number(a && a.updated) || 0) > (Number(b && b.updated) || 0);
     }}
 
     function liveScene() {{
@@ -565,6 +597,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 const r = elementRank(el);
                 const prev = syncedRank[el.id];
                 if (prev == null || r >= prev) syncedRank[el.id] = r;
+                syncedSig[el.id] = elementSyncSig(el);
                 if (el.isDeleted) syncedDeleted[el.id] = true;
                 else delete syncedDeleted[el.id];
             }}
@@ -582,6 +615,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const r = elementRank(el);
             const prev = syncedRank[el.id];
             if (prev == null || r > prev) syncedRank[el.id] = r;
+            // Always refresh content sig for accepted remotes (points may grow
+            // at the same version).
+            syncedSig[el.id] = elementSyncSig(el);
             if (el.isDeleted) syncedDeleted[el.id] = true;
             else delete syncedDeleted[el.id];
         }}
@@ -598,8 +634,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const liveRank = elementRank(live);
             if (remoteRank > liveRank) return true;
             if (remoteRank < liveRank) return false;
-            // Tie: only take a remote tombstone over a live copy.
-            return !!(el.isDeleted && !live.isDeleted);
+            // Tie: tombstone wins; else take richer freehand / newer updated.
+            if (el.isDeleted && !live.isDeleted) return true;
+            if (!el.isDeleted && live.isDeleted) return false;
+            return elementRicherThan(el, live);
         }}
         // Missing locally.
         if (syncedDeleted[el.id]) {{
@@ -620,8 +658,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         for (const el of elements || []) {{
             if (!el || typeof el.id !== 'string' || !el.id) continue;
             liveIds[el.id] = true;
-            const r = elementRank(el);
-            if (syncedRank[el.id] !== r) dirtyEls.push(el);
+            // Compare content sig — not rank alone — so mid-stroke points sync.
+            if (syncedSig[el.id] !== elementSyncSig(el)) dirtyEls.push(el);
         }}
         // Synced ids missing from the live scene (undo) need an explicit tombstone.
         for (const id of Object.keys(syncedRank)) {{
@@ -664,7 +702,13 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const rb = elementRank(old);
             if (ra > rb) byId[el.id] = el;
             else if (ra < rb) byId[el.id] = old;
-            else byId[el.id] = preferDeletedOnTie(old, el);
+            else if (el.isDeleted !== old.isDeleted) {{
+                byId[el.id] = preferDeletedOnTie(old, el);
+            }} else if (elementRicherThan(el, old)) {{
+                byId[el.id] = el;
+            }} else {{
+                byId[el.id] = old;
+            }}
         }}
         return Object.keys(byId).map((k) => byId[k]);
     }}

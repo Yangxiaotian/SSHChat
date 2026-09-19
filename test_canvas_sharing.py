@@ -164,6 +164,36 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertTrue(result["patch_elements"][0]["isDeleted"])
         self.assertEqual(result["patch_elements"][0]["version"], 2)
 
+    def test_same_version_keeps_richer_freehand_points(self) -> None:
+        """Mid-stroke patches often share version; shorter must not win."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="points"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        long_pts = [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]]
+        short_pts = [[0, 0], [1, 1]]
+        self.store.apply_scene(
+            at,
+            a_ticket,
+            elements=[_el("pen1", 1, type="freedraw", points=long_pts, updated=100)],
+        )
+        result, err = self.store.apply_scene(
+            bt,
+            b_ticket,
+            elements=[_el("pen1", 1, type="freedraw", points=short_pts, updated=50)],
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        assert result is not None
+        kept = result["elements"][0]
+        self.assertEqual(len(kept["points"]), 5)
+        # Broadcast patch must also keep the rich copy.
+        self.assertEqual(len(result["patch_elements"][0]["points"]), 5)
+
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="erase"
@@ -594,6 +624,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("new WebSocket", page)
         self.assertIn("PUSH_MS_WS", page)
         self.assertIn("buildScenePatch", page)
+        self.assertIn("elementSyncSig", page)
         self.assertIn("makeTombstone", page)
         self.assertIn("shouldAcceptRemoteEl", page)
         self.assertIn('id="closeBtn"', page)
