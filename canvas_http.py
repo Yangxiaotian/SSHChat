@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import secrets
+import threading
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -419,6 +420,22 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     const PUSH_MS_DRAWING = 160;
     const PUSH_MS_HTTP = 280;
 
+    function whenIdle(fn, timeoutMs) {{
+        // Run after paint / when the browser has spare time — keeps the pen smooth.
+        const timeout = typeof timeoutMs === 'number' ? timeoutMs : 80;
+        if (typeof requestIdleCallback === 'function') {{
+            requestIdleCallback(() => {{ try {{ fn(); }} catch (_) {{}} }}, {{ timeout: timeout }});
+            return;
+        }}
+        if (typeof requestAnimationFrame === 'function') {{
+            requestAnimationFrame(() => {{
+                setTimeout(() => {{ try {{ fn(); }} catch (_) {{}} }}, 0);
+            }});
+            return;
+        }}
+        setTimeout(() => {{ try {{ fn(); }} catch (_) {{}} }}, 0);
+    }}
+
     function adoptSceneGen(value) {{
         const g = Number(value);
         if (Number.isFinite(g) && g >= 0) sceneGen = g;
@@ -470,9 +487,16 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     function endStrokeGesture() {{
         const wasDrawing = drawingActive;
         drawingActive = false;
-        if (wasDrawing) flushPendingRemote();
-        if (localDirty) schedulePush(0);
-        else setStatus(i18n.statusReady, false);
+        if (!wasDrawing) {{
+            if (localDirty) schedulePush(0);
+            return;
+        }}
+        // Pen is up: do sync/remote work asynchronously so the next stroke can start.
+        whenIdle(() => {{
+            flushPendingRemote();
+            if (localDirty) schedulePush(0);
+            else setStatus(i18n.statusReady, false);
+        }}, 48);
     }}
 
     function showLoadError(msg) {{
@@ -843,7 +867,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (sig === lastLocalSig) return;
                 lastLocalSig = sig;
                 localDirty = true;
-                schedulePush();
+                // While the pen is down, never schedule freeze/stringify — that is
+                // what caused occasional 1s stalls. Flush on pointerup instead.
+                if (!drawingActive) schedulePush();
             }},
         }}));
         loadingEl.style.display = 'none';
@@ -859,6 +885,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     return;
                 }}
                 drawingActive = true;
+                // Cancel a pending mid-flight timer so we do not stringify mid-glyph.
+                if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
             }}, true);
             const flushTail = () => {{ endStrokeGesture(); }};
             el.addEventListener('pointerup', flushTail, true);
@@ -869,16 +897,17 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function schedulePush(delayMs) {{
+        // Explicit 0 = forced flush after pen-up (allowed even if drawingActive just cleared).
+        if (drawingActive && delayMs !== 0) {{
+            localDirty = true;
+            return;
+        }}
         if (pushTimer) clearTimeout(pushTimer);
-        // Debounce uploads; always read the live scene when the timer fires so
-        // mid-debounce strokes are not dropped from the POST body.
         let ms;
         if (typeof delayMs === 'number') {{
             ms = delayMs;
         }} else if (!canvasWsLive) {{
             ms = PUSH_MS_HTTP;
-        }} else if (drawingActive) {{
-            ms = PUSH_MS_DRAWING;
         }} else {{
             ms = PUSH_MS_WS;
         }}
@@ -887,29 +916,40 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     function finishLocalPush() {{
         if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
-        const liveNow = liveScene();
-        // Compare against watermark (snapshot-based), not the pre-flight sig —
-        // freehand keeps mutating during the round-trip.
-        const leftover = buildScenePatch(liveNow.elements, liveNow.files);
-        if (!leftover.empty) {{
-            localDirty = true;
-            // While drawing, back off — immediate re-push fights the pen for the
-            // main thread. pointerup still forces a trailing flush.
-            if (drawingActive) schedulePush(PUSH_MS_DRAWING);
-            else schedulePush(canvasWsLive ? 0 : undefined);
-        }} else {{
-            localDirty = false;
-            lastLocalSig = sceneSig(liveNow.elements, liveNow.files);
-        }}
-        setStatus(i18n.statusReady, false);
+        whenIdle(() => {{
+            if (drawingActive) {{
+                localDirty = true;
+                return;
+            }}
+            const liveNow = liveScene();
+            const leftover = buildScenePatch(liveNow.elements, liveNow.files);
+            if (!leftover.empty) {{
+                localDirty = true;
+                schedulePush(canvasWsLive ? 0 : undefined);
+            }} else {{
+                localDirty = false;
+                lastLocalSig = sceneSig(liveNow.elements, liveNow.files);
+            }}
+            setStatus(i18n.statusReady, false);
+        }}, 64);
     }}
 
     async function pushScene() {{
         if (!ticket || applyingRemote || !api || clearInFlight) return;
         if (Date.now() < suppressPushUntil) return;
-        if (pushInFlight) {{
-            // Timer may fire while a push is in flight; remember to retry on ack.
+        // Never freeze/stringify on the hot pen path.
+        if (drawingActive) {{
             localDirty = true;
+            return;
+        }}
+        if (pushInFlight) {{
+            localDirty = true;
+            return;
+        }}
+        // Yield to input/paint before doing any heavy snapshot work.
+        await new Promise((resolve) => whenIdle(resolve, 64));
+        if (drawingActive || pushInFlight || !ticket || clearInFlight) {{
+            if (drawingActive) localDirty = true;
             return;
         }}
         const live = liveScene();
@@ -921,7 +961,6 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             lastLocalSig = sceneSig(elements, files);
             return;
         }}
-        // Freeze the payload — live elements keep growing during in-flight.
         const snapEls = freezeElements(patch.elements);
         const snapFiles = Object.keys(patch.files || {{}}).length
             ? cloneJson(patch.files)
@@ -934,34 +973,30 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         setStatus(i18n.statusSync, false);
         if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
             try {{
-                const sendNow = () => {{
-                    try {{
-                        if (!canvasWs || canvasWs.readyState !== 1) {{
-                            canvasWsLive = false;
-                            pushInFlight = false;
-                            localDirty = true;
-                            schedulePush();
-                            return;
-                        }}
-                        canvasWs.send(JSON.stringify({{
-                            type: 'scene',
-                            elements: snapEls,
-                            files: snapFiles,
-                            scene_gen: genAtStart,
-                        }}));
-                    }} catch (_) {{
-                        canvasWsLive = false;
-                        pushInFlight = false;
-                        localDirty = true;
-                        schedulePush();
-                    }}
-                }};
-                // Let Excalidraw paint the newest point before we block on stringify/send.
-                if (drawingActive && typeof requestAnimationFrame === 'function') {{
-                    requestAnimationFrame(sendNow);
-                }} else {{
-                    sendNow();
+                // Stringify after another idle slice so Excalidraw owns the frame.
+                await new Promise((resolve) => whenIdle(resolve, 64));
+                if (drawingActive) {{
+                    pushInFlight = false;
+                    pendingPushSig = '';
+                    pendingPushEls = null;
+                    pendingPushFiles = null;
+                    localDirty = true;
+                    return;
                 }}
+                if (!canvasWs || canvasWs.readyState !== 1) {{
+                    canvasWsLive = false;
+                    pushInFlight = false;
+                    localDirty = true;
+                    schedulePush();
+                    return;
+                }}
+                const body = JSON.stringify({{
+                    type: 'scene',
+                    elements: snapEls,
+                    files: snapFiles,
+                    scene_gen: genAtStart,
+                }});
+                canvasWs.send(body);
                 if (pushAckTimer) clearTimeout(pushAckTimer);
                 pushAckTimer = setTimeout(() => {{
                     pushAckTimer = null;
@@ -980,6 +1015,15 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }}
         }}
         try {{
+            await new Promise((resolve) => whenIdle(resolve, 64));
+            if (drawingActive) {{
+                pushInFlight = false;
+                pendingPushSig = '';
+                pendingPushEls = null;
+                pendingPushFiles = null;
+                localDirty = true;
+                return;
+            }}
             const res = await fetch('/canvas/' + token + '/scene', {{
                 method: 'POST',
                 headers: {{
@@ -1001,7 +1045,6 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             finishLocalPush();
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
-            // Stale post-clear push: resync instead of hammering the same payload.
             localDirty = true;
             void syncOnce(false).then(() => {{
                 if (localDirty) schedulePush();
@@ -1551,16 +1594,34 @@ def handle_canvas_websocket(handler: "BaseHTTPRequestHandler") -> bool:
         )
         if result is None:
             return None
-        _broadcast_canvas_update(result, exclude_conn_id=ws_client.conn_id)
+        # Broadcast off the WS read-loop thread so stringify/sendall does not
+        # delay the drawer ack (felt as pen stalls under load).
+        exclude = ws_client.conn_id
+
+        def _bcast() -> None:
+            try:
+                _broadcast_canvas_update(result, exclude_conn_id=exclude)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bcast, daemon=True).start()
         return result
 
     def on_clear(ws_client: canvas_ws.CanvasWsClient) -> Optional[dict]:
         result, _err = store.clear_board(ws_client.token, ticket)
         if result is None:
             return None
-        _broadcast_canvas_update(
-            result, exclude_conn_id=ws_client.conn_id, msg_type="clear"
-        )
+        exclude = ws_client.conn_id
+
+        def _bcast() -> None:
+            try:
+                _broadcast_canvas_update(
+                    result, exclude_conn_id=exclude, msg_type="clear"
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_bcast, daemon=True).start()
         return result
 
     canvas_ws.run_canvas_ws_session(client, on_scene=on_scene, on_clear=on_clear)
