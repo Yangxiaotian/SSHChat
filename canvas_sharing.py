@@ -186,7 +186,7 @@ class CanvasStore:
         except Exception as e:
             print(f"[Canvas] Failed to load: {e}")
 
-    def _save(self) -> None:
+    def _save(self, *, fsync: bool = True) -> None:
         try:
             data = {
                 "sessions": {
@@ -200,12 +200,14 @@ class CanvasStore:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = f"{self.store_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                # Compact JSON — indent=2 + images made clear/stroke saves multi-second.
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                if fsync:
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
             os.replace(tmp, self.store_path)
         except Exception as e:
             print(f"[Canvas] Failed to save: {e}")
@@ -218,11 +220,22 @@ class CanvasStore:
                 pass
             self._save_timer = None
 
-    def _save_now(self) -> None:
+    def _save_now(self, *, fsync: bool = True) -> None:
         """Immediate persist (create/close/clear). Cancels a pending debounced save."""
         with self.lock:
             self._cancel_save_timer_locked()
-            self._save()
+            self._save(fsync=fsync)
+
+    def _save_now_async(self, *, fsync: bool = True) -> None:
+        """Persist on a daemon thread so WS/HTTP handlers are not blocked on disk."""
+
+        def _run() -> None:
+            try:
+                self._save_now(fsync=fsync)
+            except Exception as e:
+                print(f"[Canvas] Async save failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _schedule_save(self) -> None:
         """Debounce disk writes under stroke spam. Caller may hold the store lock."""
@@ -230,7 +243,8 @@ class CanvasStore:
         def _fire() -> None:
             with self.lock:
                 self._save_timer = None
-                self._save()
+                # Stroke traffic: skip fsync — next structural save will durable-flush.
+                self._save(fsync=False)
 
         with self.lock:
             self._cancel_save_timer_locked()
@@ -960,8 +974,8 @@ class CanvasStore:
             session.scene_gen = int(session.scene_gen or 0) + 1
             session.rev += 1
             session.next_seq = session.rev + 1
-            self._save_now()
-            return {
+            self._cancel_save_timer_locked()
+            result = {
                 "rev": session.rev,
                 "scene_gen": session.scene_gen,
                 "kind": "clear",
@@ -969,7 +983,10 @@ class CanvasStore:
                 "elements": [],
                 "files": {},
                 "session_id": session.session_id,
-            }, ""
+            }
+        # Do not fsync under the WS/HTTP lock — that made Clear feel multi-second.
+        self._save_now_async(fsync=True)
+        return result, ""
 
     def sync_since(
         self, token: str, ticket: str, since: int

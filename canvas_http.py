@@ -409,8 +409,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let canvasWsForceHttp = false;
     let canvasWsRetryTimer = null;
     let httpSyncActive = false;
-    // Piano uses ~16ms note flush; canvas payloads are larger — 32ms WS / slower HTTP.
-    const PUSH_MS_WS = 32;
+    // Piano uses ~16ms note flush; canvas payloads are larger — keep WS snappy
+    // but avoid main-thread clone storms (tool clicks / clear felt frozen).
+    const PUSH_MS_WS = 48;
     const PUSH_MS_HTTP = 280;
 
     function adoptSceneGen(value) {{
@@ -536,14 +537,38 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function cloneJson(value) {{
-        // Excalidraw mutates element objects in place while drawing. Snapshot
-        // before send/ack watermark or we mark the long stroke synced while
-        // the server only received the short mid-flight copy.
+        // Prefer structuredClone; fall back to JSON for older WebViews.
+        try {{
+            if (typeof structuredClone === 'function') return structuredClone(value);
+        }} catch (_) {{}}
         try {{
             return JSON.parse(JSON.stringify(value));
         }} catch (_) {{
             return value;
         }}
+    }}
+
+    function freezeElements(els) {{
+        // Freehand mutates points in place — copy elements cheaply without
+        // JSON-serializing the whole scene on every push (that lagged tool taps).
+        const out = [];
+        for (const el of els || []) {{
+            if (!el || typeof el !== 'object') continue;
+            const copy = Object.assign({{}}, el);
+            if (Array.isArray(el.points)) {{
+                copy.points = el.points.map((p) => (Array.isArray(p) ? p.slice() : p));
+            }}
+            if (Array.isArray(el.pressures)) copy.pressures = el.pressures.slice();
+            if (Array.isArray(el.simulatePressure)) {{
+                copy.simulatePressure = el.simulatePressure.slice();
+            }}
+            if (Array.isArray(el.groupIds)) copy.groupIds = el.groupIds.slice();
+            if (Array.isArray(el.boundElements)) {{
+                copy.boundElements = el.boundElements.slice();
+            }}
+            out.push(copy);
+        }}
+        return out;
     }}
 
     function liveScene() {{
@@ -798,13 +823,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }},
         }}));
         loadingEl.style.display = 'none';
-        // Lift pen / touch end: force a trailing flush so the stroke tip is not
-        // stuck behind an in-flight mid-stroke snapshot.
+        // Lift pen / touch end: flush only when we already owe a sync — do NOT
+        // mark dirty on every toolbar tap (pen tool / UI clicks live here too).
         if (!el.__sshchatStrokeFlush) {{
             el.__sshchatStrokeFlush = true;
             const flushTail = () => {{
-                if (!ticket || applyingRemote || clearInFlight) return;
-                localDirty = true;
+                if (!ticket || applyingRemote || clearInFlight || !localDirty) return;
                 schedulePush(0);
             }};
             el.addEventListener('pointerup', flushTail, true);
@@ -857,8 +881,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             return;
         }}
         // Freeze the payload — live elements keep growing during in-flight.
-        const snapEls = cloneJson(patch.elements);
-        const snapFiles = cloneJson(patch.files);
+        const snapEls = freezeElements(patch.elements);
+        const snapFiles = Object.keys(patch.files || {{}}).length
+            ? cloneJson(patch.files)
+            : {{}};
         const genAtStart = sceneGen;
         pushInFlight = true;
         pendingPushSig = sceneSig(snapEls, snapFiles);
@@ -1158,51 +1184,59 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
     }}
 
-    clearBtn.addEventListener('click', async () => {{
+    clearBtn.addEventListener('click', () => {{
         if (!ticket) return;
         if (!confirm(i18n.clearConfirm)) return;
-        try {{
-            markBoardClearedLocally();
-            clearInFlight = true;
-            if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
-                canvasWs.send(JSON.stringify({{ type: 'clear' }}));
-                applyingRemote = true;
+        clearBtn.disabled = true;
+        markBoardClearedLocally();
+        clearInFlight = true;
+        // Yield a frame so the button/disabled state paints before resetScene.
+        requestAnimationFrame(() => {{
+            void (async () => {{
                 try {{
-                    if (api) {{
-                        if (api.resetScene) api.resetScene();
-                        else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                    if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
+                        canvasWs.send(JSON.stringify({{ type: 'clear' }}));
+                        applyingRemote = true;
+                        try {{
+                            if (api) {{
+                                if (api.resetScene) api.resetScene();
+                                else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                            }}
+                            lastLocalSig = sceneSig([], {{}});
+                            localDirty = false;
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                        return;
                     }}
-                    lastLocalSig = sceneSig([], {{}});
-                    localDirty = false;
+                    const res = await fetch('/canvas/' + token + '/clear', {{
+                        method: 'POST',
+                        headers: {{ 'X-Canvas-Ticket': ticket }},
+                        cache: 'no-store',
+                    }});
+                    const data = await res.json().catch(() => ({{}}));
+                    if (!res.ok) throw new Error(data.error || 'clear failed');
+                    rev = Number(data.rev || rev + 1);
+                    adoptSceneGen(data.scene_gen);
+                    clearInFlight = false;
+                    markBoardClearedLocally();
+                    if (api) {{
+                        applyingRemote = true;
+                        try {{
+                            api.resetScene();
+                            lastLocalSig = sceneSig([], {{}});
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                    }}
+                }} catch (_) {{
+                    clearInFlight = false;
+                    setStatus(i18n.statusErr, true);
                 }} finally {{
-                    applyingRemote = false;
+                    clearBtn.disabled = false;
                 }}
-                return;
-            }}
-            const res = await fetch('/canvas/' + token + '/clear', {{
-                method: 'POST',
-                headers: {{ 'X-Canvas-Ticket': ticket }},
-                cache: 'no-store',
-            }});
-            const data = await res.json().catch(() => ({{}}));
-            if (!res.ok) throw new Error(data.error || 'clear failed');
-            rev = Number(data.rev || rev + 1);
-            adoptSceneGen(data.scene_gen);
-            clearInFlight = false;
-            markBoardClearedLocally();
-            if (api) {{
-                applyingRemote = true;
-                try {{
-                    api.resetScene();
-                    lastLocalSig = sceneSig([], {{}});
-                }} finally {{
-                    applyingRemote = false;
-                }}
-            }}
-        }} catch (_) {{
-            clearInFlight = false;
-            setStatus(i18n.statusErr, true);
-        }}
+            }})();
+        }});
     }});
 
     // Embedded clients (Android/iOS/Electron) expose SSHChatNative.close —
