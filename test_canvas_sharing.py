@@ -625,6 +625,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("PUSH_MS_WS", page)
         self.assertIn("buildScenePatch", page)
         self.assertIn("elementSyncSig", page)
+        self.assertIn("cloneJson", page)
         self.assertIn("makeTombstone", page)
         self.assertIn("shouldAcceptRemoteEl", page)
         self.assertIn('id="closeBtn"', page)

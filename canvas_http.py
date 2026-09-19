@@ -535,6 +535,17 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         return (Number(a && a.updated) || 0) > (Number(b && b.updated) || 0);
     }}
 
+    function cloneJson(value) {{
+        // Excalidraw mutates element objects in place while drawing. Snapshot
+        // before send/ack watermark or we mark the long stroke synced while
+        // the server only received the short mid-flight copy.
+        try {{
+            return JSON.parse(JSON.stringify(value));
+        }} catch (_) {{
+            return value;
+        }}
+    }}
+
     function liveScene() {{
         if (!api) return {{ elements: [], files: {{}} }};
         // Must include deleted tombstones — eraser sets isDeleted; getSceneElements()
@@ -787,6 +798,19 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }},
         }}));
         loadingEl.style.display = 'none';
+        // Lift pen / touch end: force a trailing flush so the stroke tip is not
+        // stuck behind an in-flight mid-stroke snapshot.
+        if (!el.__sshchatStrokeFlush) {{
+            el.__sshchatStrokeFlush = true;
+            const flushTail = () => {{
+                if (!ticket || applyingRemote || clearInFlight) return;
+                localDirty = true;
+                schedulePush(0);
+            }};
+            el.addEventListener('pointerup', flushTail, true);
+            el.addEventListener('pointercancel', flushTail, true);
+            el.addEventListener('touchend', flushTail, true);
+        }}
     }}
 
     function schedulePush(delayMs) {{
@@ -799,23 +823,30 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         pushTimer = setTimeout(() => {{ void pushScene(); }}, ms);
     }}
 
-    function finishLocalPush(sigAtStart) {{
+    function finishLocalPush() {{
         if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
         const liveNow = liveScene();
-        if (sceneSig(liveNow.elements, liveNow.files) === sigAtStart) {{
-            localDirty = false;
-            lastLocalSig = sigAtStart;
-        }} else {{
+        // Compare against watermark (snapshot-based), not the pre-flight sig —
+        // freehand keeps mutating during the round-trip.
+        const leftover = buildScenePatch(liveNow.elements, liveNow.files);
+        if (!leftover.empty) {{
             localDirty = true;
-            // WS path: flush immediately so stroke tails stay snappy.
             schedulePush(canvasWsLive ? 0 : undefined);
+        }} else {{
+            localDirty = false;
+            lastLocalSig = sceneSig(liveNow.elements, liveNow.files);
         }}
         setStatus(i18n.statusReady, false);
     }}
 
     async function pushScene() {{
-        if (!ticket || applyingRemote || !api || pushInFlight || clearInFlight) return;
+        if (!ticket || applyingRemote || !api || clearInFlight) return;
         if (Date.now() < suppressPushUntil) return;
+        if (pushInFlight) {{
+            // Timer may fire while a push is in flight; remember to retry on ack.
+            localDirty = true;
+            return;
+        }}
         const live = liveScene();
         const elements = live.elements;
         const files = live.files;
@@ -825,19 +856,21 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             lastLocalSig = sceneSig(elements, files);
             return;
         }}
-        const sigAtStart = sceneSig(elements, files);
+        // Freeze the payload — live elements keep growing during in-flight.
+        const snapEls = cloneJson(patch.elements);
+        const snapFiles = cloneJson(patch.files);
         const genAtStart = sceneGen;
         pushInFlight = true;
-        pendingPushSig = sigAtStart;
-        pendingPushEls = patch.elements;
-        pendingPushFiles = patch.files;
+        pendingPushSig = sceneSig(snapEls, snapFiles);
+        pendingPushEls = snapEls;
+        pendingPushFiles = snapFiles;
         setStatus(i18n.statusSync, false);
         if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
             try {{
                 canvasWs.send(JSON.stringify({{
                     type: 'scene',
-                    elements: patch.elements,
-                    files: patch.files,
+                    elements: snapEls,
+                    files: snapFiles,
                     scene_gen: genAtStart,
                 }}));
                 if (pushAckTimer) clearTimeout(pushAckTimer);
@@ -866,8 +899,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }},
                 cache: 'no-store',
                 body: JSON.stringify({{
-                    elements: patch.elements,
-                    files: patch.files,
+                    elements: snapEls,
+                    files: snapFiles,
                     scene_gen: genAtStart,
                 }}),
             }});
@@ -875,8 +908,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
             adoptSceneGen(data.scene_gen);
-            markLocalPushed(patch.elements, patch.files);
-            finishLocalPush(sigAtStart);
+            markLocalPushed(snapEls, snapFiles);
+            finishLocalPush();
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
             // Stale post-clear push: resync instead of hammering the same payload.
@@ -1050,7 +1083,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (pushedEls || pushedFiles) {{
                     markLocalPushed(pushedEls || [], pushedFiles || {{}});
                 }}
-                if (sig) finishLocalPush(sig);
+                if (sig) finishLocalPush();
                 else setStatus(i18n.statusReady, false);
                 return;
             }}
