@@ -43,7 +43,8 @@ MAX_SCENE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_SCENE_BYTES", str(12 * 
 MAX_FILES_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILES_BYTES", str(10 * 1024 * 1024)))
 MAX_FILE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILE_BYTES", str(4 * 1024 * 1024)))
 # Debounce disk writes under stroke spam (create/close/clear still save immediately).
-SAVE_DEBOUNCE_SECONDS = float(os.environ.get("SSHCHAT_CANVAS_SAVE_DEBOUNCE", "1.5"))
+# Keep this above typical "1s hitch" windows so rare saves do not land mid-phrase.
+SAVE_DEBOUNCE_SECONDS = float(os.environ.get("SSHCHAT_CANVAS_SAVE_DEBOUNCE", "3.0"))
 # Legacy stroke constants — kept so old clients get a clear error path.
 MAX_STROKES = int(os.environ.get("SSHCHAT_CANVAS_MAX_STROKES", "5000"))
 MAX_POINTS_PER_STROKE = int(os.environ.get("SSHCHAT_CANVAS_MAX_POINTS", "800"))
@@ -108,6 +109,7 @@ class CanvasStore:
         self.tickets: Dict[str, CanvasAccessTicket] = {}
         self.lock = threading.RLock()
         self._save_timer: Optional[threading.Timer] = None
+        self._save_files_dirty: bool = False
         self._load()
 
     def _load(self) -> None:
@@ -186,21 +188,91 @@ class CanvasStore:
         except Exception as e:
             print(f"[Canvas] Failed to load: {e}")
 
-    def _save(self, *, fsync: bool = True) -> None:
+    def _session_to_disk_dict(
+        self, session: CanvasSession, *, omit_file_bodies: bool
+    ) -> dict:
+        """Serialize one session. Stroke saves omit base64 dataURLs (huge/slow)."""
+        if not omit_file_bodies:
+            return asdict(session)
+        slim_files: Dict[str, dict] = {}
+        for fid, meta in (session.files or {}).items():
+            if not isinstance(fid, str):
+                continue
+            if isinstance(meta, dict):
+                slim_files[fid] = {
+                    k: v for k, v in meta.items() if k != "dataURL"
+                }
+            else:
+                continue
+        saved = session.files
+        session.files = slim_files
         try:
-            data = {
-                "sessions": {
-                    sid: asdict(session) for sid, session in self.sessions.items()
-                },
-                "tickets": {
-                    ticket: asdict(entry) for ticket, entry in self.tickets.items()
-                },
-            }
+            return asdict(session)
+        finally:
+            session.files = saved
+
+    def _build_save_payload_locked(self, *, omit_file_bodies: bool = False) -> dict:
+        return {
+            "sessions": {
+                sid: self._session_to_disk_dict(
+                    session, omit_file_bodies=omit_file_bodies
+                )
+                for sid, session in self.sessions.items()
+            },
+            "tickets": {
+                ticket: asdict(entry) for ticket, entry in self.tickets.items()
+            },
+        }
+
+    @staticmethod
+    def _merge_preserved_file_bodies(data: dict, previous: dict) -> None:
+        """Keep image dataURLs from the last full save when stroke save stripped them."""
+        old_sessions = previous.get("sessions") or {}
+        for sid, sess in (data.get("sessions") or {}).items():
+            if not isinstance(sess, dict):
+                continue
+            old = old_sessions.get(sid) or {}
+            old_files = old.get("files") or {}
+            new_files = sess.get("files") or {}
+            if not isinstance(old_files, dict) or not isinstance(new_files, dict):
+                continue
+            merged: Dict[str, dict] = dict(old_files)
+            for fid, meta in new_files.items():
+                if not isinstance(fid, str) or not isinstance(meta, dict):
+                    continue
+                if meta.get("dataURL"):
+                    merged[fid] = meta
+                    continue
+                prev = old_files.get(fid)
+                if isinstance(prev, dict) and prev.get("dataURL"):
+                    keep = dict(meta)
+                    keep["dataURL"] = prev["dataURL"]
+                    merged[fid] = keep
+                else:
+                    merged[fid] = meta
+            live_ids = set(new_files.keys())
+            sess["files"] = {k: v for k, v in merged.items() if k in live_ids}
+
+    def _write_save_payload(
+        self,
+        data: dict,
+        *,
+        fsync: bool = True,
+        merge_file_bodies: bool = False,
+    ) -> None:
+        try:
+            if merge_file_bodies and os.path.exists(self.store_path):
+                try:
+                    with open(self.store_path, "r", encoding="utf-8") as rf:
+                        previous = json.load(rf)
+                    if isinstance(previous, dict):
+                        self._merge_preserved_file_bodies(data, previous)
+                except Exception:
+                    pass
             path = Path(self.store_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = f"{self.store_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                # Compact JSON — indent=2 + images made clear/stroke saves multi-second.
                 json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
                 f.flush()
                 if fsync:
@@ -212,6 +284,18 @@ class CanvasStore:
         except Exception as e:
             print(f"[Canvas] Failed to save: {e}")
 
+    def _save(self, *, fsync: bool = True, omit_file_bodies: bool = False) -> None:
+        """Snapshot under the lock, then write without holding it when possible."""
+        with self.lock:
+            data = self._build_save_payload_locked(
+                omit_file_bodies=omit_file_bodies
+            )
+        self._write_save_payload(
+            data,
+            fsync=fsync,
+            merge_file_bodies=omit_file_bodies,
+        )
+
     def _cancel_save_timer_locked(self) -> None:
         if self._save_timer is not None:
             try:
@@ -221,10 +305,11 @@ class CanvasStore:
             self._save_timer = None
 
     def _save_now(self, *, fsync: bool = True) -> None:
-        """Immediate persist (create/close/clear). Cancels a pending debounced save."""
+        """Immediate full persist (create/close/clear). Cancels a pending debounced save."""
         with self.lock:
             self._cancel_save_timer_locked()
-            self._save(fsync=fsync)
+            data = self._build_save_payload_locked(omit_file_bodies=False)
+        self._write_save_payload(data, fsync=fsync, merge_file_bodies=False)
 
     def _save_now_async(self, *, fsync: bool = True) -> None:
         """Persist on a daemon thread so WS/HTTP handlers are not blocked on disk."""
@@ -237,16 +322,26 @@ class CanvasStore:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _schedule_save(self) -> None:
+    def _schedule_save(self, *, files_changed: bool = False) -> None:
         """Debounce disk writes under stroke spam. Caller may hold the store lock."""
 
         def _fire() -> None:
-            with self.lock:
-                self._save_timer = None
-                # Stroke traffic: skip fsync — next structural save will durable-flush.
-                self._save(fsync=False)
+            try:
+                with self.lock:
+                    self._save_timer = None
+                    omit = not bool(getattr(self, "_save_files_dirty", False))
+                    self._save_files_dirty = False
+                    data = self._build_save_payload_locked(omit_file_bodies=omit)
+                # Disk I/O off the store lock so WS scene pushes stay responsive.
+                self._write_save_payload(
+                    data, fsync=False, merge_file_bodies=omit
+                )
+            except Exception as e:
+                print(f"[Canvas] Debounced save failed: {e}")
 
         with self.lock:
+            if files_changed:
+                self._save_files_dirty = True
             self._cancel_save_timer_locked()
             timer = threading.Timer(max(0.2, SAVE_DEBOUNCE_SECONDS), _fire)
             timer.daemon = True
@@ -919,7 +1014,7 @@ class CanvasStore:
             # Keep legacy next_seq in lockstep for any old poller.
             session.next_seq = session.rev + 1
             # Stroke spam: debounce fsync so WS push stays responsive.
-            self._schedule_save()
+            self._schedule_save(files_changed=bool(file_patch))
             # Broadcast post-merge truth for touched ids — never echo a stale
             # client patch that lost to a newer tombstone already on the server.
             touched = {

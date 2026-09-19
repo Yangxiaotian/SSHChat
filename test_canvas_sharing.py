@@ -194,6 +194,38 @@ class CanvasStoreTests(unittest.TestCase):
         # Broadcast patch must also keep the rich copy.
         self.assertEqual(len(result["patch_elements"][0]["points"]), 5)
 
+    def test_debounced_save_preserves_image_dataurls(self) -> None:
+        """Stroke saves omit dataURL bodies but must merge them back from disk."""
+        session = self.store.create_session(
+            creator="Alice", participants=[], room="img-save"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(
+            token, session.keys["Alice"]
+        )
+        data_url = "data:image/png;base64,AAAA"
+        self.store.apply_scene(
+            token,
+            ticket,
+            elements=[
+                _el("img1", 1, type="image", fileId="f1", width=10, height=10)
+            ],
+            files={"f1": {"id": "f1", "mimeType": "image/png", "dataURL": data_url}},
+        )
+        # Force a full save so dataURL is on disk.
+        self.store._save_now(fsync=False)
+        # Element-only stroke save should keep the image body via merge.
+        self.store.apply_scene(
+            token, ticket, elements=[_el("img1", 2, type="image", fileId="f1")]
+        )
+        self.store._save(fsync=False, omit_file_bodies=True)
+        reloaded = canvas_sharing.CanvasStore(store_path=self.store.store_path)
+        found = reloaded.find_open_for_room("img-save")
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertIn("f1", found.files)
+        self.assertEqual(found.files["f1"].get("dataURL"), data_url)
+
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="erase"
@@ -624,6 +656,7 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("new WebSocket", page)
         self.assertIn("PUSH_MS_WS", page)
         self.assertIn("PUSH_MS_DRAWING", page)
+        self.assertIn("STROKE_IDLE_MS", page)
         self.assertIn("drawingActive", page)
         self.assertIn("buildScenePatch", page)
         self.assertIn("elementSyncSig", page)
