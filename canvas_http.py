@@ -414,6 +414,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     // clone/stringify does not steal frames from Excalidraw input.
     let drawingActive = false;
     let pendingRemote = null;
+    let localQuietUntil = 0;
+    let quietFlushTimer = null;
     // Piano uses ~16ms note flush; canvas payloads are larger — keep WS snappy
     // but avoid main-thread clone storms (tool clicks / clear felt frozen).
     const PUSH_MS_WS = 48;
@@ -434,6 +436,27 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             return;
         }}
         setTimeout(() => {{ try {{ fn(); }} catch (_) {{}} }}, 0);
+    }}
+
+    function bumpLocalQuiet(ms) {{
+        // Block remote updateScene while Excalidraw owns the pen — that was
+        // causing "写不出来" / warped glyphs mid-phrase.
+        const hold = typeof ms === 'number' ? ms : 500;
+        localQuietUntil = Math.max(localQuietUntil, Date.now() + hold);
+        if (quietFlushTimer) clearTimeout(quietFlushTimer);
+        quietFlushTimer = setTimeout(() => {{
+            quietFlushTimer = null;
+            if (drawingActive || Date.now() < localQuietUntil) return;
+            whenIdle(() => {{
+                if (drawingActive || Date.now() < localQuietUntil) return;
+                flushPendingRemote();
+                if (localDirty && !pushInFlight) schedulePush(0);
+            }}, 32);
+        }}, hold + 16);
+    }}
+
+    function isPenHot() {{
+        return drawingActive || Date.now() < localQuietUntil;
     }}
 
     function adoptSceneGen(value) {{
@@ -463,6 +486,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         resetSyncWatermark();
         pendingRemote = null;
         drawingActive = false;
+        localQuietUntil = 0;
+        if (quietFlushTimer) {{ clearTimeout(quietFlushTimer); quietFlushTimer = null; }}
         lastLocalSig = sceneSig([], {{}});
         localDirty = false;
         // Excalidraw may emit a late onChange with pre-clear elements; ignore
@@ -491,12 +516,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (localDirty) schedulePush(0);
             return;
         }}
-        // Pen is up: do sync/remote work asynchronously so the next stroke can start.
-        whenIdle(() => {{
-            flushPendingRemote();
-            if (localDirty) schedulePush(0);
-            else setStatus(i18n.statusReady, false);
-        }}, 48);
+        // Keep remote updateScene away until Excalidraw finishes the stroke.
+        bumpLocalQuiet(550);
     }}
 
     function showLoadError(msg) {{
@@ -576,11 +597,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         );
     }}
 
-    function elementRicherThan(a, b) {{
-        // Same version/nonce: keep the stroke with more geometry / newer stamp.
-        const pa = elementPointsLen(a);
-        const pb = elementPointsLen(b);
-        if (pa !== pb) return pa > pb;
+    function elementNewerThan(a, b) {{
+        // Same version/nonce: newer updated wins. Never prefer longer point
+        // lists — final freehand is often simplified (fewer points); keeping
+        // the longer mid-stroke copy makes glyphs look warped.
         return (Number(a && a.updated) || 0) > (Number(b && b.updated) || 0);
     }}
 
@@ -718,10 +738,10 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const liveRank = elementRank(live);
             if (remoteRank > liveRank) return true;
             if (remoteRank < liveRank) return false;
-            // Tie: tombstone wins; else take richer freehand / newer updated.
+            // Tie: tombstone wins; else take newer updated (not more points).
             if (el.isDeleted && !live.isDeleted) return true;
             if (!el.isDeleted && live.isDeleted) return false;
-            return elementRicherThan(el, live);
+            return elementNewerThan(el, live);
         }}
         // Missing locally.
         if (syncedDeleted[el.id]) {{
@@ -788,7 +808,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             else if (ra < rb) byId[el.id] = old;
             else if (el.isDeleted !== old.isDeleted) {{
                 byId[el.id] = preferDeletedOnTie(old, el);
-            }} else if (elementRicherThan(el, old)) {{
+            }} else if (elementNewerThan(el, old)) {{
                 byId[el.id] = el;
             }} else {{
                 byId[el.id] = old;
@@ -867,9 +887,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (sig === lastLocalSig) return;
                 lastLocalSig = sig;
                 localDirty = true;
-                // While the pen is down, never schedule freeze/stringify — that is
-                // what caused occasional 1s stalls. Flush on pointerup instead.
-                if (!drawingActive) schedulePush();
+                // While the pen is hot, never schedule freeze/stringify.
+                if (!isPenHot()) schedulePush();
             }},
         }}));
         loadingEl.style.display = 'none';
@@ -885,6 +904,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     return;
                 }}
                 drawingActive = true;
+                bumpLocalQuiet(700);
                 // Cancel a pending mid-flight timer so we do not stringify mid-glyph.
                 if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
             }}, true);
@@ -897,8 +917,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function schedulePush(delayMs) {{
-        // Explicit 0 = forced flush after pen-up (allowed even if drawingActive just cleared).
-        if (drawingActive && delayMs !== 0) {{
+        // While Excalidraw owns the pen (or quiet window), only mark dirty —
+        // bumpLocalQuiet will flush afterward.
+        if (isPenHot()) {{
             localDirty = true;
             return;
         }}
@@ -917,7 +938,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     function finishLocalPush() {{
         if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
         whenIdle(() => {{
-            if (drawingActive) {{
+            if (isPenHot()) {{
                 localDirty = true;
                 return;
             }}
@@ -938,7 +959,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (!ticket || applyingRemote || !api || clearInFlight) return;
         if (Date.now() < suppressPushUntil) return;
         // Never freeze/stringify on the hot pen path.
-        if (drawingActive) {{
+        if (isPenHot()) {{
             localDirty = true;
             return;
         }}
@@ -948,8 +969,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
         // Yield to input/paint before doing any heavy snapshot work.
         await new Promise((resolve) => whenIdle(resolve, 64));
-        if (drawingActive || pushInFlight || !ticket || clearInFlight) {{
-            if (drawingActive) localDirty = true;
+        if (isPenHot() || pushInFlight || !ticket || clearInFlight) {{
+            if (isPenHot()) localDirty = true;
             return;
         }}
         const live = liveScene();
@@ -975,7 +996,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             try {{
                 // Stringify after another idle slice so Excalidraw owns the frame.
                 await new Promise((resolve) => whenIdle(resolve, 64));
-                if (drawingActive) {{
+                if (isPenHot()) {{
                     pushInFlight = false;
                     pendingPushSig = '';
                     pendingPushEls = null;
@@ -1016,7 +1037,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
         try {{
             await new Promise((resolve) => whenIdle(resolve, 64));
-            if (drawingActive) {{
+            if (isPenHot()) {{
                 pushInFlight = false;
                 pendingPushSig = '';
                 pendingPushEls = null;
@@ -1080,8 +1101,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             rev = Math.max(rev, remoteRev);
             return;
         }}
-        // Never updateScene while the pen is down — that stalls Excalidraw input.
-        if (drawingActive) {{
+        // Never updateScene while the pen is hot — that stalls/warps Excalidraw.
+        if (isPenHot()) {{
             if (!pendingRemote) {{
                 pendingRemote = data;
             }} else {{

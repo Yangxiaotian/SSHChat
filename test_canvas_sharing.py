@@ -164,8 +164,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertTrue(result["patch_elements"][0]["isDeleted"])
         self.assertEqual(result["patch_elements"][0]["version"], 2)
 
-    def test_same_version_keeps_richer_freehand_points(self) -> None:
-        """Mid-stroke patches often share version; shorter must not win."""
+    def test_same_version_prefers_newer_updated_not_more_points(self) -> None:
+        """Final freehand often has fewer points; a longer stale copy must not win."""
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="points"
         )
@@ -184,15 +184,14 @@ class CanvasStoreTests(unittest.TestCase):
         result, err = self.store.apply_scene(
             bt,
             b_ticket,
-            elements=[_el("pen1", 1, type="freedraw", points=short_pts, updated=50)],
+            elements=[_el("pen1", 1, type="freedraw", points=short_pts, updated=200)],
         )
         self.assertEqual(err, "")
         self.assertIsNotNone(result)
         assert result is not None
         kept = result["elements"][0]
-        self.assertEqual(len(kept["points"]), 5)
-        # Broadcast patch must also keep the rich copy.
-        self.assertEqual(len(result["patch_elements"][0]["points"]), 5)
+        self.assertEqual(len(kept["points"]), 2)
+        self.assertEqual(kept["updated"], 200)
 
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
@@ -626,6 +625,8 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("PUSH_MS_DRAWING", page)
         self.assertIn("drawingActive", page)
         self.assertIn("whenIdle", page)
+        self.assertIn("isPenHot", page)
+        self.assertIn("bumpLocalQuiet", page)
         self.assertIn("buildScenePatch", page)
         self.assertIn("elementSyncSig", page)
         self.assertIn("cloneJson", page)
