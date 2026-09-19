@@ -109,6 +109,35 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(payload["elements"][0]["width"], 99)
         self.assertEqual(payload["elements"][0]["version"], 2)
 
+    def test_apply_scene_returns_patch_not_only_full(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=[], room="patch"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(
+            token, session.keys["Alice"]
+        )
+        first, err = self.store.apply_scene(
+            token, ticket, elements=[_el("a", 1), _el("b", 1)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(len(first["elements"]), 2)
+        self.assertEqual(len(first["patch_elements"]), 2)
+
+        second, err = self.store.apply_scene(
+            token, ticket, elements=[_el("b", 2, width=50)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(second)
+        assert second is not None
+        # Full scene still has both; patch is only the dirty element.
+        self.assertEqual(len(second["elements"]), 2)
+        self.assertEqual(len(second["patch_elements"]), 1)
+        self.assertEqual(second["patch_elements"][0]["id"], "b")
+        self.assertEqual(second["patch_elements"][0]["width"], 50)
+
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="erase"
@@ -532,11 +561,13 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("window.name", page)
         self.assertIn("excalidraw-root", page)
         # Peers need BinaryFileData[]; passing the files map shows image placeholders.
-        self.assertIn("Object.values(remoteFileMap)", page)
+        self.assertIn("Object.values(remoteFiles)", page)
         self.assertIn("api.addFiles(fileList)", page)
         self.assertIn("connectCanvasWs", page)
         self.assertIn("/ws?ticket=", page)
         self.assertIn("new WebSocket", page)
+        self.assertIn("PUSH_MS_WS", page)
+        self.assertIn("buildScenePatch", page)
         self.assertIn('id="closeBtn"', page)
         self.assertIn("SSHChatNative", page)
         self.assertIn("__SSHCHAT_EMBEDDED__", page)

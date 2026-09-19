@@ -42,6 +42,8 @@ MAX_ELEMENTS = int(os.environ.get("SSHCHAT_CANVAS_MAX_ELEMENTS", "5000"))
 MAX_SCENE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_SCENE_BYTES", str(12 * 1024 * 1024)))
 MAX_FILES_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILES_BYTES", str(10 * 1024 * 1024)))
 MAX_FILE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILE_BYTES", str(4 * 1024 * 1024)))
+# Debounce disk writes under stroke spam (create/close/clear still save immediately).
+SAVE_DEBOUNCE_SECONDS = float(os.environ.get("SSHCHAT_CANVAS_SAVE_DEBOUNCE", "1.5"))
 # Legacy stroke constants — kept so old clients get a clear error path.
 MAX_STROKES = int(os.environ.get("SSHCHAT_CANVAS_MAX_STROKES", "5000"))
 MAX_POINTS_PER_STROKE = int(os.environ.get("SSHCHAT_CANVAS_MAX_POINTS", "800"))
@@ -105,6 +107,7 @@ class CanvasStore:
         self.token_to_session: Dict[str, str] = {}
         self.tickets: Dict[str, CanvasAccessTicket] = {}
         self.lock = threading.RLock()
+        self._save_timer: Optional[threading.Timer] = None
         self._load()
 
     def _load(self) -> None:
@@ -206,6 +209,36 @@ class CanvasStore:
             os.replace(tmp, self.store_path)
         except Exception as e:
             print(f"[Canvas] Failed to save: {e}")
+
+    def _cancel_save_timer_locked(self) -> None:
+        if self._save_timer is not None:
+            try:
+                self._save_timer.cancel()
+            except Exception:
+                pass
+            self._save_timer = None
+
+    def _save_now(self) -> None:
+        """Immediate persist (create/close/clear). Cancels a pending debounced save."""
+        with self.lock:
+            self._cancel_save_timer_locked()
+            self._save()
+
+    def _schedule_save(self) -> None:
+        """Debounce disk writes under stroke spam. Caller may hold the store lock."""
+
+        def _fire() -> None:
+            with self.lock:
+                self._save_timer = None
+                self._save()
+
+        with self.lock:
+            self._cancel_save_timer_locked()
+            timer = threading.Timer(max(0.2, SAVE_DEBOUNCE_SECONDS), _fire)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
+
     def create_session(
         self,
         creator: str,
@@ -845,12 +878,16 @@ class CanvasStore:
             session.rev += 1
             # Keep legacy next_seq in lockstep for any old poller.
             session.next_seq = session.rev + 1
-            self._save()
+            # Stroke spam: debounce fsync so WS push stays responsive.
+            self._schedule_save()
             return {
                 "rev": session.rev,
                 "scene_gen": session.scene_gen,
                 "elements": session.elements,
                 "files": session.files,
+                # Peers merge by id/version — broadcast only the applied patch.
+                "patch_elements": cleaned,
+                "patch_files": file_patch if file_patch is not None else {},
                 "author": participant,
                 "session_id": session.session_id,
             }, ""
@@ -886,7 +923,7 @@ class CanvasStore:
             session.scene_gen = int(session.scene_gen or 0) + 1
             session.rev += 1
             session.next_seq = session.rev + 1
-            self._save()
+            self._save_now()
             return {
                 "rev": session.rev,
                 "scene_gen": session.scene_gen,

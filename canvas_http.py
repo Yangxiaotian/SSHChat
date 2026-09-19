@@ -1,7 +1,8 @@
 """HTML page and request helpers for the shared canvas (served by FileHTTP).
 
-UI: Excalidraw (CDN). Sync: Excalidraw elements JSON over the existing
-URL+key → ticket gate, with WebSocket scene push/broadcast (HTTP poll fallback).
+UI: Excalidraw (CDN). Sync: Excalidraw element patches over WebSocket
+(URL+key → ticket), with HTTP poll fallback. Clients push dirty elements
+only; peers merge by id/version (same rule as the server).
 """
 
 from __future__ import annotations
@@ -392,14 +393,22 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let suppressPushUntil = 0;
     let localDirty = false;
     let pendingPushSig = '';
+    let pendingPushEls = null;
+    let pendingPushFiles = null;
     let pushAckTimer = null;
     let api = null;
     let lastLocalSig = '';
+    // Server watermark: rank/file ids we believe the hub already has.
+    let syncedRank = Object.create(null);
+    let syncedFiles = Object.create(null);
     let canvasWs = null;
     let canvasWsLive = false;
     let canvasWsForceHttp = false;
     let canvasWsRetryTimer = null;
     let httpSyncActive = false;
+    // Piano uses ~16ms note flush; canvas payloads are larger — 32ms WS / slower HTTP.
+    const PUSH_MS_WS = 32;
+    const PUSH_MS_HTTP = 280;
 
     function adoptSceneGen(value) {{
         const g = Number(value);
@@ -411,11 +420,19 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
         pushInFlight = false;
         pendingPushSig = '';
+        pendingPushEls = null;
+        pendingPushFiles = null;
         localDirty = false;
+    }}
+
+    function resetSyncWatermark() {{
+        syncedRank = Object.create(null);
+        syncedFiles = Object.create(null);
     }}
 
     function markBoardClearedLocally() {{
         abortPendingPush();
+        resetSyncWatermark();
         lastLocalSig = sceneSig([], {{}});
         localDirty = false;
         // Excalidraw may emit a late onChange with pre-clear elements; ignore
@@ -500,6 +517,56 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (a && a.isDeleted && !(b && b.isDeleted)) return a;
         if (b && b.isDeleted && !(a && a.isDeleted)) return b;
         return b || a;
+    }}
+
+    function markLocalPushed(els, files) {{
+        for (const el of els || []) {{
+            if (el && typeof el.id === 'string' && el.id) {{
+                syncedRank[el.id] = elementRank(el);
+            }}
+        }}
+        for (const fid of Object.keys(files || {{}})) {{
+            syncedFiles[fid] = true;
+        }}
+    }}
+
+    function noteRemoteSynced(remoteEls, remoteFiles) {{
+        // Advance watermark only up to what the server sent — keep local-newer
+        // strokes dirty so we still push them after a peer patch merges in.
+        for (const el of remoteEls || []) {{
+            if (!el || typeof el.id !== 'string' || !el.id) continue;
+            const r = elementRank(el);
+            const prev = syncedRank[el.id];
+            if (prev == null || r > prev) syncedRank[el.id] = r;
+        }}
+        for (const fid of Object.keys(remoteFiles || {{}})) {{
+            syncedFiles[fid] = true;
+        }}
+    }}
+
+    function buildScenePatch(elements, files) {{
+        const dirtyEls = [];
+        for (const el of elements || []) {{
+            if (!el || typeof el.id !== 'string' || !el.id) continue;
+            const r = elementRank(el);
+            if (syncedRank[el.id] !== r) dirtyEls.push(el);
+        }}
+        const dirtyFiles = {{}};
+        const fileMap = files || {{}};
+        for (const el of dirtyEls) {{
+            const fid = el.fileId;
+            if (fid && fileMap[fid] && !syncedFiles[fid]) {{
+                dirtyFiles[fid] = fileMap[fid];
+            }}
+        }}
+        for (const fid of Object.keys(fileMap)) {{
+            if (!syncedFiles[fid] && fileMap[fid]) dirtyFiles[fid] = fileMap[fid];
+        }}
+        return {{
+            elements: dirtyEls,
+            files: dirtyFiles,
+            empty: dirtyEls.length === 0 && Object.keys(dirtyFiles).length === 0,
+        }};
     }}
 
     function mergeElements(base, incoming) {{
@@ -600,11 +667,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         loadingEl.style.display = 'none';
     }}
 
-    function schedulePush() {{
+    function schedulePush(delayMs) {{
         if (pushTimer) clearTimeout(pushTimer);
         // Debounce uploads; always read the live scene when the timer fires so
         // mid-debounce strokes are not dropped from the POST body.
-        pushTimer = setTimeout(() => {{ void pushScene(); }}, 450);
+        const ms = typeof delayMs === 'number'
+            ? delayMs
+            : (canvasWsLive ? PUSH_MS_WS : PUSH_MS_HTTP);
+        pushTimer = setTimeout(() => {{ void pushScene(); }}, ms);
     }}
 
     function finishLocalPush(sigAtStart) {{
@@ -615,7 +685,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             lastLocalSig = sigAtStart;
         }} else {{
             localDirty = true;
-            schedulePush();
+            // WS path: flush immediately so stroke tails stay snappy.
+            schedulePush(canvasWsLive ? 0 : undefined);
         }}
         setStatus(i18n.statusReady, false);
     }}
@@ -626,17 +697,25 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         const live = liveScene();
         const elements = live.elements;
         const files = live.files;
+        const patch = buildScenePatch(elements, files);
+        if (patch.empty) {{
+            localDirty = false;
+            lastLocalSig = sceneSig(elements, files);
+            return;
+        }}
         const sigAtStart = sceneSig(elements, files);
         const genAtStart = sceneGen;
         pushInFlight = true;
         pendingPushSig = sigAtStart;
+        pendingPushEls = patch.elements;
+        pendingPushFiles = patch.files;
         setStatus(i18n.statusSync, false);
         if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
             try {{
                 canvasWs.send(JSON.stringify({{
                     type: 'scene',
-                    elements: elements || [],
-                    files: files || {{}},
+                    elements: patch.elements,
+                    files: patch.files,
                     scene_gen: genAtStart,
                 }}));
                 if (pushAckTimer) clearTimeout(pushAckTimer);
@@ -645,6 +724,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     if (!pushInFlight) return;
                     pushInFlight = false;
                     pendingPushSig = '';
+                    pendingPushEls = null;
+                    pendingPushFiles = null;
                     canvasWsLive = false;
                     localDirty = true;
                     schedulePush();
@@ -663,8 +744,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }},
                 cache: 'no-store',
                 body: JSON.stringify({{
-                    elements: elements || [],
-                    files: files || {{}},
+                    elements: patch.elements,
+                    files: patch.files,
                     scene_gen: genAtStart,
                 }}),
             }});
@@ -672,6 +753,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
             adoptSceneGen(data.scene_gen);
+            markLocalPushed(patch.elements, patch.files);
             finishLocalPush(sigAtStart);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
@@ -683,6 +765,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }} finally {{
             pushInFlight = false;
             pendingPushSig = '';
+            pendingPushEls = null;
+            pendingPushFiles = null;
         }}
     }}
 
@@ -710,6 +794,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (remoteRev < rev) return;
         adoptSceneGen(data.scene_gen);
         const remoteEls = data.elements || [];
+        const remoteFiles = data.files || {{}};
+        noteRemoteSynced(remoteEls, remoteFiles);
         const live = liveScene();
         let nextEls;
         // Empty remote + no local pending ⇒ peer clear / empty board.
@@ -719,15 +805,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }} else {{
             nextEls = mergeElements(remoteEls, live.elements);
         }}
-        const nextFiles = Object.assign({{}}, live.files || {{}}, data.files || {{}});
+        const nextFiles = Object.assign({{}}, live.files || {{}}, remoteFiles);
         const nextSig = sceneSig(nextEls, nextFiles);
         const curSig = sceneSig(live.elements, live.files);
-        if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
+        if (nextSig !== curSig || (remoteFiles && Object.keys(remoteFiles).length)) {{
             applyingRemote = true;
             try {{
                 // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
-                const remoteFileMap = data.files || {{}};
-                const fileList = Object.values(remoteFileMap).filter(
+                const fileList = Object.values(remoteFiles).filter(
                     (f) => f && typeof f === 'object' && f.dataURL
                 );
                 if (fileList.length && api.addFiles) {{
@@ -808,8 +893,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (typeof data.rev === 'number') rev = data.rev;
                 adoptSceneGen(data.scene_gen);
                 const sig = pendingPushSig;
+                const pushedEls = pendingPushEls;
+                const pushedFiles = pendingPushFiles;
                 pushInFlight = false;
                 pendingPushSig = '';
+                pendingPushEls = null;
+                pendingPushFiles = null;
                 if (String(data.kind || '') === 'clear') {{
                     clearInFlight = false;
                     markBoardClearedLocally();
@@ -819,6 +908,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (clearInFlight) {{
                     setStatus(i18n.statusReady, false);
                     return;
+                }}
+                if (pushedEls || pushedFiles) {{
+                    markLocalPushed(pushedEls || [], pushedFiles || {{}});
                 }}
                 if (sig) finishLocalPush(sig);
                 else setStatus(i18n.statusReady, false);
@@ -833,6 +925,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
                 pushInFlight = false;
                 pendingPushSig = '';
+                pendingPushEls = null;
+                pendingPushFiles = null;
                 clearInFlight = false;
                 setStatus(i18n.statusErr, true);
                 // Prefer resync: stale pre-clear pushes must not loop.
@@ -1065,11 +1159,19 @@ def _broadcast_canvas_update(
         "rev": result.get("rev", 0),
         "scene_gen": result.get("scene_gen", 0),
         "author": result.get("author") or "",
-        "elements": result.get("elements") if msg_type != "clear" else [],
-        "files": result.get("files") if msg_type != "clear" else {},
+        "elements": [],
+        "files": {},
     }
     if msg_type == "clear":
         payload["kind"] = "clear"
+    else:
+        # Prefer incremental patch when present (peers merge by id/version).
+        if "patch_elements" in result:
+            payload["elements"] = result.get("patch_elements") or []
+            payload["files"] = result.get("patch_files") or {}
+        else:
+            payload["elements"] = result.get("elements") or []
+            payload["files"] = result.get("files") or {}
     canvas_ws.canvas_ws_hub.broadcast(
         session_id,
         payload,
