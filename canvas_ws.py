@@ -139,9 +139,7 @@ canvas_ws_hub = CanvasWsHub()
 def run_canvas_ws_session(
     client: CanvasWsClient,
     *,
-    on_scene: Callable[
-        [CanvasWsClient, Any, Any], Optional[dict]
-    ],
+    on_scene: Callable[..., Optional[dict]],
     on_clear: Callable[[CanvasWsClient], Optional[dict]],
     on_close: Optional[Callable[[CanvasWsClient], None]] = None,
 ) -> None:
@@ -191,6 +189,7 @@ def run_canvas_ws_session(
                         "type": "ack",
                         "kind": "clear",
                         "rev": result.get("rev", 0),
+                        "scene_gen": result.get("scene_gen", 0),
                     }
                 )
                 continue
@@ -206,6 +205,7 @@ def run_canvas_ws_session(
                 client,
                 elements if isinstance(elements, list) else [],
                 files if isinstance(files, dict) else None,
+                msg.get("scene_gen"),
             )
             if result is None:
                 client.send_json({"type": "error", "error": "scene failed"})
@@ -215,6 +215,7 @@ def run_canvas_ws_session(
                     "type": "ack",
                     "kind": "scene",
                     "rev": result.get("rev", 0),
+                    "scene_gen": result.get("scene_gen", 0),
                 }
             )
     finally:

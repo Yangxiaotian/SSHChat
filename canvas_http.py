@@ -383,10 +383,13 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     let ticket = '';
     let rev = 0;
+    let sceneGen = 0;
     let syncing = false;
     let applyingRemote = false;
     let pushTimer = null;
     let pushInFlight = false;
+    let clearInFlight = false;
+    let suppressPushUntil = 0;
     let localDirty = false;
     let pendingPushSig = '';
     let pushAckTimer = null;
@@ -397,6 +400,28 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     let canvasWsForceHttp = false;
     let canvasWsRetryTimer = null;
     let httpSyncActive = false;
+
+    function adoptSceneGen(value) {{
+        const g = Number(value);
+        if (Number.isFinite(g) && g >= 0) sceneGen = g;
+    }}
+
+    function abortPendingPush() {{
+        if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
+        if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+        pushInFlight = false;
+        pendingPushSig = '';
+        localDirty = false;
+    }}
+
+    function markBoardClearedLocally() {{
+        abortPendingPush();
+        lastLocalSig = sceneSig([], {{}});
+        localDirty = false;
+        // Excalidraw may emit a late onChange with pre-clear elements; ignore
+        // and re-reset briefly so we do not push them under the new scene_gen.
+        suppressPushUntil = Date.now() + 1000;
+    }}
 
     function setStatus(text, err) {{
         statusEl.textContent = text;
@@ -548,6 +573,23 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             excalidrawAPI: (a) => {{ api = a; }},
             onChange: (elements, _appState, files) => {{
                 if (applyingRemote || !ticket) return;
+                if (Date.now() < suppressPushUntil) {{
+                    const liveCount = (elements || []).filter((el) => el && !el.isDeleted).length;
+                    if (liveCount > 0 && api) {{
+                        applyingRemote = true;
+                        try {{
+                            if (api.resetScene) api.resetScene();
+                            else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                            lastLocalSig = sceneSig([], {{}});
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                    }} else {{
+                        lastLocalSig = sceneSig(elements, files);
+                    }}
+                    localDirty = false;
+                    return;
+                }}
                 const sig = sceneSig(elements, files);
                 if (sig === lastLocalSig) return;
                 lastLocalSig = sig;
@@ -579,11 +621,13 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     async function pushScene() {{
-        if (!ticket || applyingRemote || !api || pushInFlight) return;
+        if (!ticket || applyingRemote || !api || pushInFlight || clearInFlight) return;
+        if (Date.now() < suppressPushUntil) return;
         const live = liveScene();
         const elements = live.elements;
         const files = live.files;
         const sigAtStart = sceneSig(elements, files);
+        const genAtStart = sceneGen;
         pushInFlight = true;
         pendingPushSig = sigAtStart;
         setStatus(i18n.statusSync, false);
@@ -593,6 +637,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                     type: 'scene',
                     elements: elements || [],
                     files: files || {{}},
+                    scene_gen: genAtStart,
                 }}));
                 if (pushAckTimer) clearTimeout(pushAckTimer);
                 pushAckTimer = setTimeout(() => {{
@@ -620,16 +665,21 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 body: JSON.stringify({{
                     elements: elements || [],
                     files: files || {{}},
+                    scene_gen: genAtStart,
                 }}),
             }});
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
+            adoptSceneGen(data.scene_gen);
             finishLocalPush(sigAtStart);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
+            // Stale post-clear push: resync instead of hammering the same payload.
             localDirty = true;
-            schedulePush();
+            void syncOnce(false).then(() => {{
+                if (localDirty) schedulePush();
+            }});
         }} finally {{
             pushInFlight = false;
             pendingPushSig = '';
@@ -642,6 +692,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         const mtype = String(data.type || data.kind || '');
         if (mtype === 'clear') {{
             if (remoteRev < rev) return;
+            markBoardClearedLocally();
+            clearInFlight = false;
+            adoptSceneGen(data.scene_gen);
             applyingRemote = true;
             try {{
                 if (api.resetScene) api.resetScene();
@@ -655,6 +708,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             return;
         }}
         if (remoteRev < rev) return;
+        adoptSceneGen(data.scene_gen);
         const remoteEls = data.elements || [];
         const live = liveScene();
         let nextEls;
@@ -752,11 +806,17 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (mtype === 'ack') {{
                 if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
                 if (typeof data.rev === 'number') rev = data.rev;
+                adoptSceneGen(data.scene_gen);
                 const sig = pendingPushSig;
                 pushInFlight = false;
                 pendingPushSig = '';
                 if (String(data.kind || '') === 'clear') {{
-                    localDirty = false;
+                    clearInFlight = false;
+                    markBoardClearedLocally();
+                    setStatus(i18n.statusReady, false);
+                    return;
+                }}
+                if (clearInFlight) {{
                     setStatus(i18n.statusReady, false);
                     return;
                 }}
@@ -773,9 +833,12 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
                 pushInFlight = false;
                 pendingPushSig = '';
-                localDirty = true;
+                clearInFlight = false;
                 setStatus(i18n.statusErr, true);
-                schedulePush();
+                // Prefer resync: stale pre-clear pushes must not loop.
+                void syncOnce(false).then(() => {{
+                    if (localDirty) schedulePush();
+                }});
             }}
         }};
         ws.onclose = function () {{
@@ -813,6 +876,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (data.changed && remoteRev >= rev && api) {{
                 applyRemotePayload({{
                     rev: remoteRev,
+                    scene_gen: data.scene_gen,
                     elements: data.elements || [],
                     files: data.files || {{}},
                 }});
@@ -820,6 +884,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }} else if (remoteRev > rev) {{
                 rev = remoteRev;
             }}
+            adoptSceneGen(data.scene_gen);
             setStatus(i18n.statusReady, false);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
@@ -832,8 +897,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         if (!ticket) return;
         if (!confirm(i18n.clearConfirm)) return;
         try {{
+            markBoardClearedLocally();
+            clearInFlight = true;
             if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
-                if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
                 canvasWs.send(JSON.stringify({{ type: 'clear' }}));
                 applyingRemote = true;
                 try {{
@@ -856,8 +922,9 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'clear failed');
             rev = Number(data.rev || rev + 1);
-            localDirty = false;
-            if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
+            adoptSceneGen(data.scene_gen);
+            clearInFlight = false;
+            markBoardClearedLocally();
             if (api) {{
                 applyingRemote = true;
                 try {{
@@ -868,6 +935,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }}
             }}
         }} catch (_) {{
+            clearInFlight = false;
             setStatus(i18n.statusErr, true);
         }}
     }});
@@ -995,6 +1063,7 @@ def _broadcast_canvas_update(
     payload = {
         "type": msg_type,
         "rev": result.get("rev", 0),
+        "scene_gen": result.get("scene_gen", 0),
         "author": result.get("author") or "",
         "elements": result.get("elements") if msg_type != "clear" else [],
         "files": result.get("files") if msg_type != "clear" else {},
@@ -1074,12 +1143,14 @@ def handle_canvas_websocket(handler: "BaseHTTPRequestHandler") -> bool:
         ws_client: canvas_ws.CanvasWsClient,
         elements,
         files,
+        scene_gen=None,
     ) -> Optional[dict]:
         result, _err = store.apply_scene(
             ws_client.token,
             ticket,
             elements=elements,
             files=files,
+            scene_gen=scene_gen,
         )
         if result is None:
             return None
@@ -1130,6 +1201,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
                 "width": canvas_sharing.LOGICAL_WIDTH,
                 "height": canvas_sharing.LOGICAL_HEIGHT,
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
             },
         )
         return True
@@ -1141,6 +1213,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
             ticket,
             elements=body.get("elements"),
             files=body.get("files"),
+            scene_gen=body.get("scene_gen"),
         )
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]

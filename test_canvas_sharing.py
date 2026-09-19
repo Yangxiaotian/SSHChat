@@ -160,8 +160,10 @@ class CanvasStoreTests(unittest.TestCase):
         event, err = self.store.clear_board(token, ticket)
         self.assertEqual(err, "")
         self.assertEqual(event["kind"], "clear")
+        self.assertEqual(event["scene_gen"], 1)
         payload, _ = self.store.sync_since(token, ticket, 0)
         self.assertEqual(payload["elements"], [])
+        self.assertEqual(payload["scene_gen"], 1)
         self.assertTrue(payload["rev"] >= 2)
 
         ok, err = self.store.close_session(session.session_id, "Bob")
@@ -170,6 +172,37 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertTrue(ok)
         found = self.store.find_open_for_room("art")
         self.assertIsNone(found)
+
+    def test_stale_scene_after_clear_is_rejected(self) -> None:
+        """In-flight pre-clear pushes must not resurrect wiped strokes."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="art"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(token, session.keys["Alice"])
+        self.store.apply_scene(
+            token, ticket, elements=[_el("old", 1)], scene_gen=0
+        )
+        cleared, err = self.store.clear_board(token, ticket)
+        self.assertEqual(err, "")
+        self.assertEqual(cleared["scene_gen"], 1)
+
+        # Late push still carrying the pre-clear generation.
+        result, err = self.store.apply_scene(
+            token, ticket, elements=[_el("old", 1)], scene_gen=0
+        )
+        self.assertIsNone(result)
+        self.assertIn("清空", err)
+        payload, _ = self.store.sync_since(token, ticket, 0)
+        self.assertEqual(payload["elements"], [])
+
+        # Fresh strokes after clear are accepted.
+        result, err = self.store.apply_scene(
+            token, ticket, elements=[_el("new", 1)], scene_gen=1
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(len(result["elements"]), 1)
+        self.assertEqual(result["elements"][0]["id"], "new")
 
     def test_register_remote_session_mirror(self) -> None:
         session = self.store.register_remote_session(

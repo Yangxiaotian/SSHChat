@@ -149,8 +149,10 @@ def test_run_session_scene_ack() -> None:
         sock=sa,
     )
 
-    def on_scene(c, elements, files):
-        result, err = store.apply_scene(c.token, ticket, elements=elements, files=files)
+    def on_scene(c, elements, files, scene_gen=None):
+        result, err = store.apply_scene(
+            c.token, ticket, elements=elements, files=files, scene_gen=scene_gen
+        )
         assert err == ""
         return result
 

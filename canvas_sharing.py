@@ -77,6 +77,8 @@ class CanvasSession:
     elements: List[dict] = field(default_factory=list)
     files: Dict[str, dict] = field(default_factory=dict)
     rev: int = 0
+    # Bumped on every clear so in-flight pre-clear scene pushes cannot resurrect strokes.
+    scene_gen: int = 0
     # Legacy freehand log (ignored by new UI; kept for disk compat).
     strokes: List[dict] = field(default_factory=list)
     next_seq: int = 1
@@ -129,6 +131,7 @@ class CanvasStore:
                     elements=list(raw.get("elements") or []),
                     files=dict(raw.get("files") or {}),
                     rev=int(raw.get("rev") or 0),
+                    scene_gen=int(raw.get("scene_gen") or 0),
                     strokes=list(raw.get("strokes") or []),
                     next_seq=int(raw.get("next_seq") or 1),
                     created_at=float(raw.get("created_at") or 0),
@@ -796,6 +799,7 @@ class CanvasStore:
         *,
         elements,
         files=None,
+        scene_gen=None,
     ) -> Tuple[Optional[dict], str]:
         """Merge Excalidraw elements by id/version and bump rev."""
         session, participant, err = self.resolve_ticket(token, ticket)
@@ -805,6 +809,12 @@ class CanvasStore:
         if cleaned is None:
             return None, "场景数据无效"
         file_patch = self._sanitize_files(files) if files is not None else None
+        try:
+            client_gen = 0 if scene_gen is None else int(scene_gen)
+        except (TypeError, ValueError):
+            client_gen = 0
+        if client_gen < 0:
+            client_gen = 0
         try:
             probe = {"elements": cleaned, "files": file_patch or {}}
             if (
@@ -822,6 +832,10 @@ class CanvasStore:
             ok, alive_err = self._alive(session)
             if not ok:
                 return None, alive_err
+            # Drop in-flight pushes from before the latest clear — otherwise
+            # merge onto an empty board resurrects the wiped strokes.
+            if client_gen < int(session.scene_gen or 0):
+                return None, "画板已清空，请重新同步"
             merged = self._merge_elements(session.elements, cleaned)
             session.elements = merged
             if file_patch is not None:
@@ -834,6 +848,7 @@ class CanvasStore:
             self._save()
             return {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "elements": session.elements,
                 "files": session.files,
                 "author": participant,
@@ -868,11 +883,13 @@ class CanvasStore:
             session.elements = []
             session.files = {}
             session.strokes = []
+            session.scene_gen = int(session.scene_gen or 0) + 1
             session.rev += 1
             session.next_seq = session.rev + 1
             self._save()
             return {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "kind": "clear",
                 "author": participant,
                 "elements": [],
@@ -894,6 +911,7 @@ class CanvasStore:
             changed = session.rev > since_i
             return {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "changed": changed,
                 "elements": list(session.elements) if changed else [],
                 "files": dict(session.files) if changed else {},
@@ -962,6 +980,7 @@ class CanvasStore:
                 session.elements = []
                 session.files = {}
                 session.strokes = []
+                session.scene_gen = int(session.scene_gen or 0) + 1
                 session.rev += 1
                 session.next_seq = session.rev + 1
                 self._save()
@@ -973,6 +992,7 @@ class CanvasStore:
                         {
                             "type": "clear",
                             "rev": session.rev,
+                            "scene_gen": session.scene_gen,
                             "author": "",
                             "elements": [],
                             "files": {},
