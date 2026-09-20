@@ -44,6 +44,7 @@ class FederationProtocolTests(unittest.TestCase):
         server.room_game_provisional.clear()
         server.room_games_parked.clear()
         server.room_enabled_games.clear()
+        server.room_enabled_game_revs.clear()
         server.disconnected_sessions.clear()
         federation._hub = None
         server._fed_hub = None
@@ -1179,6 +1180,61 @@ class FederationServerIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(any(l.startswith("lcatalog\tnode-b\t") for l in peer_c.lines))
         self.assertFalse(any(l.startswith("lcatalog\t") for l in peer_b.lines))
+
+    def test_gcat_fanout_and_applies_lww(self) -> None:
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        applied: list[tuple] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        peer_b = FakeLink("node-b")
+        peer_c = FakeLink("node-c")
+        hub._peers["node-b"] = peer_b
+        hub._peers["node-c"] = peer_c
+        hub.on_game_catalog_sync = lambda *a: applied.append(a)
+
+        names = ["chess", "gomoku"]
+        blob = base64.b64encode(
+            json.dumps(names, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"gcat\tnode-b\tdefault\t{blob}\t100\t1"
+        hub._on_peer_line("node-b", line)
+        self.assertEqual(applied[-1][:3], ("node-b", "default", names))
+        self.assertEqual(applied[-1][3], 100)
+        self.assertTrue(any(l.startswith("gcat\tnode-b\tdefault\t") for l in peer_c.lines))
+        self.assertFalse(any(l.startswith("gcat\t") for l in peer_b.lines))
+
+        # Local apply: newer rev wins
+        server.room_enabled_games["default"] = {"chess"}
+        server.room_enabled_game_revs["default"] = 50
+        server._fed_on_game_catalog_sync("node-b", "default", ["gomoku"], 100)
+        self.assertEqual(server.room_enabled_games["default"], {"gomoku"})
+        self.assertEqual(server.room_enabled_game_revs["default"], 100)
+        # Older rev ignored
+        server._fed_on_game_catalog_sync("node-b", "default", ["chess"], 80)
+        self.assertEqual(server.room_enabled_games["default"], {"gomoku"})
+
+        # sync_game_catalog emits gcat
+        peer_b.lines.clear()
+        peer_c.lines.clear()
+        hub.sync_game_catalog("default", ["chess"], 200)
+        self.assertTrue(any(l.startswith("gcat\tnode-a\tdefault\t") for l in peer_b.lines))
+        self.assertTrue(any(l.startswith("gcat\tnode-a\tdefault\t") for l in peer_c.lines))
 
     def test_lpage_round_trip_invokes_handlers(self) -> None:
         requests: list[tuple] = []
@@ -2389,6 +2445,8 @@ class FederationSendQueueTests(unittest.TestCase):
     def test_is_droppable_frame_kinds(self) -> None:
         self.assertTrue(federation._is_droppable_frame(b"presence\tx\t[]\n"))
         self.assertTrue(federation._is_droppable_frame(b"lcatalog\tx\tYQ==\t1\n"))
+        self.assertTrue(federation._is_droppable_frame(b"gcat\tx\tr\tYQ==\t1\t2\n"))
+        self.assertTrue(federation._is_droppable_frame(b"psync\tx\tr\tYQ==\t1\t2\n"))
         self.assertFalse(federation._is_droppable_frame(b"msg\tx\tr\thi\n"))
         self.assertFalse(federation._is_droppable_frame(b"ping\n"))
         self.assertFalse(federation._is_droppable_frame(b"join\tx\ta\tr\n"))

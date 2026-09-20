@@ -48,6 +48,7 @@ _FED_DROPPABLE_KINDS = frozenset(
         "csync",
         "pisync",
         "psync",
+        "gcat",
     }
 )
 # Active heartbeat: ping idle peers; close half-open links (common with iSH /
@@ -454,6 +455,10 @@ class FederationHub:
         self.on_piano_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
         # origin_node, room, text, rev — room /pad LWW sync
         self.on_pad_sync: Optional[Callable[[str, str, str, int], None]] = None
+        # origin_node, room, enabled_names, rev — room /game on|off catalog LWW
+        self.on_game_catalog_sync: Optional[
+            Callable[[str, str, list[str], int], None]
+        ] = None
         # node_id, base_url — peer public file URL changed (refresh canvas mirrors)
         self.on_file_public_change: Optional[Callable[[str, str], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
@@ -1219,6 +1224,33 @@ class FederationHub:
         blob = base64.b64encode(str(text or "").encode("utf-8")).decode("ascii")
         # Nonce so peer-up re-pushes are not dropped by ingress dedup.
         line = f"psync\t{self.node_id}\t{room}\t{blob}\t{rev_i}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def sync_game_catalog(self, room: str, enabled: list[str], rev: int) -> None:
+        """Fan-out room /game on|off catalog (gcat); empty list = all offline."""
+        if not self.enabled or not self._peers:
+            return
+        room = str(room or "").strip()
+        if not room:
+            return
+        try:
+            rev_i = int(rev)
+        except (TypeError, ValueError):
+            return
+        if rev_i <= 0:
+            return
+        names = sorted(
+            {
+                str(n).strip().lower()
+                for n in (enabled or [])
+                if isinstance(n, str) and str(n).strip()
+            }
+        )
+        blob = base64.b64encode(
+            json.dumps(names, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"gcat\t{self.node_id}\t{room}\t{blob}\t{rev_i}\t{time.time_ns()}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -2484,6 +2516,39 @@ class FederationHub:
                     self.on_pad_sync(origin, room, text, rev)
                 except Exception as e:
                     print(f"federation: on_pad_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "gcat":
+            # gcat\torigin\troom\tb64(json names)\trev\tnonce
+            gparts = line.split("\t", 5)
+            if len(gparts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, room, blob, rev_s = gparts[1], gparts[2], gparts[3], gparts[4]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                rev = int(rev_s)
+                parsed = json.loads(
+                    base64.b64decode(blob.encode("ascii")).decode("utf-8")
+                )
+            except Exception as e:
+                print(f"federation: gcat decode error: {e!r}")
+                return
+            if not isinstance(parsed, list):
+                return
+            names = [
+                str(n).strip().lower()
+                for n in parsed
+                if isinstance(n, str) and str(n).strip()
+            ]
+            if self.on_game_catalog_sync is not None:
+                try:
+                    self.on_game_catalog_sync(origin, room, names, rev)
+                except Exception as e:
+                    print(f"federation: on_game_catalog_sync error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gsync" and self.on_game_sync:

@@ -147,6 +147,8 @@ room_game_provisional: set[str] = set()
 _greq_until: dict[str, float] = {}
 # room -> set of canonical game ids enabled for /game list and /game new
 room_enabled_games: dict[str, set[str]] = {}
+# room -> LWW revision for federated /game on|off catalog sync
+room_enabled_game_revs: dict[str, int] = {}
 # The room catalog predates several games. Keep this separate from the
 # persisted session version so adding a game does not silently re-enable it
 # after the owner explicitly turns it off on a current server.
@@ -368,6 +370,7 @@ def _may_force_end_game_locked(room: str, conn, name: str, game) -> bool:
     clients), so comparing only live sockets rejects the returning owner.
     """
     _ = game
+    _ensure_live_room_owner_locked(room)
     owner_conn = room_owners.get(room)
     if owner_conn is None:
         return False
@@ -384,11 +387,35 @@ def _reassign_room_owner_locked(room: str, departed: object) -> None:
     """Must hold lock. departed left this room or disconnected."""
     if room_owners.get(room) != departed:
         return
-    rem = rooms.get(room, ())
+    rem = [c for c in rooms.get(room, ()) if c in clients]
     if rem:
-        room_owners[room] = next(iter(rem))
+        rem.sort(key=lambda c: ((clients[c].get("name") or "").lower(), id(c)))
+        room_owners[room] = rem[0]
     else:
         room_owners.pop(room, None)
+
+
+def _ensure_live_room_owner_locked(room: str) -> None:
+    """Repair room_owners when it still points at a gone / DisconnectedSeat.
+
+    Mid-game disconnect used to keep DisconnectedSeat as owner so the same nick
+    could /game end after reconnect. That left everyone else unable to run
+    /game on|off. Prefer a live member; rebind same-nick if they are back.
+    """
+    rem = [c for c in rooms.get(room, ()) if c in clients]
+    if not rem:
+        return
+    owner = room_owners.get(room)
+    if owner in rem:
+        return
+    owner_nick = _owner_nick_locked(owner) if owner is not None else ""
+    if owner_nick:
+        for c in rem:
+            if _same_nick(clients[c].get("name") or "", owner_nick):
+                room_owners[room] = c
+                return
+    rem.sort(key=lambda c: ((clients[c].get("name") or "").lower(), id(c)))
+    room_owners[room] = rem[0]
 
 
 def send_room_announcement_preview(conn, room: str) -> None:
@@ -646,6 +673,76 @@ def _fed_on_pad_sync(origin: str, room: str, text: str, rev: int) -> None:
             room_pads[room] = text
         else:
             room_pads.pop(room, None)
+    _mark_sessions_dirty()
+
+
+def _bump_room_game_catalog_rev_locked(room: str) -> int:
+    """Stamp a new LWW rev for this room's enabled-game set. Caller holds lock."""
+    rev = time.time_ns()
+    room_enabled_game_revs[room] = rev
+    return rev
+
+
+def _federation_push_game_catalog(room: str) -> None:
+    """Fan-out one room's /game on|off catalog to federation peers."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        enabled = sorted(_enabled_games_for_room_locked(room))
+        rev = int(room_enabled_game_revs.get(room) or 0)
+    if rev <= 0:
+        return
+    try:
+        hub.sync_game_catalog(room, enabled, rev)
+    except Exception as e:
+        print(f"federation: game catalog sync failed for #{room}: {e!r}")
+
+
+def _federation_push_all_game_catalogs() -> None:
+    """Catch-up: push every room catalog revision after a peer comes up."""
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return
+    with lock:
+        rooms = set(room_enabled_games) | set(room_enabled_game_revs)
+        now = time.time_ns()
+        for room in list(rooms):
+            if int(room_enabled_game_revs.get(room) or 0) <= 0:
+                room_enabled_game_revs[room] = now
+                now += 1
+        targets = list(rooms)
+    for room in targets:
+        _federation_push_game_catalog(room)
+
+
+def _fed_on_game_catalog_sync(
+    origin: str, room: str, names: list[str], rev: int
+) -> None:
+    """Apply peer /game on|off catalog when remote revision is newer (LWW)."""
+    _ = origin
+    room = (room or "").strip()
+    if not room:
+        return
+    try:
+        rev_i = int(rev)
+    except (TypeError, ValueError):
+        return
+    if rev_i <= 0:
+        return
+    cleaned = {
+        str(n).strip().lower()
+        for n in (names or [])
+        if isinstance(n, str) and str(n).strip()
+    }
+    # Only keep ids this build knows; unknown peer games are dropped.
+    cleaned &= set(games.GAMES)
+    with lock:
+        local_rev = int(room_enabled_game_revs.get(room) or 0)
+        if rev_i <= local_rev:
+            return
+        room_enabled_game_revs[room] = rev_i
+        room_enabled_games[room] = cleaned
     _mark_sessions_dirty()
 
 
@@ -1549,15 +1646,26 @@ def _enabled_games_for_room_locked(room: str) -> set[str]:
 
 
 def _is_room_game_owner_locked(room: str, conn, name: str) -> bool:
-    """True if *conn* may manage this room's game catalog; may rebind owner seat."""
+    """True if *conn* may manage this room (catalog / announce); may rebind seat.
+
+    Same nickname is the same account. After a mid-game disconnect the stored
+    handle may be a DisconnectedSeat (not in clients); reclaim like /game end.
+    If that nick is gone and the room still has people, hand ownership over.
+    """
+    _ensure_live_room_owner_locked(room)
     owner_conn = room_owners.get(room)
-    same_owner_account = (
-        owner_conn in clients
-        and clients[owner_conn]["name"].strip().lower() == name.strip().lower()
-    )
-    if same_owner_account and owner_conn is not conn:
+    if owner_conn is None:
+        if conn in clients and conn in rooms.get(room, ()):
+            room_owners[room] = conn
+            return True
+        return False
+    if owner_conn is conn:
+        return True
+    if not _same_nick(_owner_nick_locked(owner_conn), name):
+        return False
+    if not isinstance(conn, (DisconnectedSeat, FederatedSeat)):
         room_owners[room] = conn
-    return owner_conn is conn or same_owner_account
+    return True
 
 
 def _drop_game_if_room_empty_locked(room: str) -> None:
@@ -1978,6 +2086,11 @@ def _build_session_payload_locked() -> dict[str, object]:
             for room, enabled in room_enabled_games.items()
         },
         "room_enabled_games_version": ROOM_GAME_CATALOG_VERSION,
+        "room_enabled_game_revs": {
+            room: int(rev)
+            for room, rev in room_enabled_game_revs.items()
+            if isinstance(room, str) and int(rev or 0) > 0
+        },
         "room_announcements": dict(room_announcements),
         "room_pads": dict(room_pads),
         "room_pad_revs": {
@@ -2082,6 +2195,17 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 if catalog_version < ROOM_GAME_CATALOG_VERSION:
                     room_enabled_games[room].update(ROOM_GAME_CATALOG_MIGRATION_IDS)
                     catalog_migrated = True
+    catalog_revs = payload.get("room_enabled_game_revs")
+    if isinstance(catalog_revs, dict):
+        for room, rev in catalog_revs.items():
+            if not isinstance(room, str):
+                continue
+            try:
+                rev_i = int(rev)
+            except (TypeError, ValueError):
+                continue
+            if rev_i > 0:
+                room_enabled_game_revs[room] = rev_i
     announcements = payload.get("room_announcements")
     if isinstance(announcements, dict):
         for room, text in announcements.items():
@@ -8907,6 +9031,10 @@ def _federation_peer_up_catchup(peer_node: str) -> None:
         _federation_push_all_pads()
     except Exception as e:
         print(f"federation: peer-up pad catch-up error: {e!r}")
+    try:
+        _federation_push_all_game_catalogs()
+    except Exception as e:
+        print(f"federation: peer-up game catalog catch-up error: {e!r}")
 
 
 def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
@@ -9177,6 +9305,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_canvas_sync = _fed_on_canvas_sync
     _fed_hub.on_piano_sync = _fed_on_piano_sync
     _fed_hub.on_pad_sync = _fed_on_pad_sync
+    _fed_hub.on_game_catalog_sync = _fed_on_game_catalog_sync
     _fed_hub.on_file_public_change = _fed_on_file_public_change
     _fed_hub.on_offline_pm_clear = _fed_on_offline_pm_clear
     _fed_hub.on_ratings = _fed_on_ratings
@@ -9275,17 +9404,14 @@ def remove_client(conn) -> None:
         for room in joined_rooms:
             same_name_peer = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
             game = room_games.get(room)
-            preserve_disconnected_seat = (
-                not _shutting_down
-                and game is not None
-                and getattr(game, "state", "ended") != "ended"
-                and _is_conn_seated_in_game(game, conn)
-            )
             rooms[room].discard(conn)
             if room_owners.get(room) is conn:
                 if same_name_peer is not None:
                     room_owners[room] = same_name_peer
-                elif not preserve_disconnected_seat and not _shutting_down:
+                elif not _shutting_down:
+                    # Always hand off to a live member (or clear). Do not keep
+                    # DisconnectedSeat as room owner — that blocked /game on for
+                    # everyone still in the room while a game seat was preserved.
                     _reassign_room_owner_locked(room, conn)
             if game is not None:
                 if _shutting_down:
@@ -9312,8 +9438,6 @@ def remove_client(conn) -> None:
                         elif _game_seat_conn_by_name(game, name) is conn:
                             seat = DisconnectedSeat(name)
                             _replace_conn_refs(game, conn, seat)
-                            if room_owners.get(room) is conn:
-                                room_owners[room] = seat
                             flush_now = True
                             game_notices.append(
                                 (
@@ -9327,8 +9451,6 @@ def remove_client(conn) -> None:
                     else:
                         seat = DisconnectedSeat(name)
                         _replace_conn_refs(game, conn, seat)
-                        if room_owners.get(room) is conn:
-                            room_owners[room] = seat
                         flush_now = True
                         game_notices.append(
                             (
@@ -9685,14 +9807,7 @@ def handle_command(conn, payload: str) -> None:
             if conn not in clients:
                 return
             room = clients[conn]["current_room"]
-            owner_conn = room_owners.get(room)
-            same_owner_account = (
-                owner_conn in clients
-                and clients[owner_conn]["name"].strip().lower() == name.strip().lower()
-            )
-            is_owner = owner_conn is conn or same_owner_account
-            if same_owner_account and owner_conn is not conn:
-                room_owners[room] = conn
+            is_owner = _is_room_game_owner_locked(room, conn, name)
         if not tail:
             with lock:
                 cur = (room_announcements.get(room) or "").strip()
@@ -9945,15 +10060,18 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             n = 0
             removed = 0
             active_name = ""
+            changed = False
             with lock:
                 if not _is_room_game_owner_locked(room, conn, name):
                     send_line(conn, _ts(conn, "game_owner_only_catalog"))
                     return
                 enabled = _enabled_games_for_room_locked(room)
                 if enable:
+                    before = set(enabled)
                     enabled.clear()
                     enabled.update(games.GAMES)
                     n = len(enabled)
+                    changed = before != enabled
                 else:
                     game = room_games.get(room)
                     if (
@@ -9966,7 +10084,12 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                     if active_name and active_name in games.GAMES:
                         enabled.add(active_name)
                     removed = len(before - enabled)
-                _mark_sessions_dirty()
+                    changed = before != enabled
+                if changed:
+                    _bump_room_game_catalog_rev_locked(room)
+                    _mark_sessions_dirty()
+            if changed:
+                _federation_push_game_catalog(room)
             if enable:
                 send_line(conn, _ts(conn, "game_on_all", n=n))
             elif active_name and active_name in games.GAMES:
@@ -9994,6 +10117,8 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
                 ),
             )
             return
+        reply = ""
+        changed = False
         with lock:
             if not _is_room_game_owner_locked(room, conn, name):
                 send_line(conn, _ts(conn, "game_owner_only_catalog"))
@@ -10001,29 +10126,32 @@ def _handle_game(conn, name: str, room: str, payload: str) -> None:
             enabled = _enabled_games_for_room_locked(room)
             if enable:
                 if game_name in enabled:
-                    send_line(conn, _ts(conn, "game_already_on", game=game_name))
+                    reply = _ts(conn, "game_already_on", game=game_name)
                 else:
                     enabled.add(game_name)
-                    send_line(conn, _ts(conn, "game_turned_on", game=game_name))
+                    reply = _ts(conn, "game_turned_on", game=game_name)
+                    changed = True
+            elif game_name not in enabled:
+                reply = _ts(conn, "game_already_off", game=game_name)
+            else:
+                game = room_games.get(room)
+                if (
+                    game is not None
+                    and getattr(game, "name", "") == game_name
+                    and getattr(game, "state", "ended") != "ended"
+                ):
+                    reply = _ts(conn, "game_off_blocked_active", game=game_name)
+                else:
+                    enabled.discard(game_name)
+                    reply = _ts(conn, "game_turned_off", game=game_name)
+                    changed = True
+            if changed:
+                _bump_room_game_catalog_rev_locked(room)
                 _mark_sessions_dirty()
-                return
-            if game_name not in enabled:
-                send_line(conn, _ts(conn, "game_already_off", game=game_name))
-                return
-            game = room_games.get(room)
-            if (
-                game is not None
-                and getattr(game, "name", "") == game_name
-                and getattr(game, "state", "ended") != "ended"
-            ):
-                send_line(
-                    conn,
-                    _ts(conn, "game_off_blocked_active", game=game_name),
-                )
-                return
-            enabled.discard(game_name)
-        send_line(conn, _ts(conn, "game_turned_off", game=game_name))
-        _mark_sessions_dirty()
+        if changed:
+            _federation_push_game_catalog(room)
+        if reply:
+            send_line(conn, reply)
         return
 
     if sub == "new":
