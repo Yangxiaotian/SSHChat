@@ -202,6 +202,9 @@ def _path_looks_like_image(path: Path) -> bool:
             return _sniff_raster_image(f.read(64))
     except OSError:
         return False
+_PAD_DUMP_MARKER = "<<PADDUMP>>"
+_PAD_MAX_CHARS = 8000  # keep in sync with server.MAX_PAD_LEN
+
 _TOP_COMMANDS = (
     "/help",
     "/lang",
@@ -2151,6 +2154,8 @@ class SSHChatGUI:
         self._online_users: list[str] = []
         self._recent_users: list[str] = []
         self._expecting_names = False
+        self._expecting_pad_dump = False
+        self._pad_win: tk.Toplevel | None = None
 
         self._build_ui()
         self._apply_profile(load_client_config(self.config_path))
@@ -2385,6 +2390,9 @@ class SSHChatGUI:
         )
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
+        )
+        self.btn_pad, _ = self._pack_icon_btn(
+            self._input_row, "📝", "便签（房间剪贴板）", self._start_pad
         )
         self.btn_clear, _ = self._pack_icon_btn(
             self._input_row, "⌫", "清屏", self._clear_active_room
@@ -3025,6 +3033,103 @@ class SSHChatGUI:
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
 
+    def _start_pad(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        if self._pad_win is not None and self._pad_win.winfo_exists():
+            self._pad_win.lift()
+            self._pad_win.focus_force()
+            return
+        self._expecting_pad_dump = True
+        try:
+            self._chan_send_bytes(b"/pad dump\n")
+        except Exception as e:
+            self._expecting_pad_dump = False
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+            return
+        self.root.after(12000, self._pad_dump_timeout)
+
+    def _pad_dump_timeout(self) -> None:
+        if self._expecting_pad_dump:
+            self._expecting_pad_dump = False
+            self._append_chat_line("[*] 读取便签超时，请重试。", local_sent=True)
+
+    def _on_pad_dump(self, blob: str) -> None:
+        self._expecting_pad_dump = False
+        try:
+            blob += "=" * ((-len(blob)) % 4)
+            current = base64.urlsafe_b64decode(blob.encode("ascii")).decode("utf-8")
+        except Exception:
+            self._append_chat_line("[*] 服务器返回的便签内容无法解析。", local_sent=True)
+            return
+        self._open_pad_editor(current)
+
+    def _open_pad_editor(self, current: str) -> None:
+        room = self._active_room
+        win = tk.Toplevel(self.root)
+        self._pad_win = win
+        win.title(f"房间便签 #{room}")
+        win.geometry("560x420")
+        text = scrolledtext.ScrolledText(win, wrap=tk.WORD, undo=True)
+        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+        text.insert("1.0", current)
+        text.focus_set()
+        bar = ttk.Frame(win)
+        bar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(bar, text=f"最多 {_PAD_MAX_CHARS} 字；房内所有人可见可改", foreground="#666").pack(
+            side=tk.LEFT
+        )
+
+        def close() -> None:
+            self._pad_win = None
+            win.destroy()
+
+        def send(cmd: str) -> bool:
+            # Server applies /pad to the session's current room, not the one shown in the title.
+            if self._active_room != room:
+                messagebox.showwarning(
+                    "SSHChat", f"已切换到 #{self._active_room}，请切回 #{room} 再保存", parent=win
+                )
+                return False
+            if not self._chan or self._chan.closed:
+                messagebox.showwarning("SSHChat", "连接已断开", parent=win)
+                return False
+            try:
+                self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+            except Exception as e:
+                messagebox.showerror("SSHChat", f"发送失败: {e}", parent=win)
+                return False
+            return True
+
+        def save() -> None:
+            new = text.get("1.0", tk.END).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+            if new == current.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n"):
+                close()
+                return
+            if len(new) > _PAD_MAX_CHARS:
+                messagebox.showwarning(
+                    "SSHChat", f"便签过长（{len(new)} 字，最多 {_PAD_MAX_CHARS}）", parent=win
+                )
+                return
+            if not new.strip():
+                cmd = "/pad clear"
+            else:
+                cmd = "/pad load " + base64.urlsafe_b64encode(new.encode("utf-8")).decode("ascii")
+            if send(cmd):
+                close()
+
+        def clear() -> None:
+            if messagebox.askyesno("SSHChat", f"清空 #{room} 的便签？", parent=win) and send(
+                "/pad clear"
+            ):
+                close()
+
+        ttk.Button(bar, text="取消", command=close).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="清空", command=clear).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(bar, text="保存", command=save).pack(side=tk.RIGHT, padx=(0, 6))
+        win.protocol("WM_DELETE_WINDOW", close)
+
     def _refresh_online_users(self) -> None:
         if not self._chan or self._chan.closed:
             return
@@ -3460,6 +3565,11 @@ class SSHChatGUI:
         cleaned = _TIME_ANY_RE.sub("", cleaned).strip()
         t = cleaned
         if not t:
+            return
+        pad_idx = t.find(_PAD_DUMP_MARKER)
+        if pad_idx >= 0:
+            if self._expecting_pad_dump:
+                self._on_pad_dump(t[pad_idx + len(_PAD_DUMP_MARKER) :].strip())
             return
         if self._expecting_names:
             names = _parse_names_line(t)
@@ -4562,6 +4672,9 @@ class SSHChatGUI:
         if re.fullmatch(r"/(?:clear|cls)", low, flags=re.I):
             self._clear_active_room()
             return
+        if re.fullmatch(r"/pad\s+(?:edit|vim)", low, flags=re.I):
+            self._start_pad()
+            return
         try:
             m_join = re.match(r"^/(?:join|switch)\s+([a-zA-Z0-9_-]{1,32})\s*$", low)
             if m_join:
@@ -4626,6 +4739,7 @@ class SSHChatGUI:
         self._online_users = []
         self._expecting_names = False
         self._expecting_own_piano = False
+        self._expecting_pad_dump = False
         self._open_piano_tokens.clear()
         self._open_canvas_tokens.clear()
         self._open_piano_urls.clear()

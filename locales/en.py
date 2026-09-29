@@ -150,7 +150,7 @@ MESSAGES: dict = {
         "pad_cleared_bcast": "[#{room}] [*] {editor} cleared the pad.\n",
         "pad_cleared": "[*] Cleared the pad for #{room}.\n",
         "pad_edit_client_only": (
-            "[*] Multi-line edit: terminal /pad edit, or mobile App + → Pad. "
+            "[*] Multi-line edit: terminal /pad edit, Tk desktop client 📝 button, or mobile App + → Pad. "
             "Or keep using /pad <one line>.\n"
         ),
         "pad_load_usage": "[*] Usage: /pad load <base64> (sent automatically by /pad edit)\n",

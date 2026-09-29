@@ -146,7 +146,7 @@ MESSAGES: dict = {
         "pad_cleared_bcast": "[#{room}] [*] {editor} 清除了剪贴板。\n",
         "pad_cleared": "[*] 已清除 #{room} 的剪贴板。\n",
         "pad_edit_client_only": (
-            "[*] 多行编辑：终端用 /pad edit；手机 App 点「+」→「便签」。"
+            "[*] 多行编辑：终端用 /pad edit；Tk 桌面客户端点 📝；手机 App 点「+」→「便签」。"
             "也可继续 /pad <一行文字>。\n"
         ),
         "pad_load_usage": "[*] 用法：/pad load <base64>（由 /pad edit 自动发送）\n",
