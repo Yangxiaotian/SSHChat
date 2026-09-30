@@ -2598,15 +2598,18 @@ def _reversi_legal_moves(board: list[list[int]], player: int) -> list[tuple[int,
 def _reversi_render(
     board: list[list[int]], *, last: Optional[tuple[int, int]] = None
 ) -> list[str]:
-    lines = ["    " + " ".join(str(i) for i in range(1, REVERSI_SIZE + 1))]
+    # Same column geometry as gomoku/go: each cell is "{token:>2} " so the
+    # header digits sit above the stone glyphs (not left-shifted by one).
+    hdr = "   " + "".join(f"{i:>2} " for i in range(1, REVERSI_SIZE + 1))
+    lines = [hdr]
     for row, cells in enumerate(board):
         tokens = []
         for col, cell in enumerate(cells):
             token = "#" if cell == 1 else "o" if cell == 2 else "."
             if last == (row, col):
                 token = f"!{token}"
-            tokens.append(token)
-        lines.append(f"{row + 1:>2}  " + " ".join(f"{token:>2}" for token in tokens))
+            tokens.append(f"{token:>2} ")
+        lines.append(f"{row + 1:>2} " + "".join(tokens))
     lines.append("Legend: # Black  o White  . Empty  ! opponent last")
     return lines
 
@@ -10466,13 +10469,13 @@ class ZhaJinHuaGame:
 
 _HOLDEM_MOVE_HELP = (
     "德州扑克 /game move 指令（中文与英文等价，任选一种）：",
-    "  开始 start                 房主开局",
-    "  看牌 look                  查看自己的底牌（仅自己可见，不占行动轮次）",
+    "  开始 start                 房主开局（发牌后即可看到自己的底牌）",
     "  过牌 check                 当前无需跟注时过牌",
     "  跟注 call                  跟平当前注（无需跟注时等同过牌）",
     "  加注 <额> raise <额>       在现有注额上再加",
     "  弃牌 fold",
     "  全下 allin",
+    "  看牌 look                  再次查看自己的底牌（仅自己可见，不占行动轮次）",
     "  机器人 <难度> bot <easy|hard|pro>   房主设置机器人",
     "示例：/game move 跟注  或  /game move call  ；/game move 加注 10  或  raise 10",
 )
@@ -10868,10 +10871,11 @@ class HoldemGame:
         if self.stacks.get(name, 0) <= 0:
             return (["你已全下，等待本轮结算。"], [], False)
         if cmd == "look":
-            if name in self.looked:
-                return ([], [f"{name} 已经看过牌。"], False)
-            self.looked.add(name)
-            return ([], [f"{name} 选择了看牌"], False)
+            hand = self.hands.get(name)
+            if not hand:
+                return (["你当前没有手牌。"], [], False)
+            # 仅私信回显底牌；德州扑克不需要闷牌步骤。
+            return ([f"你的手牌：{self._fmt(hand)}"], [], False)
 
         cur = self.players[self.turn_idx][1]
         if name != cur:
@@ -10996,24 +11000,21 @@ class HoldemGame:
             else:
                 tag = "存活"
             mark = "（行动中）" if self.state == "playing" and n == current and self._can_act(n) else ""
-            looked = "，已看牌" if n in self.looked else ""
-            lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{looked}{mark}")
+            lines.append(f"#{i} {n}：积分={self.stacks.get(n, 0)} {tag}{mark}")
         return lines
 
     def show(self, conn=None, full: bool = False) -> list[str]:
         lines = self.seats()
         me = self._name_of(conn) if conn is not None else None
         if me and me in self.hands:
-            if me in self.looked:
-                lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
-            else:
-                lines.append("你当前闷牌中（先看牌后可见）")
+            # 德州扑克发牌后即可看到自己的底牌（不像炸金花需要先看牌）。
+            lines.append(f"你的手牌：{self._fmt(self.hands[me])}")
         if full:
             lines.extend(_HOLDEM_MOVE_HELP)
         else:
             lines.append(
-                "行牌（中英均可）：开始 start | 看牌 look | 过牌 check | 跟注 call | "
-                "加注 raise <额> | 弃牌 fold | 全下 allin"
+                "行牌（中英均可）：开始 start | 过牌 check | 跟注 call | "
+                "加注 raise <额> | 弃牌 fold | 全下 allin | 看牌 look"
             )
             if self.state == "waiting":
                 lines.append("房主 /game move 开始 发牌；人数不足会自动补机器人")
@@ -12851,11 +12852,11 @@ HELP_LINES = (
     "[*] /game resign           认负（仅对局进行中）。",
     "[*] /game abort            终止未开始的对局。",
     "[*] /game end              房主可强制结束当前对局。",
-    "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）。",
-    "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）。",
+    "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）；联邦节点同步。",
+    "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；联邦节点同步。",
     "[*] holdem（德州扑克）中英指令对照：",
-    "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
-    "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
+    "[*]   开始 start | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin | 看牌 look",
+    "[*]   发牌后即可看到自己的底牌；机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
     "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
     "比牌 compare <昵称> | 弃牌 fold；比牌费用为当前单注两倍（看牌后再翻倍）；"
     "牌型：豹子>顺金>金花>顺子>对子>单张，花色不同235可胜豹子；"

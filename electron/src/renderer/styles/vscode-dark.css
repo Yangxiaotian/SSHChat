@@ -1209,6 +1209,14 @@ html, body, #root {
   color: #c8a4a4;
 }
 
+.poker-card-back {
+  background: #1a237e;
+  color: #e8eaf6;
+  border-color: #3949ab;
+  font-size: 18px;
+  min-width: 48px;
+}
+
 .game-grid-row {
   display: flex;
   align-items: center;

@@ -29,8 +29,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.q267267275.SSHChat
         PRODUCT_NAME: SSHChat
-        MARKETING_VERSION: "0.3.15"
-        CURRENT_PROJECT_VERSION: "28"
+        MARKETING_VERSION: "0.3.19"
+        CURRENT_PROJECT_VERSION: "32"
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
@@ -58,8 +58,8 @@ targets:
       path: SSHChat/Info.plist
       properties:
         CFBundleDisplayName: SSHChat
-        CFBundleShortVersionString: "0.3.15"
-        CFBundleVersion: "28"
+        CFBundleShortVersionString: "0.3.19"
+        CFBundleVersion: "29"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities: [armv7]
         UISupportedInterfaceOrientations:
@@ -87,8 +87,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.q267267275.SSHChat.watchkitapp
         PRODUCT_NAME: SSHChatWatch
-        MARKETING_VERSION: "0.3.15"
-        CURRENT_PROJECT_VERSION: "28"
+        MARKETING_VERSION: "0.3.19"
+        CURRENT_PROJECT_VERSION: "32"
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
@@ -108,8 +108,8 @@ targets:
       path: SSHChatWatch/Info.plist
       properties:
         CFBundleDisplayName: SSHChat
-        CFBundleShortVersionString: "0.3.15"
-        CFBundleVersion: "28"
+        CFBundleShortVersionString: "0.3.19"
+        CFBundleVersion: "29"
         # Independent Watch MVP: omit WKCompanionAppBundleIdentifier so XcodeGen
         # does not auto-embed into the iPhone target (needs watchOS SDK to build).
         WKRunsIndependentlyOfCompanionApp: true

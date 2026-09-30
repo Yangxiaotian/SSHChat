@@ -11,8 +11,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-import queue
 import re
+import select
 import socket
 import subprocess
 import threading
@@ -23,16 +23,47 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 PROTOCOL_VERSION = "1"
-_DISCONNECT_ERRNOS = {32, 54, 57, 104}
+# 9=EBADF: writer close_transport() while reader is in recv().
+_DISCONNECT_ERRNOS = {9, 32, 54, 57, 104}
 _RECONNECT_DELAY = float(os.environ.get("SSHCHAT_FED_RECONNECT_SECONDS", "5"))
 _PEERS_WATCH_SECONDS = float(os.environ.get("SSHCHAT_FED_PEERS_WATCH_SECONDS", "5"))
 # Bound flood dedup memory (graph cycles / rebroadcast).
 _SEEN_MAX = int(os.environ.get("SSHCHAT_FED_SEEN_MAX", "4096"))
 # Bound federation sendall so a congested peer cannot stall forever.
-_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "5") or "5")
+# Slow VPN/SSH forwards (ZeroTier) often need tens of seconds for large frames.
+_FED_SEND_TIMEOUT = float(os.environ.get("SSHCHAT_FED_SEND_TIMEOUT", "30") or "30")
 # Outbound queue per peer: join/leave/chat fanout returns immediately to callers
 # (e.g. local SSH clients). Writer thread drains with _FED_SEND_TIMEOUT.
-_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "512") or "512")
+# Larger default absorbs bursty presence/catalog pushes on high-latency links.
+_FED_SEND_QUEUE_MAX = int(os.environ.get("SSHCHAT_FED_SEND_QUEUE_MAX", "2048") or "2048")
+# Bulk / refreshable frames — drop under congestion instead of closing the link.
+_FED_DROPPABLE_KINDS = frozenset(
+    {
+        "presence",
+        "lcatalog",
+        "lmarks",
+        "lcap",
+        "rrating",
+        "fpub",
+        "csync",
+        "pisync",
+        "psync",
+        "gcat",
+    }
+)
+# Active heartbeat: ping idle peers; close half-open links (common with iSH /
+# ZeroTier / phone sleep) so /fed and remote presence do not stay stale.
+# Defaults are deliberately loose for high-latency VPN links — override via env.
+_FED_HEARTBEAT_INTERVAL = float(
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_SECONDS", "45") or "45"
+)
+_FED_HEARTBEAT_TIMEOUT = float(
+    os.environ.get("SSHCHAT_FED_HEARTBEAT_TIMEOUT", "150") or "150"
+)
+# Re-announce local roster so peers drop ghosts after a missed leave frame.
+_FED_PRESENCE_REFRESH = float(
+    os.environ.get("SSHCHAT_FED_PRESENCE_REFRESH_SECONDS", "120") or "120"
+)
 
 
 def _node_id() -> str:
@@ -69,34 +100,77 @@ def _nick_key(name: str) -> str:
 
 
 def _sendall_timeout(sock, data: bytes, timeout: float | None = None) -> None:
-    """sendall with a temporary timeout; restore the prior socket timeout after.
+    """Send all bytes with a deadline without sock.settimeout().
 
-    Pipes / file objects without gettimeout/settimeout fall back to bare sendall.
+    Federation sessions share one TCP socket across a reader thread and a writer
+    thread. Changing the socket timeout from the writer wakes a blocking recv()
+    with TimeoutError and falsely drops healthy peers (seen as rapid
+    Mathematics.local join/leave storms on slow SSH-forwarded links).
     """
     if not data:
         return
     if timeout is None:
         timeout = _FED_SEND_TIMEOUT
-    old = None
-    has_timeout_api = hasattr(sock, "gettimeout") and hasattr(sock, "settimeout")
-    if has_timeout_api:
-        try:
-            old = sock.gettimeout()
-        except Exception:
-            old = None
-        try:
-            if timeout > 0:
-                sock.settimeout(timeout)
-        except Exception:
-            has_timeout_api = False
-    try:
+    if timeout is not None and float(timeout) <= 0:
         sock.sendall(data)
-    finally:
-        if has_timeout_api:
-            try:
-                sock.settimeout(old)
-            except Exception:
-                pass
+        return
+
+    fileno = getattr(sock, "fileno", None)
+    can_select = False
+    if callable(fileno):
+        try:
+            fd = fileno()
+            can_select = isinstance(fd, int) and fd >= 0
+        except Exception:
+            can_select = False
+    if not can_select:
+        # Test doubles / non-socket transports: blocking sendall, no timeout API.
+        sock.sendall(data)
+        return
+
+    deadline = time.monotonic() + float(timeout)
+    view = memoryview(data)
+    while len(view):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out")
+        try:
+            _readable, writable, errored = select.select([], [sock], [sock], remaining)
+        except (TypeError, ValueError, OSError):
+            sock.sendall(bytes(view))
+            return
+        if errored and sock in errored and not writable:
+            raise OSError("socket error during federation send")
+        if not writable:
+            raise TimeoutError("timed out")
+        try:
+            sent = sock.send(view)
+        except BlockingIOError:
+            continue
+        if sent == 0:
+            raise BrokenPipeError("socket send returned 0")
+        view = view[sent:]
+
+
+def _enable_tcp_keepalive(sock: socket.socket) -> None:
+    """Best-effort TCP keepalive so half-open peer links die without app traffic."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    # Linux / some BSDs: idle 30s, then probe every 10s, drop after 3 fails.
+    for opt, value in (
+        ("TCP_KEEPIDLE", 30),
+        ("TCP_KEEPINTVL", 10),
+        ("TCP_KEEPCNT", 3),
+    ):
+        const = getattr(socket, opt, None)
+        if const is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, const, value)
+        except OSError:
+            pass
 
 
 class RemoteUser:
@@ -117,6 +191,24 @@ class RemoteUser:
         self.current_room = current_room
 
 
+def _frame_kind(data: bytes) -> str:
+    """Return the leading frame token (before tab/newline), lowercased."""
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    for sep in ("\t", "\n", "\r", " "):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+            break
+    return text.strip().lower()
+
+
+def _is_droppable_frame(data: bytes) -> bool:
+    """True for bulk/refreshable frames safe to drop when the peer is slow."""
+    return _frame_kind(data) in _FED_DROPPABLE_KINDS
+
+
 class _PeerLink:
     """One bidirectional federation link to a peer node.
 
@@ -124,15 +216,32 @@ class _PeerLink:
     handlers (join welcome, /names, /rooms) never block on a congested peer
     TCP window. The writer applies ``SSHCHAT_FED_SEND_TIMEOUT`` when the
     underlying object is a socket.
+
+    When the outbound queue is full (slow ZeroTier / SSH forwards), drop
+    refreshable bulk frames (presence, catalogs, …) instead of tearing down
+    the link — chat/PM/game frames still force a close if they cannot fit.
     """
 
-    def __init__(self, hub: FederationHub, node_id: str, send_fn: Callable[[bytes], None]) -> None:
+    def __init__(
+        self,
+        hub: FederationHub,
+        node_id: str,
+        send_fn: Callable[[bytes], None],
+        *,
+        close_transport: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.hub = hub
         self.node_id = node_id
         self._send_fn = send_fn
+        self._close_transport = close_transport
         self._closed = False
-        qmax = max(16, _FED_SEND_QUEUE_MAX)
-        self._send_q: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=qmax)
+        self.last_rx = time.monotonic()
+        self._ping_sent_at = 0.0
+        self._qmax = max(16, _FED_SEND_QUEUE_MAX)
+        self._send_buf: deque[Optional[bytes]] = deque()
+        self._send_cv = threading.Condition()
+        self._drop_log_at = 0.0
+        self._drops_since_log = 0
         self._writer = threading.Thread(
             target=self._write_loop,
             name=f"fed-send-{node_id}",
@@ -140,39 +249,105 @@ class _PeerLink:
         )
         self._writer.start()
 
+    def note_rx(self) -> None:
+        self.last_rx = time.monotonic()
+
+    def _log_drops(self, n: int, *, dropped_new: bool = False) -> None:
+        if n <= 0:
+            return
+        self._drops_since_log += n
+        now = time.monotonic()
+        if now - self._drop_log_at < 10.0:
+            return
+        self._drop_log_at = now
+        total = self._drops_since_log
+        self._drops_since_log = 0
+        why = "dropped new bulk frame(s)" if dropped_new else "dropped queued bulk frame(s)"
+        print(
+            f"federation: {why} for {self.node_id} "
+            f"(congested; {total} since last log); keeping link"
+        )
+
+    def _drop_queued_droppable_locked(self) -> int:
+        """Remove droppable frames from the outbound buffer. Caller holds _send_cv."""
+        if not self._send_buf:
+            return 0
+        kept: deque[Optional[bytes]] = deque()
+        dropped = 0
+        for item in self._send_buf:
+            if item is None or not _is_droppable_frame(item):
+                kept.append(item)
+            else:
+                dropped += 1
+        if dropped:
+            self._send_buf = kept
+        return dropped
+
     def send_line(self, line: str) -> None:
         if self._closed:
             return
         data = line.encode("utf-8")
-        try:
-            self._send_q.put_nowait(data)
-        except queue.Full:
-            print(
-                f"federation: send queue full for {self.node_id} "
-                f"(peer congested); closing link"
-            )
-            self.close()
+        closer: Optional[Callable[[], None]] = None
+        with self._send_cv:
+            if self._closed:
+                return
+            if len(self._send_buf) >= self._qmax:
+                dropped = self._drop_queued_droppable_locked()
+                self._log_drops(dropped)
+            if len(self._send_buf) >= self._qmax:
+                if _is_droppable_frame(data):
+                    self._log_drops(1, dropped_new=True)
+                    return
+                print(
+                    f"federation: send queue full for {self.node_id} "
+                    f"(critical frame, peer congested); closing link"
+                )
+                # Avoid re-entering close() while holding _send_cv.
+                self._closed = True
+                self._send_buf.append(None)
+                self._send_cv.notify()
+                closer = self._close_transport
+                self._close_transport = None
+            else:
+                self._send_buf.append(data)
+                self._send_cv.notify()
+                return
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._send_q.put_nowait(None)
-        except queue.Full:
-            pass
+        closer: Optional[Callable[[], None]] = None
+        with self._send_cv:
+            if self._closed:
+                return
+            self._closed = True
+            self._send_buf.append(None)
+            self._send_cv.notify()
+            closer = self._close_transport
+            self._close_transport = None
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
     def handle_line(self, line: str) -> None:
+        self.note_rx()
         self.hub._on_peer_line(self.node_id, line)
 
     def _write_loop(self) -> None:
         while True:
-            try:
-                item = self._send_q.get(timeout=0.5)
-            except queue.Empty:
-                if self._closed:
-                    break
-                continue
+            with self._send_cv:
+                while not self._send_buf and not self._closed:
+                    self._send_cv.wait(timeout=0.5)
+                if not self._send_buf:
+                    if self._closed:
+                        break
+                    continue
+                item = self._send_buf.popleft()
             if item is None:
                 break
             if self._closed:
@@ -276,8 +451,14 @@ class FederationHub:
         self.get_local_file_public = get_local_file_public
         # origin_node, announce_dict — room canvas advertise / conflict merge
         self.on_canvas_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
+        # origin_node, announce_dict — room piano advertise / conflict merge
+        self.on_piano_sync: Optional[Callable[[str, dict[str, Any]], None]] = None
         # origin_node, room, text, rev — room /pad LWW sync
         self.on_pad_sync: Optional[Callable[[str, str, str, int], None]] = None
+        # origin_node, room, enabled_names, rev — room /game on|off catalog LWW
+        self.on_game_catalog_sync: Optional[
+            Callable[[str, str, list[str], int], None]
+        ] = None
         # node_id, base_url — peer public file URL changed (refresh canvas mirrors)
         self.on_file_public_change: Optional[Callable[[str, str], None]] = None
         self.enabled = os.environ.get("SSHCHAT_FEDERATION_DISABLE", "").strip().lower() not in (
@@ -298,6 +479,8 @@ class FederationHub:
         self._remote_catalogs: dict[str, list[dict[str, Any]]] = {}
         # node_id -> {"base_url": str, "seen_at": float} for public file endpoints
         self._remote_file_pubs: dict[str, dict[str, Any]] = {}
+        # Sticky federation CF host (node_id); elect min id when unset/gone.
+        self._sticky_file_host: Optional[str] = None
         self._seen_lock = threading.Lock()
         self._seen_keys: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -305,12 +488,17 @@ class FederationHub:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._peers_mtime: Optional[float] = None
+        self._last_presence_refresh = 0.0
         # Load initial peer list (outbound threads start in start()).
         self._ingest_peer_configs(self._load_peers(), start_outbound=False)
 
     @property
     def peer_count(self) -> int:
         return len(self._peers)
+
+    def direct_peer_ids(self) -> list[str]:
+        """Node ids with a live direct link (sorted)."""
+        return sorted(self._peers.keys())
 
     def start(self) -> None:
         if not self.enabled:
@@ -326,9 +514,18 @@ class FederationHub:
             )
             wt.start()
             self._threads.append(wt)
+        if _FED_HEARTBEAT_INTERVAL > 0 or _FED_PRESENCE_REFRESH > 0:
+            ht = threading.Thread(
+                target=self._heartbeat_loop, name="fed-heartbeat", daemon=True
+            )
+            ht.start()
+            self._threads.append(ht)
         print(
             f"federation: node={self.node_id!r} listen=0.0.0.0:{self.port} "
-            f"peers={len(self._peer_configs_by_id)} outbound_started={started}"
+            f"peers={len(self._peer_configs_by_id)} outbound_started={started} "
+            f"heartbeat={_FED_HEARTBEAT_INTERVAL:.0f}s/"
+            f"{_FED_HEARTBEAT_TIMEOUT:.0f}s "
+            f"presence_refresh={_FED_PRESENCE_REFRESH:.0f}s"
         )
 
     def stop(self) -> None:
@@ -465,6 +662,81 @@ class FederationHub:
                 self.reload_peers()
             except Exception as e:
                 print(f"federation: peers watch reload error: {e!r}")
+
+    def _heartbeat_loop(self) -> None:
+        """Ping idle peers, drop silent links, and periodically refresh presence."""
+        # Wake often enough to honor the smaller of heartbeat / presence intervals.
+        candidates = [
+            x
+            for x in (_FED_HEARTBEAT_INTERVAL, _FED_PRESENCE_REFRESH, 5.0)
+            if x and x > 0
+        ]
+        sleep_for = max(1.0, min(candidates) if candidates else 5.0)
+        while not self._stop.wait(sleep_for):
+            try:
+                self._tick_heartbeats()
+            except Exception as e:
+                print(f"federation: heartbeat tick error: {e!r}")
+            try:
+                self._tick_presence_refresh()
+            except Exception as e:
+                print(f"federation: presence refresh error: {e!r}")
+
+    def _tick_heartbeats(self) -> None:
+        """Send ping to idle peers; close links with no inbound traffic."""
+        if _FED_HEARTBEAT_INTERVAL <= 0 or _FED_HEARTBEAT_TIMEOUT <= 0:
+            return
+        now = time.monotonic()
+        for node_id, link in list(self._peers.items()):
+            if not isinstance(link, _PeerLink) or link._closed:
+                continue
+            idle = now - float(getattr(link, "last_rx", now))
+            if idle >= _FED_HEARTBEAT_TIMEOUT:
+                print(
+                    f"federation: peer {node_id} heartbeat timeout "
+                    f"({idle:.0f}s idle); closing link"
+                )
+                link.close()
+                continue
+            if idle < _FED_HEARTBEAT_INTERVAL:
+                continue
+            # Avoid spamming ping while still waiting for a recent one.
+            ping_at = float(getattr(link, "_ping_sent_at", 0.0) or 0.0)
+            if ping_at > link.last_rx and (now - ping_at) < _FED_HEARTBEAT_INTERVAL:
+                continue
+            link._ping_sent_at = now
+            link.send_line("ping\n")
+
+    def _tick_presence_refresh(self) -> None:
+        """Re-broadcast local roster when it changed (or on first refresh)."""
+        if _FED_PRESENCE_REFRESH <= 0 or not self._peers:
+            return
+        now = time.monotonic()
+        if (
+            self._last_presence_refresh > 0
+            and (now - self._last_presence_refresh) < _FED_PRESENCE_REFRESH
+        ):
+            return
+        self._last_presence_refresh = now
+        self._broadcast_local_presence()
+
+    def _broadcast_local_presence(self) -> None:
+        """Announce current local users so peers can drop missed-leave ghosts."""
+        if not self.enabled or not self._peers:
+            return
+        try:
+            users = self.get_local_clients()
+        except Exception as e:
+            print(f"federation: presence refresh get_local_clients error: {e!r}")
+            return
+        if not isinstance(users, list):
+            return
+        blob = json.dumps(users, ensure_ascii=False)
+        line = f"presence\t{self.node_id}\t{blob}\n"
+        # Unchanged roster is already in flood-dedup; skip identical re-sends.
+        if self._remember_seen(line):
+            return
+        self._fanout(line)
 
     def _load_peers(self) -> list[dict[str, Any]]:
         path = _peers_path()
@@ -916,6 +1188,26 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
+    def sync_piano_announce(self, announce: dict[str, Any]) -> None:
+        """Fan-out an open room-piano advertisement (pisync)."""
+        if not self.enabled or not self._peers:
+            return
+        if not isinstance(announce, dict):
+            return
+        room = str(announce.get("room") or "").strip()
+        sid = str(announce.get("session_id") or "").strip()
+        if not room or not sid:
+            return
+        try:
+            blob = base64.b64encode(
+                json.dumps(announce, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+        except (TypeError, ValueError):
+            return
+        line = f"pisync\t{self.node_id}\t{blob}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
     def sync_pad(self, room: str, text: str, rev: int) -> None:
         """Fan-out room /pad content (psync); empty text means cleared."""
         if not self.enabled or not self._peers:
@@ -935,11 +1227,86 @@ class FederationHub:
         self._remember_seen(line)
         self._fanout(line)
 
-    def pick_file_public_peer(self) -> Optional[tuple[str, str]]:
-        """Return (node_id, base_url) for the newest advertised public file host.
+    def sync_game_catalog(self, room: str, enabled: list[str], rev: int) -> None:
+        """Fan-out room /game on|off catalog (gcat); empty list = all offline."""
+        if not self.enabled or not self._peers:
+            return
+        room = str(room or "").strip()
+        if not room:
+            return
+        try:
+            rev_i = int(rev)
+        except (TypeError, ValueError):
+            return
+        if rev_i <= 0:
+            return
+        names = sorted(
+            {
+                str(n).strip().lower()
+                for n in (enabled or [])
+                if isinstance(n, str) and str(n).strip()
+            }
+        )
+        blob = base64.b64encode(
+            json.dumps(names, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"gcat\t{self.node_id}\t{room}\t{blob}\t{rev_i}\t{time.time_ns()}\n"
+        self._remember_seen(line)
+        self._fanout(line)
 
-        Prefers a direct neighbor when timestamps tie; skips self.
+    def pick_federation_file_host(self) -> Optional[tuple[str, str]]:
+        """Return (node_id, base_url) for the sticky shared Cloudflare host.
+
+        Candidates: this node's reachable public URL (if any) plus still-routable
+        peer fpub advertisements. Keep sticky node_id while it remains a
+        candidate (URL may refresh). Otherwise elect lexicographically smallest
+        node_id so every peer converges on the same host.
         """
+        if not self.enabled:
+            return None
+        candidates: dict[str, str] = {}
+        if self.get_local_file_public is not None:
+            try:
+                local = str(self.get_local_file_public() or "").strip().rstrip("/")
+            except Exception as e:
+                print(f"federation: get_local_file_public error: {e!r}")
+                local = ""
+            if local and local != "-":
+                candidates[self.node_id] = local
+        for node_id, info in list(self._remote_file_pubs.items()):
+            if node_id == self.node_id:
+                continue
+            if node_id not in self._routes and node_id not in self._peers:
+                continue
+            url = str((info or {}).get("base_url") or "").strip().rstrip("/")
+            if not url or url == "-":
+                continue
+            candidates[node_id] = url
+        if not candidates:
+            self._sticky_file_host = None
+            return None
+        sticky = (self._sticky_file_host or "").strip()
+        if sticky and sticky in candidates:
+            return sticky, candidates[sticky]
+        elected = min(candidates.keys())
+        prev = self._sticky_file_host
+        self._sticky_file_host = elected
+        if prev != elected:
+            print(
+                f"federation: sticky file host -> {elected} "
+                f"({candidates[elected]})"
+            )
+        return elected, candidates[elected]
+
+    def pick_file_public_peer(self) -> Optional[tuple[str, str]]:
+        """Return (node_id, base_url) for a peer Cloudflare host (never self).
+
+        Prefers the sticky federation host when it is a remote peer; otherwise
+        falls back to the newest advertised remote fpub.
+        """
+        sticky = self.pick_federation_file_host()
+        if sticky is not None and sticky[0] != self.node_id:
+            return sticky
         best: Optional[tuple[float, int, str, str]] = None
         # rank: (seen_at, direct_neighbor_boost, node_id, url)
         for node_id, info in list(self._remote_file_pubs.items()):
@@ -1171,6 +1538,17 @@ class FederationHub:
         keys = self._room_remotes.get(room, ())
         return sorted({self._remote_users[k].name for k in keys if k in self._remote_users})
 
+    def remote_users_by_node(self) -> dict[str, list[tuple[str, str]]]:
+        """Presence snapshot: node_id -> sorted [(name, current_room), ...]."""
+        grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for u in self._remote_users.values():
+            room = (u.current_room or "default").strip() or "default"
+            grouped[u.node_id].append((u.name, room))
+        return {
+            node: sorted(rows, key=lambda r: _nick_key(r[0]))
+            for node, rows in sorted(grouped.items(), key=lambda kv: _nick_key(kv[0]))
+        }
+
     def same_name_in_room(self, room: str, name: str, local_has_other: bool) -> bool:
         """True if same nickname exists on a peer in this room."""
         if local_has_other:
@@ -1200,8 +1578,24 @@ class FederationHub:
         return not already_up
 
     def _notify_peer_up(self, peer_node: str) -> None:
-        """Local peer just connected: tell local users and other online peers."""
-        self._emit_peer_event("up", peer_node, reporter=self.node_id, relay=True)
+        """Local peer just connected: tell local users and other online peers.
+
+        Run off the session thread so the read loop can drain inbound data while
+        catch-up (offline clears, games, catalogs) is queued — otherwise both
+        sides fill the TCP window on slow links and the link flaps.
+        """
+
+        def _run() -> None:
+            try:
+                self._emit_peer_event(
+                    "up", peer_node, reporter=self.node_id, relay=True
+                )
+            except Exception as e:
+                print(f"federation: peer-up notify error ({peer_node}): {e!r}")
+
+        threading.Thread(
+            target=_run, name=f"fed-up-{peer_node}", daemon=True
+        ).start()
 
     def _notify_peer_down(self, peer_node: str) -> None:
         """Local peer just disconnected: tell local users and other online peers."""
@@ -2070,6 +2464,36 @@ class FederationHub:
                     print(f"federation: on_canvas_sync error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
+        if kind == "pisync":
+            # pisync\torigin\tb64(announce_json)\tnonce
+            cparts = line.split("\t", 3)
+            if len(cparts) < 3:
+                return
+            if self._remember_seen(line):
+                return
+            origin, blob = cparts[1], cparts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            announce: dict[str, Any] = {}
+            try:
+                raw = base64.b64decode(blob.encode("ascii"))
+                parsed = json.loads(raw.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    announce = parsed
+            except Exception as e:
+                print(f"federation: pisync decode error: {e!r}")
+                return
+            host = str(announce.get("host_node") or "").strip()
+            if host and host != self.node_id:
+                self._learn_route(host, peer_node)
+            if self.on_piano_sync is not None:
+                try:
+                    self.on_piano_sync(origin, announce)
+                except Exception as e:
+                    print(f"federation: on_piano_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
         if kind == "psync":
             # psync\torigin\troom\tb64text\trev\tnonce
             pparts = line.split("\t", 5)
@@ -2092,6 +2516,39 @@ class FederationHub:
                     self.on_pad_sync(origin, room, text, rev)
                 except Exception as e:
                     print(f"federation: on_pad_sync error: {e!r}")
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
+        if kind == "gcat":
+            # gcat\torigin\troom\tb64(json names)\trev\tnonce
+            gparts = line.split("\t", 5)
+            if len(gparts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, room, blob, rev_s = gparts[1], gparts[2], gparts[3], gparts[4]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            try:
+                rev = int(rev_s)
+                parsed = json.loads(
+                    base64.b64decode(blob.encode("ascii")).decode("utf-8")
+                )
+            except Exception as e:
+                print(f"federation: gcat decode error: {e!r}")
+                return
+            if not isinstance(parsed, list):
+                return
+            names = [
+                str(n).strip().lower()
+                for n in parsed
+                if isinstance(n, str) and str(n).strip()
+            ]
+            if self.on_game_catalog_sync is not None:
+                try:
+                    self.on_game_catalog_sync(origin, room, names, rev)
+                except Exception as e:
+                    print(f"federation: on_game_catalog_sync error: {e!r}")
             self._fanout(line + "\n", exclude_node=peer_node)
             return
         if kind == "gsync" and self.on_game_sync:
@@ -2388,6 +2845,7 @@ class FederationHub:
                 conn, addr = s.accept()
             except OSError:
                 break
+            _enable_tcp_keepalive(conn)
             threading.Thread(
                 target=self._serve_inbound,
                 args=(conn, addr),
@@ -2427,7 +2885,19 @@ class FederationHub:
                 def _send(data: bytes, _c=conn) -> None:
                     _sendall_timeout(_c, data)
 
-                link = _PeerLink(self, peer_node, _send)
+                def _close_transport(_c=conn) -> None:
+                    try:
+                        _c.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        _c.close()
+                    except Exception:
+                        pass
+
+                link = _PeerLink(
+                    self, peer_node, _send, close_transport=_close_transport
+                )
                 is_new = self._register_peer(peer_node, link)
                 # Handshake @fed-ok must go out immediately (not via the queue)
                 # so the peer can finish connecting even if the writer is busy.
@@ -2518,6 +2988,7 @@ class FederationHub:
         if mode == "tcp":
             sock = socket.create_connection((host, fed_port), timeout=15)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            _enable_tcp_keepalive(sock)
             return self._wrap_socket_proc(sock)
 
         ssh_port = int(peer.get("ssh_port") or 22)
@@ -2595,6 +3066,22 @@ class FederationHub:
                 send_sock.write(data)
                 send_sock.flush()
 
+        def _close_transport() -> None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            for end in (send_sock, conn):
+                try:
+                    if hasattr(end, "shutdown"):
+                        end.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    end.close()
+                except Exception:
+                    pass
+
         def _recv(n: int) -> bytes:
             if hasattr(conn, "recv"):
                 return conn.recv(n)
@@ -2630,7 +3117,9 @@ class FederationHub:
                 if not line.startswith("@fed-ok"):
                     break
                 parts = line.split("\t")
-                link = _PeerLink(self, peer_node, _send)
+                link = _PeerLink(
+                    self, peer_node, _send, close_transport=_close_transport
+                )
                 is_new = self._register_peer(peer_node, link)
                 registered = True
                 # Apply any peer lines already buffered with @fed-ok (usually

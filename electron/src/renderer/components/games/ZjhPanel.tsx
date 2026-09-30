@@ -99,6 +99,7 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
 
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
+  const canLook = isPlaying && handCards.length === 0;
   const canTuneBot = isHost;
   const amountNum = Number(raiseAmount.trim());
   const hasValidRaise = Number.isFinite(amountNum) && amountNum > 0;
@@ -121,8 +122,15 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
       {(isPlaying && myTurn) && (
         <div className="game-workbench-hint">{t('game.zjh.yourTurn')}</div>
       )}
+      {isPlaying && handCards.length === 0 && (
+        <div className="game-workbench-hint">{t('game.zjh.lookHint')}</div>
+      )}
 
-      <PokerCardsView title={t('game.zjh.yourHand')} cards={handCards} />
+      <PokerCardsView
+        title={t('game.zjh.yourHand')}
+        cards={handCards}
+        faceDown={isPlaying && handCards.length === 0 ? 3 : 0}
+      />
 
       {scores.length > 0 && (
         <div className="game-chip-row">
@@ -141,7 +149,13 @@ export default function ZjhPanel({ disabled, users, nickname, onCmd, boardText }
         >
           {t('game.zjh.dealStart')}
         </button>
-        <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('look')}>{t('game.zjh.look')}</button>
+        <button
+          className={`mini-btn ${canLook && canAct ? 'ready' : ''}`}
+          disabled={disabled || !canLook || !canAct}
+          onClick={() => onCmd('look')}
+        >
+          {t('game.zjh.look')}
+        </button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('follow')}>{t('game.zjh.follow')}</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('fold')}>{t('game.zjh.fold')}</button>
         <button className="mini-btn" disabled={disabled} onClick={() => onCmd('/game end')}>{t('game.end')}</button>

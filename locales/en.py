@@ -11,6 +11,7 @@ MESSAGES: dict = {
         "[*] /part <room>    Leave a room; you must keep at least one (cannot leave the last).\n",
         "[*] /rooms         List rooms you joined; * marks the active room.\n",
         "[*] /names or /users  List nicknames in the active room (same command).\n",
+        "[*] /fed or /peers    Show federation peers and online users (alias /federation).\n",
         "[*]\n",
         "[*] /msg #<room> <text>   Send one line to a room without switching (# means room).\n",
         "[*] /msg <nick> <text>   PM: delivered live if online; otherwise left as a leave-message for next login.\n",
@@ -100,11 +101,11 @@ MESSAGES: dict = {
         "[*] /game end              Room owner may force-end the current game.",
         "[*] /game restore          Restore a game parked by restart/federation into an idle room.",
         "[*] /game restore swap     Swap the parked game with the active one (keeps both).",
-        "[*] /game on <name>        Owner enables a game in this room (same name aliases as new); /game on all enables every game.",
-        "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected); /game off all disables every game.",
+        "[*] /game on <name>        Owner enables a game in this room (same name aliases as new); /game on all enables every game; synced across federation.",
+        "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected); /game off all disables every game; synced across federation.",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",
-        "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <amt> raise <amt> | 弃牌 fold | 全下 allin",
-        "[*]   bots: bot <easy|hard|pro>; after start, /game show 帮助 shows the full help again.",
+        "[*]   开始 start | 过牌 check | 跟注 call | 加注 <amt> raise <amt> | 弃牌 fold | 全下 allin | 看牌 look",
+        "[*]   hole cards visible after deal; bots: bot <easy|hard|pro>; after start, /game show 帮助 shows the full help again.",
         "[*] zjh (Zha Jin Hua) EN/ZH: 开始 start | 看牌 look | 跟注 follow | 加注 raise <amt> | "
         "比牌 compare <nick> | 弃牌 fold; compare costs 2× current bet (×2 again after looking); "
         "ranks: leopard > straight flush > flush > straight > pair > high card; "
@@ -149,7 +150,7 @@ MESSAGES: dict = {
         "pad_cleared_bcast": "[#{room}] [*] {editor} cleared the pad.\n",
         "pad_cleared": "[*] Cleared the pad for #{room}.\n",
         "pad_edit_client_only": (
-            "[*] Multi-line edit: terminal /pad edit, or mobile App + → Pad. "
+            "[*] Multi-line edit: terminal /pad edit, Tk desktop client 📝 button, or mobile App + → Pad. "
             "Or keep using /pad <one line>.\n"
         ),
         "pad_load_usage": "[*] Usage: /pad load <base64> (sent automatically by /pad edit)\n",
@@ -228,6 +229,20 @@ MESSAGES: dict = {
         ),
         "fed_connected": (
             "[*] Federation connected to {n} node(s) (same nick/rooms merge across servers).\n"
+        ),
+        "fed_disabled": "[*] Federation is disabled on this node (SSHCHAT_FEDERATION_DISABLE).\n",
+        "fed_none": "[*] Federation is on, but no direct peers are online.\n",
+        "fed_status": (
+            "[*] Federation: this node {self}; {n} direct peer(s) online"
+            "{peers_clause}.\n"
+        ),
+        "fed_status_peers": ": {peers}",
+        "fed_reachable": "[*] Reachable via routes (incl. multi-hop): {n} — {peers}\n",
+        "fed_users_header": "[*] Federation online users ({n}):\n",
+        "fed_users_node": "[*]   {node} ({n}): {users}\n",
+        "fed_users_empty": "[*] Federation online users: none.\n",
+        "fed_usage": (
+            "[*] Usage: /fed or /peers  show federation peers and online users (alias /federation).\n"
         ),
         "multi_terminal": (
             "[*] Another terminal for this account is online; rooms synced and resume-play is available.\n"

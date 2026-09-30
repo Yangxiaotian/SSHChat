@@ -473,6 +473,7 @@ npm run build:portable
 | `/help` | 完整命令说明（多行） |
 | `/names` 或 `/users` | 当前房间昵称列表 |
 | `/rooms` | 查看你已加入的房间（`*` 表示当前活动房间） |
+| `/fed` 或 `/peers` | 查看联邦直连节点与联邦在线用户（别名 `/federation`） |
 | `/join 房间名` | 加入房间并切换到该房间 |
 | `/switch 房间名` | 在已加入房间之间切换 |
 | `/msg #房间名 内容` | 不切换当前房间，向指定房间发一行话（`#` 开头表示房间） |
@@ -566,8 +567,8 @@ npm run build:portable
 
 - **`sanguo`（三国杀）**：房主 `/game move 开始` 开局；`/game move 武将` 查武将池；观星/蛊惑/断粮等技能见 `/game show`。
 - **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
-- **`holdem`（德州扑克）**：`start` 开始 \| `look` 看牌 \| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可 `bot <easy\|hard\|pro>` 加机器人。
-- **`zjh`（炸金花）**：`start` \| `look` \| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
+- **`holdem`（德州扑克）**：`start` 开始（发牌后即可看到自己的底牌）\| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可选 `look` 再看一次底牌；可 `bot <easy\|hard\|pro>` 加机器人。
+- **`zjh`（炸金花）**：`start` \| `look` 看牌（默认闷牌）\| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
 - **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
 - **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
 

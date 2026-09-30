@@ -44,9 +44,11 @@ class FederationProtocolTests(unittest.TestCase):
         server.room_game_provisional.clear()
         server.room_games_parked.clear()
         server.room_enabled_games.clear()
+        server.room_enabled_game_revs.clear()
         server.disconnected_sessions.clear()
         federation._hub = None
         server._fed_hub = None
+        server._peer_up_offline_catchup_at.clear()
 
     def _free_port(self) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -491,6 +493,11 @@ class FederationProtocolTests(unittest.TestCase):
         hub._peers["node-c"] = link_c
 
         hub._notify_peer_up("node-c")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not any(
+            e == ("up", "node-c", "node-a") for e in events
+        ):
+            time.sleep(0.01)
         self.assertEqual(events[-1], ("up", "node-c", "node-a"))
         # Other online peers get nodeup; the subject peer itself does not.
         self.assertTrue(any(l.startswith("nodeup\tnode-a\tnode-c") for l in link_b.lines))
@@ -878,6 +885,47 @@ class FederationServerIntegrationTests(unittest.TestCase):
         # peer-up catch-up push + reconcile re-push for local-authority rooms
         self.assertEqual(pushed, [("lobby", "node-a"), ("lobby", "node-a")])
 
+    def test_peer_up_offline_catchup_debounced(self) -> None:
+        clears: list[int] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "node-a"
+            peer_count = 1
+
+            def sync_game(self, *a, **k):
+                return None
+
+            def sync_library_catalog(self, books=None):
+                return None
+
+            def sync_file_public(self, base_url=None):
+                return None
+
+            def request_game(self, room: str) -> None:
+                return None
+
+            def end_game(self, room: str, authority: str, token: str = "") -> None:
+                return None
+
+            def sync_ratings(self, entries=None):
+                return None
+
+        server._peer_up_offline_catchup_at.clear()
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "broadcast_local_notice"):
+                with mock.patch.object(
+                    server, "_federation_push_all_offline_clears",
+                    side_effect=lambda: clears.append(1),
+                ):
+                    with mock.patch.object(
+                        server, "_federation_push_all_offline_leaves"
+                    ):
+                        with mock.patch.object(server, "_PEER_UP_CATCHUP_DEBOUNCE", 120.0):
+                            server._fed_on_peer_event("up", "Math.local", "node-a")
+                            server._fed_on_peer_event("up", "Math.local", "node-a")
+        self.assertEqual(clears, [1])
+
     def test_game_request_pushes_snapshot(self) -> None:
         pushed: list[str] = []
 
@@ -1132,6 +1180,61 @@ class FederationServerIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(any(l.startswith("lcatalog\tnode-b\t") for l in peer_c.lines))
         self.assertFalse(any(l.startswith("lcatalog\t") for l in peer_b.lines))
+
+    def test_gcat_fanout_and_applies_lww(self) -> None:
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        applied: list[tuple] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        peer_b = FakeLink("node-b")
+        peer_c = FakeLink("node-c")
+        hub._peers["node-b"] = peer_b
+        hub._peers["node-c"] = peer_c
+        hub.on_game_catalog_sync = lambda *a: applied.append(a)
+
+        names = ["chess", "gomoku"]
+        blob = base64.b64encode(
+            json.dumps(names, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"gcat\tnode-b\tdefault\t{blob}\t100\t1"
+        hub._on_peer_line("node-b", line)
+        self.assertEqual(applied[-1][:3], ("node-b", "default", names))
+        self.assertEqual(applied[-1][3], 100)
+        self.assertTrue(any(l.startswith("gcat\tnode-b\tdefault\t") for l in peer_c.lines))
+        self.assertFalse(any(l.startswith("gcat\t") for l in peer_b.lines))
+
+        # Local apply: newer rev wins
+        server.room_enabled_games["default"] = {"chess"}
+        server.room_enabled_game_revs["default"] = 50
+        server._fed_on_game_catalog_sync("node-b", "default", ["gomoku"], 100)
+        self.assertEqual(server.room_enabled_games["default"], {"gomoku"})
+        self.assertEqual(server.room_enabled_game_revs["default"], 100)
+        # Older rev ignored
+        server._fed_on_game_catalog_sync("node-b", "default", ["chess"], 80)
+        self.assertEqual(server.room_enabled_games["default"], {"gomoku"})
+
+        # sync_game_catalog emits gcat
+        peer_b.lines.clear()
+        peer_c.lines.clear()
+        hub.sync_game_catalog("default", ["chess"], 200)
+        self.assertTrue(any(l.startswith("gcat\tnode-a\tdefault\t") for l in peer_b.lines))
+        self.assertTrue(any(l.startswith("gcat\tnode-a\tdefault\t") for l in peer_c.lines))
 
     def test_lpage_round_trip_invokes_handlers(self) -> None:
         requests: list[tuple] = []
@@ -1775,13 +1878,16 @@ class FederationServerIntegrationTests(unittest.TestCase):
         first = FakeLink("node-b")
         self.assertTrue(hub._register_peer("node-b", first))
         hub._notify_peer_up("node-b")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not events:
+            time.sleep(0.01)
         second = FakeLink("node-b")
         self.assertFalse(hub._register_peer("node-b", second))
         self.assertEqual(events, [("up", "node-b", "node-a")])
         self.assertTrue(first._closed)
         self.assertIs(hub._peers["node-b"], second)
 
-    def test_pick_newest_file_public_peer(self) -> None:
+    def test_pick_sticky_file_public_peer_prefers_min_node_id(self) -> None:
         hub = federation.FederationHub(
             12345,
             server.lock,
@@ -1803,8 +1909,11 @@ class FederationServerIntegrationTests(unittest.TestCase):
             "base_url": "https://new.trycloudflare.com",
             "seen_at": 200.0,
         }
+        # Sticky elects lexicographically smallest remote (node-b), not newest.
         picked = hub.pick_file_public_peer()
-        self.assertEqual(picked, ("node-c", "https://new.trycloudflare.com"))
+        self.assertEqual(picked, ("node-b", "https://old.trycloudflare.com"))
+        sticky = hub.pick_federation_file_host()
+        self.assertEqual(sticky, ("node-b", "https://old.trycloudflare.com"))
 
     def test_file_host_rpc_roundtrip(self) -> None:
         chat_a = self._free_port()
@@ -2253,33 +2362,310 @@ class FederationSendQueueTests(unittest.TestCase):
         self.assertTrue(sent[0].startswith(b"join\t"))
         link.close()
 
-    def test_sendall_timeout_applies_socket_timeout(self) -> None:
-        """_sendall_timeout must set a temporary timeout around sendall."""
+    def test_congested_queue_drops_bulk_not_link(self) -> None:
+        """Full queue drops presence/catalog frames instead of closing."""
+        block = threading.Event()
+        sent: list[bytes] = []
+
+        def slow_send(data: bytes) -> None:
+            block.wait(5.0)
+            sent.append(data)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "node-b", slow_send)
+        link._qmax = 4
+        hub._peers["node-b"] = link
+        # Fill with droppable bulk frames while writer is blocked on first send.
+        link.send_line("presence\tnode-a\t[]\n")
+        time.sleep(0.05)  # let writer pick first frame and block
+        for i in range(20):
+            link.send_line(f"lcatalog\tnode-a\tYQ==\t{i}\n")
+            link.send_line("presence\tnode-a\t[]\n")
+        self.assertFalse(link._closed, "bulk congestion must not close the link")
+        # Critical chat frame must still be accepted (after dropping bulk).
+        link.send_line("msg\tnode-a\tdefault\thello\n")
+        self.assertFalse(link._closed)
+        with link._send_cv:
+            kinds = [
+                federation._frame_kind(x)
+                for x in link._send_buf
+                if isinstance(x, (bytes, bytearray))
+            ]
+        self.assertIn("msg", kinds)
+        block.set()
+        link.close()
+
+    def test_congested_queue_critical_still_closes(self) -> None:
+        """If only critical frames fill the queue, close rather than stall forever."""
+        block = threading.Event()
+        started = threading.Event()
+
+        def slow_send(data: bytes) -> None:
+            started.set()
+            block.wait(5.0)
+
+        closed = threading.Event()
+
+        def on_close() -> None:
+            closed.set()
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(
+            hub, "node-b", slow_send, close_transport=on_close
+        )
+        link._qmax = 3
+        link.send_line("msg\tnode-a\tdefault\ta\n")
+        self.assertTrue(started.wait(2.0), "writer did not start")
+        for i in range(20):
+            link.send_line(f"msg\tnode-a\tdefault\tb{i}\n")
+            if link._closed:
+                break
+        self.assertTrue(link._closed)
+        self.assertTrue(closed.wait(1.0))
+        block.set()
+
+    def test_is_droppable_frame_kinds(self) -> None:
+        self.assertTrue(federation._is_droppable_frame(b"presence\tx\t[]\n"))
+        self.assertTrue(federation._is_droppable_frame(b"lcatalog\tx\tYQ==\t1\n"))
+        self.assertTrue(federation._is_droppable_frame(b"gcat\tx\tr\tYQ==\t1\t2\n"))
+        self.assertTrue(federation._is_droppable_frame(b"psync\tx\tr\tYQ==\t1\t2\n"))
+        self.assertFalse(federation._is_droppable_frame(b"msg\tx\tr\thi\n"))
+        self.assertFalse(federation._is_droppable_frame(b"ping\n"))
+        self.assertFalse(federation._is_droppable_frame(b"join\tx\ta\tr\n"))
+
+    def test_sendall_timeout_does_not_set_socket_timeout(self) -> None:
+        """Non-selectable transports use sendall and must not call settimeout."""
 
         class TrackingSock:
             def __init__(self) -> None:
                 self.timeouts: list[float | None] = []
-                self._timeout: float | None = None
                 self.sent: list[bytes] = []
 
             def gettimeout(self) -> float | None:
-                return self._timeout
+                return None
 
             def settimeout(self, value: float | None) -> None:
                 self.timeouts.append(value)
-                self._timeout = value
 
             def sendall(self, data: bytes) -> None:
-                if self._timeout == 0.3:
-                    raise TimeoutError("timed out")
                 self.sent.append(data)
 
         sock = TrackingSock()
-        with self.assertRaises(TimeoutError):
-            federation._sendall_timeout(sock, b"hello", timeout=0.3)
-        self.assertEqual(sock.timeouts[0], 0.3)
-        # Prior timeout restored even after failure.
-        self.assertIsNone(sock.timeouts[-1])
+        federation._sendall_timeout(sock, b"hello", timeout=0.3)
+        self.assertEqual(sock.sent, [b"hello"])
+        self.assertEqual(sock.timeouts, [])
+
+    def test_sendall_timeout_does_not_wake_concurrent_recv(self) -> None:
+        """Writer deadline must not interrupt a concurrent blocking recv()."""
+        s1, s2 = socket.socketpair()
+        try:
+            s1.settimeout(None)
+            err: list[BaseException] = []
+            done = threading.Event()
+
+            def reader() -> None:
+                try:
+                    s1.recv(4096)
+                except BaseException as e:
+                    err.append(e)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=reader, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            federation._sendall_timeout(s1, b"ping\n", timeout=0.5)
+            time.sleep(0.2)
+            self.assertFalse(done.is_set(), "recv should still be blocked")
+            self.assertEqual(err, [])
+            s2.sendall(b"wake\n")
+            self.assertTrue(done.wait(2.0))
+            self.assertEqual(err, [])
+        finally:
+            s1.close()
+            s2.close()
+
+    def test_sendall_timeout_raises_when_peer_not_draining(self) -> None:
+        s1, s2 = socket.socketpair()
+        try:
+            s1.setblocking(False)
+            payload = b"x" * 65536
+            try:
+                while True:
+                    s1.send(payload)
+            except BlockingIOError:
+                pass
+            s1.setblocking(True)
+            with self.assertRaises(TimeoutError):
+                federation._sendall_timeout(s1, payload, timeout=0.2)
+        finally:
+            s1.close()
+            s2.close()
+
+    def test_heartbeat_timeout_closes_idle_peer(self) -> None:
+        closed: list[str] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(
+            hub,
+            "iPhone",
+            lambda _data: None,
+            close_transport=lambda: closed.append("iPhone"),
+        )
+        hub._peers["iPhone"] = link
+        hub._remote_join("iPhone", "bob", "default")
+        link.last_rx = time.monotonic() - (federation._FED_HEARTBEAT_TIMEOUT + 5)
+
+        with mock.patch.object(federation, "_FED_HEARTBEAT_INTERVAL", 20.0), mock.patch.object(
+            federation, "_FED_HEARTBEAT_TIMEOUT", 60.0
+        ):
+            hub._tick_heartbeats()
+
+        self.assertTrue(link._closed)
+        self.assertEqual(closed, ["iPhone"])
+
+    def test_heartbeat_sends_ping_when_idle(self) -> None:
+        sent: list[bytes] = []
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = federation._PeerLink(hub, "iPhone", sent.append)
+        hub._peers["iPhone"] = link
+        link.last_rx = time.monotonic() - (federation._FED_HEARTBEAT_INTERVAL + 1)
+
+        with mock.patch.object(federation, "_FED_HEARTBEAT_INTERVAL", 20.0), mock.patch.object(
+            federation, "_FED_HEARTBEAT_TIMEOUT", 60.0
+        ):
+            hub._tick_heartbeats()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not any(b == b"ping\n" for b in sent):
+            time.sleep(0.02)
+        self.assertFalse(link._closed)
+        self.assertTrue(any(b == b"ping\n" for b in sent), sent)
+        link.close()
+
+    def test_presence_refresh_fans_out_changed_roster(self) -> None:
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        users = [{"name": "alice", "rooms": ["default"], "current_room": "default"}]
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: list(users),
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        link = FakeLink()
+        hub._peers["node-b"] = link  # type: ignore[assignment]
+        hub._last_presence_refresh = 0.0
+
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 1)
+        self.assertTrue(link.lines[0].startswith("presence\tnode-a\t"))
+
+        # Unchanged roster is flood-deduped — no second send.
+        hub._last_presence_refresh = 0.0
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 1)
+
+        users.clear()
+        hub._last_presence_refresh = 0.0
+        with mock.patch.object(federation, "_FED_PRESENCE_REFRESH", 60.0):
+            hub._tick_presence_refresh()
+        self.assertEqual(len(link.lines), 2)
+        self.assertIn("[]", link.lines[1])
+
+    def test_presence_bulk_clears_stale_remote_users(self) -> None:
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub._remote_join("iPhone", "ghost", "default")
+        self.assertIn("ghost", hub.names_in_room("default"))
+        hub._remote_presence_bulk("iPhone", "[]")
+        self.assertEqual(hub.names_in_room("default"), [])
+
+    def test_remove_client_notifies_leave_despite_remote_same_nick(self) -> None:
+        """Remote same-nick must not suppress federated leave for this node."""
+        leaves: list[tuple[str, str]] = []
+        local_notices: list[tuple[str, bytes]] = []
+
+        class FakeHub:
+            enabled = True
+
+            def same_name_in_room(self, room, name, local_same):
+                return True  # ghost / multi-device peer still listed
+
+            def notify_leave(self, name, room):
+                leaves.append((name, room))
+
+        alice = DummyConn()
+        with server.lock:
+            server.clients[alice] = {
+                "name": "yxt",
+                "rooms": {"default"},
+                "current_room": "default",
+            }
+            server.rooms.setdefault("default", set()).add(alice)
+        with mock.patch.object(federation, "get_hub", return_value=FakeHub()), mock.patch.object(
+            server, "broadcast_room", side_effect=lambda room, msg, **kw: local_notices.append((room, msg))
+        ):
+            server.remove_client(alice)
+        self.assertEqual(leaves, [("yxt", "default")])
+        # Local leave notice suppressed while remote same nick is still visible.
+        self.assertEqual(local_notices, [])
 
 
 if __name__ == "__main__":

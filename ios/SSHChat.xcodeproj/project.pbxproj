@@ -13,6 +13,7 @@
 		11F5CC89B5B6C9D89FE1D79D /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = A08C4E92EBFEEC5E68BF8338 /* NIO */; };
 		1E085B8F1FEA160FB0992774 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B83D7B2716C6BA3941551A /* AppConfig.swift */; };
 		25648748AA6143FECF4EE327 /* SecureUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 559396D782E192802F9A441C /* SecureUpload.swift */; };
+		2877320888397A3A62A13342 /* GamePanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7B82EBAD42738EE17725A7C /* GamePanelView.swift */; };
 		2A7F104EC14D7544E01DEA5F /* SSHChatWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A68C58969B3B6A439DAB63 /* SSHChatWatchApp.swift */; };
 		2D2528AC0CCFDF2388043C1C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A6E5B6078F5A131C28D76C70 /* Assets.xcassets */; };
 		33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */; };
@@ -36,8 +37,10 @@
 		B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4659214F0C54010180B570ED /* ContentView.swift */; };
 		B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = F19D61F982D7132AB0491F6A /* MessageAlert.swift */; };
 		B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41AF976063059AD5181A7784 /* CameraPicker.swift */; };
+		B7DF71EAA49A2AA38781DD87 /* BoardCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FA8EE55F824A5EAF29621E1 /* BoardCanvasView.swift */; };
 		B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5382B5859F78E00B2C7A222 /* MediaMime.swift */; };
 		BD67B539F8441967582D8123 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D83E0298EA4557B016E588C /* SSHSession.swift */; };
+		BE50C64E296A3C07551D32FD /* GameParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F81A023ABD4963873B3934 /* GameParser.swift */; };
 		CB4028DA1D7F208B9739ADFD /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = A6426611A081C6DD05ADEA57 /* NIOSSH */; };
 		D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */; };
 		DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64243685BD8B9E650897F969 /* SSHChatApp.swift */; };
@@ -50,6 +53,7 @@
 		0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyNoise.swift; sourceTree = "<group>"; };
 		256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
 		2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
+		2FA8EE55F824A5EAF29621E1 /* BoardCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardCanvasView.swift; sourceTree = "<group>"; };
 		41AF976063059AD5181A7784 /* CameraPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPicker.swift; sourceTree = "<group>"; };
 		465728BED464780173D6E5F6 /* WatchChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchChatViewModel.swift; sourceTree = "<group>"; };
 		4659214F0C54010180B570ED /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -66,9 +70,11 @@
 		B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTargetPickerView.swift; sourceTree = "<group>"; };
 		B5382B5859F78E00B2C7A222 /* MediaMime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaMime.swift; sourceTree = "<group>"; };
 		B5D36B7779851F7EDF5DDC96 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B7B82EBAD42738EE17725A7C /* GamePanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamePanelView.swift; sourceTree = "<group>"; };
 		C2B83D7B2716C6BA3941551A /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		C3F4144E1C8DE0CDD8431E22 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C90E177203159780DB095D76 /* SecureDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDownload.swift; sourceTree = "<group>"; };
+		C9F81A023ABD4963873B3934 /* GameParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameParser.swift; sourceTree = "<group>"; };
 		CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInvite.swift; sourceTree = "<group>"; };
 		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
@@ -122,6 +128,16 @@
 			);
 			sourceTree = "<group>";
 		};
+		36768ACD0D6CF600C486BE7C /* Games */ = {
+			isa = PBXGroup;
+			children = (
+				2FA8EE55F824A5EAF29621E1 /* BoardCanvasView.swift */,
+				B7B82EBAD42738EE17725A7C /* GamePanelView.swift */,
+				C9F81A023ABD4963873B3934 /* GameParser.swift */,
+			);
+			path = Games;
+			sourceTree = "<group>";
+		};
 		857B4ECC9C809EAF18411B4A /* SSHChatWatch */ = {
 			isa = PBXGroup;
 			children = (
@@ -154,6 +170,7 @@
 				64243685BD8B9E650897F969 /* SSHChatApp.swift */,
 				E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */,
 				A62D55F063B5A6E13A717437 /* WebInviteView.swift */,
+				36768ACD0D6CF600C486BE7C /* Games */,
 			);
 			path = SSHChat;
 			sourceTree = "<group>";
@@ -309,10 +326,13 @@
 			files = (
 				F1657897BC6C5B81115E37B6 /* AppConfig.swift in Sources */,
 				5A063F3F4338A79777477C18 /* AppDelegate.swift in Sources */,
+				B7DF71EAA49A2AA38781DD87 /* BoardCanvasView.swift in Sources */,
 				B715CBD3CB4C4F9C457AA946 /* CameraPicker.swift in Sources */,
 				97BB0462049C44207D03D40D /* CommandCompletions.swift in Sources */,
 				B5716A186DD1BD57DDA6FEBD /* ContentView.swift in Sources */,
 				78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */,
+				2877320888397A3A62A13342 /* GamePanelView.swift in Sources */,
+				BE50C64E296A3C07551D32FD /* GameParser.swift in Sources */,
 				B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */,
 				8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */,
 				B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */,
@@ -339,7 +359,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 28;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -352,7 +372,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.15;
+				MARKETING_VERSION = 0.3.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
@@ -366,12 +386,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 28;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = 5NS64773VG;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChatWatch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
-				MARKETING_VERSION = 0.3.15;
+				MARKETING_VERSION = 0.3.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat.watchkitapp;
 				PRODUCT_NAME = SSHChatWatch;
 				SDKROOT = watchos;
@@ -387,12 +407,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 28;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = 5NS64773VG;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChatWatch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SSHChat;
-				MARKETING_VERSION = 0.3.15;
+				MARKETING_VERSION = 0.3.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat.watchkitapp;
 				PRODUCT_NAME = SSHChatWatch;
 				SDKROOT = watchos;
@@ -408,7 +428,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 28;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -421,7 +441,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.15;
+				MARKETING_VERSION = 0.3.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
