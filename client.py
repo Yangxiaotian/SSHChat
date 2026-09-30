@@ -143,6 +143,9 @@ _TOP_COMMANDS = (
     "/names",
     "/users",
     "/rooms",
+    "/fed",
+    "/peers",
+    "/federation",
     "/join",
     "/switch",
     "/part",
@@ -207,6 +210,10 @@ _CLOCK_SUBCOMMANDS = {
     "new": None,
 }
 
+_FED_SUBCOMMANDS = {
+    "help": None,
+}
+
 _SUBCOMMANDS_BY_CMD = {
     "/game": sorted(_GAME_SUBCOMMANDS),
     "/news": sorted(_NEWS_SUBCOMMANDS),
@@ -220,6 +227,9 @@ _SUBCOMMANDS_BY_CMD = {
     "/pad": sorted(_PAD_SUBCOMMANDS),
     "/later": sorted(_LATER_SUBCOMMANDS),
     "/clock": sorted(_CLOCK_SUBCOMMANDS),
+    "/fed": sorted(_FED_SUBCOMMANDS),
+    "/peers": sorted(_FED_SUBCOMMANDS),
+    "/federation": sorted(_FED_SUBCOMMANDS),
 }
 
 _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -899,6 +909,9 @@ set viminfo=
 set nobackup
 set nowritebackup
 set noshelltemp
+set mouse=
+set t_BE=
+set nopaste
 filetype plugin off
 let s:pad = resolve({pad_lit})
 let s:rc = resolve({rc_path_lit})
@@ -919,6 +932,10 @@ function! s:GuardRead() abort
   endif
 endfunction
 function! s:GuardBuf() abort
+  " Do not fight :q / VimLeave — only bounce foreign buffers while editing.
+  if get(v:, 'exiting', 0)
+    return
+  endif
   if s:Allowed(expand('%:p'))
     return
   endif
@@ -929,6 +946,7 @@ augroup sshchat_pad_lock
   autocmd!
   autocmd BufReadPre,FileReadPre,FilterReadPre,BufNewFile * call s:GuardRead()
   autocmd BufEnter,WinEnter * call s:GuardBuf()
+  autocmd VimLeavePre * autocmd! sshchat_pad_lock
 augroup END
 """
     with open(rc_path, "w", encoding="utf-8") as f:
@@ -1004,12 +1022,27 @@ def _snapshot_tty_attrs():
         return None
 
 
+_PAD_MAX_CHARS = 8000  # keep in sync with server.MAX_PAD_LEN
+
+
+def _flush_stdin_after_editor() -> None:
+    """Drop unread key/paste bytes vim left in the TTY input queue."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _restore_tty_after_editor(attrs) -> None:
     """Undo vim/nano terminal damage so prompt_toolkit can take input again.
 
-    After :wq (especially with a large paste), vim may leave bracketed-paste /
-    mouse / alt-screen modes on; the next prompt then looks alive but /names
-    and other commands appear dead.
+    After :wq / :q, vim may leave bracketed-paste / mouse / alt-screen on.
+    Keep this quiet: no renderer.reset/invalidate (those spam under patch_stdout)
+    and no PromptSession recreate loop.
     """
     try:
         import termios
@@ -1018,7 +1051,6 @@ def _restore_tty_after_editor(attrs) -> None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attrs)
     except Exception:
         pass
-    # Belt-and-suspenders when termios restore is incomplete (common on SSH PTYs).
     try:
         if sys.stdin.isatty() and shutil.which("stty"):
             subprocess.call(
@@ -1029,15 +1061,18 @@ def _restore_tty_after_editor(attrs) -> None:
             )
     except Exception:
         pass
+    _flush_stdin_after_editor()
     real = _get_real_stdout() or sys.stdout
     try:
-        # Leave alt screen, disable mouse / bracketed paste, show cursor, reset SGR.
+        # Leave alt screen, disable mouse / bracketed paste / focus, show cursor.
+        # No trailing \\r\\n — that was redrawing as endless blank/prompt noise.
         seq = (
-            b"\x1b[?1049l"  # alt screen off
-            b"\x1b[?2004l"  # bracketed paste off
-            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"  # mouse off
-            b"\x1b[?25h"  # cursor on
-            b"\x1b[0m\r\n"
+            b"\x1b[?1049l"
+            b"\x1b[?2004l"
+            b"\x1b[?1004l"
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+            b"\x1b[?25h"
+            b"\x1b[0m"
         )
         if hasattr(real, "buffer"):
             real.buffer.write(seq)
@@ -1045,21 +1080,6 @@ def _restore_tty_after_editor(attrs) -> None:
         else:
             real.write(seq.decode("ascii"))
             real.flush()
-    except Exception:
-        pass
-    try:
-        from prompt_toolkit.application import get_app_or_none
-
-        app = get_app_or_none()
-        if app is not None:
-            try:
-                app.renderer.reset()
-            except Exception:
-                pass
-            try:
-                app.invalidate()
-            except Exception:
-                pass
     except Exception:
         pass
     _clear_stdout_proxy_pending()
@@ -1147,17 +1167,23 @@ def _run_pad_edit(sock: socket.socket, my_name: str) -> None:
 
     if new_text is None:
         return
-    if new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") == current.replace(
-        "\r\n", "\n"
-    ).replace("\r", "\n").rstrip("\n"):
+    normalized = new_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    if normalized == current.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n"):
         print("[*] Pad unchanged.")
         return
-    encoded = base64.urlsafe_b64encode(new_text.encode("utf-8")).decode("ascii")
+    if len(normalized) > _PAD_MAX_CHARS:
+        print(
+            f"[*] Pad too long ({len(normalized)} chars; max {_PAD_MAX_CHARS}). "
+            "Not uploaded — trim in the editor and try /pad edit again."
+        )
+        return
+    encoded = base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii")
     try:
         sock.send(f"[{my_name}] /pad load {encoded}\n".encode("utf-8"))
     except Exception:
         print("[*] Failed to upload pad.")
         return
+    print("[*] Pad uploaded.")
 
 
 def _try_handle_local_command(msg: str, sock: socket.socket | None = None, my_name: str = "") -> bool:
@@ -1634,7 +1660,7 @@ def main():
 
     print("[OK] connected as " + name)
     print(
-        "Commands: /names  /rooms  /join <room>  /switch <room>  "
+        "Commands: /names  /rooms  /fed  /join <room>  /switch <room>  "
         "/msg #<room> <text> | /msg <nick> <text> (offline=leave msg)  "
         "/sendfile | /sendfile <nick> | /sendfile #<room>  "
         "/canvas | /canvas <nick> | /canvas #<room>  "

@@ -29,6 +29,10 @@ class I18nTests(unittest.TestCase):
         self.assertIn("/canvas", zh_text)
         self.assertIn("/board", zh_text)
         self.assertIn("画板", zh_text)
+        self.assertIn("/fed", en_text)
+        self.assertIn("/peers", en_text)
+        self.assertIn("/fed", zh_text)
+        self.assertIn("/peers", zh_text)
 
     def test_zh_help_wraps_under_mobile_utf8_byte_budget(self) -> None:
         # Mobile SSH often soft-wraps near 80 UTF-8 bytes; mid-CJK splits truncate

@@ -42,6 +42,9 @@ MAX_ELEMENTS = int(os.environ.get("SSHCHAT_CANVAS_MAX_ELEMENTS", "5000"))
 MAX_SCENE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_SCENE_BYTES", str(12 * 1024 * 1024)))
 MAX_FILES_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILES_BYTES", str(10 * 1024 * 1024)))
 MAX_FILE_BYTES = int(os.environ.get("SSHCHAT_CANVAS_MAX_FILE_BYTES", str(4 * 1024 * 1024)))
+# Debounce disk writes under stroke spam (create/close/clear still save immediately).
+# Keep this above typical "1s hitch" windows so rare saves do not land mid-phrase.
+SAVE_DEBOUNCE_SECONDS = float(os.environ.get("SSHCHAT_CANVAS_SAVE_DEBOUNCE", "5.0"))
 # Legacy stroke constants — kept so old clients get a clear error path.
 MAX_STROKES = int(os.environ.get("SSHCHAT_CANVAS_MAX_STROKES", "5000"))
 MAX_POINTS_PER_STROKE = int(os.environ.get("SSHCHAT_CANVAS_MAX_POINTS", "800"))
@@ -77,6 +80,8 @@ class CanvasSession:
     elements: List[dict] = field(default_factory=list)
     files: Dict[str, dict] = field(default_factory=dict)
     rev: int = 0
+    # Bumped on every clear so in-flight pre-clear scene pushes cannot resurrect strokes.
+    scene_gen: int = 0
     # Legacy freehand log (ignored by new UI; kept for disk compat).
     strokes: List[dict] = field(default_factory=list)
     next_seq: int = 1
@@ -103,6 +108,7 @@ class CanvasStore:
         self.token_to_session: Dict[str, str] = {}
         self.tickets: Dict[str, CanvasAccessTicket] = {}
         self.lock = threading.RLock()
+        self._save_timer: Optional[threading.Timer] = None
         self._load()
 
     def _load(self) -> None:
@@ -129,6 +135,7 @@ class CanvasStore:
                     elements=list(raw.get("elements") or []),
                     files=dict(raw.get("files") or {}),
                     rev=int(raw.get("rev") or 0),
+                    scene_gen=int(raw.get("scene_gen") or 0),
                     strokes=list(raw.get("strokes") or []),
                     next_seq=int(raw.get("next_seq") or 1),
                     created_at=float(raw.get("created_at") or 0),
@@ -180,29 +187,89 @@ class CanvasStore:
         except Exception as e:
             print(f"[Canvas] Failed to load: {e}")
 
-    def _save(self) -> None:
+    def _build_save_payload_locked(self) -> dict:
+        return {
+            "sessions": {
+                sid: asdict(session) for sid, session in self.sessions.items()
+            },
+            "tickets": {
+                ticket: asdict(entry) for ticket, entry in self.tickets.items()
+            },
+        }
+
+    def _write_save_payload(self, data: dict, *, fsync: bool = True) -> None:
         try:
-            data = {
-                "sessions": {
-                    sid: asdict(session) for sid, session in self.sessions.items()
-                },
-                "tickets": {
-                    ticket: asdict(entry) for ticket, entry in self.tickets.items()
-                },
-            }
             path = Path(self.store_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = f"{self.store_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                if fsync:
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
             os.replace(tmp, self.store_path)
         except Exception as e:
             print(f"[Canvas] Failed to save: {e}")
+
+    def _save(self, *, fsync: bool = True) -> None:
+        """Snapshot under the lock, then write without holding it when possible."""
+        with self.lock:
+            data = self._build_save_payload_locked()
+        self._write_save_payload(data, fsync=fsync)
+
+    def _cancel_save_timer_locked(self) -> None:
+        if self._save_timer is not None:
+            try:
+                self._save_timer.cancel()
+            except Exception:
+                pass
+            self._save_timer = None
+
+    def _save_now(self, *, fsync: bool = True) -> None:
+        """Immediate persist (create/close/clear). Cancels a pending debounced save."""
+        with self.lock:
+            self._cancel_save_timer_locked()
+            data = self._build_save_payload_locked()
+        self._write_save_payload(data, fsync=fsync)
+
+    def _save_now_async(self, *, fsync: bool = True) -> None:
+        """Persist on a daemon thread so WS/HTTP handlers are not blocked on disk."""
+
+        def _run() -> None:
+            try:
+                self._save_now(fsync=fsync)
+            except Exception as e:
+                print(f"[Canvas] Async save failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _schedule_save(self) -> None:
+        """Debounce disk writes under stroke spam. Caller may hold the store lock.
+
+        Important: never re-read the on-disk JSON here (that regresses into
+        multi-second hitches when the store holds image dataURLs).
+        """
+
+        def _fire() -> None:
+            try:
+                with self.lock:
+                    self._save_timer = None
+                    data = self._build_save_payload_locked()
+                self._write_save_payload(data, fsync=False)
+            except Exception as e:
+                print(f"[Canvas] Debounced save failed: {e}")
+
+        with self.lock:
+            self._cancel_save_timer_locked()
+            # Rare: prefer not to serialize a multi-MB board mid-phrase.
+            timer = threading.Timer(max(1.0, SAVE_DEBOUNCE_SECONDS), _fire)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
+
     def create_session(
         self,
         creator: str,
@@ -701,6 +768,25 @@ class CanvasStore:
             nonce = 0
         return version, nonce
 
+    @staticmethod
+    def _element_updated(el: dict) -> int:
+        try:
+            return int(el.get("updated") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _prefer_newer_element(cls, existing: dict, incoming: dict) -> dict:
+        """Same version/nonce: newer `updated` wins. Do NOT prefer more points —
+        Excalidraw often simplifies freehand on stroke end (fewer points).
+        Preferring longer mid-stroke geometry warps the final glyph.
+        """
+        ua = cls._element_updated(existing)
+        ub = cls._element_updated(incoming)
+        if ub != ua:
+            return incoming if ub > ua else existing
+        return incoming
+
     def _sanitize_elements(self, elements) -> Optional[List[dict]]:
         if not isinstance(elements, list):
             return None
@@ -775,7 +861,10 @@ class CanvasStore:
                 elif old.get("isDeleted") and not el.get("isDeleted"):
                     by_id[eid] = old
                 else:
-                    by_id[eid] = el
+                    # Same live/deleted state: newer updated wins. Never prefer
+                    # longer point lists — that resurrects mid-stroke geometry
+                    # over Excalidraw's simplified final path (looks "扭曲").
+                    by_id[eid] = self._prefer_newer_element(old, el)
         # Keep deleted markers so peers can tombstone; cap list size.
         merged = list(by_id.values())
         if len(merged) > MAX_ELEMENTS:
@@ -796,6 +885,7 @@ class CanvasStore:
         *,
         elements,
         files=None,
+        scene_gen=None,
     ) -> Tuple[Optional[dict], str]:
         """Merge Excalidraw elements by id/version and bump rev."""
         session, participant, err = self.resolve_ticket(token, ticket)
@@ -805,6 +895,12 @@ class CanvasStore:
         if cleaned is None:
             return None, "场景数据无效"
         file_patch = self._sanitize_files(files) if files is not None else None
+        try:
+            client_gen = 0 if scene_gen is None else int(scene_gen)
+        except (TypeError, ValueError):
+            client_gen = 0
+        if client_gen < 0:
+            client_gen = 0
         try:
             probe = {"elements": cleaned, "files": file_patch or {}}
             if (
@@ -822,6 +918,10 @@ class CanvasStore:
             ok, alive_err = self._alive(session)
             if not ok:
                 return None, alive_err
+            # Drop in-flight pushes from before the latest clear — otherwise
+            # merge onto an empty board resurrects the wiped strokes.
+            if client_gen < int(session.scene_gen or 0):
+                return None, "画板已清空，请重新同步"
             merged = self._merge_elements(session.elements, cleaned)
             session.elements = merged
             if file_patch is not None:
@@ -831,11 +931,28 @@ class CanvasStore:
             session.rev += 1
             # Keep legacy next_seq in lockstep for any old poller.
             session.next_seq = session.rev + 1
-            self._save()
+            # Do not debounce-persist every stroke — serializing boards with
+            # images made live drawing hitch. Memory+WS is source of truth;
+            # create/clear/close still durable-save.
+            # Broadcast post-merge truth for touched ids — never echo a stale
+            # client patch that lost to a newer tombstone already on the server.
+            touched = {
+                el.get("id")
+                for el in cleaned
+                if isinstance(el, dict) and isinstance(el.get("id"), str)
+            }
+            patch_elements = [
+                el
+                for el in merged
+                if isinstance(el, dict) and el.get("id") in touched
+            ]
             return {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "elements": session.elements,
                 "files": session.files,
+                "patch_elements": patch_elements,
+                "patch_files": file_patch if file_patch is not None else {},
                 "author": participant,
                 "session_id": session.session_id,
             }, ""
@@ -868,17 +985,22 @@ class CanvasStore:
             session.elements = []
             session.files = {}
             session.strokes = []
+            session.scene_gen = int(session.scene_gen or 0) + 1
             session.rev += 1
             session.next_seq = session.rev + 1
-            self._save()
-            return {
+            self._cancel_save_timer_locked()
+            result = {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "kind": "clear",
                 "author": participant,
                 "elements": [],
                 "files": {},
                 "session_id": session.session_id,
-            }, ""
+            }
+        # Do not fsync under the WS/HTTP lock — that made Clear feel multi-second.
+        self._save_now_async(fsync=True)
+        return result, ""
 
     def sync_since(
         self, token: str, ticket: str, since: int
@@ -894,6 +1016,7 @@ class CanvasStore:
             changed = session.rev > since_i
             return {
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
                 "changed": changed,
                 "elements": list(session.elements) if changed else [],
                 "files": dict(session.files) if changed else {},
@@ -962,6 +1085,7 @@ class CanvasStore:
                 session.elements = []
                 session.files = {}
                 session.strokes = []
+                session.scene_gen = int(session.scene_gen or 0) + 1
                 session.rev += 1
                 session.next_seq = session.rev + 1
                 self._save()
@@ -973,6 +1097,7 @@ class CanvasStore:
                         {
                             "type": "clear",
                             "rev": session.rev,
+                            "scene_gen": session.scene_gen,
                             "author": "",
                             "elements": [],
                             "files": {},

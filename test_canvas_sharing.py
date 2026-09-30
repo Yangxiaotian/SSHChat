@@ -109,6 +109,90 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertEqual(payload["elements"][0]["width"], 99)
         self.assertEqual(payload["elements"][0]["version"], 2)
 
+    def test_apply_scene_returns_patch_not_only_full(self) -> None:
+        session = self.store.create_session(
+            creator="Alice", participants=[], room="patch"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(
+            token, session.keys["Alice"]
+        )
+        first, err = self.store.apply_scene(
+            token, ticket, elements=[_el("a", 1), _el("b", 1)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(len(first["elements"]), 2)
+        self.assertEqual(len(first["patch_elements"]), 2)
+
+        second, err = self.store.apply_scene(
+            token, ticket, elements=[_el("b", 2, width=50)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(second)
+        assert second is not None
+        # Full scene still has both; patch is only the dirty element.
+        self.assertEqual(len(second["elements"]), 2)
+        self.assertEqual(len(second["patch_elements"]), 1)
+        self.assertEqual(second["patch_elements"][0]["id"], "b")
+        self.assertEqual(second["patch_elements"][0]["width"], 50)
+
+    def test_stale_live_patch_broadcasts_merged_tombstone(self) -> None:
+        """Broadcast post-merge truth so peers never receive a losing live copy."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="stale"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        self.store.apply_scene(at, a_ticket, elements=[_el("s1", 1)])
+        self.store.apply_scene(
+            at, a_ticket, elements=[_el("s1", 2, isDeleted=True)]
+        )
+        result, err = self.store.apply_scene(
+            bt, b_ticket, elements=[_el("s1", 1, isDeleted=False)]
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["elements"][0]["isDeleted"])
+        self.assertEqual(result["elements"][0]["version"], 2)
+        self.assertEqual(len(result["patch_elements"]), 1)
+        self.assertTrue(result["patch_elements"][0]["isDeleted"])
+        self.assertEqual(result["patch_elements"][0]["version"], 2)
+
+    def test_same_version_prefers_newer_updated_not_more_points(self) -> None:
+        """Final freehand often has fewer points; a longer stale copy must not win."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="points"
+        )
+        at = session.tokens["Alice"]
+        bt = session.tokens["Bob"]
+        _, _, a_ticket, _ = self.store.issue_access_ticket(at, session.keys["Alice"])
+        _, _, b_ticket, _ = self.store.issue_access_ticket(bt, session.keys["Bob"])
+
+        long_pts = [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]]
+        short_pts = [[0, 0], [1, 1]]
+        self.store.apply_scene(
+            at,
+            a_ticket,
+            elements=[_el("pen1", 1, type="freedraw", points=long_pts, updated=100)],
+        )
+        result, err = self.store.apply_scene(
+            bt,
+            b_ticket,
+            elements=[_el("pen1", 1, type="freedraw", points=short_pts, updated=200)],
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)
+        assert result is not None
+        kept = result["elements"][0]
+        self.assertEqual(len(kept["points"]), 2)
+        self.assertEqual(kept["updated"], 200)
+
     def test_eraser_tombstone_wins_over_live_copy(self) -> None:
         session = self.store.create_session(
             creator="Alice", participants=["Bob"], room="erase"
@@ -160,8 +244,10 @@ class CanvasStoreTests(unittest.TestCase):
         event, err = self.store.clear_board(token, ticket)
         self.assertEqual(err, "")
         self.assertEqual(event["kind"], "clear")
+        self.assertEqual(event["scene_gen"], 1)
         payload, _ = self.store.sync_since(token, ticket, 0)
         self.assertEqual(payload["elements"], [])
+        self.assertEqual(payload["scene_gen"], 1)
         self.assertTrue(payload["rev"] >= 2)
 
         ok, err = self.store.close_session(session.session_id, "Bob")
@@ -170,6 +256,37 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertTrue(ok)
         found = self.store.find_open_for_room("art")
         self.assertIsNone(found)
+
+    def test_stale_scene_after_clear_is_rejected(self) -> None:
+        """In-flight pre-clear pushes must not resurrect wiped strokes."""
+        session = self.store.create_session(
+            creator="Alice", participants=["Bob"], room="art"
+        )
+        token = session.tokens["Alice"]
+        _, _, ticket, _ = self.store.issue_access_ticket(token, session.keys["Alice"])
+        self.store.apply_scene(
+            token, ticket, elements=[_el("old", 1)], scene_gen=0
+        )
+        cleared, err = self.store.clear_board(token, ticket)
+        self.assertEqual(err, "")
+        self.assertEqual(cleared["scene_gen"], 1)
+
+        # Late push still carrying the pre-clear generation.
+        result, err = self.store.apply_scene(
+            token, ticket, elements=[_el("old", 1)], scene_gen=0
+        )
+        self.assertIsNone(result)
+        self.assertIn("清空", err)
+        payload, _ = self.store.sync_since(token, ticket, 0)
+        self.assertEqual(payload["elements"], [])
+
+        # Fresh strokes after clear are accepted.
+        result, err = self.store.apply_scene(
+            token, ticket, elements=[_el("new", 1)], scene_gen=1
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(len(result["elements"]), 1)
+        self.assertEqual(result["elements"][0]["id"], "new")
 
     def test_register_remote_session_mirror(self) -> None:
         session = self.store.register_remote_session(
@@ -499,11 +616,23 @@ class CanvasStoreTests(unittest.TestCase):
         self.assertIn("window.name", page)
         self.assertIn("excalidraw-root", page)
         # Peers need BinaryFileData[]; passing the files map shows image placeholders.
-        self.assertIn("Object.values(remoteFileMap)", page)
+        self.assertIn("Object.values(remoteFiles)", page)
         self.assertIn("api.addFiles(fileList)", page)
         self.assertIn("connectCanvasWs", page)
         self.assertIn("/ws?ticket=", page)
         self.assertIn("new WebSocket", page)
+        self.assertIn("PUSH_MS_WS", page)
+        self.assertIn("PUSH_MS_DRAWING", page)
+        self.assertIn("drawingActive", page)
+        self.assertIn("whenIdle", page)
+        self.assertIn("isPenHot", page)
+        self.assertIn("bumpLocalQuiet", page)
+        self.assertIn("buildScenePatch", page)
+        self.assertIn("elementSyncSig", page)
+        self.assertIn("cloneJson", page)
+        self.assertIn("freezeElements", page)
+        self.assertIn("makeTombstone", page)
+        self.assertIn("shouldAcceptRemoteEl", page)
         self.assertIn('id="closeBtn"', page)
         self.assertIn("SSHChatNative", page)
         self.assertIn("__SSHCHAT_EMBEDDED__", page)

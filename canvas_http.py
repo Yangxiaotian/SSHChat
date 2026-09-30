@@ -1,7 +1,8 @@
 """HTML page and request helpers for the shared canvas (served by FileHTTP).
 
-UI: Excalidraw (CDN). Sync: Excalidraw elements JSON over the existing
-URL+key → ticket gate, with WebSocket scene push/broadcast (HTTP poll fallback).
+UI: Excalidraw (CDN). Sync: Excalidraw element patches over WebSocket
+(URL+key → ticket), with HTTP poll fallback. Clients push dirty elements
+only; peers merge by id/version (same rule as the server).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import secrets
+import threading
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -383,24 +385,175 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
 
     let ticket = '';
     let rev = 0;
+    let sceneGen = 0;
     let syncing = false;
     let applyingRemote = false;
     let pushTimer = null;
     let pushInFlight = false;
+    let clearInFlight = false;
+    let suppressPushUntil = 0;
     let localDirty = false;
     let pendingPushSig = '';
+    let pendingPushEls = null;
+    let pendingPushFiles = null;
     let pushAckTimer = null;
     let api = null;
     let lastLocalSig = '';
+    // Server watermark: rank/file ids we believe the hub already has.
+    let syncedRank = Object.create(null);
+    let syncedSig = Object.create(null);
+    let syncedFiles = Object.create(null);
+    // Ids we already told the server are deleted (or saw deleted from peers).
+    let syncedDeleted = Object.create(null);
     let canvasWs = null;
     let canvasWsLive = false;
     let canvasWsForceHttp = false;
     let canvasWsRetryTimer = null;
     let httpSyncActive = false;
+    // True while the primary pointer is down on the board — ease sync load so
+    // clone/stringify does not steal frames from Excalidraw input.
+    let drawingActive = false;
+    let pendingRemote = null;
+    let localQuietUntil = 0;
+    let quietFlushTimer = null;
+    let remoteApplyScheduled = false;
+    // Piano uses ~16ms note flush; canvas payloads are larger — keep WS snappy
+    // but avoid main-thread clone storms (tool clicks / clear felt frozen).
+    // Asymmetry: outbound mid-stroke push stays live; inbound updateScene is
+    // deferred (Excalidraw cannot run updateScene off-thread — only yield).
+    const PUSH_MS_WS = 48;
+    const PUSH_MS_DRAWING = 120;
+    const PUSH_MS_HTTP = 280;
+
+    function whenIdle(fn, timeoutMs) {{
+        // Run after paint / when the browser has spare time — keeps the pen smooth.
+        const timeout = typeof timeoutMs === 'number' ? timeoutMs : 80;
+        if (typeof requestIdleCallback === 'function') {{
+            requestIdleCallback(() => {{ try {{ fn(); }} catch (_) {{}} }}, {{ timeout: timeout }});
+            return;
+        }}
+        if (typeof requestAnimationFrame === 'function') {{
+            requestAnimationFrame(() => {{
+                setTimeout(() => {{ try {{ fn(); }} catch (_) {{}} }}, 0);
+            }});
+            return;
+        }}
+        setTimeout(() => {{ try {{ fn(); }} catch (_) {{}} }}, 0);
+    }}
+
+    function bumpLocalQuiet(ms) {{
+        // Block remote updateScene while Excalidraw owns the pen — that was
+        // causing "写不出来" / warped glyphs mid-phrase. Does NOT block outbound push.
+        const hold = typeof ms === 'number' ? ms : 500;
+        localQuietUntil = Math.max(localQuietUntil, Date.now() + hold);
+        if (quietFlushTimer) clearTimeout(quietFlushTimer);
+        quietFlushTimer = setTimeout(() => {{
+            quietFlushTimer = null;
+            if (drawingActive || Date.now() < localQuietUntil) return;
+            scheduleRemoteApply();
+        }}, hold + 16);
+    }}
+
+    function isPenHot() {{
+        // Gates inbound updateScene only — outbound sync may still run.
+        return drawingActive || Date.now() < localQuietUntil;
+    }}
+
+    function adoptSceneGen(value) {{
+        const g = Number(value);
+        if (Number.isFinite(g) && g >= 0) sceneGen = g;
+    }}
+
+    function abortPendingPush() {{
+        if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
+        if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+        pushInFlight = false;
+        pendingPushSig = '';
+        pendingPushEls = null;
+        pendingPushFiles = null;
+        localDirty = false;
+    }}
+
+    function resetSyncWatermark() {{
+        syncedRank = Object.create(null);
+        syncedSig = Object.create(null);
+        syncedFiles = Object.create(null);
+        syncedDeleted = Object.create(null);
+    }}
+
+    function markBoardClearedLocally() {{
+        abortPendingPush();
+        resetSyncWatermark();
+        pendingRemote = null;
+        drawingActive = false;
+        localQuietUntil = 0;
+        if (quietFlushTimer) {{ clearTimeout(quietFlushTimer); quietFlushTimer = null; }}
+        lastLocalSig = sceneSig([], {{}});
+        localDirty = false;
+        // Excalidraw may emit a late onChange with pre-clear elements; ignore
+        // and re-reset briefly so we do not push them under the new scene_gen.
+        suppressPushUntil = Date.now() + 1000;
+    }}
 
     function setStatus(text, err) {{
+        // Avoid layout thrash mid-stroke (status flips were visible as pen stalls).
+        if (drawingActive && !err) return;
         statusEl.textContent = text;
         statusEl.classList.toggle('err', !!err);
+    }}
+
+    function coalesceRemote(data) {{
+        if (!data) return;
+        const remoteRev = Number(data.rev || 0);
+        if (!pendingRemote) {{
+            pendingRemote = data;
+            return;
+        }}
+        pendingRemote = {{
+            rev: Math.max(Number(pendingRemote.rev) || 0, remoteRev),
+            scene_gen: data.scene_gen != null
+                ? data.scene_gen
+                : pendingRemote.scene_gen,
+            type: data.type || pendingRemote.type,
+            elements: mergeElements(
+                pendingRemote.elements || [],
+                data.elements || []
+            ),
+            files: Object.assign(
+                {{}},
+                pendingRemote.files || {{}},
+                data.files || {{}}
+            ),
+        }};
+    }}
+
+    function scheduleRemoteApply() {{
+        if (remoteApplyScheduled) return;
+        remoteApplyScheduled = true;
+        // Yield past the current input/paint frame — updateScene must stay on
+        // the main thread (React/Excalidraw), but must not run under the pen.
+        whenIdle(() => {{
+            remoteApplyScheduled = false;
+            if (isPenHot()) return;
+            const data = pendingRemote;
+            if (!data) return;
+            pendingRemote = null;
+            applyRemotePayloadNow(data);
+        }}, 24);
+    }}
+
+    function flushPendingRemote() {{
+        if (isPenHot()) return;
+        scheduleRemoteApply();
+    }}
+
+    function endStrokeGesture() {{
+        const wasDrawing = drawingActive;
+        drawingActive = false;
+        // Keep remote updateScene away until Excalidraw finishes the stroke.
+        if (wasDrawing) bumpLocalQuiet(400);
+        // Final geometry should ship immediately — quiet window is inbound-only.
+        if (localDirty) schedulePush(0);
     }}
 
     function showLoadError(msg) {{
@@ -444,18 +597,82 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
     }}
 
     function sceneSig(elements, files) {{
-        // Cheap change detector — enough to skip no-op pushes.
+        // Include points/updated — freehand often grows points without bumping version.
         const n = (elements || []).length;
         let v = 0;
-        for (const el of elements || []) v += (el.version || 0);
+        let pts = 0;
+        let upd = 0;
+        for (const el of elements || []) {{
+            v += (el.version || 0);
+            pts += Array.isArray(el.points) ? el.points.length : 0;
+            upd += Number(el.updated) || 0;
+        }}
         const fk = files ? Object.keys(files).length : 0;
-        return n + ':' + v + ':' + fk;
+        return n + ':' + v + ':' + pts + ':' + upd + ':' + fk;
     }}
 
     function elementRank(el) {{
         const version = Number(el && el.version) || 0;
         const nonce = Number(el && el.versionNonce) || 0;
         return version * 1e13 + nonce;
+    }}
+
+    function elementPointsLen(el) {{
+        return Array.isArray(el && el.points) ? el.points.length : 0;
+    }}
+
+    function elementSyncSig(el) {{
+        if (!el) return '';
+        return (
+            elementRank(el) + ':' +
+            (Number(el.updated) || 0) + ':' +
+            elementPointsLen(el) + ':' +
+            (el.isDeleted ? 1 : 0) + ':' +
+            (Number(el.width) || 0) + ':' +
+            (Number(el.height) || 0)
+        );
+    }}
+
+    function elementNewerThan(a, b) {{
+        // Same version/nonce: newer updated wins. Never prefer longer point
+        // lists — final freehand is often simplified (fewer points); keeping
+        // the longer mid-stroke copy makes glyphs look warped.
+        return (Number(a && a.updated) || 0) > (Number(b && b.updated) || 0);
+    }}
+
+    function cloneJson(value) {{
+        // Prefer structuredClone; fall back to JSON for older WebViews.
+        try {{
+            if (typeof structuredClone === 'function') return structuredClone(value);
+        }} catch (_) {{}}
+        try {{
+            return JSON.parse(JSON.stringify(value));
+        }} catch (_) {{
+            return value;
+        }}
+    }}
+
+    function freezeElements(els) {{
+        // Freehand mutates points in place — copy elements cheaply without
+        // JSON-serializing the whole scene on every push (that lagged tool taps).
+        const out = [];
+        for (const el of els || []) {{
+            if (!el || typeof el !== 'object') continue;
+            const copy = Object.assign({{}}, el);
+            if (Array.isArray(el.points)) {{
+                copy.points = el.points.map((p) => (Array.isArray(p) ? p.slice() : p));
+            }}
+            if (Array.isArray(el.pressures)) copy.pressures = el.pressures.slice();
+            if (Array.isArray(el.simulatePressure)) {{
+                copy.simulatePressure = el.simulatePressure.slice();
+            }}
+            if (Array.isArray(el.groupIds)) copy.groupIds = el.groupIds.slice();
+            if (Array.isArray(el.boundElements)) {{
+                copy.boundElements = el.boundElements.slice();
+            }}
+            out.push(copy);
+        }}
+        return out;
     }}
 
     function liveScene() {{
@@ -477,6 +694,137 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         return b || a;
     }}
 
+    function rankVersion(rank) {{
+        return Math.max(0, Math.floor(Number(rank) / 1e13) || 0);
+    }}
+
+    function makeTombstone(id, syncedRankVal) {{
+        // Undo may drop an element with no isDeleted marker. Emit a synthetic
+        // tombstone so merge-based sync cannot resurrect the server copy.
+        const version = rankVersion(syncedRankVal) + 1;
+        return {{
+            id: id,
+            type: 'rectangle',
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            angle: 0,
+            strokeColor: 'transparent',
+            backgroundColor: 'transparent',
+            fillStyle: 'solid',
+            strokeWidth: 1,
+            strokeStyle: 'solid',
+            roughness: 0,
+            opacity: 0,
+            groupIds: [],
+            frameId: null,
+            roundness: null,
+            seed: 1,
+            version: version,
+            versionNonce: (Date.now() % 1000000000) + 1,
+            isDeleted: true,
+            boundElements: null,
+            updated: Date.now(),
+            link: null,
+            locked: false,
+        }};
+    }}
+
+    function markLocalPushed(els, files) {{
+        for (const el of els || []) {{
+            if (el && typeof el.id === 'string' && el.id) {{
+                const r = elementRank(el);
+                const prev = syncedRank[el.id];
+                if (prev == null || r >= prev) syncedRank[el.id] = r;
+                syncedSig[el.id] = elementSyncSig(el);
+                if (el.isDeleted) syncedDeleted[el.id] = true;
+                else delete syncedDeleted[el.id];
+            }}
+        }}
+        for (const fid of Object.keys(files || {{}})) {{
+            syncedFiles[fid] = true;
+        }}
+    }}
+
+    function noteRemoteSynced(remoteEls, remoteFiles) {{
+        // Advance watermark only up to what the server sent — keep local-newer
+        // strokes dirty so we still push them after a peer patch merges in.
+        for (const el of remoteEls || []) {{
+            if (!el || typeof el.id !== 'string' || !el.id) continue;
+            const r = elementRank(el);
+            const prev = syncedRank[el.id];
+            if (prev == null || r > prev) syncedRank[el.id] = r;
+            // Always refresh content sig for accepted remotes (points may grow
+            // at the same version).
+            syncedSig[el.id] = elementSyncSig(el);
+            if (el.isDeleted) syncedDeleted[el.id] = true;
+            else delete syncedDeleted[el.id];
+        }}
+        for (const fid of Object.keys(remoteFiles || {{}})) {{
+            syncedFiles[fid] = true;
+        }}
+    }}
+
+    function shouldAcceptRemoteEl(el, liveById) {{
+        if (!el || typeof el.id !== 'string' || !el.id) return false;
+        const live = liveById[el.id];
+        const remoteRank = elementRank(el);
+        if (live) {{
+            const liveRank = elementRank(live);
+            if (remoteRank > liveRank) return true;
+            if (remoteRank < liveRank) return false;
+            // Tie: tombstone wins; else take newer updated (not more points).
+            if (el.isDeleted && !live.isDeleted) return true;
+            if (!el.isDeleted && live.isDeleted) return false;
+            return elementNewerThan(el, live);
+        }}
+        // Missing locally.
+        if (syncedDeleted[el.id]) {{
+            // We already believe it is deleted — ignore stale live echoes.
+            if (el.isDeleted) return false;
+            return remoteRank > (syncedRank[el.id] || 0);
+        }}
+        if (syncedRank[el.id] != null) {{
+            // Vanished via undo (awaiting/sending tombstone): suppress stale copies.
+            return remoteRank > syncedRank[el.id];
+        }}
+        return true;
+    }}
+
+    function buildScenePatch(elements, files) {{
+        const dirtyEls = [];
+        const liveIds = Object.create(null);
+        for (const el of elements || []) {{
+            if (!el || typeof el.id !== 'string' || !el.id) continue;
+            liveIds[el.id] = true;
+            // Compare content sig — not rank alone — so mid-stroke points sync.
+            if (syncedSig[el.id] !== elementSyncSig(el)) dirtyEls.push(el);
+        }}
+        // Synced ids missing from the live scene (undo) need an explicit tombstone.
+        for (const id of Object.keys(syncedRank)) {{
+            if (liveIds[id]) continue;
+            if (syncedDeleted[id]) continue;
+            dirtyEls.push(makeTombstone(id, syncedRank[id]));
+        }}
+        const dirtyFiles = {{}};
+        const fileMap = files || {{}};
+        for (const el of dirtyEls) {{
+            const fid = el.fileId;
+            if (fid && fileMap[fid] && !syncedFiles[fid]) {{
+                dirtyFiles[fid] = fileMap[fid];
+            }}
+        }}
+        for (const fid of Object.keys(fileMap)) {{
+            if (!syncedFiles[fid] && fileMap[fid]) dirtyFiles[fid] = fileMap[fid];
+        }}
+        return {{
+            elements: dirtyEls,
+            files: dirtyFiles,
+            empty: dirtyEls.length === 0 && Object.keys(dirtyFiles).length === 0,
+        }};
+    }}
+
     function mergeElements(base, incoming) {{
         // Same id/version rule as server: higher version (then nonce) wins.
         const byId = Object.create(null);
@@ -494,7 +842,13 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             const rb = elementRank(old);
             if (ra > rb) byId[el.id] = el;
             else if (ra < rb) byId[el.id] = old;
-            else byId[el.id] = preferDeletedOnTie(old, el);
+            else if (el.isDeleted !== old.isDeleted) {{
+                byId[el.id] = preferDeletedOnTie(old, el);
+            }} else if (elementNewerThan(el, old)) {{
+                byId[el.id] = el;
+            }} else {{
+                byId[el.id] = old;
+            }}
         }}
         return Object.keys(byId).map((k) => byId[k]);
     }}
@@ -548,58 +902,148 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             excalidrawAPI: (a) => {{ api = a; }},
             onChange: (elements, _appState, files) => {{
                 if (applyingRemote || !ticket) return;
+                if (Date.now() < suppressPushUntil) {{
+                    const liveCount = (elements || []).filter((el) => el && !el.isDeleted).length;
+                    if (liveCount > 0 && api) {{
+                        applyingRemote = true;
+                        try {{
+                            if (api.resetScene) api.resetScene();
+                            else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                            lastLocalSig = sceneSig([], {{}});
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                    }} else {{
+                        lastLocalSig = sceneSig(elements, files);
+                    }}
+                    localDirty = false;
+                    return;
+                }}
                 const sig = sceneSig(elements, files);
                 if (sig === lastLocalSig) return;
                 lastLocalSig = sig;
                 localDirty = true;
+                // Mid-stroke outbound is fine (snapshot); only inbound updateScene waits.
                 schedulePush();
             }},
         }}));
         loadingEl.style.display = 'none';
-    }}
-
-    function schedulePush() {{
-        if (pushTimer) clearTimeout(pushTimer);
-        // Debounce uploads; always read the live scene when the timer fires so
-        // mid-debounce strokes are not dropped from the POST body.
-        pushTimer = setTimeout(() => {{ void pushScene(); }}, 450);
-    }}
-
-    function finishLocalPush(sigAtStart) {{
-        if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
-        const liveNow = liveScene();
-        if (sceneSig(liveNow.elements, liveNow.files) === sigAtStart) {{
-            localDirty = false;
-            lastLocalSig = sigAtStart;
-        }} else {{
-            localDirty = true;
-            schedulePush();
+        // Track pen-down on the draw surface so sync yields to stroke input.
+        if (!el.__sshchatStrokeFlush) {{
+            el.__sshchatStrokeFlush = true;
+            el.addEventListener('pointerdown', (ev) => {{
+                if (ev.isPrimary === false) return;
+                if (ev.button != null && ev.button !== 0) return;
+                const t = ev.target;
+                // Toolbar/UI lives in the same root — only treat canvas as drawing.
+                if (!t || (t.tagName !== 'CANVAS' && !(t.closest && t.closest('canvas')))) {{
+                    return;
+                }}
+                drawingActive = true;
+                bumpLocalQuiet(700);
+                // Re-time push to the drawing throttle (do not cancel outbound sync).
+                if (localDirty) schedulePush();
+            }}, true);
+            const flushTail = () => {{ endStrokeGesture(); }};
+            el.addEventListener('pointerup', flushTail, true);
+            el.addEventListener('pointercancel', flushTail, true);
+            el.addEventListener('lostpointercapture', flushTail, true);
+            el.addEventListener('touchend', flushTail, true);
         }}
-        setStatus(i18n.statusReady, false);
+    }}
+
+    function schedulePush(delayMs) {{
+        if (pushTimer) clearTimeout(pushTimer);
+        let ms;
+        if (typeof delayMs === 'number') {{
+            ms = delayMs;
+        }} else if (!canvasWsLive) {{
+            ms = PUSH_MS_HTTP;
+        }} else if (drawingActive) {{
+            ms = PUSH_MS_DRAWING;
+        }} else {{
+            ms = PUSH_MS_WS;
+        }}
+        pushTimer = setTimeout(() => {{ void pushScene(); }}, ms);
+    }}
+
+    function finishLocalPush() {{
+        if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
+        const idleBudget = drawingActive ? 24 : 64;
+        whenIdle(() => {{
+            const liveNow = liveScene();
+            const leftover = buildScenePatch(liveNow.elements, liveNow.files);
+            if (!leftover.empty) {{
+                localDirty = true;
+                schedulePush(drawingActive ? undefined : (canvasWsLive ? 0 : undefined));
+            }} else {{
+                localDirty = false;
+                lastLocalSig = sceneSig(liveNow.elements, liveNow.files);
+            }}
+            setStatus(i18n.statusReady, false);
+        }}, idleBudget);
     }}
 
     async function pushScene() {{
-        if (!ticket || applyingRemote || !api || pushInFlight) return;
+        if (!ticket || applyingRemote || !api || clearInFlight) return;
+        if (Date.now() < suppressPushUntil) return;
+        if (pushInFlight) {{
+            localDirty = true;
+            return;
+        }}
+        // Snapshot/stringify on idle so Excalidraw keeps the input frame.
+        // Still allowed while drawingActive — peers need live mid-stroke geometry.
+        const idleBudget = drawingActive ? 24 : 64;
+        await new Promise((resolve) => whenIdle(resolve, idleBudget));
+        if (pushInFlight || !ticket || clearInFlight || applyingRemote) {{
+            if (!pushInFlight) localDirty = true;
+            return;
+        }}
+        if (Date.now() < suppressPushUntil) return;
         const live = liveScene();
         const elements = live.elements;
         const files = live.files;
-        const sigAtStart = sceneSig(elements, files);
+        const patch = buildScenePatch(elements, files);
+        if (patch.empty) {{
+            localDirty = false;
+            lastLocalSig = sceneSig(elements, files);
+            return;
+        }}
+        const snapEls = freezeElements(patch.elements);
+        const snapFiles = Object.keys(patch.files || {{}}).length
+            ? cloneJson(patch.files)
+            : {{}};
+        const genAtStart = sceneGen;
         pushInFlight = true;
-        pendingPushSig = sigAtStart;
+        pendingPushSig = sceneSig(snapEls, snapFiles);
+        pendingPushEls = snapEls;
+        pendingPushFiles = snapFiles;
         setStatus(i18n.statusSync, false);
         if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
             try {{
-                canvasWs.send(JSON.stringify({{
+                await new Promise((resolve) => whenIdle(resolve, idleBudget));
+                if (!canvasWs || canvasWs.readyState !== 1) {{
+                    canvasWsLive = false;
+                    pushInFlight = false;
+                    localDirty = true;
+                    schedulePush();
+                    return;
+                }}
+                const body = JSON.stringify({{
                     type: 'scene',
-                    elements: elements || [],
-                    files: files || {{}},
-                }}));
+                    elements: snapEls,
+                    files: snapFiles,
+                    scene_gen: genAtStart,
+                }});
+                canvasWs.send(body);
                 if (pushAckTimer) clearTimeout(pushAckTimer);
                 pushAckTimer = setTimeout(() => {{
                     pushAckTimer = null;
                     if (!pushInFlight) return;
                     pushInFlight = false;
                     pendingPushSig = '';
+                    pendingPushEls = null;
+                    pendingPushFiles = null;
                     canvasWsLive = false;
                     localDirty = true;
                     schedulePush();
@@ -610,6 +1054,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }}
         }}
         try {{
+            await new Promise((resolve) => whenIdle(resolve, idleBudget));
             const res = await fetch('/canvas/' + token + '/scene', {{
                 method: 'POST',
                 headers: {{
@@ -618,30 +1063,56 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 }},
                 cache: 'no-store',
                 body: JSON.stringify({{
-                    elements: elements || [],
-                    files: files || {{}},
+                    elements: snapEls,
+                    files: snapFiles,
+                    scene_gen: genAtStart,
                 }}),
             }});
             const data = await res.json().catch(() => ({{}}));
             if (!res.ok) throw new Error(data.error || 'scene failed');
             if (typeof data.rev === 'number') rev = data.rev;
-            finishLocalPush(sigAtStart);
+            adoptSceneGen(data.scene_gen);
+            markLocalPushed(snapEls, snapFiles);
+            finishLocalPush();
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
             localDirty = true;
-            schedulePush();
+            void syncOnce(false).then(() => {{
+                if (localDirty) schedulePush();
+            }});
         }} finally {{
             pushInFlight = false;
             pendingPushSig = '';
+            pendingPushEls = null;
+            pendingPushFiles = null;
         }}
     }}
 
     function applyRemotePayload(data) {{
         if (!data || !api) return;
+        const mtype = String(data.type || data.kind || '');
+        if (mtype === 'clear') {{
+            // Clears are urgent — apply now (also cancels in-progress pen).
+            pendingRemote = null;
+            applyRemotePayloadNow(data);
+            return;
+        }}
+        coalesceRemote(data);
+        if (isPenHot()) return;
+        scheduleRemoteApply();
+    }}
+
+    function applyRemotePayloadNow(data) {{
+        if (!data || !api) return;
         const remoteRev = Number(data.rev || 0);
         const mtype = String(data.type || data.kind || '');
         if (mtype === 'clear') {{
+            pendingRemote = null;
+            drawingActive = false;
             if (remoteRev < rev) return;
+            markBoardClearedLocally();
+            clearInFlight = false;
+            adoptSceneGen(data.scene_gen);
             applyingRemote = true;
             try {{
                 if (api.resetScene) api.resetScene();
@@ -654,26 +1125,49 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             rev = Math.max(rev, remoteRev);
             return;
         }}
+        // Never updateScene while the pen is hot — that stalls/warps Excalidraw.
+        if (isPenHot()) {{
+            coalesceRemote(data);
+            return;
+        }}
         if (remoteRev < rev) return;
+        adoptSceneGen(data.scene_gen);
         const remoteEls = data.elements || [];
+        const remoteFiles = data.files || {{}};
         const live = liveScene();
+        const liveById = Object.create(null);
+        for (const el of live.elements || []) {{
+            if (el && typeof el.id === 'string' && el.id) liveById[el.id] = el;
+        }}
+        // Drop stale echoes (own strokes / pre-erase copies) so updateScene
+        // does not redraw them as 重笔 or resurrect undone strokes.
+        const accepted = [];
+        for (const el of remoteEls) {{
+            if (shouldAcceptRemoteEl(el, liveById)) accepted.push(el);
+        }}
+        const fileKeys = Object.keys(remoteFiles || {{}});
+        if (accepted.length === 0 && fileKeys.length === 0) {{
+            if (remoteRev > rev) rev = remoteRev;
+            return;
+        }}
+        noteRemoteSynced(accepted, remoteFiles);
         let nextEls;
         // Empty remote + no local pending ⇒ peer clear / empty board.
         // Otherwise merge so an older poll cannot wipe unpushed strokes.
         if (remoteEls.length === 0 && !localDirty && !pushInFlight) {{
             nextEls = [];
         }} else {{
-            nextEls = mergeElements(remoteEls, live.elements);
+            // Live as base: keep in-progress strokes; apply only accepted remote.
+            nextEls = mergeElements(live.elements, accepted);
         }}
-        const nextFiles = Object.assign({{}}, live.files || {{}}, data.files || {{}});
+        const nextFiles = Object.assign({{}}, live.files || {{}}, remoteFiles);
         const nextSig = sceneSig(nextEls, nextFiles);
         const curSig = sceneSig(live.elements, live.files);
-        if (nextSig !== curSig || (data.files && Object.keys(data.files).length)) {{
+        if (nextSig !== curSig || fileKeys.length) {{
             applyingRemote = true;
             try {{
                 // addFiles expects BinaryFileData[]; getFiles()/sync return a map.
-                const remoteFileMap = data.files || {{}};
-                const fileList = Object.values(remoteFileMap).filter(
+                const fileList = Object.values(remoteFiles).filter(
                     (f) => f && typeof f === 'object' && f.dataURL
                 );
                 if (fileList.length && api.addFiles) {{
@@ -702,7 +1196,8 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             try {{
                 if (canvasWsLive) {{
                     await syncOnce(false);
-                    await new Promise((r) => setTimeout(r, 2500));
+                    // WS is primary; keep HTTP backup rare to avoid full-scene jank.
+                    await new Promise((r) => setTimeout(r, 8000));
                 }} else {{
                     await syncOnce(false);
                     await new Promise((r) => setTimeout(r, 1200));
@@ -752,15 +1247,28 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (mtype === 'ack') {{
                 if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
                 if (typeof data.rev === 'number') rev = data.rev;
+                adoptSceneGen(data.scene_gen);
                 const sig = pendingPushSig;
+                const pushedEls = pendingPushEls;
+                const pushedFiles = pendingPushFiles;
                 pushInFlight = false;
                 pendingPushSig = '';
+                pendingPushEls = null;
+                pendingPushFiles = null;
                 if (String(data.kind || '') === 'clear') {{
-                    localDirty = false;
+                    clearInFlight = false;
+                    markBoardClearedLocally();
                     setStatus(i18n.statusReady, false);
                     return;
                 }}
-                if (sig) finishLocalPush(sig);
+                if (clearInFlight) {{
+                    setStatus(i18n.statusReady, false);
+                    return;
+                }}
+                if (pushedEls || pushedFiles) {{
+                    markLocalPushed(pushedEls || [], pushedFiles || {{}});
+                }}
+                if (sig) finishLocalPush();
                 else setStatus(i18n.statusReady, false);
                 return;
             }}
@@ -773,9 +1281,14 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
                 if (pushAckTimer) {{ clearTimeout(pushAckTimer); pushAckTimer = null; }}
                 pushInFlight = false;
                 pendingPushSig = '';
-                localDirty = true;
+                pendingPushEls = null;
+                pendingPushFiles = null;
+                clearInFlight = false;
                 setStatus(i18n.statusErr, true);
-                schedulePush();
+                // Prefer resync: stale pre-clear pushes must not loop.
+                void syncOnce(false).then(() => {{
+                    if (localDirty) schedulePush();
+                }});
             }}
         }};
         ws.onclose = function () {{
@@ -813,6 +1326,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             if (data.changed && remoteRev >= rev && api) {{
                 applyRemotePayload({{
                     rev: remoteRev,
+                    scene_gen: data.scene_gen,
                     elements: data.elements || [],
                     files: data.files || {{}},
                 }});
@@ -820,6 +1334,7 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
             }} else if (remoteRev > rev) {{
                 rev = remoteRev;
             }}
+            adoptSceneGen(data.scene_gen);
             setStatus(i18n.statusReady, false);
         }} catch (_) {{
             setStatus(i18n.statusErr, true);
@@ -828,48 +1343,59 @@ def generate_canvas_page(token: str, lang: str = "en") -> str:
         }}
     }}
 
-    clearBtn.addEventListener('click', async () => {{
+    clearBtn.addEventListener('click', () => {{
         if (!ticket) return;
         if (!confirm(i18n.clearConfirm)) return;
-        try {{
-            if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
-                if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
-                canvasWs.send(JSON.stringify({{ type: 'clear' }}));
-                applyingRemote = true;
+        clearBtn.disabled = true;
+        markBoardClearedLocally();
+        clearInFlight = true;
+        // Yield a frame so the button/disabled state paints before resetScene.
+        requestAnimationFrame(() => {{
+            void (async () => {{
                 try {{
-                    if (api) {{
-                        if (api.resetScene) api.resetScene();
-                        else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                    if (canvasWsLive && canvasWs && canvasWs.readyState === 1) {{
+                        canvasWs.send(JSON.stringify({{ type: 'clear' }}));
+                        applyingRemote = true;
+                        try {{
+                            if (api) {{
+                                if (api.resetScene) api.resetScene();
+                                else api.updateScene({{ elements: [], ...remoteUpdateOpts }});
+                            }}
+                            lastLocalSig = sceneSig([], {{}});
+                            localDirty = false;
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                        return;
                     }}
-                    lastLocalSig = sceneSig([], {{}});
-                    localDirty = false;
+                    const res = await fetch('/canvas/' + token + '/clear', {{
+                        method: 'POST',
+                        headers: {{ 'X-Canvas-Ticket': ticket }},
+                        cache: 'no-store',
+                    }});
+                    const data = await res.json().catch(() => ({{}}));
+                    if (!res.ok) throw new Error(data.error || 'clear failed');
+                    rev = Number(data.rev || rev + 1);
+                    adoptSceneGen(data.scene_gen);
+                    clearInFlight = false;
+                    markBoardClearedLocally();
+                    if (api) {{
+                        applyingRemote = true;
+                        try {{
+                            api.resetScene();
+                            lastLocalSig = sceneSig([], {{}});
+                        }} finally {{
+                            applyingRemote = false;
+                        }}
+                    }}
+                }} catch (_) {{
+                    clearInFlight = false;
+                    setStatus(i18n.statusErr, true);
                 }} finally {{
-                    applyingRemote = false;
+                    clearBtn.disabled = false;
                 }}
-                return;
-            }}
-            const res = await fetch('/canvas/' + token + '/clear', {{
-                method: 'POST',
-                headers: {{ 'X-Canvas-Ticket': ticket }},
-                cache: 'no-store',
-            }});
-            const data = await res.json().catch(() => ({{}}));
-            if (!res.ok) throw new Error(data.error || 'clear failed');
-            rev = Number(data.rev || rev + 1);
-            localDirty = false;
-            if (pushTimer) {{ clearTimeout(pushTimer); pushTimer = null; }}
-            if (api) {{
-                applyingRemote = true;
-                try {{
-                    api.resetScene();
-                    lastLocalSig = sceneSig([], {{}});
-                }} finally {{
-                    applyingRemote = false;
-                }}
-            }}
-        }} catch (_) {{
-            setStatus(i18n.statusErr, true);
-        }}
+            }})();
+        }});
     }});
 
     // Embedded clients (Android/iOS/Electron) expose SSHChatNative.close —
@@ -995,12 +1521,21 @@ def _broadcast_canvas_update(
     payload = {
         "type": msg_type,
         "rev": result.get("rev", 0),
+        "scene_gen": result.get("scene_gen", 0),
         "author": result.get("author") or "",
-        "elements": result.get("elements") if msg_type != "clear" else [],
-        "files": result.get("files") if msg_type != "clear" else {},
+        "elements": [],
+        "files": {},
     }
     if msg_type == "clear":
         payload["kind"] = "clear"
+    else:
+        # Prefer incremental patch when present (peers merge by id/version).
+        if "patch_elements" in result:
+            payload["elements"] = result.get("patch_elements") or []
+            payload["files"] = result.get("patch_files") or {}
+        else:
+            payload["elements"] = result.get("elements") or []
+            payload["files"] = result.get("files") or {}
     canvas_ws.canvas_ws_hub.broadcast(
         session_id,
         payload,
@@ -1074,25 +1609,45 @@ def handle_canvas_websocket(handler: "BaseHTTPRequestHandler") -> bool:
         ws_client: canvas_ws.CanvasWsClient,
         elements,
         files,
+        scene_gen=None,
     ) -> Optional[dict]:
         result, _err = store.apply_scene(
             ws_client.token,
             ticket,
             elements=elements,
             files=files,
+            scene_gen=scene_gen,
         )
         if result is None:
             return None
-        _broadcast_canvas_update(result, exclude_conn_id=ws_client.conn_id)
+        # Broadcast off the WS read-loop thread so stringify/sendall does not
+        # delay the drawer ack (felt as pen stalls under load).
+        exclude = ws_client.conn_id
+
+        def _bcast() -> None:
+            try:
+                _broadcast_canvas_update(result, exclude_conn_id=exclude)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bcast, daemon=True).start()
         return result
 
     def on_clear(ws_client: canvas_ws.CanvasWsClient) -> Optional[dict]:
         result, _err = store.clear_board(ws_client.token, ticket)
         if result is None:
             return None
-        _broadcast_canvas_update(
-            result, exclude_conn_id=ws_client.conn_id, msg_type="clear"
-        )
+        exclude = ws_client.conn_id
+
+        def _bcast() -> None:
+            try:
+                _broadcast_canvas_update(
+                    result, exclude_conn_id=exclude, msg_type="clear"
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_bcast, daemon=True).start()
         return result
 
     canvas_ws.run_canvas_ws_session(client, on_scene=on_scene, on_clear=on_clear)
@@ -1130,6 +1685,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
                 "width": canvas_sharing.LOGICAL_WIDTH,
                 "height": canvas_sharing.LOGICAL_HEIGHT,
                 "rev": session.rev,
+                "scene_gen": session.scene_gen,
             },
         )
         return True
@@ -1141,6 +1697,7 @@ def handle_canvas_post(handler: "BaseHTTPRequestHandler") -> bool:
             ticket,
             elements=body.get("elements"),
             files=body.get("files"),
+            scene_gen=body.get("scene_gen"),
         )
         if result is None:
             handler._send_error_json(403, err)  # type: ignore[attr-defined]

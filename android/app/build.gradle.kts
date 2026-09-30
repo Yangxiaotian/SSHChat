@@ -12,8 +12,8 @@ android {
         applicationId = "chat.ssh.sshchat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "0.3.34"
+        versionCode = 51
+        versionName = "0.3.38"
         buildConfigField("String", "DEFAULT_HOST", "\"stdlib.gicp.net\"")
         buildConfigField("int", "DEFAULT_PORT", "44681")
     }
@@ -67,4 +67,5 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcutil-jdk18on:1.78.1")
     implementation("org.slf4j:slf4j-nop:2.0.16")
+    testImplementation("junit:junit:4.13.2")
 }

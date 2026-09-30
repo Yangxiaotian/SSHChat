@@ -71,13 +71,18 @@ object ChatLineParsers {
     // Lookahead keeps tags like [root] / [TXT] / [HINT].
     private const val bareCsiFragment =
         """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"""
+    /**
+     * Incomplete CSI when the final byte was lost (e.g. `[2` / `[0;` before `[*]`).
+     * Must not absorb real tags like `[alice]` — only digits/`;`/`?` after `[`.
+     */
+    private const val incompleteCsi = """(?:\[[0-9;?]+)"""
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */
     private val ptyCrumbsBeforeTag =
-        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|$incompleteCsi|[?\uFFFD0-9; \t])+(?=\[(?:\*|#))""")
     private val ptyNoiseOnlyPrefix =
-        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|[?\uFFFD0-9; \t])+$""")
+        Regex("""^(?:(?:\?\[[0-9;?]*[@-~]?)|(?:\u001B\[[0-9;?]*[@-~]?)|$bareCsiFragment|$incompleteCsi|[?\uFFFD0-9; \t])+$""")
     /** Bare CSI at line start when ESC/`?` was eaten (e.g. `[2K` / `[K` before `[*] 9 …). */
-    private val bareCsiPrefix = Regex("""^(?:$bareCsiFragment)+""")
+    private val bareCsiPrefix = Regex("""^(?:$bareCsiFragment|$incompleteCsi)+""")
     private val systemSenders = setOf("+", "-", "*", "!")
     private val ignoredSenders = setOf("OK", "ERROR", "INFO", "WARN", "WARNING", "DEBUG", "HINT")
 
@@ -284,7 +289,9 @@ object ChatLineParsers {
                 return matchGameStarBody(rest)
             }
             matchGameStarBody(rest)?.let { body ->
-                if (looksLikeGameBoardContent(body)) return body
+                // /news "1. [src] …", /lib pages, boards — keep stripping when PTY junk
+                // is incomplete and not recognized as a nick tag.
+                if (looksLikeGameBoardContent(body) || looksLikeStarListContent(body)) return body
             }
         }
         return null
@@ -294,6 +301,16 @@ object ChatLineParsers {
         gameStarRoom.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         gameStarBare.matchEntire(t)?.let { return it.groupValues.getOrNull(1) ?: "" }
         return null
+    }
+
+    /** /news titles, section headers, indented summaries; /lib catalog rows. */
+    private fun looksLikeStarListContent(body: String): Boolean {
+        if (body.startsWith("    ") || body.startsWith("\t")) return true
+        val t = body.trimStart()
+        if (t.startsWith("---")) return true
+        if (Regex("""^\d+\.\s+\[[^\]]+]""").containsMatchIn(t)) return true
+        if (Regex("""^\[\w+]\s+\S""").containsMatchIn(t)) return true
+        return false
     }
 
     /** Board row text with `[*]` / PTY crumbs removed. */
@@ -307,12 +324,11 @@ object ChatLineParsers {
         }
         val idx = t.indexOf("[*]")
         if (idx >= 0) {
+            // Always drop [*] here — this path is only used for board/system-star display.
+            // Incomplete CSI like `[2` before [*] used to leave orphan prefixes on /news rows.
             var after = t.substring(idx + 3)
             if (after.startsWith(" ")) after = after.substring(1)
-            val prefix = t.substring(0, idx)
-            if (prefix.isEmpty() || ptyNoiseOnlyPrefix.matches(prefix) || looksLikeGameBoardContent(after)) {
-                return after.trimEnd()
-            }
+            return after.trimEnd()
         }
         return t.trimEnd()
     }

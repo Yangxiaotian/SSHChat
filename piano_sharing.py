@@ -97,7 +97,12 @@ class PianoSession:
     created_at: float = 0.0
     expires: float = 0.0
     closed: bool = False
+    parked: bool = False
+    conflict_token: str = ""
     title: str = ""
+    # When set, notes live on host_node; this node only mirrors invites/lookup.
+    host_node: Optional[str] = None
+    host_base_url: Optional[str] = None
 
 
 class PianoStore:
@@ -152,9 +157,19 @@ class PianoStore:
                     created_at=float(raw.get("created_at") or 0),
                     expires=expires,
                     closed=bool(raw.get("closed")),
+                    parked=bool(raw.get("parked")),
+                    conflict_token=str(raw.get("conflict_token") or ""),
                     title=str(raw.get("title") or ""),
+                    host_node=raw.get("host_node") or None,
+                    host_base_url=raw.get("host_base_url") or None,
                 )
-                if not self.sessions[sid].closed:
+                if self.sessions[sid].room and not self.sessions[sid].conflict_token:
+                    self.sessions[sid].conflict_token = secrets.token_hex(16)
+                if (
+                    not self.sessions[sid].closed
+                    and not self.sessions[sid].parked
+                    and not self.sessions[sid].host_node
+                ):
                     for token in self.sessions[sid].tokens.values():
                         self.token_to_session[token] = sid
             for ticket, raw in data.get("tickets", {}).items():
@@ -350,6 +365,8 @@ class PianoStore:
             created_at=now,
             expires=expires,
             closed=False,
+            parked=False,
+            conflict_token=secrets.token_hex(16) if room else "",
             title=(title or "").strip()[:80],
         )
         with self.lock:
@@ -379,7 +396,8 @@ class PianoStore:
             key = _generate_key()
             session.tokens[name] = token
             session.keys[name] = key
-            self.token_to_session[token] = session_id
+            if not session.host_node:
+                self.token_to_session[token] = session_id
             self._save_now()
             return token, key, ""
 
@@ -389,7 +407,7 @@ class PianoStore:
             if not sid:
                 return None
             session = self.sessions.get(sid)
-            if session is None or session.closed:
+            if session is None or session.closed or session.parked:
                 return None
             return session
 
@@ -402,6 +420,8 @@ class PianoStore:
     def _alive(self, session: PianoSession) -> Tuple[bool, str]:
         if session.closed:
             return False, "钢琴已关闭"
+        if session.parked:
+            return False, "钢琴已暂存（联邦合并中）"
         if session.room:
             return True, ""
         if session.expires > 0 and time.time() > session.expires:
@@ -724,9 +744,259 @@ class PianoStore:
                     session.room
                     and session.room == room
                     and not session.closed
+                    and not session.parked
                 ):
                     return session
         return None
+
+    def find_parked_for_room(self, room: str) -> Optional[PianoSession]:
+        room = (room or "").strip()
+        if not room:
+            return None
+        with self.lock:
+            for session in self.sessions.values():
+                if (
+                    session.room == room
+                    and session.parked
+                    and not session.closed
+                    and not session.host_node
+                ):
+                    return session
+        return None
+
+    def register_remote_session(
+        self,
+        *,
+        session_id: str,
+        creator: str,
+        participants: List[str],
+        room: Optional[str],
+        tokens: Dict[str, str],
+        keys: Dict[str, str],
+        host_node: str,
+        host_base_url: str,
+        title: str = "",
+        expires: float = 0.0,
+        conflict_token: str = "",
+        rev: int = 0,
+    ) -> PianoSession:
+        """Mirror a piano hosted on a federation peer (no local note storage)."""
+        now = time.time()
+        session = PianoSession(
+            session_id=session_id,
+            creator=creator,
+            room=room,
+            tokens=dict(tokens),
+            keys=dict(keys),
+            events=[],
+            rev=max(0, int(rev or 0)),
+            next_seq=1,
+            created_at=now,
+            expires=float(expires) if expires > 0 else (0.0 if room else now + PIANO_TTL_SECONDS),
+            closed=False,
+            parked=False,
+            conflict_token=str(conflict_token or "").strip() or secrets.token_hex(16),
+            title=(title or "").strip()[:80],
+            host_node=str(host_node or "").strip() or None,
+            host_base_url=str(host_base_url or "").strip().rstrip("/") or None,
+        )
+        with self.lock:
+            if room:
+                for sid, existing in list(self.sessions.items()):
+                    if (
+                        existing.room == room
+                        and not existing.closed
+                        and not existing.parked
+                        and sid != session_id
+                    ):
+                        if existing.host_node:
+                            existing.closed = True
+                        else:
+                            existing.parked = True
+                            for token in existing.tokens.values():
+                                if self.token_to_session.get(token) == sid:
+                                    self.token_to_session.pop(token, None)
+            self.sessions[session_id] = session
+            self._save_now()
+        return session
+
+    def announce_dict(self, session: PianoSession) -> dict:
+        host = (session.host_node or "").strip()
+        base = (session.host_base_url or "").strip().rstrip("/")
+        return {
+            "session_id": session.session_id,
+            "room": session.room,
+            "creator": session.creator,
+            "host_node": host,
+            "base_url": base,
+            "conflict_token": session.conflict_token or session.session_id,
+            "rev": int(session.rev or 0),
+            "title": session.title,
+            "tokens": dict(session.tokens),
+            "keys": dict(session.keys),
+            "expires": float(session.expires or 0),
+        }
+
+    def list_open_room_announces(self, *, local_node_id: str = "") -> List[dict]:
+        out: List[dict] = []
+        with self.lock:
+            for session in self.sessions.values():
+                if (
+                    not session.room
+                    or session.closed
+                    or session.parked
+                    or session.host_node
+                ):
+                    continue
+                ann = self.announce_dict(session)
+                if local_node_id and not ann["host_node"]:
+                    ann["host_node"] = local_node_id
+                out.append(ann)
+        return out
+
+    def park_session(self, session_id: str) -> bool:
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or session.host_node:
+                return False
+            if session.parked:
+                return True
+            session.parked = True
+            for token in session.tokens.values():
+                if self.token_to_session.get(token) == session_id:
+                    self.token_to_session.pop(token, None)
+            dead = [
+                t
+                for t, entry in self.tickets.items()
+                if entry.session_id == session_id
+            ]
+            for t in dead:
+                self.tickets.pop(t, None)
+            self._save_now()
+            return True
+
+    def promote_parked_for_room(self, room: str) -> Optional[PianoSession]:
+        room = (room or "").strip()
+        if not room:
+            return None
+        with self.lock:
+            parked = self.find_parked_for_room(room)
+            if parked is None:
+                return None
+            # find_parked holds no lock guarantee when called nested — re-fetch
+            parked = None
+            for session in self.sessions.values():
+                if (
+                    session.room == room
+                    and session.parked
+                    and not session.closed
+                    and not session.host_node
+                ):
+                    parked = session
+                    break
+            if parked is None:
+                return None
+            for session in list(self.sessions.values()):
+                if (
+                    session.session_id == parked.session_id
+                    or session.room != room
+                    or session.closed
+                ):
+                    continue
+                if session.host_node and not session.parked:
+                    session.closed = True
+                elif not session.host_node and not session.parked:
+                    return None
+            parked.parked = False
+            for token in parked.tokens.values():
+                self.token_to_session[token] = parked.session_id
+            self._save_now()
+            return parked
+
+    def claim_remote_as_local(
+        self, session_id: str, *, base_url: str = ""
+    ) -> Optional[PianoSession]:
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return None
+        base = (base_url or "").strip().rstrip("/") or None
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or session.parked:
+                return None
+            if not (session.host_node or "").strip():
+                return None
+            session.host_node = None
+            session.host_base_url = base
+            for token in session.tokens.values():
+                tok = (token or "").strip()
+                if tok:
+                    self.token_to_session[tok] = session_id
+            dead = [
+                t
+                for t, entry in self.tickets.items()
+                if entry.session_id == session_id
+            ]
+            for t in dead:
+                self.tickets.pop(t, None)
+            self._save_now()
+            return session
+
+    def refresh_host_base_url(self, host_node: str, base_url: str) -> int:
+        host_node = (host_node or "").strip()
+        base = (base_url or "").strip().rstrip("/")
+        if not host_node or not base or base == "-":
+            return 0
+        changed = 0
+        with self.lock:
+            for session in self.sessions.values():
+                if session.closed or session.parked:
+                    continue
+                if (session.host_node or "").strip() != host_node:
+                    continue
+                prev = (session.host_base_url or "").strip().rstrip("/")
+                if prev == base:
+                    continue
+                session.host_base_url = base
+                changed += 1
+            if changed:
+                self._save_now()
+        return changed
+
+    def apply_remote_announce_refresh(self, announce: dict) -> bool:
+        session_id = str(announce.get("session_id") or "").strip()
+        if not session_id:
+            return False
+        base = str(announce.get("base_url") or "").strip().rstrip("/")
+        host_node = str(announce.get("host_node") or "").strip()
+        tokens = announce.get("tokens") or {}
+        keys = announce.get("keys") or {}
+        if not isinstance(tokens, dict):
+            tokens = {}
+        if not isinstance(keys, dict):
+            keys = {}
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.closed or not session.host_node:
+                return False
+            dirty = False
+            if host_node and (session.host_node or "") != host_node:
+                session.host_node = host_node
+                dirty = True
+            if base and (session.host_base_url or "").rstrip("/") != base:
+                session.host_base_url = base
+                dirty = True
+            new_tokens = {str(k): str(v) for k, v in tokens.items() if str(k) and str(v)}
+            new_keys = {str(k): str(v) for k, v in keys.items() if str(k)}
+            if new_tokens and new_tokens != dict(session.tokens):
+                session.tokens = new_tokens
+                dirty = True
+            if new_keys and new_keys != dict(session.keys):
+                session.keys = new_keys
+                dirty = True
+            if dirty:
+                self._save_now()
+            return dirty
 
     def save_recording(
         self,

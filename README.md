@@ -24,6 +24,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/lang en` / `/lang zh` | UI language (saved per nick) |
 | `/names` | Users in the active room |
 | `/rooms` | Rooms you joined (`*` = active) |
+| `/fed` / `/peers` | Federation peers and online users (alias `/federation`) |
 | `/join <room>` | Join and switch |
 | `/msg <nick> <text>` | PM (or leave-message if offline) |
 | `/sendfile` | File to current room |

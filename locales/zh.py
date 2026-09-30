@@ -11,6 +11,7 @@ MESSAGES: dict = {
         "[*] /part <房间>    退出某房间；至少保留一间，不能退出最后一个。\n",
         "[*] /rooms         列出你已加入的房间；前面带 * 的是当前活跃房间。\n",
         "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
+        "[*] /fed 或 /peers    查看联邦直连节点与联邦在线用户（别名 /federation）。\n",
         "[*]\n",
         "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
         "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
@@ -98,11 +99,11 @@ MESSAGES: dict = {
         "[*] /game end              房主可强制结束当前对局。",
         "[*] /game restore          把因重启/联邦冲突暂存的对局恢复到空房间（别名：恢复）。",
         "[*] /game restore swap     与当前进行中的对局对换暂存局（不丢任何一局）。",
-        "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）；/game on all 上线全部。",
-        "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部。",
+        "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）；/game on all 上线全部；联邦节点同步。",
+        "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部；联邦节点同步。",
         "[*] holdem（德州扑克）中英指令对照：",
-        "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
-        "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
+        "[*]   开始 start | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin | 看牌 look",
+        "[*]   发牌后即可看到自己的底牌；机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
         "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
         "比牌 compare <昵称> | 弃牌 fold；比牌费用为当前单注两倍（看牌后再翻倍）；"
         "牌型：豹子>顺金>金花>顺子>对子>单张，花色不同235可胜豹子；"
@@ -145,7 +146,7 @@ MESSAGES: dict = {
         "pad_cleared_bcast": "[#{room}] [*] {editor} 清除了剪贴板。\n",
         "pad_cleared": "[*] 已清除 #{room} 的剪贴板。\n",
         "pad_edit_client_only": (
-            "[*] 多行编辑：终端用 /pad edit；手机 App 点「+」→「便签」。"
+            "[*] 多行编辑：终端用 /pad edit；Tk 桌面客户端点 📝；手机 App 点「+」→「便签」。"
             "也可继续 /pad <一行文字>。\n"
         ),
         "pad_load_usage": "[*] 用法：/pad load <base64>（由 /pad edit 自动发送）\n",
@@ -223,6 +224,20 @@ MESSAGES: dict = {
         ),
         "fed_connected": (
             "[*] 联邦网络已连接 {n} 个节点（同名用户/房间跨服合并）。\n"
+        ),
+        "fed_disabled": "[*] 本机未启用联邦（SSHCHAT_FEDERATION_DISABLE）。\n",
+        "fed_none": "[*] 联邦已启用，当前没有直连在线节点。\n",
+        "fed_status": (
+            "[*] 联邦：本机 {self}；直连在线 {n} 个"
+            "{peers_clause}。\n"
+        ),
+        "fed_status_peers": "：{peers}",
+        "fed_reachable": "[*] 经路由可达（含多跳）：{n} 个 — {peers}\n",
+        "fed_users_header": "[*] 联邦在线用户共 {n} 人：\n",
+        "fed_users_node": "[*]   {node}（{n}）：{users}\n",
+        "fed_users_empty": "[*] 联邦在线用户：无。\n",
+        "fed_usage": (
+            "[*] 用法：/fed 或 /peers  查看联邦直连节点与联邦在线用户（别名 /federation）。\n"
         ),
         "multi_terminal": (
             "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n"
