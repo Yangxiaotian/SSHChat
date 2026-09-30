@@ -156,7 +156,7 @@ class PokerGamesFlowTests(unittest.TestCase):
         self.assertGreaterEqual(len(game.bot_names), 1)
         self.assertTrue(any("机器人：" in line for line in b_start))
 
-    def test_holdem_starts_blind_and_reveals_after_look(self):
+    def test_holdem_shows_hole_cards_immediately(self):
         host_conn = object()
         peer_conn = object()
         game = HoldemGame(host_conn, "host")
@@ -166,12 +166,12 @@ class PokerGamesFlowTests(unittest.TestCase):
         err_start, _b_start, _ = game.try_move(host_conn, "start")
         self.assertEqual(err_start, [])
         lines = game.show(host_conn)
-        self.assertTrue(any("闷牌中" in line for line in lines))
+        self.assertFalse(any("闷牌中" in line for line in lines))
+        self.assertTrue(any(line.startswith("你的手牌：") for line in lines))
 
-        err_look, _b_look, _ = game.try_move(host_conn, "look")
-        self.assertEqual(err_look, [])
-        lines2 = game.show(host_conn)
-        self.assertTrue(any(line.startswith("你的手牌：") and "闷牌中" not in line for line in lines2))
+        priv, bcast, _done = game.try_move(host_conn, "look")
+        self.assertEqual(bcast, [])
+        self.assertTrue(any(line.startswith("你的手牌：") for line in priv))
 
 
 if __name__ == "__main__":

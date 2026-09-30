@@ -102,8 +102,8 @@ MESSAGES: dict = {
         "[*] /game on <名称>        房主在本房上线某游戏（别名同 new）；/game on all 上线全部；联邦节点同步。",
         "[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部；联邦节点同步。",
         "[*] holdem（德州扑克）中英指令对照：",
-        "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin",
-        "[*]   机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
+        "[*]   开始 start | 过牌 check | 跟注 call | 加注 <额> raise <额> | 弃牌 fold | 全下 allin | 看牌 look",
+        "[*]   发牌后即可看到自己的底牌；机器人 bot <easy|hard|pro>；开局后 /game show 帮助 可再看完整说明。",
         "[*] zjh（炸金花）中英对照：开始 start | 看牌 look | 跟注 follow | 加注 raise <额> | "
         "比牌 compare <昵称> | 弃牌 fold；比牌费用为当前单注两倍（看牌后再翻倍）；"
         "牌型：豹子>顺金>金花>顺子>对子>单张，花色不同235可胜豹子；"

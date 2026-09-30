@@ -136,7 +136,6 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
 
   const canStart = isHost && (isWaiting || isEnded);
   const canAct = isPlaying && myTurn;
-  const canLook = isPlaying && handCards.length === 0;
   const canTuneBot = isHost;
 
   const amountNum = Number(raiseAmount.trim());
@@ -175,9 +174,6 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
       {isPlaying && myTurn && (
         <div className="game-workbench-hint">{t('game.holdem.yourTurn')}</div>
       )}
-      {isPlaying && handCards.length === 0 && (
-        <div className="game-workbench-hint">{t('game.holdem.lookHint')}</div>
-      )}
 
       <div className="game-workbench-hint">{t('game.holdem.cmdHint')}</div>
       <div className="game-workbench-hint">{t('game.holdem.cmdExample')}</div>
@@ -202,7 +198,6 @@ export default function HoldemPanel({ disabled, nickname, onCmd, boardText }: Pr
         >
           {t('game.holdem.dealStart')}
         </button>
-        <button className={`mini-btn ${canLook ? 'ready' : ''}`} disabled={disabled || !canLook} onClick={() => onCmd('look')}>{t('game.holdem.look')}</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('check')} title={actionBlockReason}>{t('game.holdem.check')}</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('call')} title={actionBlockReason}>{t('game.holdem.call')}</button>
         <button className={`mini-btn ${canAct ? 'ready' : ''}`} disabled={disabled || !canAct} onClick={() => onCmd('allin')} title={actionBlockReason}>{t('game.holdem.allin')}</button>

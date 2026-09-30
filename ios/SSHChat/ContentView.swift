@@ -53,6 +53,8 @@ final class ChatViewModel: ObservableObject {
     @Published var showSendTargetPicker = false
     @Published var showPadEditor = false
     @Published var padEditorText = ""
+    @Published var gamePanelVisible = false
+    let gameBoard = GameBoardModel()
 
     enum FileImportKind { case media, identity }
 
@@ -116,6 +118,20 @@ final class ChatViewModel: ObservableObject {
             chatFont = min(22, max(7, CGFloat(saved)))
         }
         sendTarget = SendTargetStore.loadTarget()
+        gameBoard.onSend = { [weak self] cmd in
+            self?.sendSlashCommand(cmd)
+        }
+    }
+
+    func toggleGamePanel() {
+        guard connected else { toast = "请先连接"; return }
+        gameBoard.myName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let show = !gamePanelVisible
+        gamePanelVisible = show
+        gameBoard.setVisible(show)
+        if show {
+            toast = "棋盘已打开：点格子落子 / 点手牌出牌"
+        }
     }
 
     func refreshSendTargetLabel() {
@@ -309,6 +325,9 @@ final class ChatViewModel: ObservableObject {
         cancelUploadWait()
         cancelPadEditWait()
         showPadEditor = false
+        gamePanelVisible = false
+        gameBoard.setVisible(false)
+        gameBoard.clear()
         pendingUpload = nil
         voiceRecorder?.cancel()
         voiceRecorder = nil
@@ -400,6 +419,7 @@ final class ChatViewModel: ObservableObject {
 
     func clearScreen(announce: Bool) {
         entries.removeAll()
+        gameBoard.clear()
         if announce { appendText("[*] Screen cleared.") }
     }
 
@@ -929,15 +949,21 @@ final class ChatViewModel: ObservableObject {
     private func appendText(_ line: String) {
         trimEntriesIfNeeded()
         let kind = ChatLineParsers.classifyForDisplay(line, myName: username)
-        if case .boardLine(let t) = kind, case .board(_, let existing) = entries.last {
-            entries[entries.count - 1] = .board(id: UUID(), text: existing + "\n" + t)
+        if case .boardLine(let t) = kind {
+            gameBoard.myName = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            gameBoard.feedLine(t)
+            if case .board(_, let existing) = entries.last {
+                entries[entries.count - 1] = .board(id: UUID(), text: existing + "\n" + t)
+                return
+            }
+            entries.append(.board(id: UUID(), text: t))
             return
         }
         switch kind {
         case .bubble(let mine, let room, let sender, let body, let time):
             entries.append(.bubble(id: UUID(), mine: mine, room: room, sender: sender, body: body, time: time))
-        case .boardLine(let t):
-            entries.append(.board(id: UUID(), text: t))
+        case .boardLine:
+            break
         case .system(let t):
             entries.append(.system(id: UUID(), t))
         }
@@ -972,6 +998,9 @@ struct ContentView: View {
     @FocusState private var draftFocused: Bool
     @State private var showDisconnectConfirm = false
     @State private var showPlusPanel = false
+    /// gameBoard is a nested ObservableObject, so ContentView never re-renders on its changes;
+    /// mirror `maximized` here to drive the fullscreen cover.
+    @State private var boardFullscreen = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -998,6 +1027,10 @@ struct ContentView: View {
                 chatLog
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+                if model.gamePanelVisible {
+                    GamePanelView(model: model.gameBoard)
+                }
+
                 suggestRow
                 composerSection
             }
@@ -1009,6 +1042,14 @@ struct ContentView: View {
         // Chat chrome is light WeChat-style; without this, Dark Mode makes
         // TextField text and plus-panel SF Symbols render white-on-white.
         .preferredColorScheme(.light)
+        .fullScreenCover(isPresented: $boardFullscreen, onDismiss: {
+            model.gameBoard.maximized = false
+        }) {
+            GamePanelFullscreenView(model: model.gameBoard)
+        }
+        .onReceive(model.gameBoard.$maximized) { max in
+            if boardFullscreen != max { boardFullscreen = max }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.handleBecameActive()
@@ -1108,6 +1149,16 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSendTargetPicker) {
             SendTargetPickerView(model: model)
         }
+        .onReceive(model.gameBoard.$toast) { msg in
+            guard let msg else { return }
+            model.toast = msg
+            model.gameBoard.toast = nil
+        }
+        .onReceive(model.gameBoard.$visible) { show in
+            if model.gamePanelVisible != show {
+                model.gamePanelVisible = show
+            }
+        }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
                 Text(toast)
@@ -1117,6 +1168,7 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .padding(.bottom, 24)
+                    .id(toast)
                     .onAppear {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                             if model.toast == toast { model.toast = nil }
@@ -1562,6 +1614,10 @@ struct ContentView: View {
             plusCell(title: "棋钟", system: "timer") {
                 showPlusPanel = false
                 model.startClock()
+            }
+            plusCell(title: "棋盘", system: "checkerboard.rectangle") {
+                showPlusPanel = false
+                model.toggleGamePanel()
             }
             plusCell(title: "便签", system: "note.text") {
                 showPlusPanel = false

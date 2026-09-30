@@ -104,8 +104,8 @@ MESSAGES: dict = {
         "[*] /game on <name>        Owner enables a game in this room (same name aliases as new); /game on all enables every game; synced across federation.",
         "[*] /game off <name>       Owner disables a game in this room (an in-progress match is unaffected); /game off all disables every game; synced across federation.",
         "[*] holdem (Texas Hold'em) EN/ZH command map:",
-        "[*]   开始 start | 看牌 look | 过牌 check | 跟注 call | 加注 <amt> raise <amt> | 弃牌 fold | 全下 allin",
-        "[*]   bots: bot <easy|hard|pro>; after start, /game show 帮助 shows the full help again.",
+        "[*]   开始 start | 过牌 check | 跟注 call | 加注 <amt> raise <amt> | 弃牌 fold | 全下 allin | 看牌 look",
+        "[*]   hole cards visible after deal; bots: bot <easy|hard|pro>; after start, /game show 帮助 shows the full help again.",
         "[*] zjh (Zha Jin Hua) EN/ZH: 开始 start | 看牌 look | 跟注 follow | 加注 raise <amt> | "
         "比牌 compare <nick> | 弃牌 fold; compare costs 2× current bet (×2 again after looking); "
         "ranks: leopard > straight flush > flush > straight > pair > high card; "

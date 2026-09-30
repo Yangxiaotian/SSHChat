@@ -16,6 +16,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -23,12 +24,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import chat.ssh.sshchat.databinding.ActivityMainBinding
+import chat.ssh.sshchat.games.GameParser
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -47,6 +54,11 @@ class MainActivity : AppCompatActivity() {
     private var uploadWaitRunnable: Runnable? = null
     private var cameraTarget: File? = null
     private var videoTarget: File? = null
+    /** 棋盘全屏时：从聊天栏挪到 root FrameLayout 前的宿主与下标。 */
+    private var gamePanelHost: ViewGroup? = null
+    private var gamePanelIndex = -1
+    private var gamePanelHostLp: ViewGroup.LayoutParams? = null
+    private var gamePanelFullscreen = false
     private var voiceRecorder: VoiceRecorder? = null
     /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
     @Volatile private var mediaPickerOpen = false
@@ -208,6 +220,10 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startClock()
         }
+        binding.btnBoard.setOnClickListener {
+            hidePlusPanel()
+            toggleGamePanel()
+        }
         binding.btnPad.setOnClickListener {
             hidePlusPanel()
             startPadEdit()
@@ -240,6 +256,24 @@ class MainActivity : AppCompatActivity() {
         binding.btnSendTarget.setOnClickListener { showSendTargetPicker() }
         binding.btnFontMinus.setOnClickListener { bumpFont(-1f) }
         binding.btnFontPlus.setOnClickListener { bumpFont(1f) }
+        binding.gamePanel.onSend = { cmd ->
+            if (cmd.startsWith("/")) CommandUsage.record(cmd)
+            client?.send(cmd)
+        }
+        binding.gamePanel.onMaximizeChanged = { max ->
+            applyGamePanelMaximize(max)
+        }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (binding.gamePanel.isMaximized()) {
+                    binding.gamePanel.setMaximized(false)
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
         binding.etDraft.setOnEditorActionListener { _, actionId, event ->
             val fromIme = actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND ||
                 actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE
@@ -477,6 +511,84 @@ class MainActivity : AppCompatActivity() {
         }
         appendLine("[*] 正在开启棋钟…（/clock）")
         client?.send("/clock")
+    }
+
+    private fun toggleGamePanel() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        binding.gamePanel.myName = binding.etUsername.text?.toString()?.trim().orEmpty()
+        val show = !binding.gamePanel.isPanelVisible()
+        binding.gamePanel.setPanelVisible(show)
+        if (show) {
+            Toast.makeText(this, "棋盘已打开：点格子落子 / 点手牌出牌", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun applyGamePanelMaximize(max: Boolean) {
+        val panel = binding.gamePanel
+        val root = binding.root
+        if (max == gamePanelFullscreen) return
+        gamePanelFullscreen = max
+        if (max) {
+            val host = panel.parent as? ViewGroup ?: return
+            // 已在 root 上则无需再挂
+            if (host === root) {
+                setGamePanelImmersive(true)
+                ViewCompat.requestApplyInsets(panel)
+                return
+            }
+            gamePanelHost = host
+            gamePanelIndex = host.indexOfChild(panel)
+            gamePanelHostLp = panel.layoutParams
+            host.removeView(panel)
+            root.addView(
+                panel,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            panel.bringToFront()
+            setGamePanelImmersive(true)
+            ViewCompat.requestApplyInsets(panel)
+        } else {
+            val host = gamePanelHost
+            val curParent = panel.parent as? ViewGroup
+            if (curParent != null) {
+                curParent.removeView(panel)
+            }
+            if (host != null) {
+                val idx = gamePanelIndex.coerceIn(0, host.childCount)
+                val lp = gamePanelHostLp ?: LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
+                // 避免重复 add
+                if (panel.parent == null) {
+                    host.addView(panel, idx, lp)
+                }
+            }
+            gamePanelHost = null
+            gamePanelIndex = -1
+            gamePanelHostLp = null
+            setGamePanelImmersive(false)
+        }
+        panel.requestLayout()
+    }
+
+    private fun setGamePanelImmersive(on: Boolean) {
+        WindowCompat.setDecorFitsSystemWindows(window, !on)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        if (on) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     private fun startPiano() {
@@ -1075,6 +1187,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun clearScreen(announce: Boolean) {
         binding.chatLog.removeAllViews()
+        binding.gamePanel.clear()
         if (announce) {
             appendLine("[*] Screen cleared.")
         }
@@ -1514,6 +1627,27 @@ class MainActivity : AppCompatActivity() {
 
     /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
     private fun appendBoardLine(text: String) {
+        // Feed UI board panel (silent). Keep monospace dump in chat as fallback.
+        binding.gamePanel.myName = binding.etUsername.text?.toString()?.trim().orEmpty()
+        binding.gamePanel.feedLine(text)
+        // When panel is open and this looks like a board row, skip dumping ASCII to chat
+        // to reduce flood — still keep non-board game system lines.
+        if (binding.gamePanel.isPanelVisible() &&
+            (GameParser.detectHeader(text) != null || ChatLineParsers.looksLikeGameBoardContent(text))
+        ) {
+            // Still merge into a compact board block so user can scroll history if needed,
+            // but prefer not to spam every row when panel shows the board.
+            val log = binding.chatLog
+            val lastIdx = log.childCount - 1
+            if (lastIdx >= 0) {
+                val last = log.getChildAt(lastIdx)
+                if (last is TextView && last.tag == "board") {
+                    // Keep last board block updating so /game show still has a text trail.
+                    last.text = "${last.text}\n$text"
+                    return
+                }
+            }
+        }
         val log = binding.chatLog
         val lastIdx = log.childCount - 1
         if (lastIdx >= 0) {
@@ -1593,6 +1727,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnFile.isEnabled = on
         binding.btnCanvas.isEnabled = on
         binding.btnPiano.isEnabled = on
+        binding.btnClock.isEnabled = on
+        binding.btnBoard.isEnabled = on
         binding.btnPad.isEnabled = on
         binding.btnLibrary.isEnabled = on
         binding.btnHelp.isEnabled = on
@@ -1608,6 +1744,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnFile.alpha = iconAlpha
         binding.btnCanvas.alpha = iconAlpha
         binding.btnPiano.alpha = iconAlpha
+        binding.btnClock.alpha = iconAlpha
+        binding.btnBoard.alpha = iconAlpha
         binding.btnPad.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha
@@ -1617,6 +1755,11 @@ class MainActivity : AppCompatActivity() {
             cancelPadEditWait()
             padEditDialog?.dismiss()
             hidePlusPanel()
+            if (binding.gamePanel.isMaximized()) {
+                binding.gamePanel.setMaximized(false)
+            }
+            binding.gamePanel.setPanelVisible(false)
+            binding.gamePanel.clear()
             binding.suggestScroll.visibility = View.GONE
             binding.suggestRow.removeAllViews()
             val prefs = uiPrefs()
