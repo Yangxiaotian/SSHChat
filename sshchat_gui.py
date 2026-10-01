@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -389,6 +390,174 @@ def _command_completions(
         return []
 
     return name_arg_completions(text, rooms=rooms or (), users=users or ())
+
+
+_LOCAL_CHAT_SCRIPT_DEFAULT = Path("/opt/sshchat/chat.sh")
+_LOCAL_SSH_HOST_KEY_GLOBS = (
+    "/etc/ssh/ssh_host_*_key.pub",
+    "/usr/local/etc/ssh/ssh_host_*_key.pub",
+)
+
+
+def _local_login_name() -> str:
+    if os.name != "posix":
+        return ""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return ""
+
+
+def _find_local_chat_script() -> Path | None:
+    candidates: list[Path] = []
+    override = (os.environ.get("SSHCHAT_LOCAL_CHAT") or "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.append(_LOCAL_CHAT_SCRIPT_DEFAULT)
+    for path in candidates:
+        if path.is_file() and os.access(path, os.R_OK | os.X_OK):
+            return path
+    return None
+
+
+def _host_is_this_machine(host: str) -> bool:
+    h = host.strip().strip("[]")
+    if not h:
+        return False
+    if h.lower() in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return True
+    try:
+        infos = socket.getaddrinfo(h, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    for family, _, _, _, sockaddr in infos:
+        addr = str(sockaddr[0])
+        if addr.startswith("127.") or addr == "::1":
+            return True
+        # bind() only succeeds for addresses owned by a local interface.
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.bind((addr, 0, *sockaddr[2:]))
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _local_ssh_host_keys() -> set[str]:
+    keys: set[str] = set()
+    for pattern in _LOCAL_SSH_HOST_KEY_GLOBS:
+        base, _, glob_part = pattern.rpartition("/")
+        try:
+            paths = list(Path(base).glob(glob_part))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                parts = path.read_text(encoding="utf-8", errors="replace").split()
+            except OSError:
+                continue
+            if len(parts) >= 2:
+                keys.add(parts[1])
+    return keys
+
+
+def _transport_is_this_machine(transport: paramiko.Transport | None) -> bool:
+    """True when the sshd we reached (possibly via DDNS/port-forward) is this host."""
+    if transport is None:
+        return False
+    try:
+        key = transport.get_remote_server_key()
+    except Exception:
+        return False
+    if key is None:
+        return False
+    return key.get_base64() in _local_ssh_host_keys()
+
+
+class _LocalPtyChannel:
+    """Run chat.sh in a local PTY; mimics the paramiko.Channel subset the GUI uses."""
+
+    def __init__(self, script: Path, *, cols: int = 120, rows: int = 36) -> None:
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        master, slave = pty.openpty()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            env = dict(os.environ)
+            if getattr(sys, "frozen", False):
+                # PyInstaller points LD_LIBRARY_PATH at the bundle; chat.sh runs the server venv.
+                for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+                    orig = env.pop(f"{var}_ORIG", None)
+                    if orig is not None:
+                        env[var] = orig
+                    else:
+                        env.pop(var, None)
+            env["TERM"] = "xterm"
+            env["SSH_TTY"] = os.ttyname(slave)
+            # Same board markup as SSH sessions, which the GUI already renders.
+            env["SSHCHAT_XIANGQI_COLOR"] = "markers"
+            self._proc = subprocess.Popen(
+                [str(script)],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                cwd=str(script.parent),
+                env=env,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except Exception:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(slave)
+        self._fd = master
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def send(self, data: bytes) -> int:
+        if self._closed:
+            raise OSError("local session closed")
+        return os.write(self._fd, data)
+
+    def recv(self, nbytes: int) -> bytes:
+        if self._closed:
+            return b""
+        try:
+            return os.read(self._fd, nbytes)
+        except OSError:
+            # Linux reports EIO on the master once the child side is gone.
+            return b""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._proc.poll() is None:
+            try:
+                os.killpg(self._proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self._proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
 
 
 def _is_ssl_verify_error(exc: BaseException) -> bool:
@@ -2097,7 +2266,8 @@ class SSHChatGUI:
             pass
 
         self._ssh: paramiko.SSHClient | None = None
-        self._chan: paramiko.Channel | None = None
+        self._chan: paramiko.Channel | _LocalPtyChannel | None = None
+        self._session_local = False
         self._chan_send_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
         self._connect_thread: threading.Thread | None = None
@@ -3823,7 +3993,18 @@ class SSHChatGUI:
         self._connect_thread.start()
 
     def _connect_ssh(self, host: str, port: int, user: str) -> None:
+        # The logged-in OS user on the server machine is already authenticated:
+        # run chat.sh locally instead of requiring an authorized_keys entry
+        # (which, without command=, would only yield a login shell anyway).
+        local_script: Path | None = None
+        if user.strip() == _local_login_name():
+            local_script = _find_local_chat_script()
+        if local_script is not None and _host_is_this_machine(host):
+            self._start_local_session(local_script, user)
+            return
+
         ssh = paramiko.SSHClient()
+        use_local = False
         try:
             ssh.load_system_host_keys()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -3838,8 +4019,15 @@ class SSHChatGUI:
                 "allow_agent": True,
                 "look_for_keys": True,
             }
-            ssh.connect(**connect_kw)
-            chan = ssh.invoke_shell(term="xterm", width=120, height=36)
+            try:
+                ssh.connect(**connect_kw)
+            except paramiko.SSHException:
+                if local_script is None or not _transport_is_this_machine(ssh.get_transport()):
+                    raise
+                use_local = True
+            if not use_local and local_script is not None:
+                use_local = _transport_is_this_machine(ssh.get_transport())
+            chan = None if use_local else ssh.invoke_shell(term="xterm", width=120, height=36)
         except Exception:
             try:
                 ssh.close()
@@ -3847,15 +4035,33 @@ class SSHChatGUI:
                 pass
             raise
 
+        if use_local:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            assert local_script is not None
+            self._start_local_session(local_script, user)
+            return
+
         self._session_user = user.strip()
+        self._session_local = False
         self._ssh = ssh
+        self._chan = chan
+        self.root.after(0, self._connect_succeeded)
+
+    def _start_local_session(self, script: Path, user: str) -> None:
+        chan = _LocalPtyChannel(script, cols=120, rows=36)
+        self._session_user = user.strip()
+        self._session_local = True
+        self._ssh = None
         self._chan = chan
         self.root.after(0, self._connect_succeeded)
 
     def _connect_succeeded(self) -> None:
         self._save_profile(warn_on_error=False)
         self._set_connect_buttons_state(connect_enabled=False, disconnect_enabled=True)
-        self._set_status("已连接（SSH 会话）")
+        self._set_status("已连接（本机会话）" if self._session_local else "已连接（SSH 会话）")
         self._rooms_order = ["default"]
         self._active_room = "default"
         self._room_unread = {"default": 0}
