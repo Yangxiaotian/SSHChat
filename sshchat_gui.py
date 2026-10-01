@@ -29,7 +29,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import webbrowser
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -1345,11 +1344,8 @@ def _chromium_app_binaries() -> list[str]:
     ]
 
 
-def _open_browser_tab(url: str) -> bool:
-    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
-    target = (url or "").strip()
-    if not target:
-        return False
+def _popen_detached(args: list[str]) -> bool:
+    """Start a process without waiting (safe on the Tk main thread)."""
     popen_kwargs: dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -1358,27 +1354,45 @@ def _open_browser_tab(url: str) -> bool:
         popen_kwargs.update(_windows_hidden_subprocess_kwargs())
     else:
         popen_kwargs["start_new_session"] = True
-    for binary in _chromium_app_binaries():
-        if not binary or not os.path.isfile(binary):
-            continue
-        try:
-            subprocess.Popen([binary, target], **popen_kwargs)
-            return True
-        except OSError:
-            continue
+    try:
+        subprocess.Popen(args, **popen_kwargs)
+        return True
+    except OSError:
+        return False
+
+
+def _open_url_fallback(url: str) -> bool:
+    """Last-resort non-blocking URL open. Never use webbrowser.open — it can
+    block the Tk main thread for seconds (Chrome remote wait) or until the
+    browser exits when remote open fails."""
+    target = (url or "").strip()
+    if not target:
+        return False
     if sys.platform == "darwin":
-        try:
-            subprocess.Popen(["open", target], **popen_kwargs)
-            return True
-        except OSError:
-            pass
+        return _popen_detached(["open", target])
     if sys.platform == "win32":
         try:
             os.startfile(target)  # type: ignore[attr-defined]
             return True
         except OSError:
-            pass
+            return False
+    xdg = shutil.which("xdg-open") or ""
+    if xdg:
+        return _popen_detached([xdg, target])
     return False
+
+
+def _open_browser_tab(url: str) -> bool:
+    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    for binary in _chromium_app_binaries():
+        if not binary or not os.path.isfile(binary):
+            continue
+        if _popen_detached([binary, target]):
+            return True
+    return _open_url_fallback(target)
 
 
 def _piano_auth_trampoline_url(piano_url: str, boot: dict[str, Any]) -> str:
@@ -1548,38 +1562,10 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
             # Maximized keeps window chrome (close/title). --start-fullscreen
             # hides chrome and is hard to exit from an --app= window.
             args.append("--start-maximized")
-        try:
-            popen_kwargs: dict[str, Any] = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
-            }
-            if sys.platform == "win32":
-                popen_kwargs.update(_windows_hidden_subprocess_kwargs())
-            else:
-                popen_kwargs["start_new_session"] = True
-            subprocess.Popen(args, **popen_kwargs)
+        if _popen_detached(args):
             return True
-        except OSError:
-            continue
-    if sys.platform == "darwin":
-        # Safari / default handler — pass the real URL (with hash), not file://.
-        try:
-            subprocess.Popen(
-                ["open", open_target],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except OSError:
-            pass
-    if sys.platform == "win32":
-        # Last resort: default browser via os.startfile (no console).
-        try:
-            os.startfile(open_target)  # type: ignore[attr-defined]
-            return True
-        except OSError:
-            pass
-    return False
+    # Prefer the real URL (with hash) over file:// trampoline for OS handlers.
+    return _open_url_fallback(open_target)
 
 
 class NativeCanvasWindow:
@@ -4371,10 +4357,25 @@ class SSHChatGUI:
         url = m.group(1)
         self._append_chat_line("[*] 打开棋钟…", local_sent=True)
         try:
-            webbrowser.open(url)
+            # Never webbrowser.open on the Tk thread — Chrome remote wait
+            # freezes the UI (~5s) and a failed remote open can block until
+            # the browser exits (piano/canvas buttons then appear dead).
+            if _open_canvas_app_window(url, maximized=True):
+                self._set_status("棋钟已打开")
+            elif _open_browser_tab(url):
+                self._set_status("棋钟已在浏览器打开")
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开棋钟链接", local_sent=True
+                )
+                self._set_status("棋钟链接已收到（浏览器未打开）")
+                self._alert_beep()
+                return True
         except Exception as e:
             self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
-        self._set_status("棋钟已在浏览器打开")
+            self._set_status("棋钟打开失败")
+            self._alert_beep()
+            return True
         self._alert_beep()
         return True
 
@@ -4538,12 +4539,15 @@ class SSHChatGUI:
                     self._open_canvas_tokens.add(tok)
                     self._open_canvas_urls[tok] = url
                 self._append_chat_line(ok_msg, local_sent=True)
-            else:
-                webbrowser.open(target)
+            elif _open_browser_tab(target):
                 if tok:
                     self._open_canvas_tokens.add(tok)
                     self._open_canvas_urls[tok] = url
                 self._append_chat_line(browser_msg, local_sent=True)
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开画布链接", local_sent=True
+                )
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
@@ -4574,12 +4578,15 @@ class SSHChatGUI:
                     self._open_piano_tokens.add(token)
                     self._open_piano_urls[token] = url
                 self._append_chat_line(ok_msg, local_sent=True)
-            else:
-                webbrowser.open(target)
+            elif _open_browser_tab(target):
                 if token:
                     self._open_piano_tokens.add(token)
                     self._open_piano_urls[token] = url
                 self._append_chat_line(browser_msg, local_sent=True)
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开钢琴链接", local_sent=True
+                )
         except Exception as e:
             self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 
