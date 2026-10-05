@@ -2559,24 +2559,63 @@ function isTlsCertError(e: unknown): boolean {
   );
 }
 
+const UPLOAD_CHUNK = 512 * 1024;
+
 function postSecureUpload(
   urlStr: string,
   key: string,
   filename: string,
-  mime: string,
+  _mime: string,
   bytes: Buffer,
   insecure: boolean,
 ): Promise<{ ok: boolean; filename?: string; error?: string }> {
+  const count = Math.max(1, Math.ceil(bytes.length / UPLOAD_CHUNK));
+  const encoded = encodeURIComponent(filename);
+  return (async () => {
+    let remote = filename;
+    for (let index = 0; index < count; index++) {
+      const slice = bytes.subarray(
+        index * UPLOAD_CHUNK,
+        Math.min(bytes.length, (index + 1) * UPLOAD_CHUNK),
+      );
+      let lastErr: string | undefined;
+      let ok = false;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const result = await postUploadChunk(
+            urlStr, key, encoded, bytes.length, index, count, slice, insecure,
+          );
+          if (!result.ok) {
+            lastErr = result.error;
+          } else {
+            if (result.filename) remote = result.filename;
+            ok = true;
+            break;
+          }
+        } catch (e) {
+          lastErr = e instanceof Error ? e.message : String(e);
+        }
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+      if (!ok) {
+        return { ok: false, error: lastErr || 'upload failed' };
+      }
+    }
+    return { ok: true, filename: remote };
+  })();
+}
+
+function postUploadChunk(
+  urlStr: string,
+  key: string,
+  encodedName: string,
+  totalSize: number,
+  index: number,
+  count: number,
+  body: Buffer,
+  insecure: boolean,
+): Promise<{ ok: boolean; filename?: string; error?: string }> {
   const u = new URL(urlStr);
-  const boundary = `----SSHChat${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
-  const preamble = Buffer.from(
-    `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
-      `Content-Type: ${mime}\r\n\r\n`,
-    'utf8',
-  );
-  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
-  const body = Buffer.concat([preamble, bytes, epilogue]);
   const lib = u.protocol === 'https:' ? https : http;
   const options: https.RequestOptions = {
     protocol: u.protocol,
@@ -2586,7 +2625,11 @@ function postSecureUpload(
     method: 'POST',
     headers: {
       'X-Upload-Key': key,
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'X-Upload-Index': String(index),
+      'X-Upload-Count': String(count),
+      'X-Upload-Size': String(totalSize),
+      'X-Upload-Filename': encodedName,
+      'Content-Type': 'application/octet-stream',
       'Content-Length': body.length,
     },
     rejectUnauthorized: !insecure,
@@ -2608,11 +2651,11 @@ function postSecureUpload(
           resolve({ ok: false, error: result.error || `HTTP ${res.statusCode}` });
           return;
         }
-        resolve({ ok: true, filename: result.filename || filename });
+        resolve({ ok: true, filename: result.filename });
       });
     });
     req.on('error', reject);
-    req.setTimeout(120_000, () => {
+    req.setTimeout(90_000, () => {
       req.destroy(new Error('upload timeout'));
     });
     req.write(body);

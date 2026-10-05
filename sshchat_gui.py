@@ -28,7 +28,6 @@ import tkinter.font as tkfont
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -613,40 +612,54 @@ def _urlopen_read(req: urllib.request.Request, timeout: float = 120) -> bytes:
     raise last
 
 
+_UPLOAD_CHUNK = 512 * 1024
+
+
 def _upload_secure_file(url: str, key: str, path: Path) -> str:
-    """POST multipart file with X-Upload-Key; return remote filename."""
+    """POST the file in small chunks with X-Upload-Key; return remote filename."""
     filename = path.name.replace("\\", "_").replace("/", "_")[:200] or "file"
-    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    data = path.read_bytes()
-    boundary = f"----SSHChat{uuid.uuid4().hex}"
-    body = (
-        (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-            f"Content-Type: {mime}\r\n\r\n"
-        ).encode("utf-8")
-        + data
-        + f"\r\n--{boundary}--\r\n".encode("utf-8")
-    )
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "X-Upload-Key": key.upper(),
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
-    raw = _urlopen_read(req).decode("utf-8", errors="replace")
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
-        payload = {}
-    if isinstance(payload, dict) and payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
-    if isinstance(payload, dict) and payload.get("filename"):
-        return str(payload["filename"])
-    return filename
+    size = path.stat().st_size
+    if size <= 0:
+        raise RuntimeError("empty file")
+    count = max(1, (size + _UPLOAD_CHUNK - 1) // _UPLOAD_CHUNK)
+    encoded = urllib.parse.quote(filename, safe="")
+    remote = filename
+    with path.open("rb") as src:
+        for index in range(count):
+            data = src.read(_UPLOAD_CHUNK)
+            if not data:
+                break
+            headers = {
+                "X-Upload-Key": key.upper(),
+                "X-Upload-Index": str(index),
+                "X-Upload-Count": str(count),
+                "X-Upload-Size": str(size),
+                "X-Upload-Filename": encoded,
+                "Content-Type": "application/octet-stream",
+            }
+            last_err: Exception | None = None
+            for attempt in range(4):
+                try:
+                    req = urllib.request.Request(
+                        url, data=data, method="POST", headers=headers
+                    )
+                    raw = _urlopen_read(req, timeout=90).decode("utf-8", errors="replace")
+                    try:
+                        payload = json.loads(raw) if raw.strip() else {}
+                    except json.JSONDecodeError:
+                        payload = {}
+                    if isinstance(payload, dict) and payload.get("error"):
+                        raise RuntimeError(str(payload["error"]))
+                    if isinstance(payload, dict) and payload.get("filename"):
+                        remote = str(payload["filename"])
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.4 * (attempt + 1))
+            if last_err is not None:
+                raise last_err if isinstance(last_err, RuntimeError) else RuntimeError(str(last_err))
+    return remote
 
 
 def _parse_file_meta_field(body: str) -> tuple[str, str] | None:

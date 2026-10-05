@@ -4,6 +4,7 @@ HTTP server for file uploads and downloads with one-time URLs.
 Provides:
 - Upload page:     GET  /upload/<token>          - HTML form with key input
 - Upload endpoint: POST /upload/<token>          - Upload, key in X-Upload-Key header
+- Chunked upload:  POST /upload/<token>          - Raw body + X-Upload-Index/Count/Size
 - Download page:   GET  /download/<token>        - HTML page with key input and preview
 - Ticket exchange: POST /download/<token>/ticket - Key in body, returns two one-time links
 - File bytes:      GET  /f/<ticket>              - Serves the file once, then the link dies
@@ -25,6 +26,7 @@ import html
 import ipaddress
 import json
 import re
+import shutil
 import ssl
 import subprocess
 import threading
@@ -32,7 +34,7 @@ import mimetypes
 import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, quote, parse_qs
+from urllib.parse import urlparse, quote, parse_qs, unquote
 from pathlib import Path
 from typing import Optional
 import canvas_http
@@ -42,6 +44,12 @@ import piano_http
 
 
 MAX_FILE_SIZE = int(os.environ.get("SSHCHAT_MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
+
+# Cloudflare Quick Tunnels abort long POSTs (TTFB ~100s, write timeout ~30s).
+# Clients split files into small chunks so each request finishes quickly.
+MAX_UPLOAD_CHUNK = int(os.environ.get("SSHCHAT_MAX_UPLOAD_CHUNK", str(2 * 1024 * 1024)))
+MAX_UPLOAD_CHUNKS = int(os.environ.get("SSHCHAT_MAX_UPLOAD_CHUNKS", "512"))
+UPLOAD_CHUNK_SIZE = int(os.environ.get("SSHCHAT_UPLOAD_CHUNK_SIZE", str(512 * 1024)))
 
 # Preview pulls the whole file into the page at once, so keep it off very large
 # files; those go straight to the download button instead.
@@ -277,9 +285,9 @@ UPLOAD_TEXTS = {
         "heading": "🔒 Secure File Upload",
         "subtitle": "This link is finished once the upload succeeds",
         "info_title": "Instructions:",
-        "info_1": "Enter the 6-character upload key sent separately in chat",
+        "info_1": "Enter the 6-character key that came with THIS page (not an older /sendfile)",
         "info_2": "Choose a file, or paste (Ctrl/Cmd+V) an image/file from the clipboard",
-        "info_3": "Click upload; the recipient will get a download link",
+        "info_3": "Click upload (large files are sent in small pieces automatically)",
         "key_label": "Upload key *",
         "key_placeholder": "Enter 6-character key",
         "file_label": "Choose file * (or paste from clipboard)",
@@ -301,9 +309,9 @@ UPLOAD_TEXTS = {
         "heading": "🔒 安全文件上传",
         "subtitle": "上传成功后此链接即完成使命",
         "info_title": "使用说明：",
-        "info_1": "输入聊天窗里单独发给你的6位上传密钥",
+        "info_1": "输入和本页网址配套的那组6位密钥（不要用上一次 /sendfile 的）",
         "info_2": "选择文件，或从剪贴板粘贴（Ctrl/Cmd+V）图片/文件",
-        "info_3": "点击上传按钮，接收者会收到下载链接",
+        "info_3": "点击上传（大文件会自动分块，避免通道超时）",
         "key_label": "上传密钥 *",
         "key_placeholder": "输入6位密钥",
         "file_label": "选择文件 *（也可粘贴剪贴板）",
@@ -637,6 +645,7 @@ def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
         const progressFill = document.getElementById('progressFill');
         const progressText = document.getElementById('progressText');
         const uploadUrl = '/upload/{token}';
+        const chunkSize = {UPLOAD_CHUNK_SIZE};
         const i18n = {{
             alertKey: {json.dumps(S['alert_key'])},
             alertFile: {json.dumps(S['alert_file'])},
@@ -741,34 +750,84 @@ def generate_upload_page(token: str, error: str = "", lang: str = "en") -> str:
             uploadBtn.textContent = i18n.uploading;
             progress.style.display = 'block';
             
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            try {{
-                // The key goes in a header, never in the URL, so it stays out
-                // of browser history, proxy logs and Referer headers.
-                const response = await fetch(uploadUrl, {{
-                    method: 'POST',
-                    headers: {{ 'X-Upload-Key': key }},
-                    body: formData
-                }});
-                
-                const result = await response.json().catch(() => ({{}}));
-                
-                if (response.ok) {{
-                    progressFill.style.width = '100%';
-                    progressText.textContent = i18n.successProgress;
-                    progressText.style.color = '#4caf50';
-                    
-                    setTimeout(() => {{
-                        const name = result.filename || file.name;
-                        alert(i18n.successAlertPrefix + name + i18n.successAlertSuffix);
-                    }}, 800);
-                }} else {{
-                    throw new Error(result.error || i18n.failDefault);
+            const total = Math.max(1, Math.ceil(file.size / chunkSize));
+            const setProgress = (done) => {{
+                const pct = Math.min(100, Math.round((done / total) * 100));
+                progressFill.style.width = pct + '%';
+                progressText.textContent = i18n.uploading + ' ' + done + '/' + total + ' (' + pct + '%)';
+                progressText.style.color = '#666';
+            }};
+            setProgress(0);
+
+            const postChunk = async (blob, index) => {{
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 90000);
+                const formData = new FormData();
+                formData.append('key', key);
+                formData.append('file', blob, file.name || 'file');
+                try {{
+                    const response = await fetch(uploadUrl, {{
+                        method: 'POST',
+                        headers: {{
+                            'X-Upload-Key': key,
+                            'Authorization': 'Bearer ' + key,
+                            'X-Upload-Index': String(index),
+                            'X-Upload-Count': String(total),
+                            'X-Upload-Size': String(file.size),
+                            'X-Upload-Filename': encodeURIComponent(file.name || 'file'),
+                        }},
+                        body: formData,
+                        signal: controller.signal,
+                    }});
+                    const result = await response.json().catch(() => ({{}}));
+                    if (!response.ok) {{
+                        const err = new Error(result.error || i18n.failDefault);
+                        err.status = response.status;
+                        throw err;
+                    }}
+                    return result;
+                }} finally {{
+                    clearTimeout(timer);
                 }}
+            }};
+
+            const retryable = (err) => {{
+                if (!err) return true;
+                if (err.name === 'AbortError') return true;
+                const s = err.status;
+                return !s || s === 408 || s === 429 || s >= 500;
+            }};
+
+            const uploadChunk = async (blob, index) => {{
+                let lastErr = null;
+                for (let attempt = 0; attempt < 4; attempt++) {{
+                    try {{
+                        return await postChunk(blob, index);
+                    }} catch (err) {{
+                        lastErr = err;
+                        if (!retryable(err) || attempt === 3) throw err;
+                        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+                    }}
+                }}
+                throw lastErr || new Error(i18n.failDefault);
+            }};
+
+            try {{
+                let result = {{}};
+                for (let i = 0; i < total; i++) {{
+                    const blob = file.slice(i * chunkSize, Math.min(file.size, (i + 1) * chunkSize));
+                    result = await uploadChunk(blob, i);
+                    setProgress(i + 1);
+                }}
+                progressFill.style.width = '100%';
+                progressText.textContent = i18n.successProgress;
+                progressText.style.color = '#4caf50';
+                setTimeout(() => {{
+                    const name = result.filename || file.name;
+                    alert(i18n.successAlertPrefix + name + i18n.successAlertSuffix);
+                }}, 800);
             }} catch (error) {{
-                progressText.textContent = '❌ ' + error.message;
+                progressText.textContent = '❌ ' + (error && error.name === 'AbortError' ? i18n.failDefault : error.message);
                 progressText.style.color = '#f44336';
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = i18n.retry;
@@ -1281,6 +1340,25 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     
+    def _extract_upload_key(self, form=None) -> str:
+        """Upload key from headers or multipart field (never from the URL)."""
+        raw = (self.headers.get('X-Upload-Key') or '').strip()
+        if not raw:
+            raw = (self.headers.get('X-SSHChat-Upload-Key') or '').strip()
+        if not raw:
+            auth = (self.headers.get('Authorization') or '').strip()
+            if auth.lower().startswith('bearer '):
+                raw = auth[7:].strip()
+        if not raw and form is not None:
+            try:
+                item = form['key']
+                if isinstance(item, list):
+                    item = item[0]
+                raw = (getattr(item, 'value', None) or str(item) or '').strip()
+            except (TypeError, KeyError):
+                raw = ''
+        return re.sub(r'[^A-Z0-9]', '', raw.upper())
+
     def _read_json_body(self, limit: int = 64 * 1024) -> dict:
         """Read a small JSON request body, e.g. the one carrying a key."""
         try:
@@ -1335,12 +1413,18 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             return
         
         token = path_parts[1]
+        if self.headers.get('X-Upload-Index') is not None:
+            self._handle_chunked_upload(store, token)
+            return
+
         # The upload key rides in a header for the same reason.
-        key = (self.headers.get('X-Upload-Key') or '').strip().upper()
+        key = self._extract_upload_key()
         
         valid, transfer, error = store.validate_upload(token, key)
         
         if not valid:
+            xlen = len(self.headers.get('X-Upload-Key') or '')
+            print(f"[FileHTTP] upload rejected: {error} x_key_len={xlen}")
             self._reject_upload(403, error)
             return
         
@@ -1410,6 +1494,170 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             
         except Exception as e:
             print(f"[FileHTTP] Upload error: {e}")
+            self._send_error_json(500, "上传失败，请重试")
+
+    def _handle_chunked_upload(self, store, token: str):
+        """Accept one file slice so Cloudflare does not time out a large POST."""
+        try:
+            index = int(self.headers.get('X-Upload-Index') or -1)
+            count = int(self.headers.get('X-Upload-Count') or -1)
+            total_size = int(self.headers.get('X-Upload-Size') or 0)
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            self._reject_upload(400, "分块参数无效")
+            return
+
+        if index < 0 or count < 1 or count > MAX_UPLOAD_CHUNKS or index >= count:
+            self._reject_upload(400, "分块序号无效")
+            return
+        if total_size <= 0 or total_size > MAX_FILE_SIZE:
+            self._reject_upload(413, f"文件太大，最大 {MAX_FILE_SIZE / 1024 / 1024:.0f}MB")
+            return
+        # Multipart wrapping adds a small envelope around the slice.
+        if length <= 0 or length > MAX_UPLOAD_CHUNK + 256 * 1024:
+            self._reject_upload(413, "分块太大，请缩小后重试")
+            return
+
+        content_type = self.headers.get('Content-Type', '')
+        form = None
+        file_item = None
+        if content_type.startswith('multipart/form-data'):
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        'REQUEST_METHOD': 'POST',
+                        'CONTENT_TYPE': content_type,
+                    },
+                )
+            except Exception as e:
+                print(f"[FileHTTP] Chunk form parse error: {e}")
+                self._send_error_json(400, "请求格式不正确")
+                return
+            if 'file' in form and getattr(form['file'], 'file', None):
+                file_item = form['file']
+
+        key = self._extract_upload_key(form)
+        valid, transfer, error = store.validate_upload(token, key)
+        if not valid:
+            xlen = len(self.headers.get('X-Upload-Key') or '')
+            print(f"[FileHTTP] chunk rejected: {error} x_key_len={xlen} form_key={bool(key)}")
+            self._send_error_json(403, error)
+            return
+
+        raw_name = unquote(self.headers.get('X-Upload-Filename') or '')
+        if file_item is not None and file_item.filename:
+            raw_name = raw_name or file_item.filename
+        filename = file_sharing.sanitize_filename(raw_name or transfer.filename or "file")
+        parts_dir = Path(store.storage_dir) / f"{transfer.transfer_id}.parts"
+        meta_path = parts_dir / "meta.json"
+        part_path = parts_dir / f"{index:06d}"
+
+        try:
+            err = None
+            with store.lock:
+                if index == 0:
+                    if parts_dir.exists():
+                        shutil.rmtree(parts_dir, ignore_errors=True)
+                    parts_dir.mkdir(parents=True, exist_ok=True)
+                    meta_path.write_text(json.dumps({
+                        "count": count,
+                        "size": total_size,
+                        "filename": filename,
+                    }, ensure_ascii=False), encoding="utf-8")
+                elif not meta_path.is_file():
+                    err = (400, "请从第一块重新上传")
+                else:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if int(meta.get("count") or 0) != count or int(meta.get("size") or 0) != total_size:
+                        err = (400, "分块信息不一致，请重新上传")
+                    else:
+                        parts_dir.mkdir(parents=True, exist_ok=True)
+            if err:
+                self._send_error_json(*err)
+                return
+
+            written = 0
+            with open(part_path, "wb") as out:
+                if file_item is not None:
+                    src = file_item.file
+                    src.seek(0)
+                    while True:
+                        buf = src.read(65536)
+                        if not buf:
+                            break
+                        written += len(buf)
+                        if written > MAX_UPLOAD_CHUNK:
+                            break
+                        out.write(buf)
+                else:
+                    while written < length:
+                        buf = self.rfile.read(min(65536, length - written))
+                        if not buf:
+                            break
+                        out.write(buf)
+                        written += len(buf)
+            if written <= 0 or written > MAX_UPLOAD_CHUNK:
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                self._send_error_json(400, "分块接收不完整，请重试")
+                return
+            if file_item is None and written != length:
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                self._send_error_json(400, "分块接收不完整，请重试")
+                return
+
+            if index < count - 1:
+                self._send_json_response(200, {
+                    "ok": True,
+                    "index": index,
+                    "count": count,
+                    "received": index + 1,
+                })
+                return
+
+            missing = [
+                i for i in range(count)
+                if not (parts_dir / f"{i:06d}").is_file()
+            ]
+            if missing:
+                self._send_error_json(400, "分块不完整，请重新上传")
+                return
+
+            file_path = store.get_file_path(transfer.transfer_id, filename)
+            assembled = 0
+            with open(file_path, "wb") as dest:
+                for i in range(count):
+                    with open(parts_dir / f"{i:06d}", "rb") as src:
+                        while True:
+                            buf = src.read(65536)
+                            if not buf:
+                                break
+                            dest.write(buf)
+                            assembled += len(buf)
+            shutil.rmtree(parts_dir, ignore_errors=True)
+            if assembled != total_size:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+                self._send_error_json(400, "文件大小与声明不符")
+                return
+            store.mark_upload_complete(token, file_path, assembled, filename)
+            self._send_json_response(200, {
+                "success": True,
+                "message": "File uploaded successfully",
+                "filename": filename,
+                "size": assembled,
+            })
+        except Exception as e:
+            print(f"[FileHTTP] Chunk upload error: {e}")
             self._send_error_json(500, "上传失败，请重试")
     
     def _send_html_page(self, markup: str):
