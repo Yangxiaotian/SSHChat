@@ -138,6 +138,9 @@ room_games_parked: dict[str, object] = {}
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
 room_game_tokens: dict[str, str] = {}
+# room -> peer's session id replaced by a local reclaim; the peer may still host
+# it, so /game end must tombstone it too or greq revives the board.
+room_game_superseded_tokens: dict[str, str] = {}
 # ended session id -> room (offline peers get this receipt on reconnect)
 room_game_ended_ids: OrderedDict[str, str] = OrderedDict()
 _ENDED_GAME_IDS_MAX = 64
@@ -2127,6 +2130,11 @@ def _build_session_payload_locked() -> dict[str, object]:
             for room, tok in room_game_tokens.items()
             if isinstance(room, str) and isinstance(tok, str) and tok.strip()
         },
+        "room_game_superseded_tokens": {
+            room: tok
+            for room, tok in room_game_superseded_tokens.items()
+            if isinstance(room, str) and isinstance(tok, str) and tok.strip()
+        },
         "room_game_ended_ids": {
             tok: room
             for tok, room in room_game_ended_ids.items()
@@ -2280,6 +2288,16 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 and tok.strip()
             ):
                 room_game_tokens[room] = tok.strip()
+    superseded = payload.get("room_game_superseded_tokens")
+    if isinstance(superseded, dict):
+        for room, tok in superseded.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(tok, str)
+                and tok.strip()
+            ):
+                room_game_superseded_tokens[room] = tok.strip()
     ended_blob = payload.get("room_game_ended_ids")
     if isinstance(ended_blob, dict):
         for tok, room in ended_blob.items():
@@ -8076,6 +8094,11 @@ def _federation_notify_game_end(room: str) -> None:
     local = hub.node_id if hub is not None else _local_node_id()
     with lock:
         token = (room_game_tokens.pop(room, None) or "").strip()
+        superseded = (room_game_superseded_tokens.pop(room, None) or "").strip()
+        if superseded == token:
+            superseded = ""
+        if superseded:
+            _remember_ended_game_locked(room, superseded)
         if token:
             _remember_ended_game_locked(room, token)
         room_game_authority[room] = local
@@ -8086,6 +8109,8 @@ def _federation_notify_game_end(room: str) -> None:
     if hub is None or not hub.enabled:
         return
     hub.end_game(room, local, token)
+    if superseded:
+        hub.end_game(room, local, superseded)
 
 
 def _game_progress_score(game) -> int:
@@ -8365,6 +8390,18 @@ def _fed_on_game_sync(
     keep_local = False
     greq = _greq_outstanding(room)
     with lock:
+        stale_ended = _game_id_is_ended_locked(conflict_token)
+    if stale_ended:
+        # Offline replica of a finished session; never revive by ply count.
+        # Echo the tombstone so the sender (which may still believe it hosts
+        # and ignored our earlier gend) drops its board too.
+        if hub is not None and getattr(hub, "enabled", False):
+            try:
+                hub.end_game(room, local_id, conflict_token)
+            except Exception as e:
+                print(f"federation: stale gsync gend failed room={room!r}: {e!r}")
+        return
+    with lock:
         local_game = room_games.get(room)
         local_auth = (room_game_authority.get(room) or "").strip()
         local_token = (room_game_tokens.get(room) or "").strip() or local_auth
@@ -8374,9 +8411,6 @@ def _fed_on_game_sync(
         )
         remote_active = getattr(game, "state", "ended") != "ended"
         we_host = local_auth == local_id
-        if _game_id_is_ended_locked(conflict_token):
-            # Offline replica of a finished session; never revive by ply count.
-            return
         if not local_active and remote_active and we_host:
             # Local host tombstone: reject only revival of *this* ended session.
             # A peer starting a new game in the same room (different token) must
@@ -8890,6 +8924,9 @@ def _reclaim_game_authority_for_local_seats(room: str) -> bool:
             return True
         if not _game_all_seat_nicks_present_locally_locked(room, game, local):
             return False
+        old_tok = (room_game_tokens.get(room) or "").strip()
+        if old_tok:
+            room_game_superseded_tokens[room] = old_tok
         room_game_authority[room] = local
         room_game_tokens[room] = secrets.token_hex(16)
         push = True
