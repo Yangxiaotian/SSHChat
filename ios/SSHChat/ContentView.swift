@@ -54,7 +54,9 @@ final class ChatViewModel: ObservableObject {
     @Published var showPadEditor = false
     @Published var padEditorText = ""
     @Published var gamePanelVisible = false
+    @Published var libraryVisible = false
     let gameBoard = GameBoardModel()
+    let libraryReader = LibraryReaderModel()
 
     enum FileImportKind { case media, identity }
 
@@ -120,6 +122,15 @@ final class ChatViewModel: ObservableObject {
         sendTarget = SendTargetStore.loadTarget()
         gameBoard.onSend = { [weak self] cmd in
             self?.sendSlashCommand(cmd)
+        }
+        libraryReader.onSend = { [weak self] cmd in
+            guard let self else { return false }
+            guard self.connected else {
+                self.toast = "连接已断开，请稍候重连"
+                return false
+            }
+            Task { try? await self.session.send(cmd) }
+            return true
         }
     }
 
@@ -328,6 +339,8 @@ final class ChatViewModel: ObservableObject {
         gamePanelVisible = false
         gameBoard.setVisible(false)
         gameBoard.clear()
+        libraryVisible = false
+        libraryReader.reset()
         pendingUpload = nil
         voiceRecorder?.cancel()
         voiceRecorder = nil
@@ -505,7 +518,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     func openLibrary() {
-        sendSlashCommand("/library")
+        guard connected else { toast = "请先连接"; return }
+        CommandUsage.record("/library")
+        libraryVisible = true
+        libraryReader.openCatalog()
     }
 
     func openHelp() {
@@ -950,6 +966,10 @@ final class ChatViewModel: ObservableObject {
         trimEntriesIfNeeded()
         let kind = ChatLineParsers.classifyForDisplay(line, myName: username)
         if case .boardLine(let t) = kind {
+            if libraryReader.feedLine(t) {
+                libraryVisible = libraryReader.visible
+                return
+            }
             gameBoard.myName = username.trimmingCharacters(in: .whitespacesAndNewlines)
             gameBoard.feedLine(t)
             if case .board(_, let existing) = entries.last {
@@ -1046,6 +1066,16 @@ struct ContentView: View {
             model.gameBoard.maximized = false
         }) {
             GamePanelFullscreenView(model: model.gameBoard)
+        }
+        .fullScreenCover(isPresented: $model.libraryVisible, onDismiss: {
+            model.libraryReader.hide()
+        }) {
+            LibraryReaderView(model: model.libraryReader)
+        }
+        .onReceive(model.libraryReader.$visible) { show in
+            if model.libraryVisible != show {
+                model.libraryVisible = show
+            }
         }
         .onReceive(model.gameBoard.$maximized) { max in
             if boardFullscreen != max { boardFullscreen = max }

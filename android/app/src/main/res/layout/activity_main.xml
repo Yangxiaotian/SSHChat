@@ -725,4 +725,11 @@
             android:textColor="#E0E0E0"
             android:textSize="17sp" />
     </LinearLayout>
+
+    <chat.ssh.sshchat.library.LibraryReaderView
+        android:id="@+id/libraryReader"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:elevation="16dp"
+        android:visibility="gone" />
 </FrameLayout>
