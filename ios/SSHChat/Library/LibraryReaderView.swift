@@ -42,6 +42,10 @@ final class LibraryReaderModel: ObservableObject {
     @Published var jumpDraft = ""
     @Published var inBookSearchDraft = ""
     @Published var showInBookSearch = false
+    @Published var showDict = false
+    @Published var dictWord = ""
+    @Published var dictLines: [String] = []
+    @Published var dictLoading = false
 
     @Published var fontSize: CGFloat
     @Published var lineMult: CGFloat
@@ -56,6 +60,12 @@ final class LibraryReaderModel: ObservableObject {
     private var flushTask: Task<Void, Never>?
     private let parser = LibraryParser()
     private let defaults = UserDefaults.standard
+    private let dict = DictCapture()
+    private var dictFinishTask: Task<Void, Never>?
+    private var dictTimeoutTask: Task<Void, Never>?
+    private var textSelected = false
+    private var selectionChangedAt = Date.distantPast
+    private var lastBodyTapAt = Date.distantPast
 
     var theme: Theme { Self.themes[themeIdx.clamped(to: 0...Self.themes.count - 1)] }
 
@@ -109,6 +119,10 @@ final class LibraryReaderModel: ObservableObject {
         page = nil
         currentBook = nil
         reopenTried = false
+        dict.cancel()
+        dictFinishTask?.cancel()
+        dictTimeoutTask?.cancel()
+        showDict = false
     }
 
     @discardableResult
@@ -128,6 +142,17 @@ final class LibraryReaderModel: ObservableObject {
 
     /// Feed a board/system star body. Returns true when the open reader consumed it.
     func feedLine(_ text: String) -> Bool {
+        if dict.feed(text) {
+            dictFinishTask?.cancel()
+            dictFinishTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard !Task.isCancelled, let self, let lines = self.dict.finish() else { return }
+                self.dictTimeoutTask?.cancel()
+                self.dictLines = lines
+                self.dictLoading = false
+            }
+            return true
+        }
         let r = parser.feed(text)
         if !r.events.isEmpty { handle(r.events) }
         flushTask?.cancel()
@@ -271,6 +296,62 @@ final class LibraryReaderModel: ObservableObject {
         turnPage(-1, landAtEnd: true)
     }
 
+    func lookUp(_ selected: String) {
+        guard let word = DictCapture.normalize(selected) else {
+            toast = "请选择要查询的词"
+            return
+        }
+        guard word.count <= DictCapture.maxLen else {
+            toast = "选中内容太长（最多 \(DictCapture.maxLen) 字）"
+            return
+        }
+        guard onSend?(DictCapture.command(for: word)) == true else { return }
+        dict.begin(word)
+        dictFinishTask?.cancel()
+        dictWord = word
+        dictLines = []
+        dictLoading = true
+        showDict = true
+        dictTimeoutTask?.cancel()
+        dictTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            guard !Task.isCancelled, let self, self.dict.isActive else { return }
+            self.dict.cancel()
+            self.dictLines = ["词典没有响应，请重试"]
+            self.dictLoading = false
+        }
+    }
+
+    func selectionChanged(_ on: Bool) {
+        guard on != textSelected else { return }
+        textSelected = on
+        selectionChangedAt = Date()
+    }
+
+    /// A tap that only dismisses a text selection must not turn the page.
+    var selectionBusy: Bool {
+        textSelected || Date().timeIntervalSince(selectionChangedAt) < 0.4
+    }
+
+    /// Tap on the page body; `fraction` is the horizontal position in 0…1.
+    /// Both the SwiftUI and the UIKit text view may report the same tap.
+    func bodyTap(fraction: CGFloat) {
+        let now = Date()
+        guard now.timeIntervalSince(lastBodyTapAt) > 0.25 else { return }
+        lastBodyTapAt = now
+        guard !selectionBusy else { return }
+        if chromeVisible {
+            chromeVisible = false
+            settingsVisible = false
+        } else if fraction < 0.3 {
+            stepBackward()
+        } else if fraction > 0.7 {
+            stepForward()
+        } else {
+            chromeVisible = true
+        }
+    }
+
     func bumpFont(_ d: CGFloat) {
         fontSize = min(32, max(13, fontSize + d))
         defaults.set(Double(fontSize), forKey: "library_font_sp")
@@ -356,6 +437,9 @@ struct LibraryReaderView: View {
                 }
             }
             Button("关闭", role: .cancel) {}
+        }
+        .sheet(isPresented: $model.showDict) {
+            dictSheet
         }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
@@ -577,23 +661,13 @@ struct LibraryReaderView: View {
                         .simultaneousGesture(
                             SpatialTapGesture()
                                 .onEnded { event in
-                                    let x = event.location.x
-                                    let w = geo.size.width
-                                    if model.chromeVisible {
-                                        model.chromeVisible = false
-                                        model.settingsVisible = false
-                                    } else if x < w * 0.3 {
-                                        model.stepBackward()
-                                    } else if x > w * 0.7 {
-                                        model.stepForward()
-                                    } else {
-                                        model.chromeVisible = true
-                                    }
+                                    model.bodyTap(fraction: event.location.x / max(geo.size.width, 1))
                                 }
                         )
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 40)
                                 .onEnded { value in
+                                    guard !model.selectionBusy else { return }
                                     let dx = value.translation.width
                                     let dy = value.translation.height
                                     if abs(dx) > 72, abs(dx) > abs(dy) * 1.6 {
@@ -636,19 +710,31 @@ struct LibraryReaderView: View {
 
     private func bodyText(_ p: LibraryPage) -> some View {
         let paragraphs = p.paragraphs.isEmpty ? ["（空白页）"] : p.paragraphs
-        return VStack(alignment: .leading, spacing: model.fontSize * (model.lineMult - 1) * 0.55) {
-            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, para in
-                Text(indent(para))
-                    .font(model.serif
-                          ? .system(size: model.fontSize, design: .serif)
-                          : .system(size: model.fontSize))
-                    .foregroundStyle(model.theme.text)
-                    .lineSpacing(model.fontSize * (model.lineMult - 1))
-                    .tracking(0.3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .multilineTextAlignment(.leading)
-            }
+        let size = model.fontSize
+        var font = UIFont.systemFont(ofSize: size)
+        if model.serif, let d = font.fontDescriptor.withDesign(.serif) {
+            font = UIFont(descriptor: d, size: size)
         }
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = size * (model.lineMult - 1)
+        style.paragraphSpacing = size * (model.lineMult - 1) * 0.55
+        let text = NSAttributedString(
+            string: paragraphs.map(indent).joined(separator: "\n"),
+            attributes: [
+                .font: font,
+                .foregroundColor: UIColor(model.theme.text),
+                .kern: 0.3,
+                .paragraphStyle: style,
+            ]
+        )
+        return SelectableBodyText(
+            text: text,
+            tint: UIColor(model.theme.accent),
+            onLookup: { model.lookUp($0) },
+            onSelectionChange: { model.selectionChanged($0) },
+            onTap: { model.bodyTap(fraction: $0) }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func indent(_ para: String) -> String {
@@ -803,6 +889,42 @@ struct LibraryReaderView: View {
         .padding(.bottom, 4)
     }
 
+    private var dictSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    if model.dictLoading {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("查询中…").foregroundStyle(.secondary)
+                        }
+                    }
+                    ForEach(Array(model.dictLines.enumerated()), id: \.offset) { _, line in
+                        let t = line.trimmingCharacters(in: .whitespaces)
+                        if t.hasPrefix("---") {
+                            Text(t.trimmingCharacters(in: CharacterSet(charactersIn: "- ")))
+                                .font(.headline)
+                                .padding(.top, 4)
+                        } else {
+                            Text(line)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .textSelection(.enabled)
+            }
+            .navigationTitle(model.dictWord)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("关闭") { model.showDict = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
     private var loadingPill: some View {
         HStack(spacing: 8) {
             ProgressView().tint(.white)
@@ -815,5 +937,84 @@ struct LibraryReaderView: View {
         .background(Capsule().fill(Color.black.opacity(0.8)))
         .padding(.top, 64)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - Selectable page body
+
+/// Read-only page text that supports long-press selection with a 「查词」 menu item.
+private struct SelectableBodyText: UIViewRepresentable {
+    let text: NSAttributedString
+    let tint: UIColor
+    let onLookup: (String) -> Void
+    let onSelectionChange: (Bool) -> Void
+    /// Horizontal tap position in 0…1 of the window width.
+    let onTap: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let v = UITextView()
+        v.isEditable = false
+        v.isSelectable = true
+        v.isScrollEnabled = false
+        v.backgroundColor = .clear
+        v.textContainerInset = .zero
+        v.textContainer.lineFragmentPadding = 0
+        v.dataDetectorTypes = []
+        v.delegate = context.coordinator
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delegate = context.coordinator
+        v.addGestureRecognizer(tap)
+        return v
+    }
+
+    func updateUIView(_ v: UITextView, context: Context) {
+        context.coordinator.parent = self
+        v.tintColor = tint
+        if !v.attributedText.isEqual(to: text) {
+            v.attributedText = text
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        guard let w = proposal.width, w.isFinite, w > 0 else { return nil }
+        let fit = uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude))
+        return CGSize(width: w, height: ceil(fit.height))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
+        var parent: SelectableBodyText
+
+        init(_ parent: SelectableBodyText) { self.parent = parent }
+
+        func textView(
+            _ textView: UITextView,
+            editMenuForTextIn range: NSRange,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            let picked = (textView.text as NSString).substring(with: range)
+            let lookup = UIAction(title: "查词", image: UIImage(systemName: "character.book.closed")) { [weak self, weak textView] _ in
+                textView?.selectedTextRange = nil
+                self?.parent.onLookup(picked)
+            }
+            return UIMenu(children: [lookup] + suggestedActions)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            parent.onSelectionChange(textView.selectedRange.length > 0)
+        }
+
+        @objc func tapped(_ g: UITapGestureRecognizer) {
+            guard let window = g.view?.window else { return }
+            parent.onTap(g.location(in: nil).x / max(window.bounds.width, 1))
+        }
+
+        func gestureRecognizer(
+            _ g: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool { true }
     }
 }

@@ -325,3 +325,91 @@ final class LibraryParser {
         return out
     }
 }
+
+/// Captures the `[*]` reply of a `/dict` sent from the reader so it can be shown in a sheet
+/// instead of the chat log. The server sends no end marker; callers finish after a quiet period.
+/// Mirrors `server.py` `_handle_dict` / `dict_lookup.lookup_lines`.
+final class DictCapture {
+    static let maxLen = 64
+
+    private var word: String?
+    private var started = false
+    private var lines: [String] = []
+
+    var isActive: Bool { word != nil }
+
+    private static let header = try! NSRegularExpression(pattern: #"^---\s*(英→中|中→英|汉语)：.*---$"#)
+    private static let errorPrefixes = ["词典查询失败", "请提供要查询的词语", "query too long", "missing word", "empty query"]
+    private static let modeAliases: Set<String> = ["en", "eng", "英", "ce", "cn", "中", "中英", "zh", "hh", "汉", "汉语"]
+
+    func begin(_ word: String) {
+        self.word = word
+        started = false
+        lines = []
+    }
+
+    func cancel() {
+        word = nil
+        started = false
+        lines = []
+    }
+
+    /// Returns true when the star body belongs to the pending lookup.
+    func feed(_ body: String) -> Bool {
+        guard let w = word else { return false }
+        let t = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(t.startIndex..., in: t)
+        if Self.header.firstMatch(in: t, range: range) != nil {
+            started = true
+            lines.append(t)
+            return true
+        }
+        if !started {
+            guard Self.errorPrefixes.contains(where: { t.hasPrefix($0) }) else { return false }
+            started = true
+            lines.append(t)
+            return true
+        }
+        if body.isEmpty || body.hasPrefix("  ") || t.hasPrefix("英 [") || t.hasPrefix("美 [")
+            || t.hasPrefix("[") || t.hasPrefix(w)
+        {
+            var end = body.endIndex
+            while end > body.startIndex, body[body.index(before: end)].isWhitespace { end = body.index(before: end) }
+            lines.append(String(body[..<end]))
+            return true
+        }
+        return false
+    }
+
+    /// Ends the lookup; nil when nothing arrived yet.
+    func finish() -> [String]? {
+        guard started else { return nil }
+        let out = lines
+        cancel()
+        return out
+    }
+
+    /// Selected text → query word, or nil when nothing usable is selected.
+    static func normalize(_ selected: String) -> String? {
+        let edge = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+            .union(CharacterSet(charactersIn: "\u{3000}"))
+        let words = selected.trimmingCharacters(in: edge)
+            .split(whereSeparator: { $0.isWhitespace })
+        let out = words.joined(separator: " ")
+        return out.isEmpty ? nil : out
+    }
+
+    static func hasCjk(_ s: String) -> Bool {
+        s.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+    }
+
+    /// Plain `/dict 词` gives 中→英 + 汉语 for Chinese; force a mode when the word itself
+    /// would be read as a mode alias or as `help`.
+    static func command(for word: String) -> String {
+        guard hasCjk(word) else { return "/dict en \(word)" }
+        let first = word.split(separator: " ").first.map { String($0).lowercased() } ?? ""
+        return modeAliases.contains(first) || word == "帮助" ? "/dict cn \(word)" : "/dict \(word)"
+    }
+}

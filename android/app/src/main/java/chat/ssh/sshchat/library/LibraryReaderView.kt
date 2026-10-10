@@ -14,10 +14,14 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
 import android.util.AttributeSet
 import android.util.TypedValue
+import android.view.ActionMode
 import android.view.GestureDetector
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -85,6 +89,22 @@ class LibraryReaderView @JvmOverloads constructor(
         }
     }
 
+    private val dict = DictCapture()
+    private var dictWord = ""
+    private var dictDialog: AlertDialog? = null
+    private val dictFinish = Runnable {
+        val lines = dict.finish() ?: return@Runnable
+        main.removeCallbacks(dictTimeout)
+        showDict(formatDict(lines))
+    }
+    private val dictTimeout = Runnable {
+        if (dict.isActive) {
+            dict.cancel()
+            showDict("词典没有响应，请重试")
+        }
+    }
+    private var selectionAtDown = false
+
     // --- catalog pane ---
     private val catalogPane = LinearLayout(context)
     private val catalogHeader = LinearLayout(context)
@@ -99,7 +119,10 @@ class LibraryReaderView @JvmOverloads constructor(
 
     // --- reading pane ---
     private val readingPane = FrameLayout(context)
-    private val bodyScroll = ScrollView(context)
+    private val bodyScroll = object : ScrollView(context) {
+        // The selectable body grabs focus on tap; never jump the page to "reveal" it.
+        override fun computeScrollDeltaToGetChildRectOnScreen(rect: android.graphics.Rect?): Int = 0
+    }
     private val bodyColumn = LinearLayout(context)
     private val pageHeading = TextView(context)
     private val bodyText = TextView(context)
@@ -162,6 +185,10 @@ class LibraryReaderView @JvmOverloads constructor(
         page = null
         currentBook = null
         setLoading(false)
+        dict.cancel()
+        main.removeCallbacks(dictFinish)
+        main.removeCallbacks(dictTimeout)
+        dictDialog?.dismiss()
         renderCatalog()
     }
 
@@ -203,6 +230,14 @@ class LibraryReaderView @JvmOverloads constructor(
 
     fun handle(events: List<LibraryEvent>) {
         for (ev in events) handleEvent(ev)
+    }
+
+    /** @return true when the star body is the reply to a word looked up in the reader. */
+    fun feedDict(body: String): Boolean {
+        if (!dict.feed(body)) return false
+        main.removeCallbacks(dictFinish)
+        main.postDelayed(dictFinish, 700)
+        return true
     }
 
     // ---------------------------------------------------------------- events
@@ -387,6 +422,55 @@ class LibraryReaderView @JvmOverloads constructor(
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    private fun lookUp(selected: String) {
+        val word = DictCapture.normalize(selected)
+        if (word == null) {
+            toast("请选择要查询的词")
+            return
+        }
+        if (word.length > DictCapture.MAX_LEN) {
+            toast("选中内容太长（最多 ${DictCapture.MAX_LEN} 字）")
+            return
+        }
+        if (onSend?.invoke(DictCapture.command(word)) != true) return
+        dict.begin(word)
+        dictWord = word
+        main.removeCallbacks(dictFinish)
+        main.removeCallbacks(dictTimeout)
+        main.postDelayed(dictTimeout, 25_000)
+        showDict("查询中…")
+    }
+
+    private fun showDict(body: CharSequence) {
+        val d = dictDialog
+        if (d != null && d.isShowing) {
+            d.setTitle(dictWord)
+            d.setMessage(body)
+            return
+        }
+        dictDialog = AlertDialog.Builder(context)
+            .setTitle(dictWord)
+            .setMessage(body)
+            .setPositiveButton("关闭", null)
+            .show()
+    }
+
+    private fun formatDict(lines: List<String>): CharSequence {
+        val sb = SpannableStringBuilder()
+        for (line in lines) {
+            if (sb.isNotEmpty()) sb.append('\n')
+            val t = line.trim()
+            if (t.startsWith("---")) {
+                val start = sb.length
+                sb.append(t.removePrefix("---").removeSuffix("---").trim())
+                sb.setSpan(StyleSpan(Typeface.BOLD), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            } else {
+                sb.append(line)
+            }
+        }
+        return sb
     }
 
     private fun wrapDialogInput(input: EditText): View =
@@ -657,6 +741,27 @@ class LibraryReaderView @JvmOverloads constructor(
             }
             breakStrategy = Layout.BREAK_STRATEGY_HIGH_QUALITY
             hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NORMAL
+            setTextIsSelectable(true)
+            customSelectionActionModeCallback = object : ActionMode.Callback {
+                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    menu.add(Menu.NONE, MENU_DICT, 0, "查词")
+                    return true
+                }
+
+                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                    if (item.itemId != MENU_DICT) return false
+                    val a = minOf(selectionStart, selectionEnd).coerceAtLeast(0)
+                    val b = maxOf(selectionStart, selectionEnd).coerceAtLeast(0)
+                    val picked = text.subSequence(a, b).toString()
+                    mode.finish()
+                    lookUp(picked)
+                    return true
+                }
+
+                override fun onDestroyActionMode(mode: ActionMode) = Unit
+            }
         }
         pageEnd.apply {
             gravity = Gravity.CENTER
@@ -679,18 +784,26 @@ class LibraryReaderView @JvmOverloads constructor(
         bodyScroll.isVerticalScrollBarEnabled = false
         bodyScroll.addView(bodyColumn)
 
+        // Fed from both the selectable body text and the scroll view, so use raw coordinates.
         val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(e: MotionEvent): Boolean = true
+            override fun onDown(e: MotionEvent): Boolean {
+                selectionAtDown = bodyText.hasSelection()
+                return true
+            }
 
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                onBodyTap(e.x)
+                if (selectionAtDown) return true
+                val loc = IntArray(2)
+                bodyScroll.getLocationOnScreen(loc)
+                onBodyTap(e.rawX - loc[0])
                 return true
             }
 
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
                 val start = e1 ?: return false
-                val dx = e2.x - start.x
-                val dy = e2.y - start.y
+                if (selectionAtDown || bodyText.hasSelection()) return false
+                val dx = e2.rawX - start.rawX
+                val dy = e2.rawY - start.rawY
                 if (abs(dx) > dp(72) && abs(dx) > abs(dy) * 1.6f && abs(velocityX) > 600) {
                     if (dx < 0) turnPage(+1) else turnPage(-1)
                     return true
@@ -699,6 +812,10 @@ class LibraryReaderView @JvmOverloads constructor(
             }
         })
         bodyScroll.setOnTouchListener { _, ev ->
+            gestures.onTouchEvent(ev)
+            false
+        }
+        bodyText.setOnTouchListener { _, ev ->
             gestures.onTouchEvent(ev)
             false
         }
@@ -1110,4 +1227,8 @@ class LibraryReaderView @JvmOverloads constructor(
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()
+
+    private companion object {
+        const val MENU_DICT = 0x5D1C
+    }
 }

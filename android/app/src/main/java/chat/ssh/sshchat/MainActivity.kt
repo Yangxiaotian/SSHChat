@@ -1707,8 +1707,9 @@ class MainActivity : AppCompatActivity() {
 
     /** @return true when the line belongs to the open library reader and must stay out of chat. */
     private fun feedLibrary(text: String): Boolean {
-        val r = libraryParser.feed(text)
         val reader = binding.libraryReader
+        if (reader.feedDict(text)) return true
+        val r = libraryParser.feed(text)
         if (r.events.isNotEmpty()) reader.handle(r.events)
         mainHandler.removeCallbacks(libraryFlush)
         if (r.libraryLine) mainHandler.postDelayed(libraryFlush, 350)
