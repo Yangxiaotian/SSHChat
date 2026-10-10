@@ -289,6 +289,11 @@ ensure_env_matches_public_url() {
     return 1
   }
   host="${url#https://}"
+  # Error logs contain https://api.trycloudflare.com — never treat that as a tunnel.
+  if [[ "$host" == "api.trycloudflare.com" ]]; then
+    echo "error: refusing API host as public_url: $url" >&2
+    return 1
+  fi
   [[ -f "$ENV_FILE" ]] || { echo "error: missing $ENV_FILE" >&2; return 1; }
   current=$(grep -E '^SSHCHAT_FILE_PUBLIC_HOST=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
   owner=$(stat -c '%u:%g' "$ENV_FILE" 2>/dev/null || stat -f '%u:%g' "$ENV_FILE")
@@ -325,7 +330,8 @@ ENV
 recover_url_from_log() {
   [[ -f "$STATE_DIR/tunnel.log" ]] || return 1
   local url
-  url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$STATE_DIR/tunnel.log" | tail -1 || true)
+  url=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$STATE_DIR/tunnel.log" \
+    | grep -v 'https://api\.trycloudflare\.com' | tail -1 || true)
   [[ -n "$url" ]] || return 1
   printf '%s\n' "$url" >"$STATE_DIR/public_url"
   echo "info: recovered PUBLIC_URL from tunnel.log -> $url"
@@ -341,7 +347,8 @@ wait_for_url() {
     # Prefer a public_url file written after this start (mtime/content from live log).
     if [[ -f "$STATE_DIR/tunnel.log" ]]; then
       url=$(tail -c +"$((marker + 1))" "$STATE_DIR/tunnel.log" 2>/dev/null \
-        | grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' | head -1 || true)
+        | grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+        | grep -v 'https://api\.trycloudflare\.com' | head -1 || true)
       if [[ -n "$url" ]]; then
         printf '%s\n' "$url" >"$STATE_DIR/public_url"
         echo "info: PUBLIC_URL=$url"

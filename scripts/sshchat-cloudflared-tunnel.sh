@@ -3,6 +3,7 @@
 # Environment overrides:
 #   SSHCHAT_ENV_FILE, SSHCHAT_FILE_LOCAL_URL, SSHCHAT_PREFIX, SSHCHAT_FILE_HTTP_PORT
 #   SSHCHAT_CLOUDFLARED_PROTOCOL  — quic|http2|auto (default: http2; better under Clash TUN)
+#   SSHCHAT_CLOUDFLARED_EDGE_IP_VERSION — 4|6|auto (default: 4; avoids IPv6 MITM on some ISPs)
 set -uo pipefail
 
 ENV_FILE="${SSHCHAT_ENV_FILE:-/opt/sshchat/sshchat.env}"
@@ -11,6 +12,8 @@ FILE_HTTP_PORT="${SSHCHAT_FILE_HTTP_PORT:-8443}"
 LOCAL_URL="${SSHCHAT_FILE_LOCAL_URL:-http://127.0.0.1:${FILE_HTTP_PORT}}"
 # http2 uses TCP/443 and survives many TUN/UDP filters; override with quic if preferred.
 PROTOCOL="${SSHCHAT_CLOUDFLARED_PROTOCOL:-http2}"
+# Prefer IPv4 edge: some networks MITM IPv6 to api.trycloudflare.com (fake localhost cert).
+EDGE_IP_VERSION="${SSHCHAT_CLOUDFLARED_EDGE_IP_VERSION:-4}"
 STATE_DIR=/var/lib/sshchat/cloudflared
 STORAGE_DIR=/var/lib/sshchat/files
 
@@ -143,7 +146,7 @@ if ! network_ready; then
   echo "[sshchat-cloudflared] WARN: WAN not ready yet; starting tunnel anyway" >&2
 fi
 
-echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL)"
+echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL edge-ip=$EDGE_IP_VERSION)"
 # Drop stale hostname so a half-booted server cannot keep advertising a dead tunnel.
 rm -f "$URL_FILE"
 
@@ -154,6 +157,11 @@ run_tunnel() {
     quic|http2|http2_quic|quic_http2) args+=(--protocol "$PROTOCOL") ;;
     *) echo "[sshchat-cloudflared] unknown protocol '$PROTOCOL', using cloudflared default" ;;
   esac
+  case "$EDGE_IP_VERSION" in
+    ""|auto) ;;
+    4|6) args+=(--edge-ip-version "$EDGE_IP_VERSION") ;;
+    *) echo "[sshchat-cloudflared] unknown edge-ip-version '$EDGE_IP_VERSION', using cloudflared default" ;;
+  esac
   if command -v stdbuf >/dev/null 2>&1; then
     stdbuf -oL -eL cloudflared "${args[@]}"
   else
@@ -161,10 +169,22 @@ run_tunnel() {
   fi
 }
 
+# Quick Tunnel hostnames are random labels; never accept the API host from error logs.
+is_quick_tunnel_url() {
+  local url="$1" host
+  [[ "$url" =~ ^https://[a-zA-Z0-9-]+\.trycloudflare\.com$ ]] || return 1
+  host="${url#https://}"
+  [[ "$host" != "api.trycloudflare.com" ]] || return 1
+  return 0
+}
+
 run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
   echo "$line"
   if [[ "$line" =~ https://[a-zA-Z0-9-]+\.trycloudflare\.com ]]; then
     new_url="${BASH_REMATCH[0]}"
+    if ! is_quick_tunnel_url "$new_url"; then
+      continue
+    fi
     old_url=""
     [[ -f "$URL_FILE" ]] && old_url=$(tr -d '[:space:]' <"$URL_FILE" || true)
     # Update on first sight *or* if cloudflared ever prints a different hostname.
