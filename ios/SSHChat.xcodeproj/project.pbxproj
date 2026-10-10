@@ -22,7 +22,9 @@
 		5BC66FF52939DC1BDD423200 /* SendTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A444AB9A07153781D9B379A7 /* SendTarget.swift */; };
 		604B556FE597621857CB97E4 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 5EABC10D09920FD873E2E322 /* Citadel */; };
 		605BB39E76EFB52381AF7128 /* WatchChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465728BED464780173D6E5F6 /* WatchChatViewModel.swift */; };
+		6488A318FAE0B6C69E7596B1 /* LibraryParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 235DFDA8EFC4738E2A076DF5 /* LibraryParser.swift */; };
 		67FAC2431E1B0C67ED073E61 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D83E0298EA4557B016E588C /* SSHSession.swift */; };
+		6808303312CD7ABC57D22459 /* LibraryReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6D43C249CFCDF9F07BEA274 /* LibraryReaderView.swift */; };
 		75099855702B2A4E70101994 /* WebInviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62D55F063B5A6E13A717437 /* WebInviteView.swift */; };
 		78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */; };
 		7F8E26B8F07B6BE64D4C9A82 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 3556A8FC852FF2B36C09A77F /* Citadel */; };
@@ -51,6 +53,7 @@
 /* Begin PBXFileReference section */
 		02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCompletions.swift; sourceTree = "<group>"; };
 		0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyNoise.swift; sourceTree = "<group>"; };
+		235DFDA8EFC4738E2A076DF5 /* LibraryParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryParser.swift; sourceTree = "<group>"; };
 		256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
 		2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
 		2FA8EE55F824A5EAF29621E1 /* BoardCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardCanvasView.swift; sourceTree = "<group>"; };
@@ -79,6 +82,7 @@
 		D37C08A205C190F1E87758CD /* SSHChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
 		E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
+		E6D43C249CFCDF9F07BEA274 /* LibraryReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryReaderView.swift; sourceTree = "<group>"; };
 		F0CCD510639ECD134A68FF28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F19D61F982D7132AB0491F6A /* MessageAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAlert.swift; sourceTree = "<group>"; };
 		FDBE96CE86836353F34959AD /* SSHChatWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SSHChatWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -128,6 +132,15 @@
 			);
 			sourceTree = "<group>";
 		};
+		35DF9D4CC046EB6355C55786 /* Library */ = {
+			isa = PBXGroup;
+			children = (
+				235DFDA8EFC4738E2A076DF5 /* LibraryParser.swift */,
+				E6D43C249CFCDF9F07BEA274 /* LibraryReaderView.swift */,
+			);
+			path = Library;
+			sourceTree = "<group>";
+		};
 		36768ACD0D6CF600C486BE7C /* Games */ = {
 			isa = PBXGroup;
 			children = (
@@ -171,6 +184,7 @@
 				E0844B0F6797458B635EB0F3 /* VoiceRecorder.swift */,
 				A62D55F063B5A6E13A717437 /* WebInviteView.swift */,
 				36768ACD0D6CF600C486BE7C /* Games */,
+				35DF9D4CC046EB6355C55786 /* Library */,
 			);
 			path = SSHChat;
 			sourceTree = "<group>";
@@ -333,6 +347,8 @@
 				78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */,
 				2877320888397A3A62A13342 /* GamePanelView.swift in Sources */,
 				BE50C64E296A3C07551D32FD /* GameParser.swift in Sources */,
+				6488A318FAE0B6C69E7596B1 /* LibraryParser.swift in Sources */,
+				6808303312CD7ABC57D22459 /* LibraryReaderView.swift in Sources */,
 				B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */,
 				8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */,
 				B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */,
@@ -359,7 +375,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -372,7 +388,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.19;
+				MARKETING_VERSION = 0.3.20;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
@@ -428,7 +444,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -441,7 +457,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.19;
+				MARKETING_VERSION = 0.3.20;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
