@@ -127,7 +127,10 @@ class LibraryReaderView @JvmOverloads constructor(
     private val pageHeading = TextView(context)
     private val bodyText = TextView(context)
     private val pageEnd = TextView(context)
-    private val nextPageBtn = TextView(context)
+    private val pageNavTop = LinearLayout(context)
+    private val pageNavBottom = LinearLayout(context)
+    private val pagePrevBtns = listOf(TextView(context), TextView(context))
+    private val pageNextBtns = listOf(TextView(context), TextView(context))
     private val statusBar = LinearLayout(context)
     private val statusTitle = TextView(context)
     private val statusPage = TextView(context)
@@ -209,7 +212,7 @@ class LibraryReaderView @JvmOverloads constructor(
         else -> false
     }
 
-    /** Volume-key / tap-zone forward: scroll a screen, then next page. */
+    /** Volume-key forward: scroll a screen, then next page. */
     fun stepForward() {
         if (mode != Mode.READING) return
         if (bodyScroll.canScrollVertically(1)) {
@@ -768,19 +771,15 @@ class LibraryReaderView @JvmOverloads constructor(
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, dp(28), 0, dp(10))
         }
-        nextPageBtn.apply {
-            gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            isClickable = true
-            setOnClickListener { turnPage(+1) }
-        }
+        buildPageNav(pageNavTop, pagePrevBtns[0], pageNextBtns[0])
+        buildPageNav(pageNavBottom, pagePrevBtns[1], pageNextBtns[1])
         bodyColumn.addView(pageHeading)
+        bodyColumn.addView(pageNavTop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also {
+            it.bottomMargin = dp(16)
+        })
         bodyColumn.addView(bodyText)
         bodyColumn.addView(pageEnd)
-        bodyColumn.addView(nextPageBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also {
-            it.setMargins(dp(24), 0, dp(24), 0)
-        })
+        bodyColumn.addView(pageNavBottom, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         bodyScroll.isVerticalScrollBarEnabled = false
         bodyScroll.addView(bodyColumn)
 
@@ -792,10 +791,7 @@ class LibraryReaderView @JvmOverloads constructor(
             }
 
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                if (selectionAtDown) return true
-                val loc = IntArray(2)
-                bodyScroll.getLocationOnScreen(loc)
-                onBodyTap(e.rawX - loc[0])
+                if (!selectionAtDown) setChromeVisible(!chromeVisible)
                 return true
             }
 
@@ -1039,13 +1035,20 @@ class LibraryReaderView @JvmOverloads constructor(
         })
     }
 
-    private fun onBodyTap(x: Float) {
-        val w = bodyScroll.width.coerceAtLeast(1)
-        when {
-            chromeVisible -> setChromeVisible(false)
-            x < w * 0.3f -> stepBackward()
-            x > w * 0.7f -> stepForward()
-            else -> setChromeVisible(true)
+    private fun buildPageNav(row: LinearLayout, prev: TextView, next: TextView) {
+        row.orientation = LinearLayout.HORIZONTAL
+        prev.text = "‹ 上一页"
+        next.text = "下一页 ›"
+        listOf(prev to -1, next to +1).forEachIndexed { i, (btn, delta) ->
+            btn.apply {
+                gravity = Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setOnClickListener { turnPage(delta) }
+            }
+            row.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).also {
+                if (i == 1) it.marginStart = dp(12)
+            })
         }
     }
 
@@ -1056,7 +1059,8 @@ class LibraryReaderView @JvmOverloads constructor(
             pageHeading.text = ""
             bodyText.text = ""
             pageEnd.text = ""
-            nextPageBtn.visibility = GONE
+            pageNavTop.visibility = GONE
+            pageNavBottom.visibility = GONE
             statusTitle.text = currentBook?.name.orEmpty()
             statusPage.text = ""
             topTitle.text = currentBook?.name.orEmpty()
@@ -1065,9 +1069,14 @@ class LibraryReaderView @JvmOverloads constructor(
         pageHeading.text = "《${p.title}》"
         bodyText.text = buildBody(p.paragraphs)
         pageEnd.text = if (p.page >= p.total) "— 全书完 —" else "— 第 ${p.page} / ${p.total} 页 —"
-        nextPageBtn.visibility = if (p.page < p.total) VISIBLE else GONE
-        nextPageBtn.text = "继续阅读第 ${p.page + 1} 页  ›"
-        nextPageBtn.background = rounded(blend(t.bg, t.text, 0.06f), dp(22).toFloat(), blend(t.bg, t.text, 0.15f))
+        pageNavTop.visibility = VISIBLE
+        pageNavBottom.visibility = VISIBLE
+        for (btn in pagePrevBtns + pageNextBtns) {
+            val enabled = if (btn in pagePrevBtns) p.page > 1 else p.page < p.total
+            btn.isEnabled = enabled
+            btn.alpha = if (enabled) 1f else 0.35f
+            btn.background = rounded(blend(t.bg, t.text, 0.06f), dp(22).toFloat(), blend(t.bg, t.text, 0.15f))
+        }
         statusTitle.text = p.title
         topTitle.text = p.title
         updateProgressViews()
@@ -1116,7 +1125,7 @@ class LibraryReaderView @JvmOverloads constructor(
         pageHeading.setTextColor(t.sub)
         pageHeading.typeface = bodyText.typeface
         pageEnd.setTextColor(t.sub)
-        nextPageBtn.setTextColor(t.accent)
+        for (btn in pagePrevBtns + pageNextBtns) btn.setTextColor(t.accent)
         fontLabel.text = "${fontSp.roundToInt()}"
         lineLabel.text = String.format("%.2f", lineMult)
     }

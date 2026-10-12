@@ -286,16 +286,6 @@ final class LibraryReaderModel: ObservableObject {
         send("/library search \(query)")
     }
 
-    func stepForward() {
-        guard isReading else { return }
-        turnPage(+1)
-    }
-
-    func stepBackward() {
-        guard isReading else { return }
-        turnPage(-1, landAtEnd: true)
-    }
-
     func lookUp(_ selected: String) {
         guard let word = DictCapture.normalize(selected) else {
             toast = "请选择要查询的词"
@@ -328,28 +318,20 @@ final class LibraryReaderModel: ObservableObject {
         selectionChangedAt = Date()
     }
 
-    /// A tap that only dismisses a text selection must not turn the page.
+    /// A tap that only dismisses a text selection must not toggle the toolbars or turn the page.
     var selectionBusy: Bool {
         textSelected || Date().timeIntervalSince(selectionChangedAt) < 0.4
     }
 
-    /// Tap on the page body; `fraction` is the horizontal position in 0…1.
+    /// Tap on the page body toggles the toolbars.
     /// Both the SwiftUI and the UIKit text view may report the same tap.
-    func bodyTap(fraction: CGFloat) {
+    func bodyTap() {
         let now = Date()
         guard now.timeIntervalSince(lastBodyTapAt) > 0.25 else { return }
         lastBodyTapAt = now
         guard !selectionBusy else { return }
-        if chromeVisible {
-            chromeVisible = false
-            settingsVisible = false
-        } else if fraction < 0.3 {
-            stepBackward()
-        } else if fraction > 0.7 {
-            stepForward()
-        } else {
-            chromeVisible = true
-        }
+        chromeVisible.toggle()
+        if !chromeVisible { settingsVisible = false }
     }
 
     func bumpFont(_ d: CGFloat) {
@@ -626,29 +608,17 @@ struct LibraryReaderView: View {
                                         .font(.system(size: 12))
                                         .foregroundStyle(model.theme.sub)
                                         .padding(.bottom, 14)
+                                        .id("top")
+                                    pageNav(p)
+                                        .padding(.bottom, 16)
                                     bodyText(p)
-                                        .id("body")
                                     Text(p.page >= p.total ? "— 全书完 —" : "— 第 \(p.page) / \(p.total) 页 —")
                                         .font(.system(size: 12))
                                         .foregroundStyle(model.theme.sub)
                                         .frame(maxWidth: .infinity)
                                         .padding(.top, 28)
-                                    if p.page < p.total {
-                                        Button {
-                                            model.turnPage(+1)
-                                        } label: {
-                                            Text("继续阅读第 \(p.page + 1) 页  ›")
-                                                .font(.system(size: 15))
-                                                .foregroundStyle(model.theme.accent)
-                                                .frame(maxWidth: .infinity)
-                                                .padding(.vertical, 12)
-                                                .background(model.theme.text.opacity(0.06))
-                                                .clipShape(Capsule())
-                                        }
-                                        .buttonStyle(.plain)
-                                        .padding(.top, 10)
-                                        .padding(.horizontal, 24)
-                                    }
+                                        .padding(.bottom, 10)
+                                    pageNav(p)
                                 }
                             }
                             .padding(.horizontal, 22)
@@ -656,14 +626,9 @@ struct LibraryReaderView: View {
                             .padding(.bottom, 40)
                             .frame(minHeight: geo.size.height - 28)
                             .contentShape(Rectangle())
+                            .onTapGesture { model.bodyTap() }
                         }
                         .scrollIndicators(.hidden)
-                        .simultaneousGesture(
-                            SpatialTapGesture()
-                                .onEnded { event in
-                                    model.bodyTap(fraction: event.location.x / max(geo.size.width, 1))
-                                }
-                        )
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 40)
                                 .onEnded { value in
@@ -676,7 +641,7 @@ struct LibraryReaderView: View {
                                 }
                         )
                         .onChange(of: model.page?.page) { _, _ in
-                            proxy.scrollTo("body", anchor: .top)
+                            proxy.scrollTo("top", anchor: .top)
                         }
                     }
                 }
@@ -732,9 +697,31 @@ struct LibraryReaderView: View {
             tint: UIColor(model.theme.accent),
             onLookup: { model.lookUp($0) },
             onSelectionChange: { model.selectionChanged($0) },
-            onTap: { model.bodyTap(fraction: $0) }
+            onTap: { model.bodyTap() }
         )
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pageNav(_ p: LibraryPage) -> some View {
+        HStack(spacing: 12) {
+            pageNavButton("‹ 上一页", enabled: p.page > 1) { model.turnPage(-1) }
+            pageNavButton("下一页 ›", enabled: p.page < p.total) { model.turnPage(+1) }
+        }
+    }
+
+    private func pageNavButton(_ title: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15))
+                .foregroundStyle(model.theme.accent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(model.theme.text.opacity(0.06))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
     }
 
     private func indent(_ para: String) -> String {
@@ -948,8 +935,7 @@ private struct SelectableBodyText: UIViewRepresentable {
     let tint: UIColor
     let onLookup: (String) -> Void
     let onSelectionChange: (Bool) -> Void
-    /// Horizontal tap position in 0…1 of the window width.
-    let onTap: (CGFloat) -> Void
+    let onTap: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1008,8 +994,7 @@ private struct SelectableBodyText: UIViewRepresentable {
         }
 
         @objc func tapped(_ g: UITapGestureRecognizer) {
-            guard let window = g.view?.window else { return }
-            parent.onTap(g.location(in: nil).x / max(window.bounds.width, 1))
+            parent.onTap()
         }
 
         func gestureRecognizer(
