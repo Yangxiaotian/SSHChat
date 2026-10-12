@@ -324,10 +324,11 @@ final class LibraryReaderModel: ObservableObject {
     }
 
     /// Tap on the page body toggles the toolbars.
-    /// Both the SwiftUI and the UIKit text view may report the same tap.
+    /// Both the SwiftUI and the UIKit text view report the same tap; SwiftUI's copy can lag
+    /// ~0.35 s behind while UITextView waits out its double-tap, so dedupe over a wider window.
     func bodyTap() {
         let now = Date()
-        guard now.timeIntervalSince(lastBodyTapAt) > 0.25 else { return }
+        guard now.timeIntervalSince(lastBodyTapAt) > 0.6 else { return }
         lastBodyTapAt = now
         guard !selectionBusy else { return }
         chromeVisible.toggle()
