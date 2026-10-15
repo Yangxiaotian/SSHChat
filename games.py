@@ -11299,7 +11299,7 @@ class NiuTouWangGame:
             out.extend(self._resolve_queue_until_pause_or_end())
             out.extend(self._auto_bot_pick_until_resolve())
             return ([], out, self.state == "ended")
-        if cmd != "pick" or len(parts) < 2 or not parts[1].isdigit():
+        if cmd not in ("pick", "play") or len(parts) < 2 or not parts[1].isdigit():
             return (["用法：/game move pick <card>"], [], False)
         card = int(parts[1])
         hand = self.hands.get(name, [])

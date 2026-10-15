@@ -532,7 +532,7 @@ struct GamePanelView: View {
                 }
                 if s.isPlaying {
                     chip("出牌") {
-                        if let h = model.selectedHand { model.sendMove("play \(h)"); model.selectedHand = nil }
+                        if let h = model.selectedHand { model.sendMove("pick \(h)"); model.selectedHand = nil }
                         else { model.toast = "先选手牌" }
                     }
                     ForEach(1...4, id: \.self) { row in
