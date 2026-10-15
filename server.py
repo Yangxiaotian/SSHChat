@@ -132,6 +132,11 @@ _capsule_stop = threading.Event()
 _capsule_thread: Optional[threading.Thread] = None
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# Last successfully pickled room_games blob (base64). If a live pickle fails
+# (e.g. stray socket), keep the previous snapshot so a restart does not drop
+# an in-progress game.
+_last_good_game_blobs: dict[str, str] = {}
+_last_good_parked_blobs: dict[str, str] = {}
 # room -> parked (inactive) game kept across federation merge/partition
 room_games_parked: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
@@ -1974,19 +1979,36 @@ def _pickle_game_for_storage(game) -> bytes:
             protocol=pickle.HIGHEST_PROTOCOL,
         )
     swaps: list[tuple[DisconnectedSeat, object]] = []
-    for conn, name in _iter_game_conn_seats(game):
-        if not _conn_needs_seat_swap(conn):
-            continue
-        seat = DisconnectedSeat(name)
-        _replace_conn_refs(game, conn, seat)
-        swaps.append((seat, conn))
+
+    def _swap_live_seats() -> None:
+        for conn, name in list(_iter_game_conn_seats(game)):
+            if not _conn_needs_seat_swap(conn):
+                continue
+            seat = DisconnectedSeat(name)
+            _replace_conn_refs(game, conn, seat)
+            swaps.append((seat, conn))
+
+    _swap_live_seats()
     # rating_store contains an RLock and cannot be pickled; it is rebound after
     # loading via _rebind_game_services, so strip it before serialising.
     saved_rs = getattr(game, "rating_store", _MISSING)
     if saved_rs is not _MISSING:
         game.rating_store = None
     try:
-        return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            # Second pass: force-swap any remaining seat-like live objects
+            # (stale sockets no longer in clients still break pickle).
+            for conn, name in list(_iter_game_conn_seats(game)):
+                if conn is None or isinstance(conn, (DisconnectedSeat, FederatedSeat)):
+                    continue
+                if type(conn) is object:  # bot placeholders
+                    continue
+                seat = DisconnectedSeat(name)
+                _replace_conn_refs(game, conn, seat)
+                swaps.append((seat, conn))
+            return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
     finally:
         if saved_rs is not _MISSING:
             game.rating_store = saved_rs
@@ -2043,13 +2065,24 @@ def _build_session_payload_locked() -> dict[str, object]:
     games_blob: dict[str, str] = {}
     for room, game in room_games.items():
         if game is None or getattr(game, "state", "ended") == "ended":
+            _last_good_game_blobs.pop(room, None)
             continue
         try:
             raw = _pickle_game_for_storage(game)
         except Exception as e:
-            print(f"skip persisting room {room!r} game: {e!r}")
+            prev = _last_good_game_blobs.get(room)
+            if prev:
+                print(
+                    f"skip persisting room {room!r} game: {e!r}; "
+                    "keeping previous snapshot"
+                )
+                games_blob[room] = prev
+            else:
+                print(f"skip persisting room {room!r} game: {e!r}")
             continue
-        games_blob[room] = base64.b64encode(raw).decode("ascii")
+        encoded = base64.b64encode(raw).decode("ascii")
+        games_blob[room] = encoded
+        _last_good_game_blobs[room] = encoded
     parked_blob: dict[str, str] = {}
     for room, parked in room_games_parked.items():
         games_list = [
@@ -2058,15 +2091,26 @@ def _build_session_payload_locked() -> dict[str, object]:
             if g is not None and getattr(g, "state", "ended") != "ended"
         ]
         if not games_list:
+            _last_good_parked_blobs.pop(room, None)
             continue
         try:
             # Persist stack as-is (single game or list) so multi-kind parks survive.
             to_store: object = games_list[0] if len(games_list) == 1 else games_list
             raw = _pickle_game_for_storage(to_store)
         except Exception as e:
-            print(f"skip persisting parked room {room!r} game: {e!r}")
+            prev = _last_good_parked_blobs.get(room)
+            if prev:
+                print(
+                    f"skip persisting parked room {room!r} game: {e!r}; "
+                    "keeping previous snapshot"
+                )
+                parked_blob[room] = prev
+            else:
+                print(f"skip persisting parked room {room!r} game: {e!r}")
             continue
-        parked_blob[room] = base64.b64encode(raw).decode("ascii")
+        encoded = base64.b64encode(raw).decode("ascii")
+        parked_blob[room] = encoded
+        _last_good_parked_blobs[room] = encoded
     sessions: dict[str, dict[str, object]] = {}
     for key, sess in disconnected_sessions.items():
         rooms_set = sess.get("rooms") or set()
@@ -2157,6 +2201,7 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 print(f"skip restoring room {room!r} game: {e!r}")
                 continue
             room_games[room] = game
+            _last_good_game_blobs[room] = encoded
     parked_blob = payload.get("room_games_parked")
     if isinstance(parked_blob, dict):
         for room, encoded in parked_blob.items():
@@ -2169,6 +2214,7 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 print(f"skip restoring parked room {room!r} game: {e!r}")
                 continue
             room_games_parked[room] = game
+            _last_good_parked_blobs[room] = encoded
     sessions = payload.get("disconnected_sessions")
     if isinstance(sessions, dict):
         for key, sess in sessions.items():

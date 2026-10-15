@@ -15,6 +15,8 @@ import time
 import unicodedata
 from typing import Optional, TYPE_CHECKING
 
+from session_store import DisconnectedSeat
+
 
 def stamp_new_session(game) -> None:
     """Mark a freshly created room game (/game new)."""
@@ -11353,14 +11355,16 @@ class NiuTouWangGame:
                 break
         if idx is None:
             return ([], [], False)
-        _c, pname = self.players.pop(idx)
+        _c, pname = self.players[idx]
+        if self.state in ("playing", "await_row"):
+            # Keep seat + cards so restart / brief leave can resume (like board games).
+            self.players[idx] = (DisconnectedSeat(pname), pname)
+            return ([], [f"{name} 暂时离线，席位已保留；重连后可继续本局。"], False)
+        self.players.pop(idx)
         self.hands.pop(pname, None)
         self.picks.pop(pname, None)
         self.penalty.pop(pname, None)
         if not self.players:
-            self.state = "ended"
-            return ([], [f"{name} 离开，牛头王对局已结束"], True)
-        if self.state in ("playing", "await_row"):
             self.state = "ended"
             return ([], [f"{name} 离开，牛头王对局已结束"], True)
         return ([], [f"{name} 离开了牛头王对局"], False)

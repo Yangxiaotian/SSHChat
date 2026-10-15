@@ -88,13 +88,20 @@ update_public_host() {
   owner=$(file_stat_owner "$ENV_FILE")
   mode=$(file_stat_mode "$ENV_FILE")
   if [[ "$current" == "$host" ]]; then
-    echo "[sshchat-cloudflared] PUBLIC_HOST already $host (still bouncing sshchat for boot/federation)"
-  else
-    local tmp
-    tmp=$(mktemp)
-    grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
-      | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
-    cat >>"$tmp" <<ENV
+    echo "[sshchat-cloudflared] PUBLIC_HOST already $host"
+    # Only start sshchat if it is down. Do not bounce a healthy server on every
+    # tunnel helper loop — that was wiping in-progress room games.
+    if ! pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+      echo "[sshchat-cloudflared] sshchat not running; starting"
+      restart_sshchat
+    fi
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp)
+  grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
+    | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
+  cat >>"$tmp" <<ENV
 
 # File transfer via Cloudflare Tunnel (managed by sshchat-cloudflared)
 SSHCHAT_FILE_TRANSFER_ENABLED=1
@@ -105,13 +112,11 @@ SSHCHAT_FILE_PUBLIC_HOST=$host
 SSHCHAT_FILE_PUBLIC_PORT=443
 SSHCHAT_FILE_STORAGE_DIR=$STORAGE_DIR
 ENV
-    cat "$tmp" >"$ENV_FILE"
-    rm -f "$tmp"
-    chown "$owner" "$ENV_FILE" 2>/dev/null || true
-    chmod "$mode" "$ENV_FILE" 2>/dev/null || true
-    echo "[sshchat-cloudflared] updated env -> $host"
-  fi
-  # Always restart once per helper run so boot-time servers reload env + federation ads.
+  cat "$tmp" >"$ENV_FILE"
+  rm -f "$tmp"
+  chown "$owner" "$ENV_FILE" 2>/dev/null || true
+  chmod "$mode" "$ENV_FILE" 2>/dev/null || true
+  echo "[sshchat-cloudflared] updated env -> $host"
   restart_sshchat
 }
 
