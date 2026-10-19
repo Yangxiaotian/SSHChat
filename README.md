@@ -97,7 +97,7 @@ Games are **per room** (one active match at a time). Host can `/game on|off <nam
 | `werewolf` | 5–12 players | `langrensha` |
 | `holdem` | Texas Hold'em | `poker`, `texas` |
 | `zjh` | Zha Jin Hua | `zhajinhua` |
-| `niutou` | Niu Tou Wang | — |
+| `niutou` | Niu Tou Wang (6 Nimmt!) | Persistent Elo when ≥2 humans; `/game rating niutou` |
 | `mahjong` | 4 players (+ AI fill) | — |
 | `doushou` | Jungle / Dou Shou Qi | — |
 

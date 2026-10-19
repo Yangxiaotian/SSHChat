@@ -195,6 +195,7 @@ export function getQuickByGame(locale: Locale, game: GameKind): QuickAction[] {
       m('seats', '/game seats'),
       move('werewolfStart', 'start', 'niutou'),
       qa('game.quick.niutouBot', buildGameMove(locale, 'bot hard', 'niutou'), locale),
+      { label: locale === 'zh' ? '查看积分' : 'Rating', cmd: '/game rating niutou' },
       m('end', '/game end'),
     ],
   };

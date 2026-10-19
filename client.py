@@ -236,11 +236,20 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
     ("/game", "draw"): ("accept", "reject", "cancel"),
     ("/game", "restore"): ("swap",),
-    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
+    ("/game", "move"): (
+        "flip", "move", "翻", "翻子", "走", "移动",
+        "pick", "play", "row", "start", "bot",
+    ),
     ("/game", "new"): _GAME_NAMES,
     ("/game", "on"): ("all",) + _GAME_NAMES,
     ("/game", "off"): ("all",) + _GAME_NAMES,
     ("/game", "list"): ("off", "offline"),
+}
+
+# Third token after `/game move <verb>` (niutou row/bot args).
+_NESTED3_SUBCOMMANDS: dict[tuple[str, str, str], tuple[str, ...]] = {
+    ("/game", "move", "bot"): ("easy", "hard", "pro"),
+    ("/game", "move", "row"): ("1", "2", "3", "4"),
 }
 
 # Learned from /rooms, /names, and chat traffic for Tab completion.
@@ -302,6 +311,17 @@ class SSHChatCommandCompleter(Completer):
                     if cmd.startswith(prefix):
                         yield Completion(cmd, start_position=-len(prefix))
                 return
+            if len(parts) >= 4:
+                cmd = parts[0].lower()
+                sub = parts[1].lower()
+                verb = parts[2].lower()
+                prefix = parts[-1].lower()
+                deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+                for item in deep:
+                    if item.startswith(prefix):
+                        yield Completion(item, start_position=-len(parts[-1]))
+                if deep:
+                    return
             if len(parts) >= 3:
                 cmd = parts[0].lower()
                 sub = parts[1].lower()
@@ -330,6 +350,15 @@ class SSHChatCommandCompleter(Completer):
             return
 
         parts = text.rstrip().split()
+        if len(parts) >= 3:
+            cmd = parts[0].lower()
+            sub = parts[1].lower()
+            verb = parts[2].lower()
+            deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+            if deep:
+                for item in deep:
+                    yield Completion(item + " ", start_position=0)
+                return
         if len(parts) >= 2:
             cmd = parts[0].lower()
             sub = parts[1].lower()

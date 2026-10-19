@@ -60,7 +60,12 @@ function longestCommonPrefix(values: string[]): string {
 const GAME_UNDO_ACTIONS = ['accept', 'reject', 'cancel'] as const;
 const GAME_DRAW_ACTIONS = ['accept', 'reject', 'cancel'] as const;
 const GAME_RESTORE_ACTIONS = ['swap'] as const;
-const GAME_MOVE_ACTIONS = ['flip', 'move', '翻', '翻子', '走', '移动'] as const;
+const GAME_MOVE_ACTIONS = [
+  'flip', 'move', '翻', '翻子', '走', '移动',
+  'pick', 'play', 'row', 'start', 'bot',
+] as const;
+const GAME_MOVE_BOT_LEVELS = ['easy', 'hard', 'pro'] as const;
+const GAME_MOVE_ROW_NUMS = ['1', '2', '3', '4'] as const;
 const GAME_LIST_ACTIONS = ['off', 'offline'] as const;
 const GAME_CATALOG_ACTIONS = ['all'] as const;
 const ROOM_ARG_CMDS = new Set(['/join', '/switch', '/part']);
@@ -235,9 +240,35 @@ function buildSuggestions(
 
   const gameMovePrefix = '/game move';
   if (value.toLowerCase().startsWith(gameMovePrefix)) {
-    // Only suggest verbs right after "/game move"; leave coords alone.
+    // Suggest verbs after "/game move"; then bot/row args one level deeper.
     const parts = value.trimEnd().split(/\s+/).filter(Boolean);
     const trailingSpace = value.endsWith(' ');
+    if (parts.length >= 3) {
+      const verb = parts[2].toLowerCase();
+      const deep =
+        verb === 'bot' ? GAME_MOVE_BOT_LEVELS
+          : verb === 'row' ? GAME_MOVE_ROW_NUMS
+            : null;
+      if (deep) {
+        if (trailingSpace && parts.length === 3) {
+          return deep.map((action) => ({
+            value: `${gameMovePrefix} ${verb} ${action}`,
+            desc: 'move arg',
+            source: 'command' as const,
+          }));
+        }
+        if (parts.length >= 4 && !trailingSpace) {
+          const tail = parts[3].toLowerCase();
+          return deep
+            .filter((action) => action.startsWith(tail))
+            .map((action) => ({
+              value: `${gameMovePrefix} ${verb} ${action}`,
+              desc: 'move arg',
+              source: 'command' as const,
+            }));
+        }
+      }
+    }
     if (parts.length === 2 || (parts.length === 3 && !trailingSpace)) {
       const tail = (parts.length === 3 ? parts[2] : '').toLowerCase();
       return GAME_MOVE_ACTIONS.filter(
@@ -408,8 +439,18 @@ export default function InputBar() {
     const isGameDrawCommand = value.toLowerCase().startsWith('/game draw');
     const isGameRestoreCommand = value.toLowerCase().startsWith('/game restore');
     const gameMoveParts = value.trimEnd().split(/\s+/).filter(Boolean);
-    const isGameMoveVerbCommand = value.toLowerCase().startsWith('/game move')
-      && (gameMoveParts.length === 2 || (gameMoveParts.length === 3 && !value.endsWith(' ')));
+    const gameMoveVerb = (gameMoveParts[2] || '').toLowerCase();
+    const isGameMoveDeepArg =
+      value.toLowerCase().startsWith('/game move')
+      && (gameMoveVerb === 'bot' || gameMoveVerb === 'row')
+      && (
+        (value.endsWith(' ') && gameMoveParts.length === 3)
+        || (gameMoveParts.length >= 4 && !value.endsWith(' '))
+      );
+    const isGameMoveVerbCommand = (
+      value.toLowerCase().startsWith('/game move')
+      && (gameMoveParts.length === 2 || (gameMoveParts.length === 3 && !value.endsWith(' ')))
+    ) || isGameMoveDeepArg;
     const isSubCommand = subcommandSuggestions(value).length > 0;
     const isNameArgCommand = nameArgSuggestions(value, roomNames, users).length > 0;
     setShowSuggestions(
@@ -449,7 +490,16 @@ export default function InputBar() {
       value.toLowerCase().startsWith('/game restore') ||
       (value.toLowerCase().startsWith('/game move') && (() => {
         const parts = value.trimEnd().split(/\s+/).filter(Boolean);
-        return parts.length === 2 || (parts.length === 3 && !value.endsWith(' '));
+        const verb = (parts[2] || '').toLowerCase();
+        const deepArg =
+          (verb === 'bot' || verb === 'row')
+          && (
+            (value.endsWith(' ') && parts.length === 3)
+            || (parts.length >= 4 && !value.endsWith(' '))
+          );
+        return parts.length === 2
+          || (parts.length === 3 && !value.endsWith(' '))
+          || deepArg;
       })()) ||
       subcommandSuggestions(value).length > 0 ||
       nameArgSuggestions(value, roomNames, users).length > 0;

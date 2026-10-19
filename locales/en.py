@@ -74,7 +74,7 @@ MESSAGES: dict = {
         "sanguo allows 2–6 via join; host starts with /game move 开始).",
         "[*] /game seats            Show players and game state.",
         "[*] /game show             Redraw the board (you at the bottom; opponent view flips automatically).",
-        "[*] /game rating [game] [nick]  Show persisted board-game rating/level; ratings are shared across rooms.",
+        "[*] /game rating [game] [nick]  Show persisted board-game / 6 Nimmt! rating/level; ratings are shared across rooms.",
         "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked).",
         "[*] darkchess (Dark Chess / flip chess) EN/ZH: 翻 flip <row> <col> | 走 move <fr> <fc> <tr> <tc>; "
         "4×8 board; first flip assigns red/black; cannon needs one screen; general beats all but soldier, soldier can take general.",

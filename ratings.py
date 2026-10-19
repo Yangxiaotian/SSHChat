@@ -301,6 +301,13 @@ GAME_CONFIGS: dict[str, dict[str, Any]] = {
         "level_of": _dan_level,
         "k_factor": _elo_k,
     },
+    "niutou": {
+        "scheme": "Elo",
+        "initial": 1200,
+        "floor": 1000,
+        "level_of": _dan_level,
+        "k_factor": _elo_k,
+    },
 }
 
 RATED_GAMES = tuple(GAME_CONFIGS)

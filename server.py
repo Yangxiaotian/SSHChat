@@ -2026,8 +2026,9 @@ def _rebind_game_services(game) -> None:
         for g in game:
             _rebind_game_services(g)
         return
-    if hasattr(game, "rating_store"):
-        game.rating_store = rating_store
+    # Always attach after load. Older pickles (e.g. pre-rating niutou) omit the
+    # attribute entirely; hasattr-gated rebind left show()/seats() crashing.
+    setattr(game, "rating_store", rating_store)
     if getattr(game, "name", "") == "xiangqi":
         log = getattr(game, "_xq_ply_log", None)
         if not isinstance(log, list) or any(not isinstance(item, dict) for item in log):

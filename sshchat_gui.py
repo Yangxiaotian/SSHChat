@@ -314,10 +314,18 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
     ("/game", "draw"): ("accept", "reject", "cancel"),
     ("/game", "restore"): ("swap",),
-    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
+    ("/game", "move"): (
+        "flip", "move", "翻", "翻子", "走", "移动",
+        "pick", "play", "row", "start", "bot",
+    ),
     ("/game", "list"): ("off", "offline"),
     ("/game", "on"): ("all",),
     ("/game", "off"): ("all",),
+}
+
+_NESTED3_SUBCOMMANDS: dict[tuple[str, str, str], tuple[str, ...]] = {
+    ("/game", "move", "bot"): ("easy", "hard", "pro"),
+    ("/game", "move", "row"): ("1", "2", "3", "4"),
 }
 
 
@@ -354,6 +362,20 @@ def _command_completions(
 
     if len(parts) == 1 and not trailing_space:
         return [c for c in _TOP_COMMANDS if c.startswith(parts[0])]
+
+    if len(parts) >= 3:
+        sub = parts[1].lower()
+        verb = parts[2].lower()
+        deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+        if deep:
+            base = f"{parts[0]} {parts[1]} {parts[2]}"
+            if trailing_space and len(parts) == 3:
+                return [f"{base} {item}" for item in deep]
+            if len(parts) >= 4 and not trailing_space:
+                prefix = parts[3]
+                return [f"{base} {item}" for item in deep if item.startswith(prefix)]
+            if not (len(parts) == 3 and not trailing_space):
+                return []
 
     if len(parts) >= 2:
         sub = parts[1].lower()

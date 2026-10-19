@@ -80,7 +80,9 @@ enum CommandCompletions {
         "/game undo": ["accept", "reject", "cancel"],
         "/game draw": ["accept", "reject", "cancel"],
         "/game restore": ["swap"],
-        "/game move": ["flip", "move", "翻", "翻子", "走", "移动"],
+        "/game move": ["flip", "move", "翻", "翻子", "走", "移动", "pick", "play", "row", "start", "bot"],
+        "/game move bot": ["easy", "hard", "pro"],
+        "/game move row": ["1", "2", "3", "4"],
         "/game list": ["off", "offline"],
         "/game on": ["all"],
         "/game off": ["all"],
@@ -175,6 +177,31 @@ enum CommandCompletions {
 
         if parts.count == 1 && !trailingSpace {
             return sorted(top.filter { $0.hasPrefix(parts[0]) }, defaultOrder: top)
+        }
+
+        if parts.count >= 3 {
+            let sub = parts[1].lowercased()
+            let verb = parts[2].lowercased()
+            let deepItems = nested["\(cmd) \(sub) \(verb)"] ?? []
+            if !deepItems.isEmpty {
+                let base = "\(parts[0]) \(parts[1]) \(parts[2])"
+                let deepFull = deepItems.map { "\(base) \($0)" }
+                if trailingSpace && parts.count == 3 {
+                    return sorted(deepFull, defaultOrder: deepFull)
+                }
+                if parts.count >= 4 && !trailingSpace {
+                    let prefix = parts[3]
+                    return sorted(
+                        deepItems
+                            .filter { $0.hasPrefix(prefix) }
+                            .map { "\(base) \($0)" },
+                        defaultOrder: deepFull
+                    )
+                }
+                if !(parts.count == 3 && !trailingSpace) {
+                    return []
+                }
+            }
         }
 
         if parts.count >= 2 {
