@@ -72,6 +72,8 @@ export const enMessages: MessageTree = {
       pianoTitle: 'Start a shared room piano (one-click /piano)',
       clock: '⏱ Clock',
       clockTitle: 'Start a room chess clock (one-click /clock)',
+      music: '🎵 Music',
+      musicTitle: 'Open the music player (one-click /music play)',
       pasteHint: 'Or paste / drop an image or file',
     },
     commands: {
@@ -92,6 +94,7 @@ export const enMessages: MessageTree = {
       game: 'Game commands',
       news: 'Show news',
       library: 'Browse library books',
+      music: 'Play server music library',
       lang: 'Switch UI language (en/zh)',
       dict: 'Dictionary lookup (en/cn/hh)',
       announce: 'Room announcement',
@@ -370,6 +373,7 @@ export const enMessages: MessageTree = {
   secureLink: {
     canvasHint: 'Key is handled for you — click to open the in-app canvas',
     pianoHint: 'Key is handled for you — click to open the in-app piano',
+    musicHint: 'Key is handled for you — click to open the music player',
     uploadHint: 'Key is handled for you — click to open the upload page',
     downloadHint: 'Key is handled for you — click to preview or download',
     opening: 'Opening…',

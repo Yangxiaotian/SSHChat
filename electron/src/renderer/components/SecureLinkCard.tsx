@@ -33,6 +33,8 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       ? t('secureLink.canvasHint')
       : payload.kind === 'piano'
         ? t('secureLink.pianoHint')
+        : payload.kind === 'music'
+          ? t('secureLink.musicHint')
         : payload.kind === 'upload'
           ? t('secureLink.uploadHint')
           : t('secureLink.downloadHint');
@@ -58,6 +60,17 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       }
       if (payload.kind === 'piano') {
         openPiano({ url: payload.url, key: payload.key });
+        return;
+      }
+      if (payload.kind === 'music') {
+        const result = await window.api.openSecureWebSession({
+          kind: 'music',
+          url: payload.url,
+          key: payload.key,
+        });
+        if (!result?.ok) {
+          setError(result?.error || t('secureLink.openFailed'));
+        }
         return;
       }
       const result = await window.api.openSecureWebSession({
@@ -92,6 +105,17 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       setAutoOpened(true);
       setExpectingOwnPiano(false);
       openPiano({ url: payload.url, key: payload.key });
+      return;
+    }
+    if (payload.kind === 'music') {
+      const at = payload.receivedAt || 0;
+      if (at && Date.now() - at > 15000) return;
+      setAutoOpened(true);
+      void window.api.openSecureWebSession({
+        kind: 'music',
+        url: payload.url,
+        key: payload.key,
+      });
     }
   }, [
     autoOpened,
@@ -133,7 +157,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   return (
     <div className={`secure-link-card kind-${payload.kind}`}>
       <div className="secure-link-icon" aria-hidden>
-        {payload.kind === 'canvas' ? '✎' : payload.kind === 'piano' ? '🎹' : payload.kind === 'upload' ? '↑' : '↓'}
+        {payload.kind === 'canvas' ? '✎' : payload.kind === 'piano' ? '🎹' : payload.kind === 'music' ? '🎵' : payload.kind === 'upload' ? '↑' : '↓'}
       </div>
       <div className="secure-link-body">
         <div className="secure-link-title">{title}</div>

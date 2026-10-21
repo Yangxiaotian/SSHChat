@@ -456,6 +456,13 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/piano") }
     }
 
+    func startMusic() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 正在打开点歌…（/music play）")
+        CommandUsage.record("/music play")
+        Task { try? await session.send("/music play") }
+    }
+
     private func cancelPadEditWait() {
         padEditWaitTask?.cancel()
         padEditWaitTask = nil
@@ -866,6 +873,15 @@ final class ChatViewModel: ObservableObject {
                     key: "",
                     isCanvas: true,
                     isClock: true
+                )
+            case .music:
+                pendingFileMeta.reset()
+                appendText("[*] 打开点歌…")
+                webInvite = WebInvitePayload(
+                    title: "点歌",
+                    url: open.url,
+                    key: open.key,
+                    isCanvas: false
                 )
             }
             return
@@ -1656,6 +1672,10 @@ struct ContentView: View {
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false
                 model.openLibrary()
+            }
+            plusCell(title: "点歌", system: "music.note") {
+                showPlusPanel = false
+                model.startMusic()
             }
             plusCell(title: "帮助", system: "questionmark.circle.fill") {
                 showPlusPanel = false

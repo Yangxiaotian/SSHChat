@@ -7,7 +7,7 @@ object CommandCompletions {
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
         "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
-        "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
+        "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     )
 
     private val SUBS = mapOf(
@@ -24,6 +24,8 @@ object CommandCompletions {
             "open", "read", "next", "n", "prev", "p", "page", "find", "search",
             "bookmarks", "bookmark", "reset", "close", "info", "show", "help",
         ),
+        "/music" to listOf("play", "open", "listen", "find", "search", "help"),
+        "/song" to listOf("play", "open", "listen", "find", "search", "help"),
         "/dict" to listOf("en", "cn", "hh", "help", "英", "中", "汉"),
         "/dnd" to listOf("on", "off"),
         "/lang" to listOf("en", "zh", "english", "chinese", "中文", "英文"),

@@ -38,6 +38,9 @@ MESSAGES: dict = {
         "[*] /lib             Short for /library.\n",
         "[*] /library open <index|filename>  Open a book (resume from bookmark if any); next|prev|page to turn pages.\n",
         "[*] /library find <keyword>        Find by title; while reading, search in the current book (aliases: search / 搜索 / 查找).\n",
+        "[*] /music         List songs (mp3 / m4a / ogg / flac / wav; admin drop folder).\n",
+        "[*] /song            Short for /music.\n",
+        "[*] /music play [index|filename]  Open the web player (default: first song); aliases: open / 播放.\n",
         "[*] /dict en|cn|hh <word>  Dictionary: EN→ZH, ZH→EN, Chinese gloss; /dict <word> auto-detects.\n",
         "[*]\n",
         "[*] /sendfile      Send a file to the current room (ok when alone — same nick on another device can download); you get an upload URL; the key is given separately.\n",
@@ -290,6 +293,12 @@ MESSAGES: dict = {
         ),
         "library_cmd_fail": (
             "[*] Library command failed; try again later (see server log for details).\n"
+        ),
+        "music_cmd_fail": (
+            "[*] Music command failed; try again later (see server log for details).\n"
+        ),
+        "music_http_off": (
+            "[*] Music playback needs the file web service, which is currently off.\n"
         ),
         "lang_usage": "[*] Usage: /lang [en|zh]\n",
         "lang_set": "[*] UI language set to {lang}.\n",

@@ -47,6 +47,8 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/game help` | Mini-game help |
 | `/news` | RSS headlines |
 | `/library` | Browse books |
+| `/music` | List songs in the server music folder |
+| `/music play [n]` | Play a song (web player; alias `/song`) |
 | `/dict <word>` | Dictionary |
 | `/dnd on` | Terminal do-not-disturb for game spam |
 

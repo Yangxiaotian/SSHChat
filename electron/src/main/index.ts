@@ -26,7 +26,7 @@ import {
   ChatHistorySnapshot,
 } from '../shared/protocol';
 
-type SecureWebKind = 'canvas' | 'piano' | 'upload' | 'download';
+type SecureWebKind = 'canvas' | 'piano' | 'upload' | 'download' | 'music';
 
 function buildSecureKeyAutofillScript(kind: SecureWebKind, key: string): string {
   const safeKey = JSON.stringify(String(key || '').trim().toUpperCase());
@@ -44,7 +44,7 @@ function buildSecureKeyAutofillScript(kind: SecureWebKind, key: string): string 
     input.dispatchEvent(new Event('input', { bubbles: true }));
     if (kind === 'upload') return { ok: true, mode: 'upload-fill-only' };
     const unlock = document.getElementById('unlockBtn');
-    if (unlock) { unlock.click(); return { ok: true, mode: kind === 'piano' ? 'piano' : 'canvas' }; }
+    if (unlock) { unlock.click(); return { ok: true, mode: kind === 'piano' ? 'piano' : kind === 'music' ? 'music' : 'canvas' }; }
     const submit = document.getElementById('submitBtn');
     if (submit) { submit.click(); return { ok: true, mode: 'download' }; }
     const form = document.getElementById('downloadForm');
@@ -67,15 +67,15 @@ async function openSecureWebSession(payload: {
   if (!key || key.length !== 6) {
     return { ok: false, error: 'Invalid key' };
   }
-  if (kind !== 'canvas' && kind !== 'piano' && kind !== 'upload' && kind !== 'download') {
+  if (kind !== 'canvas' && kind !== 'piano' && kind !== 'upload' && kind !== 'download' && kind !== 'music') {
     return { ok: false, error: 'Invalid kind' };
   }
 
   const win = new BrowserWindow({
-    width: kind === 'canvas' || kind === 'piano' ? 1100 : 900,
-    height: kind === 'canvas' || kind === 'piano' ? 820 : 720,
+    width: kind === 'canvas' || kind === 'piano' ? 1100 : kind === 'music' ? 480 : 900,
+    height: kind === 'canvas' || kind === 'piano' ? 820 : kind === 'music' ? 720 : 720,
     autoHideMenuBar: true,
-    title: kind === 'canvas' ? 'SSHChat Canvas' : kind === 'piano' ? 'SSHChat Piano' : kind === 'upload' ? 'SSHChat Upload' : 'SSHChat File',
+    title: kind === 'canvas' ? 'SSHChat Canvas' : kind === 'piano' ? 'SSHChat Piano' : kind === 'music' ? 'SSHChat Music' : kind === 'upload' ? 'SSHChat Upload' : 'SSHChat File',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

@@ -38,6 +38,9 @@ MESSAGES: dict = {
         "[*] /lib             /library 的简写。\n",
         "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
         "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
+        "[*] /music         列出点歌曲目（mp3 / m4a / ogg / flac / wav；管理员放到 music 目录）。\n",
+        "[*] /song            /music 的简写。\n",
+        "[*] /music play [序号|文件名]  打开网页播放器（省略则从第 1 首开始）；别名：open / 播放。\n",
         "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
         "[*]\n",
         "[*] /sendfile      发送文件到当前房间（仅自己在线也可发，同名多端可下载）；你将收到上传网址，密钥另行单独给出。\n",
@@ -285,6 +288,12 @@ MESSAGES: dict = {
         ),
         "library_cmd_fail": (
             "[*] 图书馆命令处理失败，请稍后重试（详情见服务端日志）。\n"
+        ),
+        "music_cmd_fail": (
+            "[*] 点歌命令处理失败，请稍后重试（详情见服务端日志）。\n"
+        ),
+        "music_http_off": (
+            "[*] 点歌播放依赖文件网页服务，当前未启用。\n"
         ),
         "lang_usage": "[*] 用法：/lang [en|zh]\n",
         "lang_set": "[*] 界面语言已设为 {lang}。\n",

@@ -1,7 +1,7 @@
 import Foundation
 
 enum SecureInvite {
-    enum Kind { case download, canvas, piano, upload, clock }
+    enum Kind { case download, canvas, piano, upload, clock, music }
 
     struct Open {
         let kind: Kind
@@ -22,7 +22,7 @@ enum SecureInvite {
     }
 
     private static let guiOpen = try! NSRegularExpression(
-        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$"#,
+        pattern: #"^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock|music)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$"#,
         options: [.caseInsensitive]
     )
 
@@ -81,6 +81,7 @@ enum SecureInvite {
         case "piano": kind = .piano
         case "upload": kind = .upload
         case "clock": kind = .clock
+        case "music": kind = .music
         default: return nil
         }
         let keyRange = m.range(at: 3)
@@ -103,7 +104,7 @@ enum SecureInvite {
         if t.hasPrefix("共享画布") || t.hasPrefix("房间钢琴") || t.hasPrefix("棋钟") || t.hasPrefix("文件上传信息") || t.hasPrefix("收到新文件") { return true }
         if lower.hasPrefix("shared canvas") || lower.hasPrefix("room piano") || lower.hasPrefix("chess clock") || lower.hasPrefix("file upload") || lower.hasPrefix("new file") { return true }
         if t.range(of: #"^=+\s*$"#, options: .regularExpression) != nil { return true }
-        if t.range(of: #"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        if t.range(of: #"(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true
         }
         if t.range(of: #"^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*[A-Z0-9]{6}\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
@@ -114,7 +115,7 @@ enum SecureInvite {
         if t.range(of: #"^\d+\.\s+(打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|Enter|Open|Click|Choose|Select|Upload|Download|Preview|This page|Each recipient|The key|Verify)"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true
         }
-        if t.range(of: #"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|From|Sender|Filename|Size|Room|Recipients?)\s*[:：]"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        if t.range(of: #"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|正在播放|From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true
         }
         if t.hasPrefix("经联邦节点") { return true }

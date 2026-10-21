@@ -31,6 +31,7 @@ import federation
 import games
 import i18n
 import library
+import music
 import file_sharing
 import file_http_server
 import piano_sharing
@@ -5387,6 +5388,215 @@ def _handle_library(conn, payload: str) -> None:
     send_line(conn, "[*] 未知子命令。试试 /library help\n")
 
 
+def _music_dir() -> Path:
+    return music.default_music_dir()
+
+
+def _music_invite_message(
+    *,
+    url: str,
+    key: str,
+    song: music.SongEntry,
+    lang: str,
+) -> str:
+    loc = "en" if str(lang).lower().startswith("en") else "zh"
+    if loc == "en":
+        return (
+            "[*] ========== Music ==========\n"
+            f"[*] Now playing: [{song.ext.upper()}] {song.name} "
+            f"({music.format_size(song.size_bytes)})\n"
+            "[*] Player URL:\n"
+            f"[*] {url}\n"
+            f"[*] Access key: {key}\n"
+            "[*] Open the URL and enter the key (GUI clients do this for you).\n"
+            "[*] =====================================\n"
+            f"[*] gui-open music {url} {key}\n"
+        )
+    return (
+        "[*] ========== 点歌 ==========\n"
+        f"[*] 正在播放：[{song.ext.upper()}] {song.name} "
+        f"({music.format_size(song.size_bytes)})\n"
+        "[*] 播放网址:\n"
+        f"[*] {url}\n"
+        f"[*] 访问密钥: {key}\n"
+        "[*] 打开网址后输入密钥（图形客户端会自动填）。\n"
+        "[*] =====================================\n"
+        f"[*] gui-open music {url} {key}\n"
+    )
+
+
+def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = "") -> None:
+    loc = conn_locale(conn)
+    music_dir = _music_dir()
+    send_line(
+        conn,
+        i18n.tr(en="[*] --- Music ---\n", zh="[*] --- 点歌 ---\n", locale=loc),
+    )
+    if not music_dir.is_dir():
+        send_line(
+            conn,
+            i18n.tr(
+                en=f"[*] Music directory missing: {music_dir}\n",
+                zh=f"[*] 点歌目录不存在：{music_dir}\n",
+                locale=loc,
+            ),
+        )
+        return
+    if not catalog:
+        if query:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] No matching songs.\n",
+                    zh="[*] 没有匹配的歌曲。\n",
+                    locale=loc,
+                ),
+            )
+        else:
+            send_line(
+                conn,
+                i18n.tr(
+                    en=(
+                        "[*] Library is empty. Place mp3 / m4a / ogg / flac / wav "
+                        f"in {music_dir}\n"
+                    ),
+                    zh=(
+                        "[*] 曲库为空。把 mp3 / m4a / ogg / flac / wav "
+                        f"放到 {music_dir}\n"
+                    ),
+                    locale=loc,
+                ),
+            )
+        return
+    if query:
+        send_line(
+            conn,
+            i18n.tr(
+                en=f"[*] {len(catalog)} match(es) for {query!r}.\n",
+                zh=f"[*] 关键词 {query!r} 共 {len(catalog)} 首。\n",
+                locale=loc,
+            ),
+        )
+    else:
+        send_line(
+            conn,
+            i18n.tr(
+                en=f"[*] {len(catalog)} song(s).\n",
+                zh=f"[*] 共 {len(catalog)} 首。\n",
+                locale=loc,
+            ),
+        )
+    for entry in catalog:
+        send_line(
+            conn,
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
+            f"({music.format_size(entry.size_bytes)})\n",
+        )
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Play: /music play <index|filename>\n",
+            zh="[*] 播放：/music play <序号|文件名>\n",
+            locale=loc,
+        ),
+    )
+
+
+def _handle_music(conn, payload: str) -> None:
+    if payload.startswith("/music"):
+        raw = payload[len("/music") :].strip()
+    elif payload.startswith("/song"):
+        raw = payload[len("/song") :].strip()
+    else:
+        raw = payload.strip()
+    music_dir = _music_dir()
+    loc = conn_locale(conn)
+    parts = raw.split(None, 1)
+    head = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if head in {"help", "?", "帮助"}:
+        for line in (
+            i18n.tr(en="[*] /music usage:\n", zh="[*] /music 用法：\n", locale=loc),
+            i18n.tr(
+                en="[*]   /music | /song                 Catalog\n",
+                zh="[*]   /music | /song                 曲目列表\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /music find <keyword>           Filter by filename\n",
+                zh="[*]   /music find <关键词> | 查找      按文件名筛选\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /music play [index|filename]    Open the web player (default: 1)\n",
+                zh="[*]   /music play [序号|文件名] | 播放  打开网页播放器（默认第 1 首）\n",
+                locale=loc,
+            ),
+        ):
+            send_line(conn, line)
+        return
+
+    catalog = music.list_songs(music_dir)
+    if not head:
+        _send_music_catalog(conn, catalog)
+        return
+
+    if head in {"find", "search", "查找"}:
+        if not rest:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] Usage: /music find <keyword>\n",
+                    zh="[*] 用法：/music find <关键词>\n",
+                    locale=loc,
+                ),
+            )
+            return
+        _send_music_catalog(conn, music.search_catalog(catalog, rest), query=rest)
+        return
+
+    if head in {"play", "open", "listen", "播放", "听", "打开"}:
+        if file_http is None:
+            send_line(conn, _ts(conn, "music_http_off"))
+            return
+        if not catalog:
+            _send_music_catalog(conn, catalog)
+            return
+        token = rest or "1"
+        entry = music.resolve_song(token, catalog)
+        if entry is None:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] Song not found. Use /music to list indexes.\n",
+                    zh="[*] 找不到这首歌。用 /music 查看序号。\n",
+                    locale=loc,
+                ),
+            )
+            return
+        session = music.music_store.mint(entry.index, _client_name(conn))
+        lang_q = "en" if str(loc).lower().startswith("en") else "zh"
+        url = (
+            f"{file_http.get_base_url().rstrip('/')}/music/{session.token}"
+            f"?lang={lang_q}"
+        )
+        send_line(
+            conn,
+            _music_invite_message(url=url, key=session.key, song=entry, lang=loc),
+        )
+        return
+
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Unknown subcommand. Try /music help\n",
+            zh="[*] 未知子命令。试试 /music help\n",
+            locale=loc,
+        ),
+    )
+
+
 def _send_dict_help(conn) -> None:
     send_line(conn, "[*] /dict 用法：\n")
     send_line(conn, "[*]   /dict en <英文>     英→中（中英文词典）\n")
@@ -9967,6 +10177,15 @@ def handle_command(conn, payload: str) -> None:
             send_line(conn, _ts(conn, "library_cmd_fail"))
         return
 
+    if cmd in {"/music", "/song"}:
+        try:
+            _handle_music(conn, payload)
+        except Exception as e:
+            print(f"/music error: {e!r}")
+            traceback.print_exc()
+            send_line(conn, _ts(conn, "music_cmd_fail"))
+        return
+
     if cmd == "/dict":
         _handle_dict(conn, payload)
         return
@@ -10731,7 +10950,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:

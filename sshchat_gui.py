@@ -111,6 +111,10 @@ _GUI_OPEN_CLOCK_RE = re.compile(
     r"^gui-open\s+clock\s+(https?://\S+)\s*$",
     re.I,
 )
+_GUI_OPEN_MUSIC_RE = re.compile(
+    r"^gui-open\s+music\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
 _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
@@ -137,12 +141,12 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|点歌\s*=|Music\s*=|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
 _SECURE_URL_LABEL_RE = re.compile(
-    r"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
+    r"(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
     re.I,
 )
 _SECURE_KEY_LINE_RE = re.compile(
@@ -152,8 +156,8 @@ _SECURE_KEY_LINE_RE = re.compile(
 )
 _SECURE_HTTP_URL_RE = re.compile(r"^https?://\S+\s*$", re.I)
 _SECURE_META_LINE_RE = re.compile(
-    r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|"
-    r"From|Sender|Filename|Size|Room|Recipients?)\s*[:：]",
+    r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|正在播放|"
+    r"From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]",
     re.I,
 )
 _IMAGE_MIME_RE = re.compile(r"^image/(jpeg|jpg|png|gif|webp|bmp)$", re.I)
@@ -234,6 +238,8 @@ _TOP_COMMANDS = (
     "/news",
     "/library",
     "/lib",
+    "/music",
+    "/song",
     "/dict",
     "/clear",
     "/cls",
@@ -297,6 +303,8 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
         "show",
         "help",
     ),
+    "/music": ("play", "open", "listen", "find", "search", "help"),
+    "/song": ("play", "open", "listen", "find", "search", "help"),
     "/dict": ("en", "cn", "hh", "help", "英", "中", "汉"),
     "/dnd": ("on", "off"),
     "/lang": ("en", "zh", "english", "chinese", "中文", "英文"),
@@ -716,6 +724,7 @@ def _is_secure_invite_noise(body: str) -> bool:
         or _GUI_OPEN_PIANO_RE.match(t)
         or _GUI_OPEN_DOWNLOAD_RE.match(t)
         or _GUI_OPEN_CLOCK_RE.match(t)
+        or _GUI_OPEN_MUSIC_RE.match(t)
     ):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
@@ -2582,6 +2591,9 @@ class SSHChatGUI:
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
         )
+        self.btn_music, _ = self._pack_icon_btn(
+            self._input_row, "🎵", "点歌", self._start_music
+        )
         self.btn_pad, _ = self._pack_icon_btn(
             self._input_row, "📝", "便签（房间剪贴板）", self._start_pad
         )
@@ -3224,6 +3236,16 @@ class SSHChatGUI:
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
 
+    def _start_music(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        self._append_chat_line("[*] 正在打开点歌…（/music play）", local_sent=True)
+        try:
+            self._chan_send_bytes(b"/music play\n")
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
     def _start_pad(self) -> None:
         if not self._chan or self._chan.closed:
             messagebox.showwarning("SSHChat", "请先连接")
@@ -3794,6 +3816,8 @@ class SSHChatGUI:
         if parsed and parsed[1] == "*" and self._try_handle_piano_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_clock_invite(parsed[2]):
+            return
+        if parsed and parsed[1] == "*" and self._try_handle_music_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
@@ -4384,6 +4408,33 @@ class SSHChatGUI:
                     self._canvas_open_targets[tag] = (url, key)
             except ValueError:
                 continue
+
+    def _try_handle_music_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_MUSIC_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        open_url = f"{url}#{key}"
+        self._append_chat_line("[*] 打开点歌…", local_sent=True)
+        try:
+            if _open_canvas_app_window(open_url, maximized=True):
+                self._set_status("点歌已打开")
+            elif _open_browser_tab(open_url):
+                self._set_status("点歌已在浏览器打开")
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开点歌链接", local_sent=True
+                )
+                self._set_status("点歌链接已收到（浏览器未打开）")
+                self._alert_beep()
+                return True
+        except Exception as e:
+            self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
+            self._set_status("点歌打开失败")
+            self._alert_beep()
+            return True
+        self._alert_beep()
+        return True
 
     def _try_handle_clock_invite(self, body: str) -> bool:
         m = _GUI_OPEN_CLOCK_RE.match(body.strip())

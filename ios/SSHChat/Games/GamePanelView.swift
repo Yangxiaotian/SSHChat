@@ -322,6 +322,8 @@ struct GamePanelView: View {
     @ObservedObject var model: GameBoardModel
     var fullscreen: Bool = false
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmResign = false
+    @State private var confirmEnd = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -372,6 +374,18 @@ struct GamePanelView: View {
             RoundedRectangle(cornerRadius: fullscreen ? 0 : 10)
                 .stroke(fullscreen ? Color.clear : Color(white: 0.9), lineWidth: 1)
         )
+        .alert("确认认负？", isPresented: $confirmResign) {
+            Button("认负", role: .destructive) { model.send("/game resign") }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("认负后本局立刻结束，无法恢复。")
+        }
+        .alert("确认结束棋局？", isPresented: $confirmEnd) {
+            Button("结束", role: .destructive) { model.send("/game end") }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("结束后本局作废，无法恢复。")
+        }
     }
 
     @ViewBuilder
@@ -730,8 +744,8 @@ struct GamePanelView: View {
     private func commonActions(_ s: GameSnapshot) -> some View {
         chip("刷新") { model.send("/game show") }
         chip("席位") { model.send("/game seats") }
-        if s.isPlaying { chip("认负") { model.send("/game resign") } }
-        chip("结束") { model.send("/game end") }
+        if s.isPlaying { chip("认负") { confirmResign = true } }
+        chip("结束") { confirmEnd = true }
         if s.kind == .go || s.kind == .reversi {
             chip("停一手") { model.sendMove("pass") }
         }

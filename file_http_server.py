@@ -12,6 +12,7 @@ Provides:
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
 - Piano WS:        GET  /piano/<token>/ws        - WebSocket note push/broadcast (ticket auth)
 - Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
+- Music player:    GET  /music/<token>/...       - Playlist page + Range audio from the music drop folder
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
 - HTTPS support with auto-generated or provided certificates
@@ -40,6 +41,7 @@ from typing import Optional
 import canvas_http
 import clock_http
 import file_sharing
+import music_http
 import piano_http
 
 
@@ -1372,8 +1374,15 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
     
+    def do_HEAD(self):
+        if music_http.handle_music_get(self):
+            return
+        self.send_error(501, "Unsupported method ('HEAD')")
+
     def do_POST(self):
         """Handle key exchange and file upload."""
+        if music_http.handle_music_post(self):
+            return
         if piano_http.handle_piano_post(self):
             return
         if canvas_http.handle_canvas_post(self):
@@ -1720,6 +1729,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         if canvas_http.handle_canvas_websocket(self):
             return
         if clock_http.handle_clock_get(self):
+            return
+        if music_http.handle_music_get(self):
             return
         if piano_http.handle_piano_static_get(self):
             return

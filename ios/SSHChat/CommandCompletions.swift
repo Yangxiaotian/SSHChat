@@ -46,7 +46,7 @@ enum CommandCompletions {
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
         "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
-        "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
+        "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     ]
 
     private static let subs: [String: [String]] = [
@@ -63,6 +63,8 @@ enum CommandCompletions {
             "open", "read", "next", "n", "prev", "p", "page", "find", "search",
             "bookmarks", "bookmark", "reset", "close", "info", "show", "help",
         ],
+        "/music": ["play", "open", "listen", "find", "search", "help"],
+        "/song": ["play", "open", "listen", "find", "search", "help"],
         "/dict": ["en", "cn", "hh", "help", "英", "中", "汉"],
         "/dnd": ["on", "off"],
         "/lang": ["en", "zh", "english", "chinese", "中文", "英文"],

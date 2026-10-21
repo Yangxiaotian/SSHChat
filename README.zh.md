@@ -507,6 +507,8 @@ npm run build:portable
 | `/library` | 联邦并集书目（本机 + 对端 epub / txt / md / pdf）；书签以**藏书节点**为准，翻页自动保存 |
 | `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
 | `/library open <序号\|文件名[@节点]>` | 打开图书（对端书按页拉取，并从藏书节点恢复书签）；`next` / `prev` / `page` 翻页 |
+| `/music` 或 `/song` | 列出点歌曲目（服务端 `music` 目录的 mp3 / m4a / ogg / flac / wav） |
+| `/music play [序号\|文件名]` | 打开网页播放器听歌（省略则从第 1 首开始） |
 | `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
 | `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
 | `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
@@ -625,9 +627,21 @@ npm run build:portable
 
 Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。手机 App（Android / iOS）点 **+ → 图书馆** 可打开全屏原生阅读器：书目卡片、正文重排、左右点击/滑动翻页、字号与主题（日间/护眼/夜间）、书内搜索与进度条跳页；Android 还支持音量键翻页。
 
+### 点歌
+
+服务端目录（默认 `/opt/sshchat/music`，可用 `SSHCHAT_MUSIC_DIR` 覆盖）放置 **mp3 / m4a / aac / ogg / opus / flac / wav**。只扫这一层文件，不进子目录。播放走和 `/sendfile` 同一套 HTTP 网页（支持拖进度），不经过 SSH、也不做联邦整文件拷贝。
+
+| 命令 | 说明 |
+|------|------|
+| `/music` 或 `/song` | 曲目列表 |
+| `/music find <关键词>` | 按文件名筛选 |
+| `/music play [序号\|文件名]` | 打开网页播放器（图形/手机客户端会自动打开） |
+
+管理员把音频文件拷进 `music` 目录即可，无需重启。终端把播放网址复制到浏览器；Tk / Electron / 手机 App 点 **🎵 / + → 点歌** 或发送 `/music play`。
+
 ### 命令补全
 
-- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
+- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/music`、`/song`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
 - **Electron 图形客户端**：输入框输入 `/` 后出现命令提示，按 **Tab** 补全当前高亮项，**↑/↓** 切换候选项。
 
 ### RSS 新闻
@@ -713,6 +727,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `piano_sharing.py` / `piano_http.py` / `piano_samples/` | `/piano` 房间钢琴会话、网页与 MP3 采样 |
 | `clock_sharing.py` / `clock_http.py` | `/clock` 棋钟（Kindle 可用的无脚本网页） |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
+| `music.py` / `music_http.py` | `/music` 点歌曲库与网页播放器 |
 | `sshchat_gui.py` | 图形客户端源码 |
 | `easy_connect.py` | 按 JSON 调用 `ssh` |
 | `scripts/build-gui-packages.*` | 打 Windows / Unix 图形包 |

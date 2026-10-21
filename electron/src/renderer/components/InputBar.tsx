@@ -39,6 +39,8 @@ const COMMAND_KEYS = [
   { name: '/news', key: 'input.commands.news' },
   { name: '/library', key: 'input.commands.library' },
   { name: '/lib', key: 'input.commands.library' },
+  { name: '/music', key: 'input.commands.music' },
+  { name: '/song', key: 'input.commands.music' },
   { name: '/lang', key: 'input.commands.lang' },
   { name: '/dict', key: 'input.commands.dict' },
 ] as const;
@@ -87,6 +89,8 @@ const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
     'open', 'read', 'next', 'n', 'prev', 'p', 'page', 'find', 'search',
     'bookmarks', 'bookmark', 'reset', 'close', 'info', 'show', 'help',
   ],
+  '/music': ['play', 'open', 'listen', 'find', 'search', 'help'],
+  '/song': ['play', 'open', 'listen', 'find', 'search', 'help'],
   '/dict': ['en', 'cn', 'hh', 'help', '英', '中', '汉'],
   '/dnd': ['on', 'off'],
   '/lang': ['en', 'zh', 'english', 'chinese', '中文', '英文'],
@@ -691,6 +695,15 @@ export default function InputBar() {
           onClick={() => void sendQuickCommand('/clock')}
         >
           {t('input.quick.clock')}
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          disabled={!isConnected || isSending}
+          title={t('input.quick.musicTitle')}
+          onClick={() => void sendQuickCommand('/music play')}
+        >
+          {t('input.quick.music')}
         </button>
         <span className="quick-action-hint">{t('input.quick.pasteHint')}</span>
       </div>

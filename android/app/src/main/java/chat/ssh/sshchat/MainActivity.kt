@@ -247,6 +247,10 @@ class MainActivity : AppCompatActivity() {
                 binding.libraryReader.openCatalog()
             }
         }
+        binding.btnMusic.setOnClickListener {
+            hidePlusPanel()
+            startMusic()
+        }
         binding.btnHelp.setOnClickListener {
             hidePlusPanel()
             sendSlashCommand("/help")
@@ -625,6 +629,16 @@ class MainActivity : AppCompatActivity() {
         appendLine("[*] 正在开启房间钢琴…（/piano）")
         expectingOwnPiano = true
         client?.send("/piano")
+    }
+
+    private fun startMusic() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在打开点歌…（/music play）")
+        CommandUsage.record("/music play")
+        client?.send("/music play")
     }
 
     private fun cancelPadEditWait() {
@@ -1348,6 +1362,11 @@ class MainActivity : AppCompatActivity() {
                     MessageAlert.play(this)
                     appendLine("[*] 打开棋钟…")
                     startActivity(WebInviteActivity.clock(this, open.url))
+                }
+                SecureInvite.Kind.MUSIC -> {
+                    pendingFileMeta.reset()
+                    appendLine("[*] 打开点歌…")
+                    startActivity(WebInviteActivity.music(this, open.url, open.key))
                 }
             }
             return

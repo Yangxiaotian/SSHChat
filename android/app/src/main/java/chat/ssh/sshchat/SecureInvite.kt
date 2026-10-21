@@ -5,7 +5,7 @@ package chat.ssh.sshchat
  * GUI clients collapse (same idea as sshchat_gui._is_secure_invite_noise).
  */
 object SecureInvite {
-    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD, CLOCK }
+    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD, CLOCK, MUSIC }
 
     data class Open(val kind: Kind, val url: String, val key: String)
 
@@ -22,17 +22,17 @@ object SecureInvite {
     }
 
     private val guiOpen = Regex(
-        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$""",
+        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock|music)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$""",
         RegexOption.IGNORE_CASE,
     )
 
     private val bannerStart = Regex(
-        """^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)""",
+        """^(=+\s*)?(共享画布|房间钢琴|棋钟|点歌\s*=|Music\s*=|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)""",
         RegexOption.IGNORE_CASE,
     )
     private val bannerEnd = Regex("""^=+\s*$""")
     private val urlLabel = Regex(
-        """(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
+        """(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
         RegexOption.IGNORE_CASE,
     )
     private val keyLine = Regex(
@@ -46,8 +46,8 @@ object SecureInvite {
         RegexOption.IGNORE_CASE,
     )
     private val metaLine = Regex(
-        """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|""" +
-            """From|Sender|Filename|Size|Room|Recipients?)\s*[:：]""",
+        """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|正在播放|""" +
+            """From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]""",
         RegexOption.IGNORE_CASE,
     )
     private val instrBullet = Regex(
@@ -89,6 +89,7 @@ object SecureInvite {
             "piano" -> Kind.PIANO
             "upload" -> Kind.UPLOAD
             "clock" -> Kind.CLOCK
+            "music" -> Kind.MUSIC
             else -> return null
         }
         val key = m.groupValues.getOrNull(3).orEmpty().uppercase()

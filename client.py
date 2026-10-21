@@ -66,6 +66,15 @@ _XQ_BLACK_MARK = re.compile(r"\{\{B\}\}(.*?)\{\{/B\}\}")
 _RAW_ANSI_INLINE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
 _MANGLED_CSI_INLINE = re.compile(r"\?\[[\d;?]*[A-Za-z]")
 
+_MUSIC_SUBCOMMANDS = {
+    "play": None,
+    "open": None,
+    "listen": None,
+    "find": None,
+    "search": None,
+    "help": None,
+}
+
 _LIBRARY_SUBCOMMANDS = {
     "open": None,
     "read": None,
@@ -166,6 +175,8 @@ _TOP_COMMANDS = (
     "/news",
     "/library",
     "/lib",
+    "/music",
+    "/song",
     "/dict",
     "/clear",
     "/cls",
@@ -219,6 +230,8 @@ _SUBCOMMANDS_BY_CMD = {
     "/news": sorted(_NEWS_SUBCOMMANDS),
     "/library": sorted(_LIBRARY_SUBCOMMANDS),
     "/lib": sorted(_LIBRARY_SUBCOMMANDS),
+    "/music": sorted(_MUSIC_SUBCOMMANDS),
+    "/song": sorted(_MUSIC_SUBCOMMANDS),
     "/dict": sorted(_DICT_SUBCOMMANDS),
     "/dnd": sorted(_DND_SUBCOMMANDS),
     "/lang": sorted(_LANG_SUBCOMMANDS),
@@ -446,7 +459,7 @@ def _is_reading_content_line(payload: str) -> bool:
         return True
     if t.startswith("Usage:") or t.startswith("用法：") or t.startswith("用法:"):
         return True
-    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib") or t.startswith("/lang"):
+    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib") or t.startswith("/music") or t.startswith("/song") or t.startswith("/lang"):
         return True
     return False
 
@@ -1696,7 +1709,7 @@ def main():
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")
