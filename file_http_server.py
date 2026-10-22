@@ -129,6 +129,12 @@ def _trycloudflare_host_resolves(host: str, *, timeout: float = 1.5) -> bool:
         socket.setdefaulttimeout(prev)
 
 
+def is_quick_tunnel_host(host: str) -> bool:
+    """True for a Cloudflare Quick Tunnel hostname (not the API host)."""
+    h = (host or "").strip().lower().rstrip(".")
+    return bool(h) and h.endswith(".trycloudflare.com") and h != "api.trycloudflare.com"
+
+
 def live_cloudflare_base_url(
     path: Optional[str] = None,
 ) -> Optional[str]:
@@ -1991,20 +1997,32 @@ class FileHTTPServer:
 
         Live Cloudflare Quick Tunnel URLs (public_url file) win over env, so a
         boot-time tunnel refresh is visible without waiting for a process restart.
-        Never demote a *.trycloudflare.com host to a LAN IP — keep CF and prefer
-        the live latch so the hostname stays current.
+        A live latch is kept even when local DNS blips. Once the helper removes
+        that latch (tunnel down), leftover env *.trycloudflare.com is ignored so
+        /sendfile does not keep handing out a dead hostname.
         """
         live = live_cloudflare_base_url()
         if live:
             return live
-        port = self.port if self.public_port is None else self.public_port
-        if self.public_port == 443:
+        first = ""
+        for candidate in (self.domain, self.public_host):
+            if candidate and candidate.strip():
+                first = candidate.strip()
+                break
+        stale_cf = is_quick_tunnel_host(first)
+        if stale_cf or self.public_port is None:
+            port = self.port
+        else:
+            port = self.public_port
+        if stale_cf:
+            protocol = "https" if self.use_https else "http"
+        elif self.public_port == 443:
             protocol = "https"
         elif self.public_port == 80:
             protocol = "http"
         else:
             protocol = "https" if self.use_https else "http"
-        host = self._configured_public_host()
+        host = self._configured_public_host(allow_quick_tunnel=False)
         default_port = 443 if protocol == "https" else 80
         if port == default_port:
             return f"{protocol}://{host}"
@@ -2017,13 +2035,21 @@ class FileHTTPServer:
             host = (urlparse(live).hostname or "").strip()
             if host:
                 return host
-        return self._configured_public_host()
+        return self._configured_public_host(allow_quick_tunnel=False)
 
-    def _configured_public_host(self) -> str:
+    def _configured_public_host(self, *, allow_quick_tunnel: bool = True) -> str:
         for candidate in (self.domain, self.public_host):
-            if candidate and candidate.strip():
-                return candidate.strip()
+            if not candidate or not candidate.strip():
+                continue
+            host = candidate.strip()
+            if not allow_quick_tunnel and is_quick_tunnel_host(host):
+                continue
+            return host
         if self.host in ("", "0.0.0.0", "::", "*"):
+            return _detect_lan_ip()
+        # CF origin binds loopback; once the tunnel latch is gone, hand LAN
+        # clients a reachable IP instead of 127.0.0.1.
+        if not allow_quick_tunnel and self.host in ("127.0.0.1", "::1", "localhost"):
             return _detect_lan_ip()
         return self.host
 

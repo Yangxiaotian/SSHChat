@@ -2189,6 +2189,9 @@ class FilePublicReachabilityTests(unittest.TestCase):
     def test_trycloudflare_and_private(self) -> None:
         import file_http_server as fhs
 
+        self.assertTrue(fhs.is_quick_tunnel_host("abc.trycloudflare.com"))
+        self.assertFalse(fhs.is_quick_tunnel_host("api.trycloudflare.com"))
+        self.assertFalse(fhs.is_quick_tunnel_host("files.example.com"))
         self.assertTrue(fhs.is_externally_reachable_host("abc.trycloudflare.com"))
         self.assertTrue(
             fhs.is_externally_reachable_url("https://abc.trycloudflare.com")
@@ -2299,8 +2302,8 @@ class FilePublicReachabilityTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_trycloudflare_env_kept_without_live_file(self) -> None:
-        """Missing latch: keep configured CF host (do not demote to LAN IP)."""
+    def test_trycloudflare_env_ignored_without_live_file(self) -> None:
+        """Missing latch: leftover env Quick Tunnel host is already dead."""
         import tempfile
         import file_http_server as fhs
 
@@ -2309,6 +2312,7 @@ class FilePublicReachabilityTests(unittest.TestCase):
         os.unlink(path)  # missing latch
         with mock.patch.dict(os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}):
             with mock.patch.object(fhs, "_detect_lan_ip", return_value="10.0.0.9"):
+                fhs._live_cf_url_cache = (0.0, "", None)
                 srv = fhs.FileHTTPServer(
                     host="127.0.0.1",
                     port=8443,
@@ -2316,10 +2320,27 @@ class FilePublicReachabilityTests(unittest.TestCase):
                     public_host="env-host.trycloudflare.com",
                     public_port=443,
                 )
-                self.assertEqual(srv.get_public_host(), "env-host.trycloudflare.com")
-                self.assertEqual(
-                    srv.get_base_url(), "https://env-host.trycloudflare.com"
-                )
+                self.assertEqual(srv.get_public_host(), "10.0.0.9")
+                self.assertEqual(srv.get_base_url(), "http://10.0.0.9:8443")
+
+    def test_custom_domain_kept_without_live_file(self) -> None:
+        import tempfile
+        import file_http_server as fhs
+
+        fd, path = tempfile.mkstemp(suffix=".url")
+        os.close(fd)
+        os.unlink(path)
+        with mock.patch.dict(os.environ, {"SSHCHAT_CLOUDFLARED_URL_FILE": path}):
+            fhs._live_cf_url_cache = (0.0, "", None)
+            srv = fhs.FileHTTPServer(
+                host="127.0.0.1",
+                port=8443,
+                use_https=True,
+                public_host="files.example.com",
+                public_port=443,
+            )
+            self.assertEqual(srv.get_public_host(), "files.example.com")
+            self.assertEqual(srv.get_base_url(), "https://files.example.com")
 
 
 class FederationSendQueueTests(unittest.TestCase):

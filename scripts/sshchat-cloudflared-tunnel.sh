@@ -25,6 +25,12 @@ if getent group sshchat >/dev/null 2>&1; then
 fi
 LOG_FILE="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/public_url"
+# Local metrics only — do not health-check the public hostname (Clash fake-ip
+# makes *.trycloudflare.com look "up" while the edge connection is dead).
+METRICS_ADDR="${SSHCHAT_CLOUDFLARED_METRICS:-127.0.0.1:20241}"
+HEALTH_GRACE_SEC="${SSHCHAT_CF_HEALTH_GRACE_SEC:-45}"
+HEALTH_INTERVAL_SEC="${SSHCHAT_CF_HEALTH_INTERVAL_SEC:-15}"
+HEALTH_FAILS_NEED="${SSHCHAT_CF_HEALTH_FAILS:-4}"
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 
 restart_sshchat() {
@@ -156,7 +162,7 @@ echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL ed
 rm -f "$URL_FILE"
 
 run_tunnel() {
-  local -a args=(tunnel --no-autoupdate --url "$LOCAL_URL")
+  local -a args=(tunnel --no-autoupdate --url "$LOCAL_URL" --metrics "$METRICS_ADDR")
   case "$PROTOCOL" in
     ""|auto) ;;
     quic|http2|http2_quic|quic_http2) args+=(--protocol "$PROTOCOL") ;;
@@ -174,6 +180,37 @@ run_tunnel() {
   fi
 }
 
+metrics_ha_connections() {
+  curl -s --noproxy '*' --max-time 2 "http://${METRICS_ADDR}/metrics" 2>/dev/null \
+    | awk '/^cloudflared_tunnel_ha_connections/{print int($NF); found=1; exit} END{if(!found) exit 1}'
+}
+
+# cloudflared stays running with ha_connections=0 (Clash fake-ip / edge TLS EOF).
+# Drop the latch and kill it so launchd/systemd mint a new Quick Tunnel.
+watch_tunnel_health() {
+  local fails=0 n
+  sleep "$HEALTH_GRACE_SEC"
+  while true; do
+    sleep "$HEALTH_INTERVAL_SEC"
+    n=$(metrics_ha_connections || true)
+    case "$n" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [[ "$n" -ge 1 ]]; then
+      fails=0
+      continue
+    fi
+    fails=$((fails + 1))
+    echo "[sshchat-cloudflared] tunnel unhealthy ha_connections=$n fails=$fails/$HEALTH_FAILS_NEED" >&2
+    if [[ "$fails" -ge "$HEALTH_FAILS_NEED" ]]; then
+      echo "[sshchat-cloudflared] restarting dead Quick Tunnel (stop advertising stale URL)" >&2
+      rm -f "$URL_FILE"
+      pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
+      return 0
+    fi
+  done
+}
+
 # Quick Tunnel hostnames are random labels; never accept the API host from error logs.
 is_quick_tunnel_url() {
   local url="$1" host
@@ -182,6 +219,10 @@ is_quick_tunnel_url() {
   [[ "$host" != "api.trycloudflare.com" ]] || return 1
   return 0
 }
+
+watch_tunnel_health &
+WATCH_PID=$!
+trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
 
 run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
   echo "$line"
