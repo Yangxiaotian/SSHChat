@@ -455,6 +455,10 @@ def _is_reading_content_line(payload: str) -> bool:
         return True
     if re.match(r"^\d+\.\s+\[", t):
         return True
+    if re.match(r"^https?://\S+$", t, re.I):
+        return True
+    if t.startswith("news-link ") or t.startswith("可用：") or t.startswith("暂时没有取到新闻"):
+        return True
     if t.startswith("《") or "【图书馆】" in t or t.startswith("[图书馆]") or "[Library]" in t:
         return True
     if t.startswith("Usage:") or t.startswith("用法：") or t.startswith("用法:"):

@@ -3363,6 +3363,7 @@ def _send_news_item_fetched(conn, category: str, index_1based: int) -> None:
     link = _safe_http_url(item.get("link") or "")
     send_line(conn, f"[*] --- {label} 第 {index_1based} 条（网页正文）---\n")
     send_line(conn, f"[*] [{item['source']}] {item['title']}\n")
+    _send_news_original_link(conn, item)
     if not link:
         send_line(conn, "[*] RSS 未提供可用的 http(s) 链接，无法抓取正文。\n")
         return
@@ -3465,8 +3466,10 @@ def _get_news_items(category: str) -> list[dict[str, str]]:
             seen_titles.add(key)
             deduped.append(item)
 
-        with news_cache_lock:
-            news_cache[category] = (time.monotonic(), list(deduped))
+        # Don't cache a total miss — proxy blips would hide news for the TTL.
+        if deduped:
+            with news_cache_lock:
+                news_cache[category] = (time.monotonic(), list(deduped))
         return deduped
     finally:
         with news_cache_lock:
@@ -3491,6 +3494,13 @@ def _send_news_usage(conn) -> None:
 
 def _resolve_news_category(cat_token: str) -> Optional[str]:
     return NEWS_ALIASES.get(cat_token.lower()) or NEWS_ALIASES.get(cat_token)
+
+
+def _send_news_original_link(conn, item: dict[str, str]) -> None:
+    """One indented http(s) line so GUI clients can open the article as-is."""
+    link = _safe_http_url(item.get("link") or "")
+    if link:
+        send_line(conn, f"[*]    {link}\n")
 
 
 def _send_wrapped_news_body(conn, raw_body: str, max_chars: int) -> None:
@@ -3524,26 +3534,46 @@ def _send_news_item_detail(conn, category: str, index_1based: int) -> None:
     item = items[index_1based - 1]
     send_line(conn, f"[*] --- {label} 第 {index_1based} 条 ---\n")
     send_line(conn, f"[*] [{item['source']}] {item['title']}\n")
+    _send_news_original_link(conn, item)
     _send_wrapped_news_body(conn, item.get("body") or "", NEWS_DETAIL_MAX_CHARS)
 
 
-def _send_news_section(conn, category: str, limit: int) -> None:
+def _send_news_section(
+    conn, category: str, limit: int, items: Optional[list[dict[str, str]]] = None
+) -> None:
     label = NEWS_CATEGORIES[category]["label"]
     send_line(conn, f"[*] --- {label} ---\n")
-    items = _get_news_items(category)[:limit]
+    if items is None:
+        items = _get_news_items(category)
+    items = items[:limit]
     if not items:
         send_line(conn, "[*] 暂时没有取到新闻；稍后再试。\n")
         return
     for idx, item in enumerate(items, start=1):
         send_line(conn, f"[*] {idx}. [{item['source']}] {item['title']}\n")
         _send_wrapped_news_body(conn, item.get("body") or "", NEWS_BODY_MAX_CHARS)
+        _send_news_original_link(conn, item)
+
+
+def _send_news_all(conn, limit: int) -> None:
+    """Fetch categories in parallel and print each list as soon as it is ready."""
+    cats = ("cn", "world", "tech")
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(_get_news_items, cat): cat for cat in cats}
+        for fut in as_completed(futs):
+            cat = futs[fut]
+            try:
+                ready = fut.result() or []
+            except Exception as e:
+                print(f"news category error ({cat}): {e!r}")
+                ready = []
+            _send_news_section(conn, cat, limit, items=ready)
 
 
 def _handle_news(conn, payload: str) -> None:
     raw = payload[len("/news") :].strip()
     if not raw:
-        for category in ("cn", "world", "tech"):
-            _send_news_section(conn, category, NEWS_DEFAULT_ALL_LIMIT)
+        _send_news_all(conn, NEWS_DEFAULT_ALL_LIMIT)
         send_line(conn, "[*] 可用：/news 中文、/news 国际、/news 科技、/news all 5\n")
         send_line(conn, "[*] 单条更长提要：/news detail 中文 2（序号与上表一致；别名：详情）\n")
         send_line(conn, "[*] 抓取网页正文：/news fetch 中文 2（别名：全文；较慢，可能失败）\n")
@@ -3596,8 +3626,7 @@ def _handle_news(conn, payload: str) -> None:
 
     if topic in {"all", "全部"}:
         limit = _parse_news_limit(parts[1] if len(parts) > 1 else "", NEWS_DEFAULT_ALL_LIMIT)
-        for category in ("cn", "world", "tech"):
-            _send_news_section(conn, category, limit)
+        _send_news_all(conn, limit)
         return
 
     category = _resolve_news_category(topic)
@@ -5916,6 +5945,11 @@ def _maybe_refresh_canvas_invites_on_public_change(
     cur = (cur or "").strip().rstrip("/")
     prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
     if not cur:
+        # Latch dropped (probe failed / origin down). Remember the gap so the
+        # same trycloudflare hostname recovering still re-sends /piano invites.
+        if prev:
+            _LAST_CANVAS_PUBLIC_BASE = ""
+            _save_last_canvas_public_base("")
         return
     if cur == prev:
         _LAST_CANVAS_PUBLIC_BASE = cur
@@ -5957,6 +5991,10 @@ def _deliver_canvas_invites(
         if file_http is None:
             return
         base_url = (file_http.get_base_url() or "").strip()
+        if not file_http_server.is_externally_reachable_url(base_url):
+            waited = _wait_live_file_public(timeout=8.0)
+            if waited:
+                base_url = waited
     else:
         base_url = (session.host_base_url or "").strip()
         # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
@@ -6124,6 +6162,18 @@ def _local_file_public_ready() -> str:
     if not base or not file_http_server.is_externally_reachable_url(base):
         return ""
     return base
+
+
+def _wait_live_file_public(*, timeout: float = 8.0) -> str:
+    """Block briefly for the Quick Tunnel latch after a health drop/reconnect."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        base = _local_file_public_ready()
+        if base:
+            return base
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(0.4)
 
 
 def _try_claim_canvas_locally(
@@ -6770,6 +6820,10 @@ def _deliver_piano_invites(
         if file_http is None:
             return
         base_url = (file_http.get_base_url() or "").strip()
+        if not file_http_server.is_externally_reachable_url(base_url):
+            waited = _wait_live_file_public(timeout=8.0)
+            if waited:
+                base_url = waited
     else:
         base_url = (session.host_base_url or "").strip()
         if hub is not None and hub.enabled:
@@ -7286,6 +7340,29 @@ def _handle_piano(conn, sender: str, payload: str) -> None:
             f"[*] {sender} 关闭了共享钢琴。\n".encode("utf-8"),
         )
         return
+
+    if not _local_file_public_ready():
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(
+                conn,
+                "[*] Public Cloudflare tunnel is recovering; waiting a few seconds…\n",
+            )
+        else:
+            send_line(conn, "[*] 公网隧道正在恢复，请稍候…\n")
+        if not _wait_live_file_public(timeout=10.0):
+            if loc == "en":
+                send_line(
+                    conn,
+                    "[*] Public tunnel is still down. The invite may not open; "
+                    "a fresh link is sent automatically when it recovers.\n",
+                )
+            else:
+                send_line(
+                    conn,
+                    "[*] 公网隧道暂不可用，发出的链接可能打不开；"
+                    "恢复后会自动重发邀请。\n",
+                )
 
     recipients: list[str] = []
     room_name: Optional[str] = None
@@ -11060,7 +11137,7 @@ def run_server() -> int:
                 except Exception:
                     last = ""
                 while not _shutdown_requested:
-                    time.sleep(30)
+                    time.sleep(10)
                     if _shutdown_requested:
                         break
                     try:

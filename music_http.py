@@ -303,7 +303,22 @@ def handle_music_post(handler: "BaseHTTPRequestHandler") -> bool:
     if key != session.key:
         handler._send_error_json(403, _TEXTS[loc]["bad_key"])  # type: ignore[attr-defined]
         return True
-    handler._send_json_response(200, {"ok": True})  # type: ignore[attr-defined]
+    songs = music.list_songs(music.default_music_dir())
+    handler._send_json_response(  # type: ignore[attr-defined]
+        200,
+        {
+            "ok": True,
+            "start": int(session.start_index or 1),
+            "songs": [
+                {
+                    "name": s.name,
+                    "size": music.format_size(s.size_bytes),
+                    "bytes": int(s.size_bytes),
+                }
+                for s in songs
+            ],
+        },
+    )
     return True
 
 

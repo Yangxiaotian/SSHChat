@@ -37,6 +37,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import chat.ssh.sshchat.databinding.ActivityMainBinding
 import chat.ssh.sshchat.games.GameParser
 import chat.ssh.sshchat.library.LibraryParser
+import chat.ssh.sshchat.news.NewsParser
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -64,6 +65,11 @@ class MainActivity : AppCompatActivity() {
     private val libraryFlush = Runnable {
         val events = libraryParser.flush()
         if (events.isNotEmpty()) binding.libraryReader.handle(events)
+    }
+    private val newsParser = NewsParser()
+    private val newsFlush = Runnable {
+        val events = newsParser.flush()
+        if (events.isNotEmpty()) binding.newsPanel.handle(events)
     }
     private var voiceRecorder: VoiceRecorder? = null
     /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
@@ -244,7 +250,19 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
             } else {
                 CommandUsage.record("/library")
+                binding.newsPanel.hide()
                 binding.libraryReader.openCatalog()
+            }
+        }
+        binding.btnNews.setOnClickListener {
+            hidePlusPanel()
+            if (client == null) {
+                Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            } else {
+                CommandUsage.record("/news")
+                binding.libraryReader.hide()
+                newsParser.reset()
+                binding.newsPanel.open()
             }
         }
         binding.btnMusic.setOnClickListener {
@@ -288,12 +306,25 @@ class MainActivity : AppCompatActivity() {
                 true
             }
         }
+        binding.newsPanel.onSend = { cmd ->
+            val c = client
+            if (c == null) {
+                Toast.makeText(this, "连接已断开，请稍候重连", Toast.LENGTH_SHORT).show()
+                false
+            } else {
+                newsParser.reset()
+                c.send(cmd)
+                true
+            }
+        }
         binding.libraryReader.onChromeChanged = { visible, color, light ->
             applyReaderChrome(visible, color, light)
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (binding.libraryReader.handleBack()) {
+                if (binding.newsPanel.handleBack()) {
+                    return
+                } else if (binding.libraryReader.handleBack()) {
                     return
                 } else if (binding.gamePanel.isMaximized()) {
                     binding.gamePanel.setMaximized(false)
@@ -955,6 +986,7 @@ class MainActivity : AppCompatActivity() {
         client?.disconnect()
         client = null
         libraryParser.reset()
+        newsParser.reset()
         if (clearChat) {
             binding.chatLog.removeAllViews()
             appendLine("[*] connecting…")
@@ -1044,7 +1076,9 @@ class MainActivity : AppCompatActivity() {
         client?.disconnect()
         client = null
         libraryParser.reset()
+        newsParser.reset()
         binding.libraryReader.reset()
+        binding.newsPanel.reset()
         setConnected(false)
         binding.tvStatus.text = "未连接"
     }
@@ -1676,6 +1710,7 @@ class MainActivity : AppCompatActivity() {
     /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
     private fun appendBoardLine(text: String) {
         if (feedLibrary(text)) return
+        if (feedNews(text)) return
         // Feed UI board panel (silent). Keep monospace dump in chat as fallback.
         binding.gamePanel.myName = binding.etUsername.text?.toString()?.trim().orEmpty()
         binding.gamePanel.feedLine(text)
@@ -1733,6 +1768,16 @@ class MainActivity : AppCompatActivity() {
         mainHandler.removeCallbacks(libraryFlush)
         if (r.libraryLine) mainHandler.postDelayed(libraryFlush, 350)
         return r.libraryLine && reader.isActive()
+    }
+
+    /** @return true when the line belongs to the open news panel and must stay out of chat. */
+    private fun feedNews(text: String): Boolean {
+        val panel = binding.newsPanel
+        val r = newsParser.feed(text)
+        if (r.events.isNotEmpty()) panel.handle(r.events)
+        mainHandler.removeCallbacks(newsFlush)
+        if (r.newsLine) mainHandler.postDelayed(newsFlush, 350)
+        return r.newsLine && panel.isActive()
     }
 
     private fun applyReaderChrome(visible: Boolean, color: Int, light: Boolean) {
@@ -1830,6 +1875,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.isEnabled = on
         binding.btnPad.isEnabled = on
         binding.btnLibrary.isEnabled = on
+        binding.btnNews.isEnabled = on
         binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
@@ -1847,6 +1893,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.alpha = iconAlpha
         binding.btnPad.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
+        binding.btnNews.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE

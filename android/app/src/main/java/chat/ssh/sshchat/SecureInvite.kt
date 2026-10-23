@@ -112,13 +112,21 @@ object SecureInvite {
     }
 
     /** Hide invite boilerplate; keep normal chat. */
+    private fun looksLikeInviteUrl(url: String): Boolean {
+        val u = url.lowercase()
+        return "/download/" in u || "/upload/" in u || "/canvas/" in u ||
+            "/piano/" in u || "/clock/" in u || "/music/" in u
+    }
+
     fun isInviteNoise(line: String): Boolean {
         val t = normalize(line)
         if (t.isEmpty()) return true
         if (parseGuiOpen(t) != null) return true
         if (bannerStart.containsMatchIn(t) || bannerEnd.matches(t)) return true
         if (urlLabel.containsMatchIn(t) || keyLine.matches(t)) return true
-        if (httpOnly.matches(t)) return true
+        // Bare http(s) lines are also RSS original URLs for /news. Only hide
+        // file/canvas/piano/clock/music invite URLs; keep article links.
+        if (httpOnly.matches(t) && looksLikeInviteUrl(t)) return true
         if (t.matches(Regex("""^(说明|Instructions?)\s*:?\s*$""", RegexOption.IGNORE_CASE))) {
             return true
         }

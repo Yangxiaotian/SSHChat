@@ -88,6 +88,7 @@ class MusicHttpTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         payload = b"ABCDEFGHIJ" * 100
         (self.dir / "track.mp3").write_bytes(payload)
+        (self.dir / "星际穿越(Cornfield Chase).mp3").write_bytes(payload)
         self.payload = payload
         self.prev = os.environ.get("SSHCHAT_MUSIC_DIR")
         os.environ["SSHCHAT_MUSIC_DIR"] = str(self.dir)
@@ -127,6 +128,9 @@ class MusicHttpTests(unittest.TestCase):
         ok.json_body = {"key": sess.key}
         self.assertTrue(music_http.handle_music_post(ok))
         self.assertEqual(ok.status, 200)
+        self.assertTrue(ok.json_out.get("ok"))
+        names = [s["name"] for s in ok.json_out.get("songs") or []]
+        self.assertIn("track.mp3", names)
 
         full = _FakeHandler(f"/music/{sess.token}/file/track.mp3")
         music_http.handle_music_get(full)
@@ -134,6 +138,16 @@ class MusicHttpTests(unittest.TestCase):
         self.assertEqual(full.body.getvalue(), self.payload)
         self.assertIn(("Content-Type", "audio/mpeg"), full.sent_headers)
         self.assertIn(("Content-Length", "1000"), full.sent_headers)
+
+        from urllib.parse import quote
+
+        cjk = "星际穿越(Cornfield Chase).mp3"
+        encoded = _FakeHandler(
+            f"/music/{sess.token}/file/{quote(cjk, safe='')}"
+        )
+        music_http.handle_music_get(encoded)
+        self.assertEqual(encoded.status, 200)
+        self.assertEqual(encoded.body.getvalue(), self.payload)
 
     def test_invite_includes_gui_open_music(self):
         song = music.SongEntry(1, "a.mp3", "mp3", 12, Path("a.mp3"))

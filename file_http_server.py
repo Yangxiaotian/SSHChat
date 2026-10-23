@@ -1730,6 +1730,16 @@ class FileTransferHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle the upload/download pages and ticketed file fetches."""
+        parsed_path = urlparse(self.path).path.rstrip("/") or "/"
+        if parsed_path in ("/healthz", "/health"):
+            body = b"ok\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if piano_http.handle_piano_websocket(self):
             return
         if canvas_http.handle_canvas_websocket(self):

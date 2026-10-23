@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import WebKit
 
@@ -11,6 +12,9 @@ struct WebInviteView: View {
     var allowLandscape: Bool = false
     /// Chess clock has no unlock key.
     var isClock: Bool = false
+    private var isMusic: Bool {
+        url.lowercased().contains("/music/")
+    }
     @Environment(\.dismiss) private var dismiss
     @State private var maximized = false
 
@@ -29,6 +33,9 @@ struct WebInviteView: View {
             if allowLandscape {
                 OrientationLock.setLandscape(true)
             }
+            if isMusic {
+                PlaybackAudio.start()
+            }
         }
         .onDisappear {
             if allowLandscape {
@@ -44,6 +51,7 @@ struct WebInviteView: View {
             url: url,
             key: key.uppercased(),
             isClock: isClock,
+            keepsAudio: isMusic,
             onClose: { dismiss() }
         )
         .ignoresSafeArea()
@@ -57,6 +65,7 @@ struct WebInviteView: View {
                 url: url,
                 key: key.uppercased(),
                 isClock: isClock,
+                keepsAudio: isMusic,
                 onClose: { dismiss() }
             )
                 .ignoresSafeArea(edges: maximized ? .all : .bottom)
@@ -113,15 +122,17 @@ private struct KeyInjectingWebView: UIViewRepresentable {
     let url: String
     let key: String
     var isClock: Bool = false
+    var keepsAudio: Bool = false
     var onClose: () -> Void = {}
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(key: key, isClock: isClock, onClose: onClose)
+        Coordinator(key: key, isClock: isClock, keepsAudio: keepsAudio, onClose: onClose)
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         let safe = Self.jsStringLiteral(key)
         // Always expose close(); canvas/piano also get key + saveBlob.
@@ -176,6 +187,9 @@ private struct KeyInjectingWebView: UIViewRepresentable {
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "sshchatSave")
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "sshchatClose")
+        if coordinator.keepsAudio {
+            PlaybackAudio.stop()
+        }
     }
 
     private static func jsStringLiteral(_ value: String) -> String {
@@ -187,13 +201,15 @@ private struct KeyInjectingWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let key: String
         let isClock: Bool
+        let keepsAudio: Bool
         var onClose: () -> Void
         private var unlockDone = false
         weak var webView: WKWebView?
 
-        init(key: String, isClock: Bool, onClose: @escaping () -> Void) {
+        init(key: String, isClock: Bool, keepsAudio: Bool, onClose: @escaping () -> Void) {
             self.key = key
             self.isClock = isClock
+            self.keepsAudio = keepsAudio
             self.onClose = onClose
             super.init()
             NotificationCenter.default.addObserver(
@@ -357,5 +373,22 @@ private struct KeyInjectingWebView: UIViewRepresentable {
             }
             return vc
         }
+    }
+}
+
+enum PlaybackAudio {
+    static func start() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetoothA2DP])
+            try session.setActive(true)
+        } catch {
+            // page can still play in-foreground without a session
+        }
+        UIApplication.shared.beginReceivingRemoteControlEvents()
+    }
+
+    static func stop() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

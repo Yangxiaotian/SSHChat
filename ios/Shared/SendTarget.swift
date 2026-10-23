@@ -245,8 +245,8 @@ enum ChatLineParsers {
     ]
 
     /// Bare CSI fragment. No-param: only `ABCDHJK`. Tag-colliding finals (`T`/`S`/…) need digits.
-    /// Lookahead keeps `[root]` / `[TXT]` / `[HINT]`.
-    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"#
+    /// Lookahead keeps `[root]` / `[TXT]` / `[HINT]` / `[Ars Technica]`.
+    private static let bareCsiFragment = #"(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_ \p{Han}./&'-]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_ \p{Han}./&'-]*\]))"#
     /// Incomplete CSI when the final byte was lost (e.g. `[2` / `[0;` before `[*]`).
     private static let incompleteCsi = #"(?:\[[0-9;?]+)"#
     /** CSI crumbs before [*] / [# when PTY mangles ESC → `?` (e.g. `?[2K`, bare `[2K` / `[K`). */

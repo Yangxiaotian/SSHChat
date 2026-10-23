@@ -421,8 +421,11 @@ probe_public_url() {
   # Verify Quick Tunnel hostname has public DNS *and* answers HTTP.
   # cloudflared may print a URL whose DNS is NXDOMAIN (clients cannot open it)
   # while the connector still looks "Registered" — reject those.
+  # Clash TUN fake-ip (198.18.x) makes direct curl TLS fail; prefer mixed-port.
   local url="$1"
   local host code ip
+  local proxy="${SSHCHAT_CF_PROBE_PROXY:-http://127.0.0.1:7897}"
+  local base="${url%/}"
   host="${url#https://}"
   host="${host%%/*}"
 
@@ -433,6 +436,28 @@ probe_public_url() {
     return 2
   fi
 
+  _probe_http() {
+    local extra_code
+    extra_code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$@" 2>/dev/null || echo "000")
+    [[ "$extra_code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]] && { echo "$extra_code"; return 0; }
+    echo "$extra_code"
+    return 1
+  }
+
+  if code=$(_probe_http -x "$proxy" "${base}/healthz"); then
+    echo "info: probe ok http=$code via proxy $url/healthz"
+    return 0
+  fi
+  if code=$(_probe_http -x "$proxy" "${base}/"); then
+    echo "info: probe ok http=$code via proxy $url/"
+    return 0
+  fi
+
+  code=$(curl --noproxy '*' -sS -o /dev/null -w "%{http_code}" --max-time 20 "${base}/healthz" 2>/dev/null || echo "000")
+  if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
+    echo "info: probe ok http=$code dns=$ip $url/healthz"
+    return 0
+  fi
   code=$(curl --noproxy '*' -sS -o /dev/null -w "%{http_code}" --max-time 20 "$url/" 2>/dev/null || echo "000")
   if [[ "$code" =~ ^(200|301|302|303|307|308|401|403|404)$ ]]; then
     echo "info: probe ok http=$code dns=$ip $url/"

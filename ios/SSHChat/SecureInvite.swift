@@ -110,7 +110,12 @@ enum SecureInvite {
         if t.range(of: #"^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*[A-Z0-9]{6}\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true
         }
-        if t.range(of: #"^https?://\S+$"#, options: [.regularExpression, .caseInsensitive]) != nil { return true }
+        if t.range(of: #"^https?://\S+$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            let u = t.lowercased()
+            let invite = u.contains("/download/") || u.contains("/upload/") || u.contains("/canvas/")
+                || u.contains("/piano/") || u.contains("/clock/") || u.contains("/music/")
+            if invite { return true }
+        }
         if t.range(of: #"^(说明|Instructions?)\s*:?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil { return true }
         if t.range(of: #"^\d+\.\s+(打开|选择|输入|上传|下载|文件只能|每个接收|图形客户端|Enter|Open|Click|Choose|Select|Upload|Download|Preview|This page|Each recipient|The key|Verify)"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return true

@@ -45,7 +45,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/later list` | List your pending reminders |
 | `/later cancel <n>` | Cancel one |
 | `/game help` | Mini-game help |
-| `/news` | RSS headlines |
+| `/news` | RSS headlines, summaries, and original links (mobile: + → News opens the article URL) |
 | `/library` | Browse books |
 | `/music` | List songs in the server music folder |
 | `/music play [n]` | Play a song (web player; alias `/song`) |

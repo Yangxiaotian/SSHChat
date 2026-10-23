@@ -25,12 +25,15 @@ if getent group sshchat >/dev/null 2>&1; then
 fi
 LOG_FILE="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/public_url"
-# Local metrics only — do not health-check the public hostname (Clash fake-ip
-# makes *.trycloudflare.com look "up" while the edge connection is dead).
+LAST_URL_FILE="$STATE_DIR/last_url"
+# Local metrics alone are not enough: Clash TUN fake-ip can keep
+# ha_connections>=1 while phones still get a dead trycloudflare hostname.
+# Probe the public URL via Clash HTTP proxy when present; never through TUN.
 METRICS_ADDR="${SSHCHAT_CLOUDFLARED_METRICS:-127.0.0.1:20241}"
 HEALTH_GRACE_SEC="${SSHCHAT_CF_HEALTH_GRACE_SEC:-45}"
-HEALTH_INTERVAL_SEC="${SSHCHAT_CF_HEALTH_INTERVAL_SEC:-15}"
-HEALTH_FAILS_NEED="${SSHCHAT_CF_HEALTH_FAILS:-4}"
+HEALTH_INTERVAL_SEC="${SSHCHAT_CF_HEALTH_INTERVAL_SEC:-10}"
+HEALTH_FAILS_NEED="${SSHCHAT_CF_HEALTH_FAILS:-2}"
+PROBE_PROXY="${SSHCHAT_CF_PROBE_PROXY:-http://127.0.0.1:7897}"
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 
 restart_sshchat() {
@@ -79,7 +82,7 @@ file_stat_mode() {
 
 update_public_host() {
   # Split locals: with set -u, `local a=1 b=$a` treats a as unbound.
-  local url="$1"
+  local url="${1:-}"
   local host="${url#https://}"
   host="${host%%/*}"
   printf '%s\n' "$url" >"$URL_FILE"
@@ -123,7 +126,14 @@ ENV
   chown "$owner" "$ENV_FILE" 2>/dev/null || true
   chmod "$mode" "$ENV_FILE" 2>/dev/null || true
   echo "[sshchat-cloudflared] updated env -> $host"
-  restart_sshchat
+  # Live public_url latch is enough for a running server; bouncing it takes
+  # origin :8443 down and makes /piano return 502/1033 through Cloudflare.
+  if ! pgrep -f "$PREFIX/server.py" >/dev/null 2>&1; then
+    echo "[sshchat-cloudflared] sshchat not running; starting"
+    restart_sshchat
+  else
+    echo "[sshchat-cloudflared] sshchat already running (not bouncing)"
+  fi
 }
 
 port_ready() {
@@ -185,23 +195,137 @@ metrics_ha_connections() {
     | awk '/^cloudflared_tunnel_ha_connections/{print int($NF); found=1; exit} END{if(!found) exit 1}'
 }
 
-# cloudflared stays running with ha_connections=0 (Clash fake-ip / edge TLS EOF).
-# Drop the latch and kill it so launchd/systemd mint a new Quick Tunnel.
+http_code() {
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "$@" 2>/dev/null || echo 000
+}
+
+probe_ok_code() {
+  [[ "$1" =~ ^(200|301|302|303|307|308|401|403|404) ]]
+}
+
+origin_ok() {
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 2 \
+    "http://127.0.0.1:${FILE_HTTP_PORT}/healthz" 2>/dev/null || echo 000)
+  probe_ok_code "$code" && return 0
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 2 \
+    "http://127.0.0.1:${FILE_HTTP_PORT}/" 2>/dev/null || echo 000)
+  probe_ok_code "$code"
+}
+
+proxy_usable() {
+  local p="${PROBE_PROXY}" code
+  [[ -n "$p" ]] || return 1
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -x "$p" \
+    https://1.1.1.1/cdn-cgi/trace 2>/dev/null || echo 000)
+  [[ "$code" =~ ^(200|301|302) ]]
+}
+
+is_clash_fake_ip_host() {
+  local host="$1" ip
+  [[ -n "$host" ]] || return 1
+  ip=$(dig +short A "$host" 2>/dev/null | awk '/^198\.18\./{print; exit}')
+  [[ -n "$ip" ]]
+}
+
+# Authoritative when Clash mixed-port works. Direct curl is poisoned by TUN
+# fake-ip (TLS SYSCALL to 198.18.x) even though phones on real DNS are fine.
+probe_public_url() {
+  local url="$1" base host code
+  [[ -n "$url" ]] || return 1
+  base="${url%/}"
+  host="${base#https://}"
+  host="${host%%/*}"
+  if proxy_usable; then
+    code=$(http_code -x "$PROBE_PROXY" "${base}/healthz")
+    probe_ok_code "$code" && return 0
+    code=$(http_code -x "$PROBE_PROXY" "${base}/")
+    probe_ok_code "$code" && return 0
+    return 1
+  fi
+  if is_clash_fake_ip_host "$host"; then
+    # Cannot verify from this host; caller should fall back to ha_connections.
+    return 2
+  fi
+  code=$(http_code --noproxy '*' "${base}/healthz")
+  probe_ok_code "$code" && return 0
+  code=$(http_code --noproxy '*' "${base}/")
+  probe_ok_code "$code" && return 0
+  return 1
+}
+
+read_url_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  tr -d '[:space:]' <"$path"
+}
+
+# Write last_url always; only advertise public_url after a real probe (or HA
+# fallback when Clash fake-ip makes HTTP untestable from this machine).
+advertise_if_healthy() {
+  local url="${1:-}" rc=0
+  [[ -n "$url" ]] || return 1
+  printf '%s\n' "$url" >"$LAST_URL_FILE"
+  if getent group sshchat >/dev/null 2>&1; then
+    chgrp sshchat "$LAST_URL_FILE" 2>/dev/null || true
+    chmod 664 "$LAST_URL_FILE" 2>/dev/null || true
+  fi
+  probe_public_url "$url" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    update_public_host "$url"
+    return 0
+  fi
+  if [[ "$rc" -eq 2 ]]; then
+    local n
+    n=$(metrics_ha_connections || echo 0)
+    if [[ "${n:-0}" -ge 1 ]]; then
+      echo "[sshchat-cloudflared] WARN: Clash fake-ip; skip public HTTP probe, advertising $url" >&2
+      update_public_host "$url"
+      return 0
+    fi
+  fi
+  echo "[sshchat-cloudflared] not advertising yet (probe failed rc=$rc): $url" >&2
+  rm -f "$URL_FILE"
+  return 1
+}
+
+# Drop the latch as soon as the public hostname stops answering so /piano
+# cannot keep handing out a dead trycloudflare URL. Kill cloudflared only
+# after consecutive failures so a brief edge blip can reconnect in place.
 watch_tunnel_health() {
-  local fails=0 n
+  local fails=0 n url rc
   sleep "$HEALTH_GRACE_SEC"
   while true; do
     sleep "$HEALTH_INTERVAL_SEC"
     n=$(metrics_ha_connections || true)
+    url=$(read_url_file "$LAST_URL_FILE" 2>/dev/null || read_url_file "$URL_FILE" 2>/dev/null || true)
+    if ! origin_ok; then
+      echo "[sshchat-cloudflared] origin :${FILE_HTTP_PORT} down; keep tunnel, drop latch" >&2
+      rm -f "$URL_FILE"
+      continue
+    fi
+    rc=0
+    if [[ -n "$url" ]]; then
+      probe_public_url "$url" || rc=$?
+    else
+      rc=1
+    fi
     case "$n" in
-      ''|*[!0-9]*) continue ;;
+      ''|*[!0-9]*) n=0 ;;
     esac
-    if [[ "$n" -ge 1 ]]; then
+    if [[ "$n" -ge 1 && ( "$rc" -eq 0 || "$rc" -eq 2 ) ]]; then
       fails=0
+      if [[ -n "$url" && ! -f "$URL_FILE" ]]; then
+        echo "[sshchat-cloudflared] public probe recovered; re-advertise $url" >&2
+        advertise_if_healthy "$url" || true
+      fi
       continue
     fi
     fails=$((fails + 1))
-    echo "[sshchat-cloudflared] tunnel unhealthy ha_connections=$n fails=$fails/$HEALTH_FAILS_NEED" >&2
+    echo "[sshchat-cloudflared] tunnel unhealthy ha=$n probe_rc=$rc fails=$fails/$HEALTH_FAILS_NEED url=${url:-none}" >&2
+    if [[ "$fails" -ge 1 ]]; then
+      rm -f "$URL_FILE"
+    fi
     if [[ "$fails" -ge "$HEALTH_FAILS_NEED" ]]; then
       echo "[sshchat-cloudflared] restarting dead Quick Tunnel (stop advertising stale URL)" >&2
       rm -f "$URL_FILE"
@@ -233,9 +357,19 @@ run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
     fi
     old_url=""
     [[ -f "$URL_FILE" ]] && old_url=$(tr -d '[:space:]' <"$URL_FILE" || true)
-    # Update on first sight *or* if cloudflared ever prints a different hostname.
+    # First sight, hostname change, or latch was dropped after a failed probe.
     if [[ "$old_url" != "$new_url" ]]; then
-      update_public_host "$new_url"
+      advertised=0
+      for _try in 1 2 3 4 5 6; do
+        if advertise_if_healthy "$new_url"; then
+          advertised=1
+          break
+        fi
+        sleep 2
+      done
+      if [[ "$advertised" -eq 0 ]]; then
+        echo "[sshchat-cloudflared] URL minted but not yet publicly reachable; health watcher will retry" >&2
+      fi
     fi
   fi
 done
