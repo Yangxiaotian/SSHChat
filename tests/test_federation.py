@@ -1181,6 +1181,41 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertTrue(any(l.startswith("lcatalog\tnode-b\t") for l in peer_c.lines))
         self.assertFalse(any(l.startswith("lcatalog\t") for l in peer_b.lines))
 
+    def test_mcatalog_stores_and_fanouts(self) -> None:
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        peer_b = FakeLink("node-b")
+        peer_c = FakeLink("node-c")
+        hub._peers["node-b"] = peer_b
+        hub._peers["node-c"] = peer_c
+        songs = [{"name": "shared.mp3", "ext": "mp3", "size_bytes": 12}]
+        blob = base64.b64encode(
+            json.dumps(songs, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"mcatalog\tnode-b\t{blob}\t1"
+        hub._on_peer_line("node-b", line)
+        self.assertEqual(
+            hub.remote_music_catalogs()["node-b"][0]["name"], "shared.mp3"
+        )
+        self.assertTrue(any(l.startswith("mcatalog\tnode-b\t") for l in peer_c.lines))
+        self.assertFalse(any(l.startswith("mcatalog\t") for l in peer_b.lines))
+
     def test_gcat_fanout_and_applies_lww(self) -> None:
         class FakeLink:
             def __init__(self, node_id: str) -> None:
@@ -1296,6 +1331,70 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(results[-1][0], "node-owner")
         self.assertEqual(results[-1][1], "req1")
         self.assertEqual(results[-1][2]["text"], "hello")
+
+    def test_mplay_request_and_reply(self) -> None:
+        requests: list[tuple] = []
+        results: list[tuple] = []
+        done = threading.Event()
+
+        class FakeLink:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        def on_req(*a):
+            requests.append(a)
+            done.set()
+
+        owner = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        owner.enabled = True
+        owner.node_id = "node-owner"
+        owner.on_music_play_request = on_req
+        owner._peers["node-reader"] = FakeLink("node-reader")
+
+        reader = federation.FederationHub(
+            12346,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        reader.enabled = True
+        reader.node_id = "node-reader"
+        reader.on_music_play_result = lambda *a: results.append(a)
+        reader._peers["node-owner"] = FakeLink("node-owner")
+        reader._routes["node-owner"] = "node-owner"
+
+        self.assertTrue(reader.request_music_play("node-owner", "req1", "a.mp3", nick="ada"))
+        req_line = reader._peers["node-owner"].lines[-1].rstrip("\n")
+        owner._on_peer_line("node-reader", req_line)
+        self.assertTrue(done.wait(2.0), "mplay handler thread did not run")
+        self.assertEqual(requests[-1][:4], ("node-owner", "req1", "a.mp3", "node-reader"))
+        self.assertEqual(requests[-1][4], "ada")
+
+        payload = {
+            "ok": True,
+            "url": "https://host.example/music/tok",
+            "key": "ABC123",
+            "name": "a.mp3",
+        }
+        owner.reply_music_play("node-reader", "req1", payload)
+        ok_line = owner._peers["node-reader"].lines[-1].rstrip("\n")
+        reader._on_peer_line("node-owner", ok_line)
+        self.assertEqual(results[-1][0], "node-owner")
+        self.assertEqual(results[-1][1], "req1")
+        self.assertEqual(results[-1][2]["key"], "ABC123")
 
     def test_lpage_resume_and_save_flags_reach_owner(self) -> None:
         got: list[tuple] = []
@@ -1593,6 +1692,26 @@ class FederationServerIntegrationTests(unittest.TestCase):
             with server._library_page_waiters_lock:
                 server._library_page_waiters.pop(req_id, None)
 
+    def test_peer_down_fails_pending_music_play_waiters(self) -> None:
+        event = threading.Event()
+        req_id = "song123"
+        with server._music_play_waiters_lock:
+            server._music_play_waiters[req_id] = {
+                "event": event,
+                "payload": None,
+            }
+        try:
+            server._fed_on_peer_event("down", "Mathematics.local", "node-a")
+            self.assertTrue(event.is_set())
+            with server._music_play_waiters_lock:
+                payload = server._music_play_waiters[req_id]["payload"]
+            self.assertIsInstance(payload, dict)
+            self.assertFalse(payload.get("ok"))
+            self.assertIn("Mathematics.local", str(payload.get("error") or ""))
+        finally:
+            with server._music_play_waiters_lock:
+                server._music_play_waiters.pop(req_id, None)
+
     def test_sync_library_catalog_fanout(self) -> None:
         class FakeLink:
             def __init__(self) -> None:
@@ -1623,6 +1742,37 @@ class FederationServerIntegrationTests(unittest.TestCase):
         self.assertEqual(parts[1], "node-a")
         books = json.loads(base64.b64decode(parts[2]).decode("utf-8"))
         self.assertEqual(books[0]["name"], "local.md")
+
+    def test_sync_music_catalog_fanout(self) -> None:
+        class FakeLink:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def send_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        hub = federation.FederationHub(
+            12345,
+            server.lock,
+            lambda r, m, p: None,
+            lambda r, m: None,
+            lambda t, f, x: None,
+            lambda: [],
+        )
+        hub.enabled = True
+        hub.node_id = "node-a"
+        hub.get_local_music = lambda: [
+            {"name": "local.mp3", "ext": "mp3", "size_bytes": 8}
+        ]
+        link = FakeLink()
+        hub._peers["node-b"] = link
+        hub.sync_music_catalog()
+        self.assertEqual(len(link.lines), 1)
+        parts = link.lines[0].rstrip("\n").split("\t")
+        self.assertEqual(parts[0], "mcatalog")
+        self.assertEqual(parts[1], "node-a")
+        songs = json.loads(base64.b64decode(parts[2]).decode("utf-8"))
+        self.assertEqual(songs[0]["name"], "local.mp3")
 
     def test_lmarks_fanout_and_handler(self) -> None:
         got: list[tuple] = []
@@ -2466,6 +2616,7 @@ class FederationSendQueueTests(unittest.TestCase):
     def test_is_droppable_frame_kinds(self) -> None:
         self.assertTrue(federation._is_droppable_frame(b"presence\tx\t[]\n"))
         self.assertTrue(federation._is_droppable_frame(b"lcatalog\tx\tYQ==\t1\n"))
+        self.assertTrue(federation._is_droppable_frame(b"mcatalog\tx\tYQ==\t1\n"))
         self.assertTrue(federation._is_droppable_frame(b"gcat\tx\tr\tYQ==\t1\t2\n"))
         self.assertTrue(federation._is_droppable_frame(b"psync\tx\tr\tYQ==\t1\t2\n"))
         self.assertFalse(federation._is_droppable_frame(b"msg\tx\tr\thi\n"))

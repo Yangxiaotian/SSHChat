@@ -150,7 +150,7 @@ class MusicHttpTests(unittest.TestCase):
         self.assertEqual(encoded.body.getvalue(), self.payload)
 
     def test_invite_includes_gui_open_music(self):
-        song = music.SongEntry(1, "a.mp3", "mp3", 12, Path("a.mp3"))
+        song = music.CatalogItem(1, "a.mp3", "mp3", 12, "", Path("a.mp3"))
         fake_http = mock.Mock()
         fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
         with mock.patch.object(server, "file_http", fake_http):
@@ -161,6 +161,135 @@ class MusicHttpTests(unittest.TestCase):
             )
         self.assertIn(f"gui-open music {url} {sess.key}", text)
         self.assertIn("点歌", text)
+
+    def test_invite_shows_remote_origin(self):
+        song = music.CatalogItem(2, "b.mp3", "mp3", 12, "node-b")
+        text = server._music_invite_message(
+            url="https://peer.example/music/tok",
+            key="ABC123",
+            song=song,
+            lang="en",
+        )
+        self.assertIn("@node-b", text)
+
+
+class TestFederatedMusicCatalog(unittest.TestCase):
+    def test_merge_union_sorts_and_indexes(self):
+        local = [
+            music.SongEntry(1, "zeta.mp3", "mp3", 10, Path("/z")),
+            music.SongEntry(2, "alpha.mp3", "mp3", 20, Path("/a")),
+        ]
+        remote = {
+            "node-b": [
+                {"name": "alpha.mp3", "ext": "mp3", "size_bytes": 99},
+                {"name": "beta.wav", "ext": "wav", "size_bytes": 5},
+                {"name": "notes.txt", "ext": "txt", "size_bytes": 3},
+            ],
+            "node-c": [{"name": "gamma.ogg", "ext": "ogg", "size_bytes": 1000}],
+        }
+        catalog = music.merge_federated_catalog(local, remote)
+        names = [(it.name, it.origin) for it in catalog]
+        self.assertEqual(
+            names,
+            [
+                ("alpha.mp3", ""),
+                ("alpha.mp3", "node-b"),
+                ("beta.wav", "node-b"),
+                ("gamma.ogg", "node-c"),
+                ("zeta.mp3", ""),
+            ],
+        )
+        self.assertEqual([it.index for it in catalog], [1, 2, 3, 4, 5])
+        self.assertTrue(catalog[1].is_remote)
+        self.assertFalse(catalog[0].is_remote)
+
+    def test_resolve_prefers_local_then_name_at_node(self):
+        catalog = music.merge_federated_catalog(
+            [music.SongEntry(1, "same.mp3", "mp3", 1, Path("/s"))],
+            {"peer": [{"name": "same.mp3", "ext": "mp3", "size_bytes": 2}]},
+        )
+        local = music.resolve_catalog_item("same.mp3", catalog)
+        assert local is not None
+        self.assertEqual(local.origin, "")
+        remote = music.resolve_catalog_item("same.mp3@peer", catalog)
+        assert remote is not None
+        self.assertEqual(remote.origin, "peer")
+        by_idx = music.resolve_catalog_item("2", catalog)
+        assert by_idx is not None
+        self.assertEqual(by_idx.origin, "peer")
+
+    def test_search_catalog_items_matches_origin(self):
+        catalog = music.merge_federated_catalog(
+            [],
+            {"math": [{"name": "theme.mp3", "ext": "mp3", "size_bytes": 3}]},
+        )
+        hits = music.search_catalog_items(catalog, "math")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "theme.mp3")
+
+
+class MusicPlayFederationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "track.mp3").write_bytes(b"ID3" + b"\x00" * 20)
+        self.prev = os.environ.get("SSHCHAT_MUSIC_DIR")
+        os.environ["SSHCHAT_MUSIC_DIR"] = str(self.dir)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.tmp.cleanup()
+        if self.prev is None:
+            os.environ.pop("SSHCHAT_MUSIC_DIR", None)
+        else:
+            os.environ["SSHCHAT_MUSIC_DIR"] = self.prev
+
+    def test_owner_play_request_mints_session(self):
+        replies: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "owner"
+
+            def reply_music_play(self, requester, req_id, payload):
+                replies.append((requester, req_id, payload))
+
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://host.example"
+        with mock.patch.object(server.federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "file_http", fake_http):
+                server._fed_on_music_play_request(
+                    "owner", "rid", "track.mp3", "reader", "ada"
+                )
+        self.assertEqual(len(replies), 1)
+        requester, req_id, payload = replies[0]
+        self.assertEqual(requester, "reader")
+        self.assertEqual(req_id, "rid")
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload.get("name"), "track.mp3")
+        self.assertTrue(
+            str(payload.get("url") or "").startswith("https://host.example/music/")
+        )
+        self.assertEqual(len(str(payload.get("key") or "")), 6)
+
+    def test_owner_play_request_missing_song(self):
+        replies: list[tuple] = []
+
+        class FakeHub:
+            enabled = True
+
+            def reply_music_play(self, requester, req_id, payload):
+                replies.append(payload)
+
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://host.example"
+        with mock.patch.object(server.federation, "get_hub", return_value=FakeHub()):
+            with mock.patch.object(server, "file_http", fake_http):
+                server._fed_on_music_play_request(
+                    "owner", "rid", "nope.mp3", "reader", "ada"
+                )
+        self.assertFalse(replies[0].get("ok"))
+        self.assertIn("not found", str(replies[0].get("error") or "").lower())
 
 
 class MusicGuiOpenTests(unittest.TestCase):

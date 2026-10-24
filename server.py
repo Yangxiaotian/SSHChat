@@ -172,6 +172,9 @@ library_reading: dict[object, dict[str, object]] = {}
 # req_id -> {"event": Event, "payload": dict|None, "error": str}
 _library_page_waiters: dict[str, dict[str, object]] = {}
 _library_page_waiters_lock = threading.Lock()
+# req_id -> {"event": Event, "payload": dict|None} for federated /music play
+_music_play_waiters: dict[str, dict[str, object]] = {}
+_music_play_waiters_lock = threading.Lock()
 # req_id -> {"event": Event, "payload": dict|None} for federation file-host proxy
 _file_host_waiters: dict[str, dict[str, object]] = {}
 _file_host_waiters_lock = threading.Lock()
@@ -204,6 +207,7 @@ _peer_announce_lock = threading.Lock()
 _library_watch_thread: Optional[threading.Thread] = None
 _library_watch_stop = threading.Event()
 _library_last_state: Optional[tuple[set[str], float]] = None
+_music_last_state: Optional[tuple[set[str], float]] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -3660,6 +3664,35 @@ def _fed_local_library_snapshot() -> list[dict]:
     return [library.book_entry_to_meta(entry) for entry in library.list_books(lib_dir)]
 
 
+def _fed_local_music_snapshot() -> list[dict]:
+    music_dir = _music_dir()
+    if not music_dir.is_dir():
+        return []
+    return [music.song_entry_to_meta(entry) for entry in music.list_songs(music_dir)]
+
+
+def _union_music_catalog() -> list[music.CatalogItem]:
+    music_dir = _music_dir()
+    local = music.list_songs(music_dir) if music_dir.is_dir() else []
+    remote: dict[str, list[dict]] = {}
+    hub = federation.get_hub()
+    remote_fn = getattr(hub, "remote_music_catalogs", None) if hub is not None else None
+    if hub is not None and hub.enabled and callable(remote_fn):
+        remote = remote_fn() or {}
+    return music.merge_federated_catalog(local, remote)
+
+
+def _federation_sync_music_catalog() -> None:
+    hub = federation.get_hub()
+    sync = getattr(hub, "sync_music_catalog", None) if hub is not None else None
+    if hub is None or not hub.enabled or not callable(sync):
+        return
+    try:
+        sync(_fed_local_music_snapshot())
+    except Exception as e:
+        print(f"federation: music catalog sync failed: {e!r}")
+
+
 def _union_library_catalog() -> list[library.CatalogItem]:
     lib_dir = _library_dir()
     local = library.list_books(lib_dir) if lib_dir.is_dir() else []
@@ -3697,18 +3730,49 @@ def _get_library_state() -> tuple[set[str], float]:
         return (set(), 0.0)
 
 
+def _get_music_state() -> tuple[set[str], float]:
+    """Get current music directory state (file names + mtime)."""
+    music_dir = _music_dir()
+    if not music_dir.is_dir():
+        return (set(), 0.0)
+    try:
+        dir_mtime = music_dir.stat().st_mtime
+        files = {
+            path.name
+            for path in music_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in music.MUSIC_EXTENSIONS
+        }
+        return (files, dir_mtime)
+    except OSError:
+        return (set(), 0.0)
+
+
+def _catalog_dir_changed(
+    prev: Optional[tuple[set[str], float]],
+    current: tuple[set[str], float],
+) -> tuple[bool, set[str], set[str]]:
+    if prev is None:
+        return False, set(), set()
+    prev_files, prev_mtime = prev
+    curr_files, curr_mtime = current
+    if prev_files == curr_files and abs(curr_mtime - prev_mtime) <= 0.01:
+        return False, set(), set()
+    return True, curr_files - prev_files, prev_files - curr_files
+
+
 def _library_watch_loop() -> None:
-    """Background thread that monitors library directory for changes."""
-    global _library_last_state
+    """Background thread that monitors library and music drop folders."""
+    global _library_last_state, _music_last_state
     
     # Get initial state
     _library_last_state = _get_library_state()
+    _music_last_state = _get_music_state()
     
     # Check interval in seconds
     watch_interval = float(os.environ.get("SSHCHAT_LIBRARY_WATCH_SECONDS", "5"))
     watch_interval = max(1.0, watch_interval)
     
-    print(f"federation: library watch started (interval={watch_interval}s)")
+    print(f"federation: library/music watch started (interval={watch_interval}s)")
     
     while not _library_watch_stop.is_set():
         time.sleep(watch_interval)
@@ -3722,35 +3786,45 @@ def _library_watch_loop() -> None:
         
         try:
             current_state = _get_library_state()
-            
-            if _library_last_state is None:
-                _library_last_state = current_state
-                continue
-            
-            prev_files, prev_mtime = _library_last_state
-            curr_files, curr_mtime = current_state
-            
-            # Check if there are changes (new/removed files or directory mtime changed)
-            if prev_files != curr_files or abs(curr_mtime - prev_mtime) > 0.01:
-                added = curr_files - prev_files
-                removed = prev_files - curr_files
-                
+            changed, added, removed = _catalog_dir_changed(
+                _library_last_state, current_state
+            )
+            if changed:
                 if added or removed:
                     print(
                         f"federation: library changed "
                         f"(+{len(added)} -{len(removed)}), syncing catalog"
                     )
-                elif curr_mtime != prev_mtime:
+                else:
                     print("federation: library directory modified, syncing catalog")
-                
-                # Sync catalog to federation peers
                 _federation_sync_library_catalog()
                 _library_last_state = current_state
-                
+            elif _library_last_state is None:
+                _library_last_state = current_state
         except Exception as e:
             print(f"federation: library watch error: {e!r}")
+
+        try:
+            current_music = _get_music_state()
+            changed, added, removed = _catalog_dir_changed(
+                _music_last_state, current_music
+            )
+            if changed:
+                if added or removed:
+                    print(
+                        f"federation: music changed "
+                        f"(+{len(added)} -{len(removed)}), syncing catalog"
+                    )
+                else:
+                    print("federation: music directory modified, syncing catalog")
+                _federation_sync_music_catalog()
+                _music_last_state = current_music
+            elif _music_last_state is None:
+                _music_last_state = current_music
+        except Exception as e:
+            print(f"federation: music watch error: {e!r}")
     
-    print("federation: library watch stopped")
+    print("federation: library/music watch stopped")
 
 
 def _fed_local_library_bookmarks_snapshot() -> list[dict]:
@@ -3880,6 +3954,53 @@ def _fed_on_library_page_request(
         hub.reply_library_page(requester, req_id, payload)
     except Exception as e:
         print(f"federation: reply_library_page failed: {e!r}")
+
+
+def _fed_on_music_play_request(
+    _owner: str,
+    req_id: str,
+    song_name: str,
+    requester: str,
+    nick: str = "",
+) -> None:
+    """Mint a local web-player session so a peer can play this node's song."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    song_name = Path(str(song_name or "")).name
+    nick = str(nick or "").strip()
+    payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
+    try:
+        if file_http is None:
+            payload["error"] = "music http off"
+        else:
+            music_dir = _music_dir()
+            catalog = music.list_songs(music_dir) if music_dir.is_dir() else []
+            entry = next((e for e in catalog if e.name == song_name), None)
+            if entry is None:
+                payload["error"] = f"song not found: {song_name}"
+            else:
+                base = str(file_http.get_base_url() or "").strip().rstrip("/")
+                if not base:
+                    payload["error"] = "music http off"
+                else:
+                    session = music.music_store.mint(entry.index, nick)
+                    payload = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "url": f"{base}/music/{session.token}",
+                        "key": session.key,
+                        "name": entry.name,
+                        "ext": entry.ext,
+                        "size_bytes": entry.size_bytes,
+                        "start_index": entry.index,
+                    }
+    except Exception as e:
+        payload = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_music_play(requester, req_id, payload)
+    except Exception as e:
+        print(f"federation: reply_music_play failed: {e!r}")
 
 
 def _fed_local_file_public() -> str:
@@ -4687,6 +4808,59 @@ def _fail_library_page_waiters(error: str) -> None:
             event.set()
 
 
+def _fed_on_music_play_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _music_play_waiters_lock:
+        waiter = _music_play_waiters.get(req_id)
+        if not waiter:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_music_play_waiters(error: str) -> None:
+    """Unblock pending federated /music play when a peer link drops."""
+    with _music_play_waiters_lock:
+        waiters = list(_music_play_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fetch_remote_music_play(
+    owner: str,
+    song_name: str,
+    *,
+    nick: str = "",
+    timeout: float = 30.0,
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _music_play_waiters_lock:
+        _music_play_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_music_play(owner, req_id, song_name, nick=nick):
+            return {"ok": False, "error": f"无法联系曲库所在节点 {owner}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待对端点歌超时"}
+        with _music_play_waiters_lock:
+            payload = _music_play_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _music_play_waiters_lock:
+            _music_play_waiters.pop(req_id, None)
+
+
 def _fail_file_host_waiters(error: str) -> None:
     """Unblock pending federated /sendfile host requests when a peer drops."""
     with _file_host_waiters_lock:
@@ -5425,15 +5599,16 @@ def _music_invite_message(
     *,
     url: str,
     key: str,
-    song: music.SongEntry,
+    song: music.CatalogItem,
     lang: str,
 ) -> str:
     loc = "en" if str(lang).lower().startswith("en") else "zh"
+    where = song.display_origin()
     if loc == "en":
         return (
             "[*] ========== Music ==========\n"
             f"[*] Now playing: [{song.ext.upper()}] {song.name} "
-            f"({music.format_size(song.size_bytes)})\n"
+            f"({music.format_size(song.size_bytes)}){where}\n"
             "[*] Player URL:\n"
             f"[*] {url}\n"
             f"[*] Access key: {key}\n"
@@ -5444,7 +5619,7 @@ def _music_invite_message(
     return (
         "[*] ========== 点歌 ==========\n"
         f"[*] 正在播放：[{song.ext.upper()}] {song.name} "
-        f"({music.format_size(song.size_bytes)})\n"
+        f"({music.format_size(song.size_bytes)}){where}\n"
         "[*] 播放网址:\n"
         f"[*] {url}\n"
         f"[*] 访问密钥: {key}\n"
@@ -5454,24 +5629,36 @@ def _music_invite_message(
     )
 
 
-def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = "") -> None:
+def _send_music_catalog(
+    conn, catalog: list[music.CatalogItem], *, query: str = ""
+) -> None:
     loc = conn_locale(conn)
     music_dir = _music_dir()
+    local_count = sum(1 for e in catalog if not e.origin)
+    remote_count = len(catalog) - local_count
     send_line(
         conn,
         i18n.tr(en="[*] --- Music ---\n", zh="[*] --- 点歌 ---\n", locale=loc),
     )
-    if not music_dir.is_dir():
-        send_line(
-            conn,
-            i18n.tr(
-                en=f"[*] Music directory missing: {music_dir}\n",
-                zh=f"[*] 点歌目录不存在：{music_dir}\n",
-                locale=loc,
-            ),
-        )
-        return
     if not catalog:
+        if not music_dir.is_dir():
+            send_line(
+                conn,
+                i18n.tr(
+                    en=f"[*] Local music directory missing: {music_dir}\n",
+                    zh=f"[*] 本机点歌目录不存在：{music_dir}\n",
+                    locale=loc,
+                ),
+            )
+        else:
+            send_line(
+                conn,
+                i18n.tr(
+                    en=f"[*] Local folder is empty: {music_dir}\n",
+                    zh=f"[*] 本机目录为空：{music_dir}\n",
+                    locale=loc,
+                ),
+            )
         if query:
             send_line(
                 conn,
@@ -5481,16 +5668,16 @@ def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = ""
                     locale=loc,
                 ),
             )
-        else:
+        elif remote_count == 0:
             send_line(
                 conn,
                 i18n.tr(
                     en=(
-                        "[*] Library is empty. Place mp3 / m4a / ogg / flac / wav "
+                        "[*] No federated songs yet. Place mp3 / m4a / ogg / flac / wav "
                         f"in {music_dir}\n"
                     ),
                     zh=(
-                        "[*] 曲库为空。把 mp3 / m4a / ogg / flac / wav "
+                        "[*] 联邦暂无共享歌曲；把 mp3 / m4a / ogg / flac / wav "
                         f"放到 {music_dir}\n"
                     ),
                     locale=loc,
@@ -5501,8 +5688,14 @@ def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = ""
         send_line(
             conn,
             i18n.tr(
-                en=f"[*] {len(catalog)} match(es) for {query!r}.\n",
-                zh=f"[*] 关键词 {query!r} 共 {len(catalog)} 首。\n",
+                en=(
+                    f"[*] {len(catalog)} match(es) for {query!r} "
+                    f"(federated union: local {local_count}, remote {remote_count}).\n"
+                ),
+                zh=(
+                    f"[*] 关键词 {query!r} 共 {len(catalog)} 首"
+                    f"（联邦并集：本机 {local_count}，对端 {remote_count}）。\n"
+                ),
                 locale=loc,
             ),
         )
@@ -5510,8 +5703,14 @@ def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = ""
         send_line(
             conn,
             i18n.tr(
-                en=f"[*] {len(catalog)} song(s).\n",
-                zh=f"[*] 共 {len(catalog)} 首。\n",
+                en=(
+                    f"[*] Federated union: {len(catalog)} song(s) "
+                    f"(local {local_count}, remote {remote_count}).\n"
+                ),
+                zh=(
+                    f"[*] 联邦并集共 {len(catalog)} 首"
+                    f"（本机 {local_count}，对端 {remote_count}）。\n"
+                ),
                 locale=loc,
             ),
         )
@@ -5519,13 +5718,13 @@ def _send_music_catalog(conn, catalog: list[music.SongEntry], *, query: str = ""
         send_line(
             conn,
             f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
-            f"({music.format_size(entry.size_bytes)})\n",
+            f"({music.format_size(entry.size_bytes)}){entry.display_origin()}\n",
         )
     send_line(
         conn,
         i18n.tr(
-            en="[*] Play: /music play <index|filename>\n",
-            zh="[*] 播放：/music play <序号|文件名>\n",
+            en="[*] Play: /music play <index|filename[@node]>\n",
+            zh="[*] 播放：/music play <序号|文件名[@节点]>\n",
             locale=loc,
         ),
     )
@@ -5548,25 +5747,30 @@ def _handle_music(conn, payload: str) -> None:
         for line in (
             i18n.tr(en="[*] /music usage:\n", zh="[*] /music 用法：\n", locale=loc),
             i18n.tr(
-                en="[*]   /music | /song                 Catalog\n",
-                zh="[*]   /music | /song                 曲目列表\n",
+                en="[*]   /music | /song                 Federated catalog\n",
+                zh="[*]   /music | /song                 联邦并集曲目\n",
                 locale=loc,
             ),
             i18n.tr(
-                en="[*]   /music find <keyword>           Filter by filename\n",
-                zh="[*]   /music find <关键词> | 查找      按文件名筛选\n",
+                en="[*]   /music find <keyword>           Filter by filename (or @node)\n",
+                zh="[*]   /music find <关键词> | 查找      按文件名筛选（也可搜节点名）\n",
                 locale=loc,
             ),
             i18n.tr(
-                en="[*]   /music play [index|filename]    Open the web player (default: 1)\n",
-                zh="[*]   /music play [序号|文件名] | 播放  打开网页播放器（默认第 1 首）\n",
+                en="[*]   /music play [index|file[@node]] Open the web player (default: 1)\n",
+                zh="[*]   /music play [序号|文件名[@节点]] | 播放  打开网页播放器（默认第 1 首）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en=f"[*] Local directory: {music_dir} (remote songs play from the owning node)\n",
+                zh=f"[*] 本机目录：{music_dir}（对端歌曲由藏曲节点提供播放页）\n",
                 locale=loc,
             ),
         ):
             send_line(conn, line)
         return
 
-    catalog = music.list_songs(music_dir)
+    catalog = _union_music_catalog()
     if not head:
         _send_music_catalog(conn, catalog)
         return
@@ -5582,18 +5786,17 @@ def _handle_music(conn, payload: str) -> None:
                 ),
             )
             return
-        _send_music_catalog(conn, music.search_catalog(catalog, rest), query=rest)
+        _send_music_catalog(
+            conn, music.search_catalog_items(catalog, rest), query=rest
+        )
         return
 
     if head in {"play", "open", "listen", "播放", "听", "打开"}:
-        if file_http is None:
-            send_line(conn, _ts(conn, "music_http_off"))
-            return
         if not catalog:
             _send_music_catalog(conn, catalog)
             return
         token = rest or "1"
-        entry = music.resolve_song(token, catalog)
+        entry = music.resolve_catalog_item(token, catalog)
         if entry is None:
             send_line(
                 conn,
@@ -5604,8 +5807,54 @@ def _handle_music(conn, payload: str) -> None:
                 ),
             )
             return
-        session = music.music_store.mint(entry.index, _client_name(conn))
         lang_q = "en" if str(loc).lower().startswith("en") else "zh"
+        nick = _client_name(conn)
+        if entry.is_remote:
+            payload = _fetch_remote_music_play(
+                entry.origin, entry.name, nick=nick
+            )
+            if not payload.get("ok"):
+                err = str(payload.get("error") or "remote play failed")
+                send_line(
+                    conn,
+                    i18n.tr(
+                        en=f"[*] Could not play remote song: {err}\n",
+                        zh=f"[*] 无法播放对端歌曲：{err}\n",
+                        locale=loc,
+                    ),
+                )
+                return
+            url = str(payload.get("url") or "").strip()
+            key = str(payload.get("key") or "").strip()
+            if not url or not key:
+                send_line(
+                    conn,
+                    i18n.tr(
+                        en="[*] Remote node did not return a player URL.\n",
+                        zh="[*] 对端未返回播放网址。\n",
+                        locale=loc,
+                    ),
+                )
+                return
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}lang={lang_q}"
+            send_line(
+                conn,
+                _music_invite_message(url=url, key=key, song=entry, lang=loc),
+            )
+            return
+        if file_http is None:
+            send_line(conn, _ts(conn, "music_http_off"))
+            return
+        local_index = 1
+        if music_dir.is_dir():
+            local_entry = next(
+                (e for e in music.list_songs(music_dir) if e.name == entry.name),
+                None,
+            )
+            if local_entry is not None:
+                local_index = local_entry.index
+        session = music.music_store.mint(local_index, nick)
         url = (
             f"{file_http.get_base_url().rstrip('/')}/music/{session.token}"
             f"?lang={lang_q}"
@@ -9359,6 +9608,10 @@ def _federation_peer_up_catchup(peer_node: str) -> None:
     except Exception as e:
         print(f"federation: peer-up library catalog sync error: {e!r}")
     try:
+        _federation_sync_music_catalog()
+    except Exception as e:
+        print(f"federation: peer-up music catalog sync error: {e!r}")
+    try:
         _federation_sync_file_public()
     except Exception as e:
         print(f"federation: peer-up file public sync error: {e!r}")
@@ -9451,6 +9704,7 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
         else:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
         _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
+        _fail_music_play_waiters(f"联邦节点 {peer_node} 已断开，点歌中断")
         _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
         try:
             _fed_handle_unreachable_game_authority(peer_node)
@@ -9669,6 +9923,9 @@ def _ensure_federation_hub() -> None:
         _fed_on_file_host_result,
         _fed_local_file_public,
     )
+    _fed_hub.get_local_music = _fed_local_music_snapshot
+    _fed_hub.on_music_play_request = _fed_on_music_play_request
+    _fed_hub.on_music_play_result = _fed_on_music_play_result
     _fed_hub.start()
     _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
@@ -9685,6 +9942,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_capsules = _fed_on_capsules
     _fed_hub.on_capsule_cancel = _fed_on_capsule_cancel
     _federation_sync_library_catalog()
+    _federation_sync_music_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})

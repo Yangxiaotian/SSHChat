@@ -41,6 +41,7 @@ _FED_DROPPABLE_KINDS = frozenset(
     {
         "presence",
         "lcatalog",
+        "mcatalog",
         "lmarks",
         "lcap",
         "rrating",
@@ -437,6 +438,14 @@ class FederationHub:
         self.on_library_bookmarks = on_library_bookmarks
         # nick, book_name — clear bookmark on this (owner) node
         self.on_library_bookmark_clear: Optional[Callable[[str, str], None]] = None
+        # () -> list of song metadata dicts {name, ext, size_bytes}
+        self.get_local_music: Optional[Callable[[], list[dict[str, Any]]]] = None
+        # owner_node, req_id, song_name, requester_node, nick
+        self.on_music_play_request: Optional[Callable[..., None]] = None
+        # from_peer, req_id, payload(dict)
+        self.on_music_play_result: Optional[
+            Callable[[str, str, dict[str, Any]], None]
+        ] = None
         # () -> [{"name": nick, "capsules": [capsule_dict, ...]}] local-origin only
         self.get_local_capsules: Optional[Callable[[], list[dict[str, Any]]]] = None
         # origin_node, nick, capsules_list — merge remote time capsules
@@ -477,6 +486,8 @@ class FederationHub:
         self._room_remotes: dict[str, set[tuple[str, str]]] = defaultdict(set)
         # node_id -> list of book metadata dicts
         self._remote_catalogs: dict[str, list[dict[str, Any]]] = {}
+        # node_id -> list of song metadata dicts
+        self._remote_music_catalogs: dict[str, list[dict[str, Any]]] = {}
         # node_id -> {"base_url": str, "seen_at": float} for public file endpoints
         self._remote_file_pubs: dict[str, dict[str, Any]] = {}
         # Sticky federation CF host (node_id); elect min id when unset/gone.
@@ -831,6 +842,7 @@ class FederationHub:
             return
         self._routes.pop(origin, None)
         self._remote_catalogs.pop(origin, None)
+        self._remote_music_catalogs.pop(origin, None)
         self._remote_file_pubs.pop(origin, None)
         to_remove = [k for k in self._remote_users if k[0] == origin]
         for k in to_remove:
@@ -1062,6 +1074,12 @@ class FederationHub:
         """Copy of peer catalogs for union listing."""
         return {node: list(rows) for node, rows in self._remote_catalogs.items()}
 
+    def remote_music_catalogs(self) -> dict[str, list[dict[str, Any]]]:
+        """Copy of peer song catalogs for union listing."""
+        return {
+            node: list(rows) for node, rows in self._remote_music_catalogs.items()
+        }
+
     def sync_library_catalog(self, books: Optional[list[dict[str, Any]]] = None) -> None:
         """Fan-out local library metadata (presence-style replace-by-origin)."""
         if not self.enabled or not self._peers:
@@ -1080,6 +1098,27 @@ class FederationHub:
         b64 = base64.b64encode(blob.encode("utf-8")).decode("ascii")
         nonce = str(time.time_ns())
         line = f"lcatalog\t{self.node_id}\t{b64}\t{nonce}\n"
+        self._remember_seen(line)
+        self._fanout(line)
+
+    def sync_music_catalog(self, songs: Optional[list[dict[str, Any]]] = None) -> None:
+        """Fan-out local music metadata (presence-style replace-by-origin)."""
+        if not self.enabled or not self._peers:
+            return
+        if songs is None:
+            if self.get_local_music is None:
+                return
+            try:
+                songs = self.get_local_music()
+            except Exception as e:
+                print(f"federation: get_local_music error: {e!r}")
+                return
+        if not isinstance(songs, list):
+            return
+        blob = json.dumps(songs, ensure_ascii=False)
+        b64 = base64.b64encode(blob.encode("utf-8")).decode("ascii")
+        nonce = str(time.time_ns())
+        line = f"mcatalog\t{self.node_id}\t{b64}\t{nonce}\n"
         self._remember_seen(line)
         self._fanout(line)
 
@@ -1456,6 +1495,46 @@ class FederationHub:
         self._remember_seen(line)
         return self._send_toward(requester_node, line)
 
+    def request_music_play(
+        self,
+        owner_node: str,
+        req_id: str,
+        song_name: str,
+        *,
+        nick: str = "",
+    ) -> bool:
+        """Ask owner_node to mint a web-player session for song_name."""
+        if not self.enabled:
+            return False
+        owner_node = str(owner_node or "").strip()
+        req_id = str(req_id or "").strip()
+        song_name = Path(str(song_name or "").strip()).name
+        if not owner_node or not req_id or not song_name:
+            return False
+        safe_nick = str(nick or "").replace("\t", " ").replace("\n", " ").strip() or "-"
+        line = (
+            f"mplay\t{self.node_id}\t{owner_node}\t{req_id}\t"
+            f"{song_name}\t{safe_nick}\n"
+        )
+        self._remember_seen(line)
+        return self._send_toward(owner_node, line)
+
+    def reply_music_play(
+        self, requester_node: str, req_id: str, payload: dict[str, Any]
+    ) -> bool:
+        if not self.enabled:
+            return False
+        requester_node = str(requester_node or "").strip()
+        req_id = str(req_id or "").strip()
+        if not requester_node or not req_id or not isinstance(payload, dict):
+            return False
+        blob = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        line = f"mplay_ok\t{self.node_id}\t{requester_node}\t{req_id}\t{blob}\n"
+        self._remember_seen(line)
+        return self._send_toward(requester_node, line)
+
     def request_game(self, room: str) -> None:
         """Ask peers that hold room's game to re-push a gsync snapshot."""
         if not self.enabled or not self._peers:
@@ -1665,6 +1744,7 @@ class FederationHub:
                 self._routes.pop(dest, None)
         for origin in lost:
             self._remote_catalogs.pop(origin, None)
+            self._remote_music_catalogs.pop(origin, None)
             self._remote_file_pubs.pop(origin, None)
             to_remove = [k for k in self._remote_users if k[0] == origin]
             for k in to_remove:
@@ -1708,6 +1788,7 @@ class FederationHub:
         # Otherwise /sendfile on a LAN-only peer waits for fpub that is stuck
         # behind lcatalog on slow links (ZeroTier / iSH) and falls back to LAN.
         self._push_file_public(link)
+        self._push_music_catalog(link)
         self._push_library_catalog(link)
         self._push_capsules(link)
 
@@ -1752,6 +1833,33 @@ class FederationHub:
                 continue
             url = str((info or {}).get("base_url") or "").strip() or "-"
             line = f"fpub\t{origin}\t{url}\t{time.time_ns()}\n"
+            self._remember_seen(line)
+            link.send_line(line)
+
+    def _push_music_catalog(self, link: _PeerLink) -> None:
+        """Send local + known remote music catalogs to a newly connected peer."""
+        songs: list[dict[str, Any]] = []
+        if self.get_local_music is not None:
+            try:
+                songs = self.get_local_music() or []
+            except Exception as e:
+                print(f"federation: get_local_music error: {e!r}")
+                songs = []
+        if not isinstance(songs, list):
+            songs = []
+        local_blob = base64.b64encode(
+            json.dumps(songs, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        local_line = f"mcatalog\t{self.node_id}\t{local_blob}\t{time.time_ns()}\n"
+        self._remember_seen(local_line)
+        link.send_line(local_line)
+        for origin, rows in self._remote_music_catalogs.items():
+            if origin == link.node_id:
+                continue
+            remote_blob = base64.b64encode(
+                json.dumps(rows, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            line = f"mcatalog\t{origin}\t{remote_blob}\t{time.time_ns()}\n"
             self._remember_seen(line)
             link.send_line(line)
 
@@ -1965,6 +2073,19 @@ class FederationHub:
             self._remote_library_bulk(origin, b64)
             self._fanout(line + "\n", exclude_node=peer_node)
             return
+        if kind == "mcatalog" and len(parts) >= 3:
+            if self._remember_seen(line):
+                return
+            cat_parts = line.split("\t", 3)
+            if len(cat_parts) < 3:
+                return
+            origin, b64 = cat_parts[1], cat_parts[2]
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            self._remote_music_bulk(origin, b64)
+            self._fanout(line + "\n", exclude_node=peer_node)
+            return
         if kind == "lmarks":
             if self._remember_seen(line):
                 return
@@ -2158,6 +2279,81 @@ class FederationHub:
                         self.on_library_page_result(origin, req_id, payload)
                     except Exception as e:
                         print(f"federation: on_library_page_result error: {e!r}")
+            else:
+                self._learn_route(requester, peer_node)
+                self._send_toward(requester, line + "\n", exclude_node=peer_node)
+            return
+        if kind == "mplay":
+            # mplay\torigin\towner\treq_id\tsong\tnick
+            play_parts = line.split("\t", 5)
+            if len(play_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, owner, req_id, song_name = (
+                play_parts[1],
+                play_parts[2],
+                play_parts[3],
+                play_parts[4],
+            )
+            nick = play_parts[5].strip() if len(play_parts) >= 6 else ""
+            if nick in {"", "-"}:
+                nick = ""
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if owner == self.node_id:
+                if self.on_music_play_request is not None:
+                    cb = self.on_music_play_request
+                    args = (owner, req_id, song_name, origin, nick)
+
+                    def _run_music_play(
+                        _cb=cb, _args=args, _req=req_id
+                    ) -> None:
+                        try:
+                            _cb(*_args)
+                        except Exception as e:
+                            print(
+                                f"federation: on_music_play_request "
+                                f"error ({_req}): {e!r}"
+                            )
+
+                    threading.Thread(
+                        target=_run_music_play,
+                        name=f"fed-mplay-{req_id[:8]}",
+                        daemon=True,
+                    ).start()
+            else:
+                self._learn_route(owner, peer_node)
+                self._send_toward(owner, line + "\n", exclude_node=peer_node)
+            return
+        if kind == "mplay_ok":
+            ok_parts = line.split("\t", 4)
+            if len(ok_parts) < 5:
+                return
+            if self._remember_seen(line):
+                return
+            origin, requester, req_id, b64 = (
+                ok_parts[1],
+                ok_parts[2],
+                ok_parts[3],
+                ok_parts[4],
+            )
+            if origin == self.node_id:
+                return
+            self._learn_route(origin, peer_node)
+            if requester == self.node_id:
+                try:
+                    payload = json.loads(
+                        base64.b64decode(b64.encode("ascii")).decode("utf-8")
+                    )
+                except Exception:
+                    return
+                if isinstance(payload, dict) and self.on_music_play_result is not None:
+                    try:
+                        self.on_music_play_result(origin, req_id, payload)
+                    except Exception as e:
+                        print(f"federation: on_music_play_result error: {e!r}")
             else:
                 self._learn_route(requester, peer_node)
                 self._send_toward(requester, line + "\n", exclude_node=peer_node)
@@ -2828,6 +3024,39 @@ class FederationHub:
         self._remote_catalogs[node_id] = cleaned
         print(
             f"federation: library from {node_id}: {len(cleaned)} book(s)"
+        )
+
+    def _remote_music_bulk(self, node_id: str, b64: str) -> None:
+        if node_id == self.node_id:
+            return
+        try:
+            raw = base64.b64decode(b64.encode("ascii")).decode("utf-8")
+            songs = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(songs, list):
+            return
+        from music import MUSIC_EXTENSIONS
+
+        allowed_exts = {ext.lstrip(".") for ext in MUSIC_EXTENSIONS}
+        cleaned: list[dict[str, Any]] = []
+        for item in songs:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or Path(name).name != name:
+                continue
+            ext = str(item.get("ext") or Path(name).suffix.lstrip(".")).lower()
+            if ext not in allowed_exts:
+                continue
+            try:
+                size = int(item.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            cleaned.append({"name": name, "ext": ext, "size_bytes": size})
+        self._remote_music_catalogs[node_id] = cleaned
+        print(
+            f"federation: music from {node_id}: {len(cleaned)} song(s)"
         )
 
     def _listen_loop(self) -> None:

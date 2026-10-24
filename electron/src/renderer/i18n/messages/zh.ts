@@ -92,7 +92,7 @@ export const zhMessages = {
       game: '游戏命令',
       news: '查看新闻',
       library: '浏览图书馆',
-      music: '点歌（服务端曲库）',
+      music: '点歌（联邦并集曲库）',
       lang: '切换界面语言（en/zh）',
       dict: '词典查询（en/cn/hh）',
       announce: '房间公告',

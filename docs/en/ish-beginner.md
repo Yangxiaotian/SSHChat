@@ -59,7 +59,7 @@ Room poll example: `/poll new dinner? | pizza | sushi`, then `/poll 1` to vote; 
 
 Personal reminder: `/later 30m bring an umbrella` (only you see it); `/later list`; `/later cancel 1`.
 
-Music: `/music` lists songs the admin dropped in the server `music` folder; `/music play 1` prints a player URL (open it in Safari).
+Music: `/music` lists songs from this server and federated peers; `/music play 1` prints a player URL (open it in Safari).
 
 ## 4. Common tips
 
