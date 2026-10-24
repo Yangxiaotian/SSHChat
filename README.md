@@ -48,7 +48,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/news` | RSS headlines, summaries, and original links (mobile: + → News opens the article URL) |
 | `/library` | Browse books |
 | `/music` | Federated song catalog (local + peer drop folders) |
-| `/music play [n\|file[@node]]` | Play a song (web player; remote songs play from the owning node; alias `/song`) |
+| `/music play [n\|file[@node]]` | Open the web/app player (federated playlist; remote audio from the owning node; alias `/song`) |
 | `/dict <word>` | Dictionary |
 | `/dnd on` | Terminal do-not-disturb for game spam |
 

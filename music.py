@@ -7,7 +7,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
 MUSIC_EXTENSIONS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav"}
 MUSIC_TTL_SECONDS = int(os.environ.get("SSHCHAT_MUSIC_TTL_SECONDS", str(8 * 3600)))
@@ -248,6 +249,128 @@ def resolve_song(token: str, catalog: list[SongEntry]) -> Optional[SongEntry]:
     return None
 
 
+def catalog_item_to_player_row(item: CatalogItem) -> dict[str, Any]:
+    return {
+        "name": item.name,
+        "ext": item.ext,
+        "size": format_size(item.size_bytes),
+        "bytes": int(item.size_bytes),
+        "origin": item.origin or "",
+        "mime": mime_for(item.name),
+    }
+
+
+def song_entry_to_player_row(entry: SongEntry, origin: str = "") -> dict[str, Any]:
+    return {
+        "name": entry.name,
+        "ext": entry.ext,
+        "size": format_size(entry.size_bytes),
+        "bytes": int(entry.size_bytes),
+        "origin": origin or "",
+        "mime": mime_for(entry.name),
+    }
+
+
+_player_catalog_hook: Optional[Callable[[], list]] = None
+_remote_file_hook: Optional[Callable[[str, str, str], Optional[str]]] = None
+
+
+def set_player_catalog_hook(fn: Optional[Callable[[], list]]) -> None:
+    global _player_catalog_hook
+    _player_catalog_hook = fn
+
+
+def set_remote_file_hook(
+    fn: Optional[Callable[[str, str, str], Optional[str]]],
+) -> None:
+    global _remote_file_hook
+    _remote_file_hook = fn
+
+
+def _coerce_player_row(item: object) -> Optional[dict[str, Any]]:
+    if isinstance(item, CatalogItem):
+        return catalog_item_to_player_row(item)
+    if isinstance(item, SongEntry):
+        return song_entry_to_player_row(item)
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    if not name or Path(name).name != name:
+        return None
+    ext = str(item.get("ext") or Path(name).suffix.lstrip(".")).lower()
+    try:
+        size_bytes = int(item.get("bytes") or item.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+    origin = str(item.get("origin") or "").strip()
+    return {
+        "name": name,
+        "ext": ext,
+        "size": str(item.get("size") or format_size(size_bytes)),
+        "bytes": size_bytes,
+        "origin": origin,
+        "mime": str(item.get("mime") or mime_for(name)),
+    }
+
+
+def player_rows() -> list[dict[str, Any]]:
+    """Federated playlist when the server hook is set; else local drop folder."""
+    items: list = []
+    hook = _player_catalog_hook
+    if hook is not None:
+        try:
+            items = list(hook() or [])
+        except Exception:
+            items = []
+    if not items:
+        items = list_songs(default_music_dir())
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        row = _coerce_player_row(item)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def pick_player_row(
+    rows: list[dict[str, Any]], name: str, origin: str = ""
+) -> Optional[dict[str, Any]]:
+    name = Path(str(name or "")).name
+    origin = str(origin or "").strip()
+    if not name:
+        return None
+    if origin:
+        for row in rows:
+            if row.get("name") == name and str(row.get("origin") or "") == origin:
+                return row
+        return None
+    local = [
+        row
+        for row in rows
+        if row.get("name") == name and not row.get("origin")
+    ]
+    if len(local) == 1:
+        return local[0]
+    if local:
+        return local[0]
+    remote = [
+        row for row in rows if row.get("name") == name and row.get("origin")
+    ]
+    if len(remote) == 1:
+        return remote[0]
+    return remote[0] if remote else None
+
+
+def origin_file_url(page_url: str, song_name: str) -> str:
+    """Map an origin player page URL to its audio file URL."""
+    raw = str(page_url or "").strip()
+    song_name = Path(str(song_name or "")).name
+    parts = urlsplit(raw)
+    path = str(parts.path or "").rstrip("/")
+    file_path = f"{path}/file/{quote(song_name, safe='')}"
+    return urlunsplit((parts.scheme, parts.netloc, file_path, "", ""))
+
+
 def resolve_song_file(music_dir: Path, name: str) -> Optional[Path]:
     """Map a playlist filename to a file inside *music_dir* (no path escape)."""
     raw = (name or "").replace("\\", "/")
@@ -287,6 +410,31 @@ class MusicStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[str, MusicSession] = {}
+        # origin node_id -> player page URL (token reused for every song on that node)
+        self._origin_pages: dict[str, str] = {}
+
+    def remote_file_url(self, origin: str, song_name: str, nick: str) -> Optional[str]:
+        origin = str(origin or "").strip()
+        song_name = Path(str(song_name or "")).name
+        if not origin or not song_name:
+            return None
+        with self._lock:
+            cached = str(self._origin_pages.get(origin) or "").strip()
+        if cached:
+            return origin_file_url(cached, song_name)
+        hook = _remote_file_hook
+        if hook is None:
+            return None
+        try:
+            page_url = hook(origin, song_name, nick)
+        except Exception:
+            return None
+        page_url = str(page_url or "").strip()
+        if not page_url:
+            return None
+        with self._lock:
+            self._origin_pages[origin] = page_url
+        return origin_file_url(page_url, song_name)
 
     def mint(self, start_index: int, nick: str) -> MusicSession:
         now = time.time()

@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 import json
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import music
 
@@ -55,19 +55,15 @@ def generate_music_page(
     token: str,
     lang: str,
     start_index: int,
-    songs: list[music.SongEntry],
+    songs: list,
 ) -> str:
     loc = "zh" if str(lang).lower().startswith("zh") else "en"
     t = _TEXTS[loc]
-    payload = [
-        {
-            "name": s.name,
-            "ext": s.ext,
-            "size": music.format_size(s.size_bytes),
-            "mime": music.mime_for(s.name),
-        }
-        for s in songs
-    ]
+    payload = []
+    for item in songs or []:
+        row = music._coerce_player_row(item)
+        if row:
+            payload.append(row)
     songs_js = json.dumps(payload, ensure_ascii=False)
     token_js = json.dumps(token)
     start = max(1, int(start_index or 1))
@@ -151,8 +147,13 @@ let playGen = 0;
 let waCtx = null;
 let waNode = null;
 function $(id) {{ return document.getElementById(id); }}
-function fileUrl(name) {{
-  return location.origin + "/music/" + TOKEN + "/file/" + encodeURIComponent(name);
+function fileUrl(s) {{
+  var u = location.origin + "/music/" + TOKEN + "/file/" + encodeURIComponent(s.name || "");
+  if (s.origin) u += "?origin=" + encodeURIComponent(s.origin);
+  return u;
+}}
+function songLabel(s) {{
+  return s.origin ? ((s.name || "") + " @" + s.origin) : (s.name || "");
 }}
 function stopWebAudio() {{
   if (waNode) {{ try {{ waNode.stop(); }} catch (e) {{}} waNode = null; }}
@@ -173,7 +174,7 @@ function renderList() {{
     const li = document.createElement("li");
     if (i === current) li.className = "active";
     li.innerHTML = "<span></span><span class='sz'></span>";
-    li.children[0].textContent = s.name;
+    li.children[0].textContent = songLabel(s);
     li.children[1].textContent = s.size;
     li.onclick = () => playAt(i);
     ul.appendChild(li);
@@ -206,12 +207,12 @@ function playAt(i) {{
   current = (i + SONGS.length) % SONGS.length;
   const s = SONGS[current];
   const gen = ++playGen;
-  $("now").textContent = s.name;
+  $("now").textContent = songLabel(s);
   $("err").hidden = true;
   renderList();
   stopWebAudio();
   const a = $("player");
-  const url = fileUrl(s.name);
+  const url = fileUrl(s);
   a.onerror = () => {{ if (gen === playGen) playViaWebAudio(url); }};
   a.src = url;
   a.load();
@@ -303,20 +304,13 @@ def handle_music_post(handler: "BaseHTTPRequestHandler") -> bool:
     if key != session.key:
         handler._send_error_json(403, _TEXTS[loc]["bad_key"])  # type: ignore[attr-defined]
         return True
-    songs = music.list_songs(music.default_music_dir())
+    songs = music.player_rows()
     handler._send_json_response(  # type: ignore[attr-defined]
         200,
         {
             "ok": True,
             "start": int(session.start_index or 1),
-            "songs": [
-                {
-                    "name": s.name,
-                    "size": music.format_size(s.size_bytes),
-                    "bytes": int(s.size_bytes),
-                }
-                for s in songs
-            ],
+            "songs": songs,
         },
     )
     return True
@@ -349,7 +343,7 @@ def handle_music_get(handler: "BaseHTTPRequestHandler") -> bool:
             handler.send_header("Cache-Control", "no-store")
             handler.end_headers()
             return True
-        songs = music.list_songs(music.default_music_dir())
+        songs = music.player_rows()
         handler._send_html_page(  # type: ignore[attr-defined]
             generate_music_page(token, lang, session.start_index, songs)
         )
@@ -357,7 +351,30 @@ def handle_music_get(handler: "BaseHTTPRequestHandler") -> bool:
 
     if len(parts) >= 4 and parts[2] == "file":
         name = unquote("/".join(parts[3:]))
-        path = music.resolve_song_file(music.default_music_dir(), name)
+        origin = ""
+        try:
+            origin = str((parse_qs(parsed.query).get("origin") or [""])[0] or "").strip()
+        except Exception:
+            origin = ""
+        row = music.pick_player_row(music.player_rows(), name, origin)
+        if row is None:
+            handler._send_error_json(404, closed)  # type: ignore[attr-defined]
+            return True
+        remote_origin = str(row.get("origin") or "").strip()
+        if remote_origin:
+            loc_url = music.music_store.remote_file_url(
+                remote_origin, str(row.get("name") or name), session.nick
+            )
+            if not loc_url:
+                handler._send_error_json(502, closed)  # type: ignore[attr-defined]
+                return True
+            handler.send_response(302)
+            handler.send_header("Location", loc_url)
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            return True
+        path = music.resolve_song_file(music.default_music_dir(), str(row.get("name") or name))
         if path is None:
             handler._send_error_json(404, closed)  # type: ignore[attr-defined]
             return True

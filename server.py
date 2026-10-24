@@ -3682,6 +3682,13 @@ def _union_music_catalog() -> list[music.CatalogItem]:
     return music.merge_federated_catalog(local, remote)
 
 
+def _music_player_catalog_hook() -> list:
+    return _union_music_catalog()
+
+
+music.set_player_catalog_hook(_music_player_catalog_hook)
+
+
 def _federation_sync_music_catalog() -> None:
     hub = federation.get_hub()
     sync = getattr(hub, "sync_music_catalog", None) if hub is not None else None
@@ -4861,6 +4868,16 @@ def _fetch_remote_music_play(
             _music_play_waiters.pop(req_id, None)
 
 
+def _music_remote_page_url(origin: str, song_name: str, nick: str) -> str:
+    payload = _fetch_remote_music_play(origin, song_name, nick=nick)
+    if not payload.get("ok"):
+        return ""
+    return str(payload.get("url") or "").strip()
+
+
+music.set_remote_file_hook(_music_remote_page_url)
+
+
 def _fail_file_host_waiters(error: str) -> None:
     """Unblock pending federated /sendfile host requests when a peer drops."""
     with _file_host_waiters_lock:
@@ -5762,8 +5779,8 @@ def _handle_music(conn, payload: str) -> None:
                 locale=loc,
             ),
             i18n.tr(
-                en=f"[*] Local directory: {music_dir} (remote songs play from the owning node)\n",
-                zh=f"[*] 本机目录：{music_dir}（对端歌曲由藏曲节点提供播放页）\n",
+                en=f"[*] Local directory: {music_dir} (player lists the federated union; remote audio streams from the owning node)\n",
+                zh=f"[*] 本机目录：{music_dir}（播放器显示联邦并集；对端音频由藏曲节点提供）\n",
                 locale=loc,
             ),
         ):
@@ -5807,54 +5824,12 @@ def _handle_music(conn, payload: str) -> None:
                 ),
             )
             return
-        lang_q = "en" if str(loc).lower().startswith("en") else "zh"
-        nick = _client_name(conn)
-        if entry.is_remote:
-            payload = _fetch_remote_music_play(
-                entry.origin, entry.name, nick=nick
-            )
-            if not payload.get("ok"):
-                err = str(payload.get("error") or "remote play failed")
-                send_line(
-                    conn,
-                    i18n.tr(
-                        en=f"[*] Could not play remote song: {err}\n",
-                        zh=f"[*] 无法播放对端歌曲：{err}\n",
-                        locale=loc,
-                    ),
-                )
-                return
-            url = str(payload.get("url") or "").strip()
-            key = str(payload.get("key") or "").strip()
-            if not url or not key:
-                send_line(
-                    conn,
-                    i18n.tr(
-                        en="[*] Remote node did not return a player URL.\n",
-                        zh="[*] 对端未返回播放网址。\n",
-                        locale=loc,
-                    ),
-                )
-                return
-            sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}lang={lang_q}"
-            send_line(
-                conn,
-                _music_invite_message(url=url, key=key, song=entry, lang=loc),
-            )
-            return
         if file_http is None:
             send_line(conn, _ts(conn, "music_http_off"))
             return
-        local_index = 1
-        if music_dir.is_dir():
-            local_entry = next(
-                (e for e in music.list_songs(music_dir) if e.name == entry.name),
-                None,
-            )
-            if local_entry is not None:
-                local_index = local_entry.index
-        session = music.music_store.mint(local_index, nick)
+        lang_q = "en" if str(loc).lower().startswith("en") else "zh"
+        nick = _client_name(conn)
+        session = music.music_store.mint(entry.index, nick)
         url = (
             f"{file_http.get_base_url().rstrip('/')}/music/{session.token}"
             f"?lang={lang_q}"

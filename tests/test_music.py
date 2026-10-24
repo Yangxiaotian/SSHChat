@@ -172,6 +172,55 @@ class MusicHttpTests(unittest.TestCase):
         )
         self.assertIn("@node-b", text)
 
+    def test_player_lists_federated_songs(self):
+        prev_cat = music._player_catalog_hook
+        prev_file = music._remote_file_hook
+        music.set_player_catalog_hook(
+            lambda: [
+                music.CatalogItem(1, "track.mp3", "mp3", 10, "", Path("track.mp3")),
+                music.CatalogItem(2, "peer.mp3", "mp3", 20, "node-b"),
+            ]
+        )
+        music.set_remote_file_hook(
+            lambda origin, name, nick: "https://peer.example/music/tok123"
+        )
+        music.music_store._origin_pages.clear()
+        self.addCleanup(lambda: music.set_player_catalog_hook(prev_cat))
+        self.addCleanup(lambda: music.set_remote_file_hook(prev_file))
+        self.addCleanup(music.music_store._origin_pages.clear)
+
+        sess = music.music_store.mint(2, "ada")
+        handler = _FakeHandler(f"/music/{sess.token}")
+        music_http.handle_music_get(handler)
+        html = handler.body.getvalue().decode("utf-8")
+        self.assertIn("peer.mp3", html)
+        self.assertIn("node-b", html)
+        self.assertIn("?origin=", html)
+
+        ok = _FakeHandler(f"/music/{sess.token}/auth")
+        ok.json_body = {"key": sess.key}
+        music_http.handle_music_post(ok)
+        songs = ok.json_out.get("songs") or []
+        origins = {s["name"]: s.get("origin") for s in songs}
+        self.assertEqual(origins.get("peer.mp3"), "node-b")
+        self.assertEqual(origins.get("track.mp3"), "")
+
+        remote = _FakeHandler(f"/music/{sess.token}/file/peer.mp3?origin=node-b")
+        music_http.handle_music_get(remote)
+        self.assertEqual(remote.status, 302)
+        self.assertIn(
+            ("Location", "https://peer.example/music/tok123/file/peer.mp3"),
+            remote.sent_headers,
+        )
+
+    def test_origin_file_url_strips_query(self):
+        self.assertEqual(
+            music.origin_file_url(
+                "https://host.example/music/abc?lang=zh", "a b.mp3"
+            ),
+            "https://host.example/music/abc/file/a%20b.mp3",
+        )
+
 
 class TestFederatedMusicCatalog(unittest.TestCase):
     def test_merge_union_sorts_and_indexes(self):

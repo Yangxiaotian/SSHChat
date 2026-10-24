@@ -15,9 +15,11 @@ final class MusicPlayback: ObservableObject {
     @Published private(set) var panelOpen = false
 
     struct Song: Identifiable, Equatable {
-        var id: String { name }
+        var id: String { origin.isEmpty ? name : "\(name)@\(origin)" }
         let name: String
         let size: String
+        let origin: String
+        var label: String { origin.isEmpty ? name : "\(name) @\(origin)" }
     }
 
     var hasSession: Bool { !songs.isEmpty }
@@ -107,7 +109,7 @@ final class MusicPlayback: ObservableObject {
     func playAt(_ i: Int) {
         guard !songs.isEmpty else { return }
         index = (i % songs.count + songs.count) % songs.count
-        guard let page = pageURL, let file = Self.fileURL(page: page, token: token, name: songs[index].name) else {
+        guard let page = pageURL, let file = Self.fileURL(page: page, token: token, name: songs[index].name, origin: songs[index].origin) else {
             status = "无法播放"
             return
         }
@@ -157,7 +159,11 @@ final class MusicPlayback: ObservableObject {
                 let raw = obj["songs"] as? [[String: Any]] ?? []
                 songs = raw.compactMap { row in
                     guard let name = row["name"] as? String, !name.isEmpty else { return nil }
-                    return Song(name: name, size: row["size"] as? String ?? "")
+                    return Song(
+                        name: name,
+                        size: row["size"] as? String ?? "",
+                        origin: row["origin"] as? String ?? ""
+                    )
                 }
                 let start = max(1, (obj["start"] as? NSNumber)?.intValue ?? 1)
                 index = min(max(0, start - 1), max(0, songs.count - 1))
@@ -266,8 +272,8 @@ final class MusicPlayback: ObservableObject {
 
     private func publishNowPlaying() {
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: current?.name ?? "SSHChat",
-            MPMediaItemPropertyArtist: "SSHChat",
+            MPMediaItemPropertyTitle: current?.label ?? "SSHChat",
+            MPMediaItemPropertyArtist: current?.origin.isEmpty == false ? (current?.origin ?? "SSHChat") : "SSHChat",
             MPNowPlayingInfoPropertyPlaybackRate: playing ? 1.0 : 0.0,
         ]
         if let item = player.currentItem {
@@ -290,13 +296,16 @@ final class MusicPlayback: ObservableObject {
         return tok.isEmpty ? nil : tok
     }
 
-    private static func fileURL(page: URL, token: String, name: String) -> URL? {
+    private static func fileURL(page: URL, token: String, name: String, origin: String = "") -> URL? {
         guard var comps = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return nil }
         comps.query = nil
         comps.fragment = nil
         // Assign percentEncodedPath ourselves. Setting `path` to an already
         // encoded 星际穿越(Cornfield Chase).mp3 double-encodes and 404s.
         comps.percentEncodedPath = "/music/\(token)/file/\(encodePathSegment(name))"
+        if !origin.isEmpty {
+            comps.percentEncodedQuery = "origin=\(encodePathSegment(origin))"
+        }
         return comps.url
     }
 
@@ -325,7 +334,7 @@ struct MusicPlayerView: View {
                         Image(systemName: "music.note")
                             .font(.system(size: 44))
                             .foregroundStyle(.green)
-                        Text(playback.current?.name ?? "点歌")
+                        Text(playback.current?.label ?? "点歌")
                             .font(.headline)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
@@ -372,7 +381,7 @@ struct MusicPlayerView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(song.name)
                                             .foregroundStyle(.primary)
-                                        Text(song.size)
+                                        Text(song.origin.isEmpty ? song.size : "\(song.size) @\(song.origin)")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -419,7 +428,7 @@ struct MusicMiniBar: View {
                 Button(action: onOpen) {
                     HStack(spacing: 10) {
                         Image(systemName: "music.note")
-                        Text(playback.current?.name ?? "点歌")
+                        Text(playback.current?.label ?? "点歌")
                             .lineLimit(1)
                         Spacer(minLength: 0)
                     }

@@ -41,7 +41,7 @@ MESSAGES: dict = {
         "[*] /library find <keyword>        Find by title; while reading, search in the current book (aliases: search / 搜索 / 查找).\n",
         "[*] /music         List songs (federated union; mp3 / m4a / ogg / flac / wav; admin drop folder).\n",
         "[*] /song            Short for /music.\n",
-        "[*] /music play [index|filename[@node]]  Open the web player (default: first song; remote songs play from the owning node); aliases: open / 播放.\n",
+        "[*] /music play [index|filename[@node]]  Open the web player (default: first song; playlist is the federated union, remote audio from the owning node); aliases: open / 播放.\n",
         "[*] /dict en|cn|hh <word>  Dictionary: EN→ZH, ZH→EN, Chinese gloss; /dict <word> auto-detects.\n",
         "[*]\n",
         "[*] /sendfile      Send a file to the current room (ok when alone — same nick on another device can download); you get an upload URL; the key is given separately.\n",
