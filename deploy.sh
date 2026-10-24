@@ -307,18 +307,80 @@ stop_existing_server() {
   fi
 }
 
-# Shell-level retry: pip's --retries does not always recover from IncompleteRead on large wheels.
+# sudo strips proxy env; pip then hangs on pypi.org (Clash/VPN is often only in the login session).
+# Walk parent /proc/*/environ, then probe common local mixed-HTTP ports.
+inherit_pip_proxy() {
+  # socks ALL_PROXY (Clash all_proxy) makes pip/curl SSL fail with SSLEOF.
+  case "${ALL_PROXY:-${all_proxy:-}}" in
+    socks*|SOCKS*) unset ALL_PROXY all_proxy ;;
+  esac
+  local shown="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+  if [[ -n "$shown" ]]; then
+    export http_proxy="${http_proxy:-${HTTP_PROXY:-$shown}}"
+    export https_proxy="${https_proxy:-${HTTPS_PROXY:-$http_proxy}}"
+    export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"
+    export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"
+    echo "info: pip using proxy $https_proxy" >&2
+    return 0
+  fi
+  local pid=${PPID:-} i envfile line port
+  for i in 1 2 3 4 5 6 7 8; do
+    [[ -n "$pid" && "$pid" != 0 && -r "/proc/$pid/environ" ]] || break
+    envfile="/proc/$pid/environ"
+    while IFS= read -r line; do
+      case "$line" in
+        http_proxy=*|HTTP_PROXY=*|https_proxy=*|HTTPS_PROXY=*)
+          export "$line"
+          ;;
+      esac
+      # socks ALL_PROXY is ignored: it makes pip/curl SSL fail (SSLEOF). HTTP mixed port is enough.
+    done < <(tr '\0' '\n' < "$envfile" 2>/dev/null || true)
+    shown="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+    if [[ -n "$shown" ]]; then
+      export http_proxy="${http_proxy:-${HTTP_PROXY:-$shown}}"
+      export https_proxy="${https_proxy:-${HTTPS_PROXY:-$http_proxy}}"
+      export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"
+      export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"
+      echo "info: inherited proxy from caller pid $pid ($https_proxy)" >&2
+      return 0
+    fi
+    pid=$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || echo "")
+  done
+  for port in 7890 7897 10809 6152; do
+    if timeout 0.2 bash -c "echo >/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+      export http_proxy="http://127.0.0.1:${port}"
+      export https_proxy="$http_proxy" HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy"
+      echo "info: sudo stripped proxy; using local $http_proxy for pip" >&2
+      return 0
+    fi
+  done
+  return 0
+}
+
+# pip --timeout often does not fire on hung TCP/DNS; wrap with coreutils timeout when present.
 pip_run_with_retry() {
   local attempt=1
   local delay=5
+  local wall="${SSHCHAT_PIP_WALL_TIMEOUT:-$(( PIP_TIMEOUT * 2 ))}"
+  local -a run
   while [[ "$attempt" -le "$PIP_CMD_RETRIES" ]]; do
-    if "$@"; then
+    run=("$@")
+    if command -v timeout >/dev/null 2>&1 && [[ "${SSHCHAT_PIP_WALL_TIMEOUT:-1}" != "0" ]]; then
+      # GNU timeout supports --foreground (Ctrl-C); BusyBox only takes DURATION CMD.
+      if timeout --foreground 0 true >/dev/null 2>&1; then
+        run=(timeout --foreground --signal=TERM "$wall" "$@")
+      else
+        run=(timeout "$wall" "$@")
+      fi
+    fi
+    if "${run[@]}"; then
       return 0
     fi
     if [[ "$attempt" -ge "$PIP_CMD_RETRIES" ]]; then
       echo "error: pip failed after ${PIP_CMD_RETRIES} attempt(s): $*" >&2
       echo "hint: retry with --pip-index-url https://pypi.tuna.tsinghua.edu.cn/simple" >&2
       echo "      or SSHCHAT_PIP_TIMEOUT=300 SSHCHAT_PIP_CMD_RETRIES=5 sudo -E ./deploy.sh ..." >&2
+      echo "      (sudo strips HTTP(S)_PROXY; use sudo -E or a local Clash port 7890/7897)" >&2
       return 1
     fi
     echo "warn: pip attempt ${attempt}/${PIP_CMD_RETRIES} failed (${*:0:80}...); retrying in ${delay}s..." >&2
@@ -326,6 +388,11 @@ pip_run_with_retry() {
     attempt=$((attempt + 1))
     delay=$((delay * 2))
   done
+}
+
+pip_is_new_enough() {
+  local py=$1
+  "$py" -c 'import pip, sys; v=tuple(int(x) for x in pip.__version__.split(".")[:2]); sys.exit(0 if v >= (23, 0) else 1)' 2>/dev/null
 }
 
 usage() {
@@ -358,9 +425,11 @@ Options:
                          Reset one user's persisted rating for one game before restart
   --pip-index-url URL  Override pip index (e.g. https://pypi.tuna.tsinghua.edu.cn/simple); also reads
                        \$SSHCHAT_PIP_INDEX_URL / \$PIP_INDEX_URL (sudo strips env unless -E)
-  Env: SSHCHAT_SKIP_PIP_UPGRADE=1  Skip upgrading pip before requirements (not recommended; old pip
-       may fail hash checks on republished wheels).
+  Env: SSHCHAT_SKIP_PIP_UPGRADE=1  Skip upgrading pip before requirements (auto-skipped when pip>=23;
+       old 21.x pip can fail hash checks on republished wheels).
   Env: SSHCHAT_PIP_CMD_RETRIES=N  Shell-level pip retries on network errors (default: 3)
+  Env: sudo -E keeps HTTP(S)_PROXY. Deploy also inherits proxy from the caller or Clash
+       on 127.0.0.1:7890/7897; otherwise pip hangs silently on pypi.org.
   -h, --help         This help
 
 Each run updates files under PREFIX and, unless --no-migrate-keys, rewrites every
@@ -992,6 +1061,22 @@ fi
 
 [[ ${EUID:-0} -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 
+inherit_pip_proxy
+if [[ -z "$PIP_INDEX_URL_ARG" ]]; then
+  if timeout 8 curl -4 -fsI --max-time 6 https://pypi.org/simple/pip/ >/dev/null 2>&1; then
+    : # pypi.org ok (direct or via inherited HTTP proxy)
+  elif timeout 8 curl -4 -fsI --noproxy '*' --max-time 6 https://pypi.tuna.tsinghua.edu.cn/simple/pip/ >/dev/null 2>&1; then
+    PIP_INDEX_URL_ARG="https://pypi.tuna.tsinghua.edu.cn/simple"
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+    echo "info: pypi.org not reachable; using $PIP_INDEX_URL_ARG without proxy" >&2
+  elif timeout 8 curl -4 -fsI --max-time 6 https://pypi.tuna.tsinghua.edu.cn/simple/pip/ >/dev/null 2>&1; then
+    PIP_INDEX_URL_ARG="https://pypi.tuna.tsinghua.edu.cn/simple"
+    echo "info: using $PIP_INDEX_URL_ARG via proxy" >&2
+  else
+    echo "warn: pypi.org and tuna both failed the probe; pip may hang. Use --pip-index-url or sudo -E" >&2
+  fi
+fi
+
 for f in server.py client.py games.py ratings.py sgs_data.py library.py music.py music_http.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py canvas_ws.py piano_sharing.py piano_http.py piano_ws.py clock_sharing.py clock_http.py; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
@@ -1170,10 +1255,16 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
   fi
 
   # Fresh venv ships with old pip (e.g. 21.x) that can fail hash checks when PyPI
-  # republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped.
-  if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" != "1" ]]; then
+  # republishes wheels (pymupdf 1.28.0). Upgrade before requirements unless skipped
+  # or the venv already has pip 23+ (Python 3.12+). Do not use -q: a hung PyPI
+  # fetch otherwise looks frozen at "upgrading pip".
+  if [[ "${SSHCHAT_SKIP_PIP_UPGRADE:-0}" == "1" ]]; then
+    echo "info: skipping pip self-upgrade (SSHCHAT_SKIP_PIP_UPGRADE=1)" >&2
+  elif pip_is_new_enough "$PREFIX/venv/bin/python"; then
+    echo "info: pip already >= 23; skip self-upgrade" >&2
+  else
     echo "info: upgrading pip in $PREFIX/venv"
-    pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install -q "${PIP_COMMON_ARGS[@]}" --upgrade pip
+    pip_run_with_retry "$PREFIX/venv/bin/python" -m pip install "${PIP_COMMON_ARGS[@]}" --upgrade pip
   fi
   # Prefer binary wheels; never try to build pymupdf/lxml from source on constrained hosts.
   echo "info: installing Python deps from $REQ_FILE"
@@ -1198,7 +1289,7 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     fi
     echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
   else
-    pip_run_with_retry "$PREFIX/venv/bin/pip" install -q "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
+    pip_run_with_retry "$PREFIX/venv/bin/pip" install "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
   fi
   rm -rf "$DEPLOY_TMP"
 else
