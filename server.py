@@ -6194,11 +6194,8 @@ def _maybe_refresh_canvas_invites_on_public_change(
     cur = (cur or "").strip().rstrip("/")
     prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
     if not cur:
-        # Latch dropped (probe failed / origin down). Remember the gap so the
-        # same trycloudflare hostname recovering still re-sends /piano invites.
-        if prev:
-            _LAST_CANVAS_PUBLIC_BASE = ""
-            _save_last_canvas_public_base("")
+        # Probe blip / origin down: keep prev so a later recovery of the *same*
+        # hostname does not re-spam gui-open piano/canvas at everyone.
         return
     if cur == prev:
         _LAST_CANVAS_PUBLIC_BASE = cur

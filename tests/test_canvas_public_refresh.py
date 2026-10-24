@@ -120,7 +120,7 @@ class CanvasPublicRefreshTests(unittest.TestCase):
         self.assertIn("https://fresh.trycloudflare.com/canvas/", sent[-1])
         self.assertNotIn("old-dead.trycloudflare.com", sent[-1])
 
-    def test_empty_latch_then_same_host_redelivers(self) -> None:
+    def test_empty_latch_then_same_host_does_not_redeliver(self) -> None:
         session = canvas_sharing.canvas_store.create_session(
             creator="alice", participants=["bob"], room="lobby"
         )
@@ -148,15 +148,12 @@ class CanvasPublicRefreshTests(unittest.TestCase):
                             server._maybe_refresh_canvas_invites_on_public_change(
                                 "", reason="cf-down"
                             )
-                            self.assertEqual(server._LAST_CANVAS_PUBLIC_BASE, "")
+                            self.assertEqual(server._LAST_CANVAS_PUBLIC_BASE, host)
                             server._maybe_refresh_canvas_invites_on_public_change(
                                 host, reason="cf-up"
                             )
 
-        self.assertEqual(
-            invited,
-            [f"{session.session_id}:True", f"{session.session_id}:True"],
-        )
+        self.assertEqual(invited, [f"{session.session_id}:True"])
 
     def test_wait_live_file_public_returns_when_ready(self) -> None:
         calls = {"n": 0}

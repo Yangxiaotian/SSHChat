@@ -97,6 +97,17 @@ object SecureInvite {
         return Open(kind, m.groupValues[2], key)
     }
 
+    fun pathToken(url: String, kind: String): String? {
+        val path = try {
+            java.net.URI(url).path ?: return null
+        } catch (_: Exception) {
+            return null
+        }
+        val parts = path.trim('/').split('/')
+        if (parts.size < 2 || !parts[0].equals(kind, ignoreCase = true)) return null
+        return parts[1].ifBlank { null }
+    }
+
     /** Fallback when the server only printed the clock URL (no gui-open yet). */
     fun parseClockUrl(line: String): String? {
         val t = normalize(line)

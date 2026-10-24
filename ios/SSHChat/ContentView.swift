@@ -84,6 +84,8 @@ final class ChatViewModel: ObservableObject {
     private var pendingFileMeta = SecureInvite.FileMeta()
     private var expectingOwnCanvas = false
     private var expectingOwnPiano = false
+    /// Tokens already popped as a piano; tunnel re-invites must not reopen them.
+    private var seenPianoTokens: Set<String> = []
     private var pendingPadEdit = false
     private var padEditWaitTask: Task<Void, Never>?
     private let ansiClear = try! NSRegularExpression(pattern: #"\u001B\[[0-9;]*[HJKjk]"#)
@@ -521,6 +523,13 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/pad clear") }
     }
 
+    private static func inviteToken(from url: String, kind: String) -> String? {
+        guard let u = URL(string: url) else { return nil }
+        let parts = u.path.split(separator: "/").map(String.init)
+        guard parts.count >= 2, parts[0] == kind else { return nil }
+        return parts[1]
+    }
+
     private static func decodeURLSafeBase64(_ s: String) -> Data? {
         var t = s
             .replacingOccurrences(of: "-", with: "+")
@@ -866,6 +875,27 @@ final class ChatViewModel: ObservableObject {
                 let creator = (pendingFileMeta.sender ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 pendingFileMeta.reset()
+                let token = Self.inviteToken(from: open.url, kind: "piano")
+                if let token {
+                    let showing = webInvite?.allowLandscape == true
+                        && Self.inviteToken(from: webInvite?.url ?? "", kind: "piano") == token
+                    if showing {
+                        if webInvite?.url != open.url {
+                            webInvite = WebInvitePayload(
+                                title: "房间钢琴",
+                                url: open.url,
+                                key: open.key,
+                                isCanvas: true,
+                                allowLandscape: true
+                            )
+                        }
+                        return
+                    }
+                    if !own, seenPianoTokens.contains(token) {
+                        return
+                    }
+                    seenPianoTokens.insert(token)
+                }
                 let sameNickOtherDevice = !own && !creator.isEmpty && !me.isEmpty
                     && creator.caseInsensitiveCompare(me) == .orderedSame
                 if sameNickOtherDevice {

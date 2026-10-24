@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private var expectingNames = false
     @Volatile private var expectingOwnCanvas = false
     @Volatile private var expectingOwnPiano = false
+    private val seenPianoTokens = mutableSetOf<String>()
     @Volatile private var pendingPadEdit = false
     private var padEditTimeout: Runnable? = null
     private var padEditDialog: android.app.AlertDialog? = null
@@ -1369,6 +1370,11 @@ class MainActivity : AppCompatActivity() {
                     val me = binding.etUsername.text?.toString()?.trim().orEmpty()
                     val creator = pendingFileMeta.sender?.trim().orEmpty()
                     pendingFileMeta.reset()
+                    val token = SecureInvite.pathToken(open.url, "piano")
+                    if (token != null) {
+                        if (!own && token in seenPianoTokens) return
+                        seenPianoTokens.add(token)
+                    }
                     val sameNickOtherDevice =
                         !own && creator.isNotEmpty() && me.isNotEmpty() &&
                             creator.equals(me, ignoreCase = true)
