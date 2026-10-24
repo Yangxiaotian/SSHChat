@@ -70,7 +70,7 @@ object ChatLineParsers {
     /** Bare CSI fragment. No-param: ABCDHJK only. Tag-colliding finals (T/S/…) need digits. */
     // Lookahead keeps tags like [root] / [TXT] / [HINT].
     private const val bareCsiFragment =
-        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\]))"""
+        """(?:\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_ \p{Han}./&'-]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_ \p{Han}./&'-]*\]))"""
     /**
      * Incomplete CSI when the final byte was lost (e.g. `[2` / `[0;` before `[*]`).
      * Must not absorb real tags like `[alice]` — only digits/`;`/`?` after `[`.

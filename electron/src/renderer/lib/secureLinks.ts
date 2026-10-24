@@ -7,7 +7,7 @@
 
 import type { ChatMessage } from '../../shared/protocol';
 
-export type SecureLinkKind = 'canvas' | 'piano' | 'upload' | 'download';
+export type SecureLinkKind = 'canvas' | 'piano' | 'upload' | 'download' | 'music';
 
 export type SecureLinkPayload = {
   kind: SecureLinkKind;
@@ -23,14 +23,14 @@ export type TimelineItem =
   | { type: 'secure-link'; id: string; payload: SecureLinkPayload; messages: ChatMessage[] };
 
 const BANNER_START =
-  /^(=+\s*)?(共享画布|房间钢琴|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)/i;
+  /^(=+\s*)?(共享画布|房间钢琴|点歌\s*=|Music\s*=|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|File\s+upload|New\s+file)/i;
 const BANNER_END = /^=+/;
-const URL_LABEL = /(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$/i;
+const URL_LABEL = /(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$/i;
 const KEY_LINE =
   /^(?:访问密钥|上传密钥|下载密钥|Access\s*key|Upload\s*key|Download\s*key|密钥)\s*[:：]\s*([A-Z0-9]{6})\s*$/i;
 const HTTP_URL = /^(https?:\/\/\S+)\s*$/i;
 const GUI_OPEN =
-  /^gui-open\s+(canvas|piano|upload|download)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
+  /^gui-open\s+(canvas|piano|upload|download|music)\s+(https?:\/\/\S+)\s+([A-Z0-9]{6})\s*$/i;
 
 /** Strip timestamps / [*] so banner and gui-open match reliably. */
 export function normalizeInviteLine(line: string): string {
@@ -46,6 +46,7 @@ function kindFromBanner(text: string): SecureLinkKind | null {
   const t = text.toLowerCase();
   if (t.includes('画布') || t.includes('canvas')) return 'canvas';
   if (t.includes('钢琴') || t.includes('piano')) return 'piano';
+  if (t.includes('点歌') || t.includes('music')) return 'music';
   if (t.includes('上传') || t.includes('upload')) return 'upload';
   if (t.includes('收到新文件') || t.includes('new file') || t.includes('download')) {
     return 'download';
@@ -252,11 +253,13 @@ export function defaultSecureLinkTitle(kind: SecureLinkKind, locale: 'en' | 'zh'
   if (locale === 'zh') {
     if (kind === 'canvas') return '共享画布';
     if (kind === 'piano') return '房间钢琴';
+    if (kind === 'music') return '点歌';
     if (kind === 'upload') return '上传文件';
     return '收到文件';
   }
   if (kind === 'canvas') return 'Shared canvas';
   if (kind === 'piano') return 'Room piano';
+  if (kind === 'music') return 'Music';
   if (kind === 'upload') return 'Upload file';
   return 'Incoming file';
 }
@@ -265,11 +268,13 @@ export function defaultSecureLinkAction(kind: SecureLinkKind, locale: 'en' | 'zh
   if (locale === 'zh') {
     if (kind === 'canvas') return '打开画布';
     if (kind === 'piano') return '打开钢琴';
+    if (kind === 'music') return '打开点歌';
     if (kind === 'upload') return '去上传';
     return '打开文件';
   }
   if (kind === 'canvas') return 'Open canvas';
   if (kind === 'piano') return 'Open piano';
+  if (kind === 'music') return 'Open player';
   if (kind === 'upload') return 'Upload';
   return 'Open file';
 }

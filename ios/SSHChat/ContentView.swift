@@ -54,7 +54,11 @@ final class ChatViewModel: ObservableObject {
     @Published var showPadEditor = false
     @Published var padEditorText = ""
     @Published var gamePanelVisible = false
+    @Published var libraryVisible = false
+    @Published var newsVisible = false
     let gameBoard = GameBoardModel()
+    let libraryReader = LibraryReaderModel()
+    let newsPanel = NewsPanelModel()
 
     enum FileImportKind { case media, identity }
 
@@ -80,6 +84,8 @@ final class ChatViewModel: ObservableObject {
     private var pendingFileMeta = SecureInvite.FileMeta()
     private var expectingOwnCanvas = false
     private var expectingOwnPiano = false
+    /// Tokens already popped as a piano; tunnel re-invites must not reopen them.
+    private var seenPianoTokens: Set<String> = []
     private var pendingPadEdit = false
     private var padEditWaitTask: Task<Void, Never>?
     private let ansiClear = try! NSRegularExpression(pattern: #"\u001B\[[0-9;]*[HJKjk]"#)
@@ -95,6 +101,8 @@ final class ChatViewModel: ObservableObject {
         var allowLandscape: Bool = false
         /// Chess clock has no unlock key.
         var isClock: Bool = false
+        /// Native AVPlayer (WKWebView HTML audio stops when the app is minimized).
+        var isMusic: Bool = false
     }
 
     private static let chatFontKey = "chat_font_sp"
@@ -120,6 +128,25 @@ final class ChatViewModel: ObservableObject {
         sendTarget = SendTargetStore.loadTarget()
         gameBoard.onSend = { [weak self] cmd in
             self?.sendSlashCommand(cmd)
+        }
+        libraryReader.onSend = { [weak self] cmd in
+            guard let self else { return false }
+            guard self.connected else {
+                self.toast = "连接已断开，请稍候重连"
+                return false
+            }
+            Task { try? await self.session.send(cmd) }
+            return true
+        }
+        newsPanel.onSend = { [weak self] cmd in
+            guard let self else { return false }
+            guard self.connected else {
+                self.toast = "连接已断开，请稍候重连"
+                return false
+            }
+            // prompt_toolkit treats CR as Enter; LF-only sometimes sits in the prompt.
+            Task { try? await self.session.send(cmd.hasSuffix("\r") ? cmd : cmd + "\r") }
+            return true
         }
     }
 
@@ -328,6 +355,10 @@ final class ChatViewModel: ObservableObject {
         gamePanelVisible = false
         gameBoard.setVisible(false)
         gameBoard.clear()
+        libraryVisible = false
+        libraryReader.reset()
+        newsVisible = false
+        newsPanel.reset()
         pendingUpload = nil
         voiceRecorder?.cancel()
         voiceRecorder = nil
@@ -443,6 +474,13 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/piano") }
     }
 
+    func startMusic() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 正在打开点歌…（/music play）")
+        CommandUsage.record("/music play")
+        Task { try? await session.send("/music play") }
+    }
+
     private func cancelPadEditWait() {
         padEditWaitTask?.cancel()
         padEditWaitTask = nil
@@ -485,6 +523,13 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/pad clear") }
     }
 
+    private static func inviteToken(from url: String, kind: String) -> String? {
+        guard let u = URL(string: url) else { return nil }
+        let parts = u.path.split(separator: "/").map(String.init)
+        guard parts.count >= 2, parts[0] == kind else { return nil }
+        return parts[1]
+    }
+
     private static func decodeURLSafeBase64(_ s: String) -> Data? {
         var t = s
             .replacingOccurrences(of: "-", with: "+")
@@ -505,7 +550,21 @@ final class ChatViewModel: ObservableObject {
     }
 
     func openLibrary() {
-        sendSlashCommand("/library")
+        guard connected else { toast = "请先连接"; return }
+        CommandUsage.record("/library")
+        newsVisible = false
+        newsPanel.hide()
+        libraryVisible = true
+        libraryReader.openCatalog()
+    }
+
+    func openNews() {
+        guard connected else { toast = "请先连接"; return }
+        CommandUsage.record("/news")
+        libraryVisible = false
+        libraryReader.hide()
+        newsVisible = true
+        newsPanel.open()
     }
 
     func openHelp() {
@@ -816,6 +875,27 @@ final class ChatViewModel: ObservableObject {
                 let creator = (pendingFileMeta.sender ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 pendingFileMeta.reset()
+                let token = Self.inviteToken(from: open.url, kind: "piano")
+                if let token {
+                    let showing = webInvite?.allowLandscape == true
+                        && Self.inviteToken(from: webInvite?.url ?? "", kind: "piano") == token
+                    if showing {
+                        if webInvite?.url != open.url {
+                            webInvite = WebInvitePayload(
+                                title: "房间钢琴",
+                                url: open.url,
+                                key: open.key,
+                                isCanvas: true,
+                                allowLandscape: true
+                            )
+                        }
+                        return
+                    }
+                    if !own, seenPianoTokens.contains(token) {
+                        return
+                    }
+                    seenPianoTokens.insert(token)
+                }
                 let sameNickOtherDevice = !own && !creator.isEmpty && !me.isEmpty
                     && creator.caseInsensitiveCompare(me) == .orderedSame
                 if sameNickOtherDevice {
@@ -851,6 +931,19 @@ final class ChatViewModel: ObservableObject {
                     isCanvas: true,
                     isClock: true
                 )
+            case .music:
+                pendingFileMeta.reset()
+                // URLSession (native) can't reach LAN http without Local Network
+                // permission; WKWebView can — same path Android uses.
+                let native = SecureInvite.supportsNativeMusicPlayer(open.url)
+                appendText(native ? "[*] 打开点歌…" : "[*] 打开点歌（网页）…")
+                webInvite = WebInvitePayload(
+                    title: "点歌",
+                    url: open.url,
+                    key: open.key,
+                    isCanvas: false,
+                    isMusic: native
+                )
             }
             return
         }
@@ -875,6 +968,9 @@ final class ChatViewModel: ObservableObject {
             status = "发文件失败"
             return
         }
+
+        // Feed the raw PTY line; NewsParser peels [*] / clocks itself.
+        if newsPanel.wantsFeed, newsPanel.feedLine(stripped) { return }
 
         SecureInvite.absorbFileMeta(stripped, into: &pendingFileMeta)
         if SecureInvite.isInviteNoise(stripped) { return }
@@ -950,6 +1046,14 @@ final class ChatViewModel: ObservableObject {
         trimEntriesIfNeeded()
         let kind = ChatLineParsers.classifyForDisplay(line, myName: username)
         if case .boardLine(let t) = kind {
+            if libraryReader.feedLine(t) {
+                libraryVisible = libraryReader.visible
+                return
+            }
+            if newsPanel.feedLine(t) {
+                newsVisible = newsPanel.visible
+                return
+            }
             gameBoard.myName = username.trimmingCharacters(in: .whitespacesAndNewlines)
             gameBoard.feedLine(t)
             if case .board(_, let existing) = entries.last {
@@ -993,6 +1097,69 @@ final class ChatViewModel: ObservableObject {
     }
 }
 
+private struct WebInvitePresentations: ViewModifier {
+    @ObservedObject var model: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(item: canvasInvite) { invite in
+                WebInviteView(
+                    title: invite.title,
+                    url: invite.url,
+                    key: invite.key,
+                    startsMaximized: true,
+                    allowLandscape: invite.allowLandscape,
+                    isClock: invite.isClock
+                )
+            }
+            .fullScreenCover(item: musicInvite) { invite in
+                MusicPlayerView(
+                    pageURL: invite.url,
+                    key: invite.key,
+                    onMinimize: { model.webInvite = nil },
+                    onClose: { model.webInvite = nil },
+                    onWebFallback: {
+                        let url = invite.url
+                        let key = invite.key
+                        model.webInvite = nil
+                        DispatchQueue.main.async {
+                            model.webInvite = ChatViewModel.WebInvitePayload(
+                                title: "点歌",
+                                url: url,
+                                key: key,
+                                isMusic: false
+                            )
+                        }
+                    }
+                )
+            }
+            .sheet(item: otherInvite) { invite in
+                WebInviteView(title: invite.title, url: invite.url, key: invite.key)
+            }
+    }
+
+    private var canvasInvite: Binding<ChatViewModel.WebInvitePayload?> {
+        Binding(
+            get: { model.webInvite.flatMap { $0.isCanvas ? $0 : nil } },
+            set: { model.webInvite = $0 }
+        )
+    }
+
+    private var musicInvite: Binding<ChatViewModel.WebInvitePayload?> {
+        Binding(
+            get: { model.webInvite.flatMap { $0.isMusic ? $0 : nil } },
+            set: { model.webInvite = $0 }
+        )
+    }
+
+    private var otherInvite: Binding<ChatViewModel.WebInvitePayload?> {
+        Binding(
+            get: { model.webInvite.flatMap { ($0.isCanvas || $0.isMusic) ? nil : $0 } },
+            set: { model.webInvite = $0 }
+        )
+    }
+}
+
 struct ContentView: View {
     @StateObject private var model = ChatViewModel()
     @FocusState private var draftFocused: Bool
@@ -1031,6 +1198,16 @@ struct ContentView: View {
                     GamePanelView(model: model.gameBoard)
                 }
 
+                MusicMiniBar {
+                    if let url = MusicPlayback.shared.pageURLString {
+                        model.webInvite = ChatViewModel.WebInvitePayload(
+                            title: "点歌",
+                            url: url,
+                            key: MusicPlayback.shared.key,
+                            isMusic: true
+                        )
+                    }
+                }
                 suggestRow
                 composerSection
             }
@@ -1046,6 +1223,28 @@ struct ContentView: View {
             model.gameBoard.maximized = false
         }) {
             GamePanelFullscreenView(model: model.gameBoard)
+        }
+        .fullScreenCover(isPresented: $model.libraryVisible, onDismiss: {
+            model.libraryReader.hide()
+        }) {
+            LibraryReaderView(model: model.libraryReader)
+        }
+        // Nested ObservableObject inside fullScreenCover did not refresh the news
+        // list (blank overlay). Keep the panel in ContentView's tree like GamePanel.
+        .overlay {
+            if model.newsVisible {
+                NewsPanelView(model: model.newsPanel)
+            }
+        }
+        .onReceive(model.libraryReader.$visible) { show in
+            if model.libraryVisible != show {
+                model.libraryVisible = show
+            }
+        }
+        .onReceive(model.newsPanel.$visible) { show in
+            if model.newsVisible != show {
+                model.newsVisible = show
+            }
         }
         .onReceive(model.gameBoard.$maximized) { max in
             if boardFullscreen != max { boardFullscreen = max }
@@ -1124,25 +1323,7 @@ struct ContentView: View {
                 }
             }
         }
-        .fullScreenCover(item: Binding(
-            get: { model.webInvite.flatMap { $0.isCanvas ? $0 : nil } },
-            set: { model.webInvite = $0 }
-        )) { invite in
-            WebInviteView(
-                title: invite.title,
-                url: invite.url,
-                key: invite.key,
-                startsMaximized: true,
-                allowLandscape: invite.allowLandscape,
-                isClock: invite.isClock
-            )
-        }
-        .sheet(item: Binding(
-            get: { model.webInvite.flatMap { $0.isCanvas ? nil : $0 } },
-            set: { model.webInvite = $0 }
-        )) { invite in
-            WebInviteView(title: invite.title, url: invite.url, key: invite.key)
-        }
+        .modifier(WebInvitePresentations(model: model))
         .sheet(item: $model.previewMedia) { media in
             MediaPreviewView(media: media)
         }
@@ -1626,6 +1807,14 @@ struct ContentView: View {
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false
                 model.openLibrary()
+            }
+            plusCell(title: "新闻", system: "newspaper.fill") {
+                showPlusPanel = false
+                model.openNews()
+            }
+            plusCell(title: "点歌", system: "music.note") {
+                showPlusPanel = false
+                model.startMusic()
             }
             plusCell(title: "帮助", system: "questionmark.circle.fill") {
                 showPlusPanel = false

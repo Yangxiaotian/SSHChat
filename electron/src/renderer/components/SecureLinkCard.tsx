@@ -17,6 +17,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   const openCanvas = useChatStore((s) => s.openCanvas);
   const openPiano = useChatStore((s) => s.openPiano);
   const canvasSession = useChatStore((s) => s.canvasSession);
+  const pianoSession = useChatStore((s) => s.pianoSession);
   const expectingOwnCanvas = useChatStore((s) => s.expectingOwnCanvas);
   const canvasRequestAt = useChatStore((s) => s.canvasRequestAt);
   const expectingOwnPiano = useChatStore((s) => s.expectingOwnPiano);
@@ -33,14 +34,16 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       ? t('secureLink.canvasHint')
       : payload.kind === 'piano'
         ? t('secureLink.pianoHint')
+        : payload.kind === 'music'
+          ? t('secureLink.musicHint')
         : payload.kind === 'upload'
           ? t('secureLink.uploadHint')
           : t('secureLink.downloadHint');
 
-  const canvasTokenFromUrl = (url: string): string => {
+  const inviteTokenFromUrl = (url: string, kind: 'canvas' | 'piano'): string => {
     try {
       const parts = new URL(url).pathname.split('/').filter(Boolean);
-      if (parts[0] === 'canvas' && parts[1]) return parts[1];
+      if (parts[0] === kind && parts[1]) return parts[1];
     } catch {
       /* ignore */
     }
@@ -58,6 +61,17 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       }
       if (payload.kind === 'piano') {
         openPiano({ url: payload.url, key: payload.key });
+        return;
+      }
+      if (payload.kind === 'music') {
+        const result = await window.api.openSecureWebSession({
+          kind: 'music',
+          url: payload.url,
+          key: payload.key,
+        });
+        if (!result?.ok) {
+          setError(result?.error || t('secureLink.openFailed'));
+        }
         return;
       }
       const result = await window.api.openSecureWebSession({
@@ -92,6 +106,17 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
       setAutoOpened(true);
       setExpectingOwnPiano(false);
       openPiano({ url: payload.url, key: payload.key });
+      return;
+    }
+    if (payload.kind === 'music') {
+      const at = payload.receivedAt || 0;
+      if (at && Date.now() - at > 15000) return;
+      setAutoOpened(true);
+      void window.api.openSecureWebSession({
+        kind: 'music',
+        url: payload.url,
+        key: payload.key,
+      });
     }
   }, [
     autoOpened,
@@ -109,22 +134,36 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
     setExpectingOwnPiano,
   ]);
 
-  // Quick Tunnel hostname churn: if this board is already open, swap to the
-  // new trycloudflare URL so the iframe does not stay on NXDOMAIN.
+  // Quick Tunnel hostname churn: if this board/piano is already open, swap to
+  // the new trycloudflare URL so the iframe does not stay on NXDOMAIN.
   useEffect(() => {
-    if (payload.kind !== 'canvas' || !canvasSession) return;
-    const nextTok = canvasTokenFromUrl(payload.url);
-    const openTok = canvasTokenFromUrl(canvasSession.url);
-    if (
-      nextTok &&
-      nextTok === openTok &&
-      (payload.url !== canvasSession.url || payload.key !== canvasSession.key)
-    ) {
-      openCanvas({ url: payload.url, key: payload.key });
+    if (payload.kind === 'canvas' && canvasSession) {
+      const nextTok = inviteTokenFromUrl(payload.url, 'canvas');
+      const openTok = inviteTokenFromUrl(canvasSession.url, 'canvas');
+      if (
+        nextTok &&
+        nextTok === openTok &&
+        (payload.url !== canvasSession.url || payload.key !== canvasSession.key)
+      ) {
+        openCanvas({ url: payload.url, key: payload.key });
+      }
+    }
+    if (payload.kind === 'piano' && pianoSession) {
+      const nextTok = inviteTokenFromUrl(payload.url, 'piano');
+      const openTok = inviteTokenFromUrl(pianoSession.url, 'piano');
+      if (
+        nextTok &&
+        nextTok === openTok &&
+        (payload.url !== pianoSession.url || payload.key !== pianoSession.key)
+      ) {
+        openPiano({ url: payload.url, key: payload.key });
+      }
     }
   }, [
     canvasSession,
+    pianoSession,
     openCanvas,
+    openPiano,
     payload.key,
     payload.kind,
     payload.url,
@@ -133,7 +172,7 @@ export default function SecureLinkCard({ payload }: SecureLinkCardProps) {
   return (
     <div className={`secure-link-card kind-${payload.kind}`}>
       <div className="secure-link-icon" aria-hidden>
-        {payload.kind === 'canvas' ? '✎' : payload.kind === 'piano' ? '🎹' : payload.kind === 'upload' ? '↑' : '↓'}
+        {payload.kind === 'canvas' ? '✎' : payload.kind === 'piano' ? '🎹' : payload.kind === 'music' ? '🎵' : payload.kind === 'upload' ? '↑' : '↓'}
       </div>
       <div className="secure-link-body">
         <div className="secure-link-title">{title}</div>

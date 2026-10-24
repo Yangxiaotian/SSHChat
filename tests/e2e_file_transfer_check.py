@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -55,10 +56,11 @@ upload_url = f"{base}/upload/{transfer.upload_token}"
 
 print("== 上传 ==")
 
-status, _, body = request(upload_url)
+status, _, body = request(upload_url + "?lang=zh")
 assert status == 200, status
 page = body.decode("utf-8")
 assert "安全文件上传" in page
+assert "chunkSize" in page
 assert transfer.upload_key not in page, "upload key leaked into the page"
 # The page must not build any URL that carries the key
 assert "?key=" not in page and "key=' + " not in page, "upload page still puts key in a URL"
@@ -83,7 +85,7 @@ print("\n== 下载页与取件 ==")
 
 token = transfer.download_tokens["bob"]
 key = transfer.download_keys["bob"]
-page_url = f"{base}/download/{token}"
+page_url = f"{base}/download/{token}?lang=zh"
 
 status, _, body = request(page_url)
 assert status == 200, status
@@ -176,6 +178,69 @@ print("16. 换发后旧凭据立即失效，避免旧链接被留存复用")
 status, _, _ = request(base + second["download"])
 assert status == 200
 print("17. 新凭据可正常下载")
+
+print("\n== 分块上传 ==")
+
+t3 = store.create_upload_session(sender="alice", recipients=["dave"])
+blob = b"ABCDEFGHIJ" * 30  # 300 bytes, three 100-byte slices
+upload3 = f"{base}/upload/{t3.upload_token}"
+parts = [blob[0:100], blob[100:200], blob[200:300]]
+fname = urllib.parse.quote("分块.bin", safe="")
+for i, part in enumerate(parts):
+    status, _, body = request(upload3, "POST", part, {
+        "X-Upload-Key": t3.upload_key,
+        "X-Upload-Index": str(i),
+        "X-Upload-Count": "3",
+        "X-Upload-Size": str(len(blob)),
+        "X-Upload-Filename": fname,
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(len(part)),
+    })
+    assert status == 200, (i, status, body)
+t3b = store.get_transfer_by_token(t3.upload_token)
+assert t3b.filename == "分块.bin", t3b.filename
+assert t3b.file_size == len(blob)
+with open(t3b.file_path, "rb") as f:
+    assert f.read() == blob
+print("18. 分块上传后文件完整、文件名正确")
+
+status, _, _ = request(upload3, "POST", b"x", {
+    "X-Upload-Key": t3.upload_key,
+    "X-Upload-Index": "0",
+    "X-Upload-Count": "1",
+    "X-Upload-Size": "1",
+    "X-Upload-Filename": "x",
+    "Content-Type": "application/octet-stream",
+    "Content-Length": "1",
+})
+assert status == 403, status
+print("19. 分块完成后上传链接同样一次性")
+
+print("\n== 分块密钥走表单字段 ==")
+t4 = store.create_upload_session(sender="alice", recipients=["erin"])
+upload4 = f"{base}/upload/{t4.upload_token}"
+payload, hdrs = multipart("form.bin", b"FORMKEY")
+# Intentionally omit X-Upload-Key; put the key in the multipart field instead.
+# multipart() already has name="file"; rebuild with key field.
+boundary = uuid.uuid4().hex
+body = (
+    f"--{boundary}\r\n"
+    f'Content-Disposition: form-data; name="key"\r\n\r\n'
+    f"{t4.upload_key}\r\n"
+    f"--{boundary}\r\n"
+    f'Content-Disposition: form-data; name="file"; filename="form.bin"\r\n'
+    "Content-Type: application/octet-stream\r\n\r\n"
+).encode("utf-8") + b"FORMKEY" + f"\r\n--{boundary}--\r\n".encode("utf-8")
+status, _, body_out = request(upload4, "POST", body, {
+    "Content-Type": f"multipart/form-data; boundary={boundary}",
+    "X-Upload-Index": "0",
+    "X-Upload-Count": "1",
+    "X-Upload-Size": "7",
+    "X-Upload-Filename": "form.bin",
+})
+assert status == 200, (status, body_out)
+assert store.get_transfer_by_token(t4.upload_token).filename == "form.bin"
+print("20. 无 X-Upload-Key 时表单里的 key 仍可通过")
 
 server.stop()
 print("\n✅ 端到端流程与重放防护全部通过")

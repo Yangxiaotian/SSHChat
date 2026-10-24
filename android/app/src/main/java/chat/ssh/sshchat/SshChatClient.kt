@@ -174,7 +174,7 @@ class SshChatClient(
         /** ESC fully lost: leftover `[2K` / `[K` / `[9;1H` (not `[*]` / `[#room]` / `[TXT]`). */
         // No-param finals: ABCDHJK only. Tag-colliding finals (T/S/…) require digits.
         private val BARE_CSI_FRAGMENT =
-            Regex("""\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\])""")
+            Regex("""\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_ \p{Han}./&'-]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_ \p{Han}./&'-]*\])""")
 
         fun errText(e: Throwable): String {
             val msg = e.message?.trim().orEmpty()

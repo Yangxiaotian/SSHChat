@@ -31,13 +31,17 @@ MESSAGES: dict = {
         "[*]\n",
         "[*] /game ...      Room games (chess, gomoku, xiangqi, sanguo). /game list /new /join …; owner /game on|off [all], /game list off.\n",
         "[*]              See /game help for details. sanguo is available; its UI text may still be Chinese in this release.\n",
-        "[*] /news [zh|world|tech|all] [count]  RSS titles and summaries; default 3 per category.\n",
+        "[*] /news [zh|world|tech|all] [count]  RSS titles, summaries, and original links; default 3 per category.\n",
+        "[*]              Mobile app: + → News, tap a title to open the original URL.\n",
         "[*] /news detail <category> <index>  Longer summary from the RSS item (alias: 详情).\n",
         "[*] /news fetch <category> <index>  Fetch article body from the RSS link (alias: 全文; non-JS sites; may truncate).\n",
         "[*] /library       List library books (epub / txt / md / pdf; per-user bookmarks; page turns auto-save).\n",
         "[*] /lib             Short for /library.\n",
         "[*] /library open <index|filename>  Open a book (resume from bookmark if any); next|prev|page to turn pages.\n",
         "[*] /library find <keyword>        Find by title; while reading, search in the current book (aliases: search / 搜索 / 查找).\n",
+        "[*] /music         List songs (federated union; mp3 / m4a / ogg / flac / wav; admin drop folder).\n",
+        "[*] /song            Short for /music.\n",
+        "[*] /music play [index|filename[@node]]  Open the web player (default: first song; playlist is the federated union, remote audio from the owning node); aliases: open / 播放.\n",
         "[*] /dict en|cn|hh <word>  Dictionary: EN→ZH, ZH→EN, Chinese gloss; /dict <word> auto-detects.\n",
         "[*]\n",
         "[*] /sendfile      Send a file to the current room (ok when alone — same nick on another device can download); you get an upload URL; the key is given separately.\n",
@@ -74,7 +78,7 @@ MESSAGES: dict = {
         "sanguo allows 2–6 via join; host starts with /game move 开始).",
         "[*] /game seats            Show players and game state.",
         "[*] /game show             Redraw the board (you at the bottom; opponent view flips automatically).",
-        "[*] /game rating [game] [nick]  Show persisted board-game rating/level; ratings are shared across rooms.",
+        "[*] /game rating [game] [nick]  Show persisted board-game / 6 Nimmt! rating/level; ratings are shared across rooms.",
         "[*] Terminal: reversi = /game move <row> <col> (or pass when blocked).",
         "[*] darkchess (Dark Chess / flip chess) EN/ZH: 翻 flip <row> <col> | 走 move <fr> <fc> <tr> <tc>; "
         "4×8 board; first flip assigns red/black; cannon needs one screen; general beats all but soldier, soldier can take general.",
@@ -290,6 +294,12 @@ MESSAGES: dict = {
         ),
         "library_cmd_fail": (
             "[*] Library command failed; try again later (see server log for details).\n"
+        ),
+        "music_cmd_fail": (
+            "[*] Music command failed; try again later (see server log for details).\n"
+        ),
+        "music_http_off": (
+            "[*] Music playback needs the file web service, which is currently off.\n"
         ),
         "lang_usage": "[*] Usage: /lang [en|zh]\n",
         "lang_set": "[*] UI language set to {lang}.\n",

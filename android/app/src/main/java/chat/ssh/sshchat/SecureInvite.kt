@@ -5,7 +5,7 @@ package chat.ssh.sshchat
  * GUI clients collapse (same idea as sshchat_gui._is_secure_invite_noise).
  */
 object SecureInvite {
-    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD, CLOCK }
+    enum class Kind { DOWNLOAD, CANVAS, PIANO, UPLOAD, CLOCK, MUSIC }
 
     data class Open(val kind: Kind, val url: String, val key: String)
 
@@ -22,17 +22,17 @@ object SecureInvite {
     }
 
     private val guiOpen = Regex(
-        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$""",
+        """^(?:\[[*]\]\s*)?gui-open\s+(download|canvas|piano|upload|clock|music)\s+(https?://\S+)(?:\s+([A-Z0-9]{6}))?\s*$""",
         RegexOption.IGNORE_CASE,
     )
 
     private val bannerStart = Regex(
-        """^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)""",
+        """^(=+\s*)?(共享画布|房间钢琴|棋钟|点歌\s*=|Music\s*=|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)""",
         RegexOption.IGNORE_CASE,
     )
     private val bannerEnd = Regex("""^=+\s*$""")
     private val urlLabel = Regex(
-        """(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
+        """(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$""",
         RegexOption.IGNORE_CASE,
     )
     private val keyLine = Regex(
@@ -46,8 +46,8 @@ object SecureInvite {
         RegexOption.IGNORE_CASE,
     )
     private val metaLine = Regex(
-        """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|""" +
-            """From|Sender|Filename|Size|Room|Recipients?)\s*[:：]""",
+        """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|正在播放|""" +
+            """From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]""",
         RegexOption.IGNORE_CASE,
     )
     private val instrBullet = Regex(
@@ -89,11 +89,23 @@ object SecureInvite {
             "piano" -> Kind.PIANO
             "upload" -> Kind.UPLOAD
             "clock" -> Kind.CLOCK
+            "music" -> Kind.MUSIC
             else -> return null
         }
         val key = m.groupValues.getOrNull(3).orEmpty().uppercase()
         if (kind != Kind.CLOCK && key.length != 6) return null
         return Open(kind, m.groupValues[2], key)
+    }
+
+    fun pathToken(url: String, kind: String): String? {
+        val path = try {
+            java.net.URI(url).path ?: return null
+        } catch (_: Exception) {
+            return null
+        }
+        val parts = path.trim('/').split('/')
+        if (parts.size < 2 || !parts[0].equals(kind, ignoreCase = true)) return null
+        return parts[1].ifBlank { null }
     }
 
     /** Fallback when the server only printed the clock URL (no gui-open yet). */
@@ -111,13 +123,21 @@ object SecureInvite {
     }
 
     /** Hide invite boilerplate; keep normal chat. */
+    private fun looksLikeInviteUrl(url: String): Boolean {
+        val u = url.lowercase()
+        return "/download/" in u || "/upload/" in u || "/canvas/" in u ||
+            "/piano/" in u || "/clock/" in u || "/music/" in u
+    }
+
     fun isInviteNoise(line: String): Boolean {
         val t = normalize(line)
         if (t.isEmpty()) return true
         if (parseGuiOpen(t) != null) return true
         if (bannerStart.containsMatchIn(t) || bannerEnd.matches(t)) return true
         if (urlLabel.containsMatchIn(t) || keyLine.matches(t)) return true
-        if (httpOnly.matches(t)) return true
+        // Bare http(s) lines are also RSS original URLs for /news. Only hide
+        // file/canvas/piano/clock/music invite URLs; keep article links.
+        if (httpOnly.matches(t) && looksLikeInviteUrl(t)) return true
         if (t.matches(Regex("""^(说明|Instructions?)\s*:?\s*$""", RegexOption.IGNORE_CASE))) {
             return true
         }

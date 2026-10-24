@@ -85,10 +85,10 @@ actor SSHSession {
         guard let outbound else {
             throw SSHSessionError.notConnected
         }
-        var payload = text
-        if !payload.hasSuffix("\n") {
-            payload += "\n"
-        }
+        var payload = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        while payload.hasSuffix("\n") { payload.removeLast() }
+        payload += "\r\n"
         try await outbound.write(ByteBuffer(string: payload))
     }
 
@@ -143,9 +143,9 @@ actor SSHSession {
     /// Bare CSI after ESC/`?` was eaten.
     /// - No-param finals limited to cursor/erase (`ABCDHJK`) so `[TXT]` / `[EPUB]` stay intact.
     /// - Letter finals that collide with tags (`T`, `S`, …) require at least one numeric param.
-    /// Negative lookahead still keeps tags like `[root]` / `[HINT]`.
+    /// Lookahead keeps `[root]` / `[HINT]` / `[Ars Technica]` (spaces + CJK in the tag).
     private static let bareCsiFragment = try! NSRegularExpression(
-        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_]*\])"#
+        pattern: #"\[(?:\??(?:\d{1,4}(?:;\d{1,4})*)?)[ABCDHJK](?![A-Za-z0-9_ \p{Han}./&'-]*\])|\[(?:\??\d{1,4}(?:;\d{1,4})*)[STfhlmnpqrstsu](?![A-Za-z0-9_ \p{Han}./&'-]*\])"#
     )
 
     static func cleanLine(_ raw: String) -> String {

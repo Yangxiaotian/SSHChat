@@ -507,9 +507,11 @@ npm run build:portable
 | `/library` | 联邦并集书目（本机 + 对端 epub / txt / md / pdf）；书签以**藏书节点**为准，翻页自动保存 |
 | `/lib` | `/library` 的简写（子命令相同，如 `/lib open 1`） |
 | `/library open <序号\|文件名[@节点]>` | 打开图书（对端书按页拉取，并从藏书节点恢复书签）；`next` / `prev` / `page` 翻页 |
+| `/music` 或 `/song` | 联邦并集曲目（本机 + 对端 mp3 / m4a / ogg / flac / wav） |
+| `/music play [序号\|文件名[@节点]]` | 打开网页播放器听歌（省略则从第 1 首开始；对端歌由藏曲节点提供播放页） |
 | `/dict en\|cn\|hh <词>` | 词典查询（见下方「词典查询」）；`/dict <词>` 自动识别 |
 | `/dict help` | 词典详细用法（含 `hh` = 汉语词典） |
-| `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要正文**（无链接） |
+| `/news` | 按「中文 / 国际 / 科技」三类各显示若干条 RSS：**标题 + 提要 + 原文链接**；手机 App 点 **+ → 新闻** 打开列表，点标题直达原站 |
 | `/news 中文`、`/news 国际`、`/news 科技` | 只看某一类；可加条数，如 `/news 科技 10` |
 | `/news detail 中文 2` 或 `/news 详情 中文 2` | 该分类列表 **第 2 条** 的更长 RSS 提要（非网页全文） |
 | `/news fetch 中文 2` 或 `/news 全文 中文 2` | 按该条 RSS **链接**抓取网页 HTML，抽取正文（较慢；付费墙/反爬/纯 JS 页会失败） |
@@ -569,7 +571,7 @@ npm run build:portable
 - **`werewolf`（狼人杀）**：至少 5 人；房主 `/game move start` 开始。夜晚/白天流程：`kill` / `check` / `save` / `poison` / `pass` / `vote` 等（详见 `/game show`）。
 - **`holdem`（德州扑克）**：`start` 开始（发牌后即可看到自己的底牌）\| `check` 过牌 \| `call` 跟注 \| `raise <额>` 加注 \| `fold` 弃牌 \| `allin` 全下；可选 `look` 再看一次底牌；可 `bot <easy\|hard\|pro>` 加机器人。
 - **`zjh`（炸金花）**：`start` \| `look` 看牌（默认闷牌）\| `follow` 跟注 \| `raise <额>` \| `compare <昵称>` 比牌 \| `fold`；比牌费用为当前单注两倍（看牌后再翻倍）；每局结束自动下一局；需机器人用 `start bot` 或 `bot add`。
-- **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。
+- **`niutou`（牛头王）**：每回合 `pick` 选牌；若小于所有行尾须 `row 1~4` 选行吃牌；牛头越少排名越高。≥2 名真人终局按名次写入跨房间 Elo（`/game rating niutou`）；仅机器人陪练不计入。
 - **`mahjong`（麻将）**：4 人局，人数不足时 `start` 自动补 AI；支持吃/碰/杠/胡。轮到你时 `discard <牌>`；编码 `m`=万、`p`=筒、`s`=条、`z`=字牌；也支持中文如「二万」「红中」。
 
 **棋类积分说明：**
@@ -623,16 +625,30 @@ npm run build:portable
 | `/library reset <序号\|文件名[@节点]>` | 清除某本书的书签（对端书同时清藏书节点） |
 | `/library close` | 结束阅读（保留书签） |
 
-Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。
+Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化浏览书目与翻页。手机 App（Android / iOS）点 **+ → 图书馆** 可打开全屏原生阅读器：书目卡片、正文重排、左右点击/滑动翻页、字号与主题（日间/护眼/夜间）、书内搜索与进度条跳页；Android 还支持音量键翻页。
+
+### 点歌
+
+服务端目录（默认 `/opt/sshchat/music`，可用 `SSHCHAT_MUSIC_DIR` 覆盖）放置 **mp3 / m4a / aac / ogg / opus / flac / wav**。只扫这一层文件，不进子目录。播放走和 `/sendfile` 同一套 HTTP 网页（支持拖进度），不经过 SSH、也不做联邦整文件拷贝。
+
+联邦开启时，`/music` 与网页/手机播放器都显示**各节点曲目并集**（对端歌带 `@节点`）；点对端歌曲时由本机播放器向藏曲节点取音频，不在联邦链路上整文件拷贝。同名歌可用 `/music play 歌名@节点` 消歧。拷进 `music` 目录后约数秒内会同步到其他联邦节点，无需重启。
+
+| 命令 | 说明 |
+|------|------|
+| `/music` 或 `/song` | 联邦并集曲目 |
+| `/music find <关键词>` | 按文件名或节点名筛选 |
+| `/music play [序号\|文件名[@节点]]` | 打开网页播放器（图形/手机客户端会自动打开） |
+
+管理员把音频文件拷进 `music` 目录即可，无需重启。终端把播放网址复制到浏览器；Tk / Electron / 手机 App 点 **🎵 / + → 点歌** 或发送 `/music play`。
 
 ### 命令补全
 
-- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
+- **SSH 终端客户端**（`client.py`）：输入以 `/` 开头的命令时按 **Tab** 补全（支持 `/library`、`/lib`、`/music`、`/song`、`/dnd on|off` 及常用子命令），行为类似 Linux shell。
 - **Electron 图形客户端**：输入框输入 `/` 后出现命令提示，按 **Tab** 补全当前高亮项，**↑/↓** 切换候选项。
 
 ### RSS 新闻
 
-`/news` 从服务端抓取 RSS，把 **标题** 和 **提要/正文片段**（来自 `description`、`summary`、`content` 等字段，去掉 HTML 标签）发给当前用户，**不展示链接**，也不会广播到房间。
+`/news` 从服务端抓取 RSS，把 **标题**、**提要/正文片段**（来自 `description`、`summary`、`content` 等字段，去掉 HTML 标签）和 **原文链接** 发给当前用户，不会广播到房间。手机 App 点 **+ → 新闻**，点标题用系统浏览器打开原站（不经过 `/news fetch` 抽正文）。
 
 可用分类：
 
@@ -713,6 +729,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `piano_sharing.py` / `piano_http.py` / `piano_samples/` | `/piano` 房间钢琴会话、网页与 MP3 采样 |
 | `clock_sharing.py` / `clock_http.py` | `/clock` 棋钟（Kindle 可用的无脚本网页） |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
+| `music.py` / `music_http.py` | `/music` 点歌曲库与网页播放器 |
 | `sshchat_gui.py` | 图形客户端源码 |
 | `easy_connect.py` | 按 JSON 调用 `ssh` |
 | `scripts/build-gui-packages.*` | 打 Windows / Unix 图形包 |

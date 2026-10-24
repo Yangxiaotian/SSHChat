@@ -860,9 +860,13 @@ class GamePanel @JvmOverloads constructor(
         actions.addView(GameUi.btn(context, "刷新") { send("/game show") })
         actions.addView(GameUi.btn(context, "席位") { send("/game seats") })
         if (s.isPlaying) {
-            actions.addView(GameUi.btn(context, "认负") { send("/game resign") })
+            actions.addView(GameUi.btn(context, "认负") {
+                confirmDanger("确认认负？", "认负后本局立刻结束，无法恢复。", "/game resign")
+            })
         }
-        actions.addView(GameUi.btn(context, "结束") { send("/game end") })
+        actions.addView(GameUi.btn(context, "结束") {
+            confirmDanger("确认结束棋局？", "结束后本局作废，无法恢复。", "/game end")
+        })
         if (s.kind == GameKind.GO) {
             actions.addView(GameUi.btn(context, "停一手") { sendMove("pass") })
         }
@@ -884,6 +888,15 @@ class GamePanel @JvmOverloads constructor(
         }
         actions.addView(GameUi.btn(context, "列表") { send("/game list") })
         actions.addView(GameUi.btn(context, "加入") { send("/game join") })
+    }
+
+    private fun confirmDanger(title: String, message: String, command: String) {
+        android.app.AlertDialog.Builder(context)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("确定") { _, _ -> send(command) }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun sendMove(payload: String) {

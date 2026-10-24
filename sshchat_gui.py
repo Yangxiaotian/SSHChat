@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -27,8 +28,6 @@ import tkinter.font as tkfont
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
-import webbrowser
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -112,6 +111,10 @@ _GUI_OPEN_CLOCK_RE = re.compile(
     r"^gui-open\s+clock\s+(https?://\S+)\s*$",
     re.I,
 )
+_GUI_OPEN_MUSIC_RE = re.compile(
+    r"^gui-open\s+music\s+(https?://\S+)\s+([A-Z0-9]{6})\s*$",
+    re.I,
+)
 _CANVAS_LOGICAL_W = 1200
 _CANVAS_LOGICAL_H = 800
 _SENDFILE_FAIL_RE = re.compile(
@@ -138,12 +141,12 @@ def _parse_names_line(line: str) -> tuple[str, list[str]] | None:
     members = [x.strip() for x in tail.split(",") if x.strip()]
     return room, members
 _SECURE_BANNER_START_RE = re.compile(
-    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
+    r"^(=+\s*)?(共享画布|房间钢琴|棋钟|点歌\s*=|Music\s*=|文件上传信息|收到新文件|Shared\s+canvas|Room\s+piano|Chess\s+clock|File\s+upload|New\s+file)",
     re.I,
 )
 _SECURE_BANNER_END_RE = re.compile(r"^=+")
 _SECURE_URL_LABEL_RE = re.compile(
-    r"(画布网址|钢琴网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
+    r"(画布网址|钢琴网址|播放网址|点歌网址|上传网址|下载网址|Canvas\s*URL|Piano\s*URL|Player\s*URL|Music\s*URL|Upload\s*URL|Download\s*URL|网址)\s*:?\s*$",
     re.I,
 )
 _SECURE_KEY_LINE_RE = re.compile(
@@ -153,8 +156,8 @@ _SECURE_KEY_LINE_RE = re.compile(
 )
 _SECURE_HTTP_URL_RE = re.compile(r"^https?://\S+\s*$", re.I)
 _SECURE_META_LINE_RE = re.compile(
-    r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|"
-    r"From|Sender|Filename|Size|Room|Recipients?)\s*[:：]",
+    r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|正在播放|"
+    r"From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]",
     re.I,
 )
 _IMAGE_MIME_RE = re.compile(r"^image/(jpeg|jpg|png|gif|webp|bmp)$", re.I)
@@ -235,6 +238,8 @@ _TOP_COMMANDS = (
     "/news",
     "/library",
     "/lib",
+    "/music",
+    "/song",
     "/dict",
     "/clear",
     "/cls",
@@ -298,6 +303,8 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
         "show",
         "help",
     ),
+    "/music": ("play", "open", "listen", "find", "search", "help"),
+    "/song": ("play", "open", "listen", "find", "search", "help"),
     "/dict": ("en", "cn", "hh", "help", "英", "中", "汉"),
     "/dnd": ("on", "off"),
     "/lang": ("en", "zh", "english", "chinese", "中文", "英文"),
@@ -315,10 +322,18 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
     ("/game", "draw"): ("accept", "reject", "cancel"),
     ("/game", "restore"): ("swap",),
-    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
+    ("/game", "move"): (
+        "flip", "move", "翻", "翻子", "走", "移动",
+        "pick", "play", "row", "start", "bot",
+    ),
     ("/game", "list"): ("off", "offline"),
     ("/game", "on"): ("all",),
     ("/game", "off"): ("all",),
+}
+
+_NESTED3_SUBCOMMANDS: dict[tuple[str, str, str], tuple[str, ...]] = {
+    ("/game", "move", "bot"): ("easy", "hard", "pro"),
+    ("/game", "move", "row"): ("1", "2", "3", "4"),
 }
 
 
@@ -356,6 +371,20 @@ def _command_completions(
     if len(parts) == 1 and not trailing_space:
         return [c for c in _TOP_COMMANDS if c.startswith(parts[0])]
 
+    if len(parts) >= 3:
+        sub = parts[1].lower()
+        verb = parts[2].lower()
+        deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+        if deep:
+            base = f"{parts[0]} {parts[1]} {parts[2]}"
+            if trailing_space and len(parts) == 3:
+                return [f"{base} {item}" for item in deep]
+            if len(parts) >= 4 and not trailing_space:
+                prefix = parts[3]
+                return [f"{base} {item}" for item in deep if item.startswith(prefix)]
+            if not (len(parts) == 3 and not trailing_space):
+                return []
+
     if len(parts) >= 2:
         sub = parts[1].lower()
         nested = _NESTED_SUBCOMMANDS.get((cmd, sub), ())
@@ -389,6 +418,174 @@ def _command_completions(
         return []
 
     return name_arg_completions(text, rooms=rooms or (), users=users or ())
+
+
+_LOCAL_CHAT_SCRIPT_DEFAULT = Path("/opt/sshchat/chat.sh")
+_LOCAL_SSH_HOST_KEY_GLOBS = (
+    "/etc/ssh/ssh_host_*_key.pub",
+    "/usr/local/etc/ssh/ssh_host_*_key.pub",
+)
+
+
+def _local_login_name() -> str:
+    if os.name != "posix":
+        return ""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return ""
+
+
+def _find_local_chat_script() -> Path | None:
+    candidates: list[Path] = []
+    override = (os.environ.get("SSHCHAT_LOCAL_CHAT") or "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.append(_LOCAL_CHAT_SCRIPT_DEFAULT)
+    for path in candidates:
+        if path.is_file() and os.access(path, os.R_OK | os.X_OK):
+            return path
+    return None
+
+
+def _host_is_this_machine(host: str) -> bool:
+    h = host.strip().strip("[]")
+    if not h:
+        return False
+    if h.lower() in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return True
+    try:
+        infos = socket.getaddrinfo(h, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    for family, _, _, _, sockaddr in infos:
+        addr = str(sockaddr[0])
+        if addr.startswith("127.") or addr == "::1":
+            return True
+        # bind() only succeeds for addresses owned by a local interface.
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.bind((addr, 0, *sockaddr[2:]))
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _local_ssh_host_keys() -> set[str]:
+    keys: set[str] = set()
+    for pattern in _LOCAL_SSH_HOST_KEY_GLOBS:
+        base, _, glob_part = pattern.rpartition("/")
+        try:
+            paths = list(Path(base).glob(glob_part))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                parts = path.read_text(encoding="utf-8", errors="replace").split()
+            except OSError:
+                continue
+            if len(parts) >= 2:
+                keys.add(parts[1])
+    return keys
+
+
+def _transport_is_this_machine(transport: paramiko.Transport | None) -> bool:
+    """True when the sshd we reached (possibly via DDNS/port-forward) is this host."""
+    if transport is None:
+        return False
+    try:
+        key = transport.get_remote_server_key()
+    except Exception:
+        return False
+    if key is None:
+        return False
+    return key.get_base64() in _local_ssh_host_keys()
+
+
+class _LocalPtyChannel:
+    """Run chat.sh in a local PTY; mimics the paramiko.Channel subset the GUI uses."""
+
+    def __init__(self, script: Path, *, cols: int = 120, rows: int = 36) -> None:
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        master, slave = pty.openpty()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            env = dict(os.environ)
+            if getattr(sys, "frozen", False):
+                # PyInstaller points LD_LIBRARY_PATH at the bundle; chat.sh runs the server venv.
+                for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+                    orig = env.pop(f"{var}_ORIG", None)
+                    if orig is not None:
+                        env[var] = orig
+                    else:
+                        env.pop(var, None)
+            env["TERM"] = "xterm"
+            env["SSH_TTY"] = os.ttyname(slave)
+            # Same board markup as SSH sessions, which the GUI already renders.
+            env["SSHCHAT_XIANGQI_COLOR"] = "markers"
+            self._proc = subprocess.Popen(
+                [str(script)],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                cwd=str(script.parent),
+                env=env,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except Exception:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(slave)
+        self._fd = master
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def send(self, data: bytes) -> int:
+        if self._closed:
+            raise OSError("local session closed")
+        return os.write(self._fd, data)
+
+    def recv(self, nbytes: int) -> bytes:
+        if self._closed:
+            return b""
+        try:
+            return os.read(self._fd, nbytes)
+        except OSError:
+            # Linux reports EIO on the master once the child side is gone.
+            return b""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._proc.poll() is None:
+            try:
+                os.killpg(self._proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self._proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
 
 
 def _is_ssl_verify_error(exc: BaseException) -> bool:
@@ -445,40 +642,54 @@ def _urlopen_read(req: urllib.request.Request, timeout: float = 120) -> bytes:
     raise last
 
 
+_UPLOAD_CHUNK = 512 * 1024
+
+
 def _upload_secure_file(url: str, key: str, path: Path) -> str:
-    """POST multipart file with X-Upload-Key; return remote filename."""
+    """POST the file in small chunks with X-Upload-Key; return remote filename."""
     filename = path.name.replace("\\", "_").replace("/", "_")[:200] or "file"
-    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    data = path.read_bytes()
-    boundary = f"----SSHChat{uuid.uuid4().hex}"
-    body = (
-        (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-            f"Content-Type: {mime}\r\n\r\n"
-        ).encode("utf-8")
-        + data
-        + f"\r\n--{boundary}--\r\n".encode("utf-8")
-    )
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "X-Upload-Key": key.upper(),
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
-    raw = _urlopen_read(req).decode("utf-8", errors="replace")
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
-        payload = {}
-    if isinstance(payload, dict) and payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
-    if isinstance(payload, dict) and payload.get("filename"):
-        return str(payload["filename"])
-    return filename
+    size = path.stat().st_size
+    if size <= 0:
+        raise RuntimeError("empty file")
+    count = max(1, (size + _UPLOAD_CHUNK - 1) // _UPLOAD_CHUNK)
+    encoded = urllib.parse.quote(filename, safe="")
+    remote = filename
+    with path.open("rb") as src:
+        for index in range(count):
+            data = src.read(_UPLOAD_CHUNK)
+            if not data:
+                break
+            headers = {
+                "X-Upload-Key": key.upper(),
+                "X-Upload-Index": str(index),
+                "X-Upload-Count": str(count),
+                "X-Upload-Size": str(size),
+                "X-Upload-Filename": encoded,
+                "Content-Type": "application/octet-stream",
+            }
+            last_err: Exception | None = None
+            for attempt in range(4):
+                try:
+                    req = urllib.request.Request(
+                        url, data=data, method="POST", headers=headers
+                    )
+                    raw = _urlopen_read(req, timeout=90).decode("utf-8", errors="replace")
+                    try:
+                        payload = json.loads(raw) if raw.strip() else {}
+                    except json.JSONDecodeError:
+                        payload = {}
+                    if isinstance(payload, dict) and payload.get("error"):
+                        raise RuntimeError(str(payload["error"]))
+                    if isinstance(payload, dict) and payload.get("filename"):
+                        remote = str(payload["filename"])
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.4 * (attempt + 1))
+            if last_err is not None:
+                raise last_err if isinstance(last_err, RuntimeError) else RuntimeError(str(last_err))
+    return remote
 
 
 def _parse_file_meta_field(body: str) -> tuple[str, str] | None:
@@ -513,6 +724,7 @@ def _is_secure_invite_noise(body: str) -> bool:
         or _GUI_OPEN_PIANO_RE.match(t)
         or _GUI_OPEN_DOWNLOAD_RE.match(t)
         or _GUI_OPEN_CLOCK_RE.match(t)
+        or _GUI_OPEN_MUSIC_RE.match(t)
     ):
         return True
     if re.match(r"^(说明|Instructions?)\s*:?\s*$", t, re.I):
@@ -1176,11 +1388,8 @@ def _chromium_app_binaries() -> list[str]:
     ]
 
 
-def _open_browser_tab(url: str) -> bool:
-    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
-    target = (url or "").strip()
-    if not target:
-        return False
+def _popen_detached(args: list[str]) -> bool:
+    """Start a process without waiting (safe on the Tk main thread)."""
     popen_kwargs: dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -1189,27 +1398,45 @@ def _open_browser_tab(url: str) -> bool:
         popen_kwargs.update(_windows_hidden_subprocess_kwargs())
     else:
         popen_kwargs["start_new_session"] = True
-    for binary in _chromium_app_binaries():
-        if not binary or not os.path.isfile(binary):
-            continue
-        try:
-            subprocess.Popen([binary, target], **popen_kwargs)
-            return True
-        except OSError:
-            continue
+    try:
+        subprocess.Popen(args, **popen_kwargs)
+        return True
+    except OSError:
+        return False
+
+
+def _open_url_fallback(url: str) -> bool:
+    """Last-resort non-blocking URL open. Never use webbrowser.open — it can
+    block the Tk main thread for seconds (Chrome remote wait) or until the
+    browser exits when remote open fails."""
+    target = (url or "").strip()
+    if not target:
+        return False
     if sys.platform == "darwin":
-        try:
-            subprocess.Popen(["open", target], **popen_kwargs)
-            return True
-        except OSError:
-            pass
+        return _popen_detached(["open", target])
     if sys.platform == "win32":
         try:
             os.startfile(target)  # type: ignore[attr-defined]
             return True
         except OSError:
-            pass
+            return False
+    xdg = shutil.which("xdg-open") or ""
+    if xdg:
+        return _popen_detached([xdg, target])
     return False
+
+
+def _open_browser_tab(url: str) -> bool:
+    """Open a URL in a normal browser tab (not --app=) so file downloads work."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    for binary in _chromium_app_binaries():
+        if not binary or not os.path.isfile(binary):
+            continue
+        if _popen_detached([binary, target]):
+            return True
+    return _open_url_fallback(target)
 
 
 def _piano_auth_trampoline_url(piano_url: str, boot: dict[str, Any]) -> str:
@@ -1379,38 +1606,10 @@ def _open_canvas_app_window(url: str, *, maximized: bool = True) -> bool:
             # Maximized keeps window chrome (close/title). --start-fullscreen
             # hides chrome and is hard to exit from an --app= window.
             args.append("--start-maximized")
-        try:
-            popen_kwargs: dict[str, Any] = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
-            }
-            if sys.platform == "win32":
-                popen_kwargs.update(_windows_hidden_subprocess_kwargs())
-            else:
-                popen_kwargs["start_new_session"] = True
-            subprocess.Popen(args, **popen_kwargs)
+        if _popen_detached(args):
             return True
-        except OSError:
-            continue
-    if sys.platform == "darwin":
-        # Safari / default handler — pass the real URL (with hash), not file://.
-        try:
-            subprocess.Popen(
-                ["open", open_target],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except OSError:
-            pass
-    if sys.platform == "win32":
-        # Last resort: default browser via os.startfile (no console).
-        try:
-            os.startfile(open_target)  # type: ignore[attr-defined]
-            return True
-        except OSError:
-            pass
-    return False
+    # Prefer the real URL (with hash) over file:// trampoline for OS handlers.
+    return _open_url_fallback(open_target)
 
 
 class NativeCanvasWindow:
@@ -2097,7 +2296,8 @@ class SSHChatGUI:
             pass
 
         self._ssh: paramiko.SSHClient | None = None
-        self._chan: paramiko.Channel | None = None
+        self._chan: paramiko.Channel | _LocalPtyChannel | None = None
+        self._session_local = False
         self._chan_send_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
         self._connect_thread: threading.Thread | None = None
@@ -2390,6 +2590,9 @@ class SSHChatGUI:
         )
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
+        )
+        self.btn_music, _ = self._pack_icon_btn(
+            self._input_row, "🎵", "点歌", self._start_music
         )
         self.btn_pad, _ = self._pack_icon_btn(
             self._input_row, "📝", "便签（房间剪贴板）", self._start_pad
@@ -3033,6 +3236,16 @@ class SSHChatGUI:
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
 
+    def _start_music(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        self._append_chat_line("[*] 正在打开点歌…（/music play）", local_sent=True)
+        try:
+            self._chan_send_bytes(b"/music play\n")
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
     def _start_pad(self) -> None:
         if not self._chan or self._chan.closed:
             messagebox.showwarning("SSHChat", "请先连接")
@@ -3604,6 +3817,8 @@ class SSHChatGUI:
             return
         if parsed and parsed[1] == "*" and self._try_handle_clock_invite(parsed[2]):
             return
+        if parsed and parsed[1] == "*" and self._try_handle_music_invite(parsed[2]):
+            return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
         if parsed and parsed[1] == "*":
@@ -3823,7 +4038,18 @@ class SSHChatGUI:
         self._connect_thread.start()
 
     def _connect_ssh(self, host: str, port: int, user: str) -> None:
+        # The logged-in OS user on the server machine is already authenticated:
+        # run chat.sh locally instead of requiring an authorized_keys entry
+        # (which, without command=, would only yield a login shell anyway).
+        local_script: Path | None = None
+        if user.strip() == _local_login_name():
+            local_script = _find_local_chat_script()
+        if local_script is not None and _host_is_this_machine(host):
+            self._start_local_session(local_script, user)
+            return
+
         ssh = paramiko.SSHClient()
+        use_local = False
         try:
             ssh.load_system_host_keys()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -3838,8 +4064,15 @@ class SSHChatGUI:
                 "allow_agent": True,
                 "look_for_keys": True,
             }
-            ssh.connect(**connect_kw)
-            chan = ssh.invoke_shell(term="xterm", width=120, height=36)
+            try:
+                ssh.connect(**connect_kw)
+            except paramiko.SSHException:
+                if local_script is None or not _transport_is_this_machine(ssh.get_transport()):
+                    raise
+                use_local = True
+            if not use_local and local_script is not None:
+                use_local = _transport_is_this_machine(ssh.get_transport())
+            chan = None if use_local else ssh.invoke_shell(term="xterm", width=120, height=36)
         except Exception:
             try:
                 ssh.close()
@@ -3847,15 +4080,33 @@ class SSHChatGUI:
                 pass
             raise
 
+        if use_local:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            assert local_script is not None
+            self._start_local_session(local_script, user)
+            return
+
         self._session_user = user.strip()
+        self._session_local = False
         self._ssh = ssh
+        self._chan = chan
+        self.root.after(0, self._connect_succeeded)
+
+    def _start_local_session(self, script: Path, user: str) -> None:
+        chan = _LocalPtyChannel(script, cols=120, rows=36)
+        self._session_user = user.strip()
+        self._session_local = True
+        self._ssh = None
         self._chan = chan
         self.root.after(0, self._connect_succeeded)
 
     def _connect_succeeded(self) -> None:
         self._save_profile(warn_on_error=False)
         self._set_connect_buttons_state(connect_enabled=False, disconnect_enabled=True)
-        self._set_status("已连接（SSH 会话）")
+        self._set_status("已连接（本机会话）" if self._session_local else "已连接（SSH 会话）")
         self._rooms_order = ["default"]
         self._active_room = "default"
         self._room_unread = {"default": 0}
@@ -4158,6 +4409,33 @@ class SSHChatGUI:
             except ValueError:
                 continue
 
+    def _try_handle_music_invite(self, body: str) -> bool:
+        m = _GUI_OPEN_MUSIC_RE.match(body.strip())
+        if not m:
+            return False
+        url, key = m.group(1), m.group(2).upper()
+        open_url = f"{url}#{key}"
+        self._append_chat_line("[*] 打开点歌…", local_sent=True)
+        try:
+            if _open_canvas_app_window(open_url, maximized=True):
+                self._set_status("点歌已打开")
+            elif _open_browser_tab(open_url):
+                self._set_status("点歌已在浏览器打开")
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开点歌链接", local_sent=True
+                )
+                self._set_status("点歌链接已收到（浏览器未打开）")
+                self._alert_beep()
+                return True
+        except Exception as e:
+            self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
+            self._set_status("点歌打开失败")
+            self._alert_beep()
+            return True
+        self._alert_beep()
+        return True
+
     def _try_handle_clock_invite(self, body: str) -> bool:
         m = _GUI_OPEN_CLOCK_RE.match(body.strip())
         if not m:
@@ -4165,10 +4443,25 @@ class SSHChatGUI:
         url = m.group(1)
         self._append_chat_line("[*] 打开棋钟…", local_sent=True)
         try:
-            webbrowser.open(url)
+            # Never webbrowser.open on the Tk thread — Chrome remote wait
+            # freezes the UI (~5s) and a failed remote open can block until
+            # the browser exits (piano/canvas buttons then appear dead).
+            if _open_canvas_app_window(url, maximized=True):
+                self._set_status("棋钟已打开")
+            elif _open_browser_tab(url):
+                self._set_status("棋钟已在浏览器打开")
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开棋钟链接", local_sent=True
+                )
+                self._set_status("棋钟链接已收到（浏览器未打开）")
+                self._alert_beep()
+                return True
         except Exception as e:
             self._append_chat_line(f"[*] 无法打开浏览器: {e}", local_sent=True)
-        self._set_status("棋钟已在浏览器打开")
+            self._set_status("棋钟打开失败")
+            self._alert_beep()
+            return True
         self._alert_beep()
         return True
 
@@ -4332,12 +4625,15 @@ class SSHChatGUI:
                     self._open_canvas_tokens.add(tok)
                     self._open_canvas_urls[tok] = url
                 self._append_chat_line(ok_msg, local_sent=True)
-            else:
-                webbrowser.open(target)
+            elif _open_browser_tab(target):
                 if tok:
                     self._open_canvas_tokens.add(tok)
                     self._open_canvas_urls[tok] = url
                 self._append_chat_line(browser_msg, local_sent=True)
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开画布链接", local_sent=True
+                )
         except Exception as e:
             self._append_chat_line(f"[*] 打开画布失败: {e}", local_sent=True)
 
@@ -4368,12 +4664,15 @@ class SSHChatGUI:
                     self._open_piano_tokens.add(token)
                     self._open_piano_urls[token] = url
                 self._append_chat_line(ok_msg, local_sent=True)
-            else:
-                webbrowser.open(target)
+            elif _open_browser_tab(target):
                 if token:
                     self._open_piano_tokens.add(token)
                     self._open_piano_urls[token] = url
                 self._append_chat_line(browser_msg, local_sent=True)
+            else:
+                self._append_chat_line(
+                    "[*] 无法打开浏览器，请手动打开钢琴链接", local_sent=True
+                )
         except Exception as e:
             self._append_chat_line(f"[*] 打开钢琴失败: {e}", local_sent=True)
 

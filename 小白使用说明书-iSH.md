@@ -89,6 +89,7 @@ Are you sure you want to continue connecting (yes/no)?
 | 查单词 | `/dict hello` 或 `/dict 学习` |
 | 看新闻 | `/news` |
 | 进图书馆 | `/library` 或 `/lib` |
+| 听音乐 | `/music` 看列表，`/music play 1` 打开播放网址 |
 | 开画板一起画 | `/canvas` |
 | 房间剪贴板 | `/pad 今晚 21:00 狼人杀` 写一行；多行用 `/pad edit`（vim）；`/pad` 查看；`/pad clear` 清除（联邦同名房间同步） |
 | 房间投票 | `/poll new 今晚吃啥 \| 火锅 \| 烧烤`，再 `/poll 1` 投票；`/poll close` 结束 |
@@ -141,6 +142,21 @@ Are you sure you want to continue connecting (yes/no)?
 - `/library` 和 `/lib` 效果一样，手机上建议用短的 `/lib`。
 - 第一次打开很大的 PDF 可能要等十几秒（会提示「正在加载…」），之后再打开就快了。
 - 看书时若被别人下棋刷屏打扰，可先 `/dnd on`。
+
+---
+
+## 五（附）、点歌（听音乐）
+
+管理员把 mp3 等音频放到服务器 **music 目录** 后，你可以在聊天室点歌。联邦连上后，其他节点的歌也会出现在列表里（带 `@节点`），用序号即可播放。
+
+| 你想做的事 | 怎么做 |
+|------------|--------|
+| 看有哪些歌 | `/music` 或 `/song` |
+| 按文件名找 | `/music find 关键词` |
+| 播第 1 首 | `/music play` 或 `/music play 1` |
+| 播指定文件 | `/music play 歌名.mp3` |
+
+终端会给出**播放网址 + 6 位密钥**。把网址复制到 Safari / 浏览器打开，输入密钥即可听（可点列表切歌）。手机 SSHChat App 会自动打开播放器。
 
 ---
 

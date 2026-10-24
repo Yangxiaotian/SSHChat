@@ -67,7 +67,7 @@ declare global {
       warmupGoKataGo: () => Promise<GoKataGoAnalyzeResponse>;
       analyzeXiangqiPikafish: (payload: XiangqiPikafishAnalyzeRequest) => Promise<XiangqiPikafishAnalyzeResponse>;
       openSecureWebSession: (payload: {
-        kind: 'canvas' | 'piano' | 'upload' | 'download';
+        kind: 'canvas' | 'piano' | 'upload' | 'download' | 'music';
         url: string;
         key: string;
       }) => Promise<{ ok: boolean; error?: string }>;
