@@ -36,6 +36,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import chat.ssh.sshchat.databinding.ActivityMainBinding
 import chat.ssh.sshchat.games.GameParser
+import chat.ssh.sshchat.library.LibraryParser
+import chat.ssh.sshchat.news.NewsParser
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -59,6 +61,16 @@ class MainActivity : AppCompatActivity() {
     private var gamePanelIndex = -1
     private var gamePanelHostLp: ViewGroup.LayoutParams? = null
     private var gamePanelFullscreen = false
+    private val libraryParser = LibraryParser()
+    private val libraryFlush = Runnable {
+        val events = libraryParser.flush()
+        if (events.isNotEmpty()) binding.libraryReader.handle(events)
+    }
+    private val newsParser = NewsParser()
+    private val newsFlush = Runnable {
+        val events = newsParser.flush()
+        if (events.isNotEmpty()) binding.newsPanel.handle(events)
+    }
     private var voiceRecorder: VoiceRecorder? = null
     /** Camera/gallery/video is open — SSH may drop; reconnect on return. */
     @Volatile private var mediaPickerOpen = false
@@ -76,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private var expectingNames = false
     @Volatile private var expectingOwnCanvas = false
     @Volatile private var expectingOwnPiano = false
+    private val seenPianoTokens = mutableSetOf<String>()
     @Volatile private var pendingPadEdit = false
     private var padEditTimeout: Runnable? = null
     private var padEditDialog: android.app.AlertDialog? = null
@@ -234,7 +247,28 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnLibrary.setOnClickListener {
             hidePlusPanel()
-            sendSlashCommand("/library")
+            if (client == null) {
+                Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            } else {
+                CommandUsage.record("/library")
+                binding.newsPanel.hide()
+                binding.libraryReader.openCatalog()
+            }
+        }
+        binding.btnNews.setOnClickListener {
+            hidePlusPanel()
+            if (client == null) {
+                Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            } else {
+                CommandUsage.record("/news")
+                binding.libraryReader.hide()
+                newsParser.reset()
+                binding.newsPanel.open()
+            }
+        }
+        binding.btnMusic.setOnClickListener {
+            hidePlusPanel()
+            startMusic()
         }
         binding.btnHelp.setOnClickListener {
             hidePlusPanel()
@@ -263,9 +297,37 @@ class MainActivity : AppCompatActivity() {
         binding.gamePanel.onMaximizeChanged = { max ->
             applyGamePanelMaximize(max)
         }
+        binding.libraryReader.onSend = { cmd ->
+            val c = client
+            if (c == null) {
+                Toast.makeText(this, "连接已断开，请稍候重连", Toast.LENGTH_SHORT).show()
+                false
+            } else {
+                c.send(cmd)
+                true
+            }
+        }
+        binding.newsPanel.onSend = { cmd ->
+            val c = client
+            if (c == null) {
+                Toast.makeText(this, "连接已断开，请稍候重连", Toast.LENGTH_SHORT).show()
+                false
+            } else {
+                newsParser.reset()
+                c.send(cmd)
+                true
+            }
+        }
+        binding.libraryReader.onChromeChanged = { visible, color, light ->
+            applyReaderChrome(visible, color, light)
+        }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (binding.gamePanel.isMaximized()) {
+                if (binding.newsPanel.handleBack()) {
+                    return
+                } else if (binding.libraryReader.handleBack()) {
+                    return
+                } else if (binding.gamePanel.isMaximized()) {
                     binding.gamePanel.setMaximized(false)
                 } else {
                     isEnabled = false
@@ -601,6 +663,16 @@ class MainActivity : AppCompatActivity() {
         client?.send("/piano")
     }
 
+    private fun startMusic() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在打开点歌…（/music play）")
+        CommandUsage.record("/music play")
+        client?.send("/music play")
+    }
+
     private fun cancelPadEditWait() {
         padEditTimeout?.let { binding.root.removeCallbacks(it) }
         padEditTimeout = null
@@ -914,6 +986,8 @@ class MainActivity : AppCompatActivity() {
         cancelReconnect()
         client?.disconnect()
         client = null
+        libraryParser.reset()
+        newsParser.reset()
         if (clearChat) {
             binding.chatLog.removeAllViews()
             appendLine("[*] connecting…")
@@ -1002,6 +1076,10 @@ class MainActivity : AppCompatActivity() {
         SshKeepAliveService.stop(this)
         client?.disconnect()
         client = null
+        libraryParser.reset()
+        newsParser.reset()
+        binding.libraryReader.reset()
+        binding.newsPanel.reset()
         setConnected(false)
         binding.tvStatus.text = "未连接"
     }
@@ -1292,6 +1370,11 @@ class MainActivity : AppCompatActivity() {
                     val me = binding.etUsername.text?.toString()?.trim().orEmpty()
                     val creator = pendingFileMeta.sender?.trim().orEmpty()
                     pendingFileMeta.reset()
+                    val token = SecureInvite.pathToken(open.url, "piano")
+                    if (token != null) {
+                        if (!own && token in seenPianoTokens) return
+                        seenPianoTokens.add(token)
+                    }
                     val sameNickOtherDevice =
                         !own && creator.isNotEmpty() && me.isNotEmpty() &&
                             creator.equals(me, ignoreCase = true)
@@ -1319,6 +1402,11 @@ class MainActivity : AppCompatActivity() {
                     MessageAlert.play(this)
                     appendLine("[*] 打开棋钟…")
                     startActivity(WebInviteActivity.clock(this, open.url))
+                }
+                SecureInvite.Kind.MUSIC -> {
+                    pendingFileMeta.reset()
+                    appendLine("[*] 打开点歌…")
+                    startActivity(WebInviteActivity.music(this, open.url, open.key))
                 }
             }
             return
@@ -1627,6 +1715,8 @@ class MainActivity : AppCompatActivity() {
 
     /** Same as pre-bubble board UX: monospace, left-aligned, outer h-scroll aligns columns. */
     private fun appendBoardLine(text: String) {
+        if (feedLibrary(text)) return
+        if (feedNews(text)) return
         // Feed UI board panel (silent). Keep monospace dump in chat as fallback.
         binding.gamePanel.myName = binding.etUsername.text?.toString()?.trim().orEmpty()
         binding.gamePanel.feedLine(text)
@@ -1673,6 +1763,66 @@ class MainActivity : AppCompatActivity() {
         }
         binding.chatLog.addView(tv)
         scrollChatToBottom()
+    }
+
+    /** @return true when the line belongs to the open library reader and must stay out of chat. */
+    private fun feedLibrary(text: String): Boolean {
+        val reader = binding.libraryReader
+        if (reader.feedDict(text)) return true
+        val r = libraryParser.feed(text)
+        if (r.events.isNotEmpty()) reader.handle(r.events)
+        mainHandler.removeCallbacks(libraryFlush)
+        if (r.libraryLine) mainHandler.postDelayed(libraryFlush, 350)
+        return r.libraryLine && reader.isActive()
+    }
+
+    /** @return true when the line belongs to the open news panel and must stay out of chat. */
+    private fun feedNews(text: String): Boolean {
+        val panel = binding.newsPanel
+        val r = newsParser.feed(text)
+        if (r.events.isNotEmpty()) panel.handle(r.events)
+        mainHandler.removeCallbacks(newsFlush)
+        if (r.newsLine) mainHandler.postDelayed(newsFlush, 350)
+        return r.newsLine && panel.isActive()
+    }
+
+    private fun applyReaderChrome(visible: Boolean, color: Int, light: Boolean) {
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        if (visible) {
+            binding.root.setBackgroundColor(color)
+            @Suppress("DEPRECATION")
+            window.statusBarColor = color
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = color
+            controller.isAppearanceLightStatusBars = light
+            controller.isAppearanceLightNavigationBars = light
+            controller.hide(WindowInsetsCompat.Type.ime())
+        } else {
+            binding.root.setBackgroundColor(0xFFFFFFFF.toInt())
+            @Suppress("DEPRECATION")
+            window.statusBarColor = 0xFF1B5E20.toInt()
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = 0xFFFAFAFA.toInt()
+            controller.isAppearanceLightStatusBars = false
+            controller.isAppearanceLightNavigationBars = true
+        }
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        val reader = binding.libraryReader
+        if (reader.isReading()) {
+            when (event.keyCode) {
+                android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    if (event.action == android.view.KeyEvent.ACTION_DOWN) reader.stepForward()
+                    return true
+                }
+                android.view.KeyEvent.KEYCODE_VOLUME_UP -> {
+                    if (event.action == android.view.KeyEvent.ACTION_DOWN) reader.stepBackward()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun bubbleDrawable(fill: Int, stroke: Int? = null): android.graphics.drawable.GradientDrawable =
@@ -1731,6 +1881,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.isEnabled = on
         binding.btnPad.isEnabled = on
         binding.btnLibrary.isEnabled = on
+        binding.btnNews.isEnabled = on
         binding.btnHelp.isEnabled = on
         binding.btnClear.isEnabled = true
         binding.btnSlash.isEnabled = on
@@ -1748,6 +1899,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.alpha = iconAlpha
         binding.btnPad.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
+        binding.btnNews.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha
         binding.btnClear.alpha = 1f
         binding.loginPanel.visibility = if (on) View.GONE else View.VISIBLE

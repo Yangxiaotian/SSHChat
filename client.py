@@ -66,6 +66,15 @@ _XQ_BLACK_MARK = re.compile(r"\{\{B\}\}(.*?)\{\{/B\}\}")
 _RAW_ANSI_INLINE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
 _MANGLED_CSI_INLINE = re.compile(r"\?\[[\d;?]*[A-Za-z]")
 
+_MUSIC_SUBCOMMANDS = {
+    "play": None,
+    "open": None,
+    "listen": None,
+    "find": None,
+    "search": None,
+    "help": None,
+}
+
 _LIBRARY_SUBCOMMANDS = {
     "open": None,
     "read": None,
@@ -166,6 +175,8 @@ _TOP_COMMANDS = (
     "/news",
     "/library",
     "/lib",
+    "/music",
+    "/song",
     "/dict",
     "/clear",
     "/cls",
@@ -219,6 +230,8 @@ _SUBCOMMANDS_BY_CMD = {
     "/news": sorted(_NEWS_SUBCOMMANDS),
     "/library": sorted(_LIBRARY_SUBCOMMANDS),
     "/lib": sorted(_LIBRARY_SUBCOMMANDS),
+    "/music": sorted(_MUSIC_SUBCOMMANDS),
+    "/song": sorted(_MUSIC_SUBCOMMANDS),
     "/dict": sorted(_DICT_SUBCOMMANDS),
     "/dnd": sorted(_DND_SUBCOMMANDS),
     "/lang": sorted(_LANG_SUBCOMMANDS),
@@ -236,11 +249,20 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "undo"): ("accept", "reject", "cancel"),
     ("/game", "draw"): ("accept", "reject", "cancel"),
     ("/game", "restore"): ("swap",),
-    ("/game", "move"): ("flip", "move", "翻", "翻子", "走", "移动"),
+    ("/game", "move"): (
+        "flip", "move", "翻", "翻子", "走", "移动",
+        "pick", "play", "row", "start", "bot",
+    ),
     ("/game", "new"): _GAME_NAMES,
     ("/game", "on"): ("all",) + _GAME_NAMES,
     ("/game", "off"): ("all",) + _GAME_NAMES,
     ("/game", "list"): ("off", "offline"),
+}
+
+# Third token after `/game move <verb>` (niutou row/bot args).
+_NESTED3_SUBCOMMANDS: dict[tuple[str, str, str], tuple[str, ...]] = {
+    ("/game", "move", "bot"): ("easy", "hard", "pro"),
+    ("/game", "move", "row"): ("1", "2", "3", "4"),
 }
 
 # Learned from /rooms, /names, and chat traffic for Tab completion.
@@ -302,6 +324,17 @@ class SSHChatCommandCompleter(Completer):
                     if cmd.startswith(prefix):
                         yield Completion(cmd, start_position=-len(prefix))
                 return
+            if len(parts) >= 4:
+                cmd = parts[0].lower()
+                sub = parts[1].lower()
+                verb = parts[2].lower()
+                prefix = parts[-1].lower()
+                deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+                for item in deep:
+                    if item.startswith(prefix):
+                        yield Completion(item, start_position=-len(parts[-1]))
+                if deep:
+                    return
             if len(parts) >= 3:
                 cmd = parts[0].lower()
                 sub = parts[1].lower()
@@ -330,6 +363,15 @@ class SSHChatCommandCompleter(Completer):
             return
 
         parts = text.rstrip().split()
+        if len(parts) >= 3:
+            cmd = parts[0].lower()
+            sub = parts[1].lower()
+            verb = parts[2].lower()
+            deep = _NESTED3_SUBCOMMANDS.get((cmd, sub, verb), ())
+            if deep:
+                for item in deep:
+                    yield Completion(item + " ", start_position=0)
+                return
         if len(parts) >= 2:
             cmd = parts[0].lower()
             sub = parts[1].lower()
@@ -413,11 +455,15 @@ def _is_reading_content_line(payload: str) -> bool:
         return True
     if re.match(r"^\d+\.\s+\[", t):
         return True
+    if re.match(r"^https?://\S+$", t, re.I):
+        return True
+    if t.startswith("news-link ") or t.startswith("可用：") or t.startswith("暂时没有取到新闻"):
+        return True
     if t.startswith("《") or "【图书馆】" in t or t.startswith("[图书馆]") or "[Library]" in t:
         return True
     if t.startswith("Usage:") or t.startswith("用法：") or t.startswith("用法:"):
         return True
-    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib") or t.startswith("/lang"):
+    if t.startswith("/news") or t.startswith("/library") or t.startswith("/lib") or t.startswith("/music") or t.startswith("/song") or t.startswith("/lang"):
         return True
     return False
 
@@ -1667,7 +1713,7 @@ def main():
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
         "/leave [nick]|<nick> <n>  /part <room>  "
-        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  "
+        "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
     )
     print("Tip: type / then press Tab to complete commands (like a shell).")

@@ -1,7 +1,8 @@
 import UIKit
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    /// iPhone: portrait; iPad: all orientations. Piano WebView temporarily locks landscape.
+    /// iPhone: portrait; iPad: all four orientations (anything less makes iPadOS 26 run the app
+    /// in a non-resizable compatibility window). Piano WebView temporarily locks landscape.
     static var orientationLock: UIInterfaceOrientationMask = OrientationLock.defaultMask
 
     func application(
@@ -14,7 +15,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
 enum OrientationLock {
     static var defaultMask: UIInterfaceOrientationMask {
-        UIDevice.current.userInterfaceIdiom == .pad ? .allButUpsideDown : .portrait
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
     }
 
     static func setLandscape(_ on: Bool) {

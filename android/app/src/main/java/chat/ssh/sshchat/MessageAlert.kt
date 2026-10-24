@@ -43,14 +43,22 @@ object MessageAlert {
         val now = System.currentTimeMillis()
         if (now - lastPlayAtMs < MIN_INTERVAL_MS) return
         lastPlayAtMs = now
-        try {
-            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
-            tg.startTone(ToneGenerator.TONE_PROP_ACK, 180)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                runCatching { tg.release() }
-            }, 250)
-        } catch (_: Exception) {
-            // ignore missing audio path
+        // ToneGenerator on STREAM_NOTIFICATION steals focus from WebView <audio>
+        // (music page) when a peer joins — vibrate-only while music is active.
+        val musicOn = runCatching {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.isMusicActive == true
+        }.getOrDefault(false)
+        if (!musicOn) {
+            try {
+                val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+                tg.startTone(ToneGenerator.TONE_PROP_ACK, 180)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    runCatching { tg.release() }
+                }, 250)
+            } catch (_: Exception) {
+                // ignore missing audio path
+            }
         }
         vibrate(context)
     }

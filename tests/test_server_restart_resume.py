@@ -1,7 +1,14 @@
 import tempfile
 import unittest
 
-from games import ChessGame, GoGame, GomokuGame, chess_available, create_game
+from games import (
+    ChessGame,
+    GoGame,
+    GomokuGame,
+    NiuTouWangGame,
+    chess_available,
+    create_game,
+)
 import server
 from session_store import DisconnectedSeat, GameSessionStore
 from unittest.mock import patch
@@ -25,6 +32,8 @@ class ServerRestartResumeTests(unittest.TestCase):
         server.room_capsules.clear()
         server.room_games.clear()
         server.room_games_parked.clear()
+        server._last_good_game_blobs.clear()
+        server._last_good_parked_blobs.clear()
         server.room_game_authority.clear()
         server.room_game_tokens.clear()
         server.room_game_ended_ids.clear()
@@ -182,12 +191,66 @@ class ServerRestartResumeTests(unittest.TestCase):
         bad_room = "boom"
         black = DummyConn()
         good = GomokuGame(black, "zouyu")
+
+        class Boom:
+            state = "playing"
+
+            def __getstate__(self):
+                raise TypeError("cannot pickle boom")
+
         server.room_games[good_room] = good
-        server.room_games[bad_room] = object()
+        server.room_games[bad_room] = Boom()
         with server.lock:
             payload = server._build_session_payload_locked()
         self.assertIn(good_room, payload["room_games"])
         self.assertNotIn(bad_room, payload["room_games"])
+
+    def test_pickle_failure_keeps_previous_room_snapshot(self) -> None:
+        room = "wo"
+        black = DummyConn()
+        game = GomokuGame(black, "zouyu")
+        server.room_games[room] = game
+        with server.lock:
+            first = server._build_session_payload_locked()
+        self.assertIn(room, first["room_games"])
+        prev = first["room_games"][room]
+
+        class Boom:
+            state = "playing"
+
+            def __getstate__(self):
+                raise TypeError("cannot pickle boom")
+
+        server.room_games[room] = Boom()
+        with server.lock:
+            second = server._build_session_payload_locked()
+        self.assertEqual(second["room_games"].get(room), prev)
+
+    def test_niutou_leave_during_play_keeps_seat(self) -> None:
+        room = "wo"
+        host = DummyConn()
+        guest = DummyConn()
+        game = NiuTouWangGame(host, "yxt")
+        game.try_join(guest, "zouyu")
+        priv, bcast, ended = game.try_move(host, "start")
+        self.assertFalse(ended)
+        self.assertEqual(game.state, "playing")
+
+        _priv, leave_bcast, leave_ended = game.on_player_leave(guest, "zouyu")
+        self.assertFalse(leave_ended)
+        self.assertEqual(game.state, "playing")
+        self.assertIn("席位已保留", leave_bcast[0])
+        seat = game.players[1][0]
+        self.assertIsInstance(seat, DisconnectedSeat)
+        self.assertEqual(seat.nickname, "zouyu")
+        self.assertIn("zouyu", game.hands)
+
+        server.clients[host] = {"name": "yxt", "rooms": {room}, "current_room": room}
+        server.rooms[room].add(host)
+        server.room_games[room] = game
+        with server.lock:
+            payload = server._build_session_payload_locked()
+        self.assertIn(room, payload["room_games"])
 
     def test_ended_games_are_not_persisted(self) -> None:
         room = "default"

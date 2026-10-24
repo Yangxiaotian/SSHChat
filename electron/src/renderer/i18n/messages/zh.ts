@@ -70,6 +70,8 @@ export const zhMessages = {
       pianoTitle: '开启当前房间共享钢琴（一键 /piano）',
       clock: '⏱ 棋钟',
       clockTitle: '开启当前房间棋钟（一键 /clock）',
+      music: '🎵 点歌',
+      musicTitle: '打开点歌播放器（一键 /music play）',
       pasteHint: '也可直接粘贴/拖入图片或文件',
     },
     commands: {
@@ -90,6 +92,7 @@ export const zhMessages = {
       game: '游戏命令',
       news: '查看新闻',
       library: '浏览图书馆',
+      music: '点歌（联邦并集曲库）',
       lang: '切换界面语言（en/zh）',
       dict: '词典查询（en/cn/hh）',
       announce: '房间公告',
@@ -368,6 +371,7 @@ export const zhMessages = {
   secureLink: {
     canvasHint: '密钥已自动处理，点按钮即可在客户端内打开画布',
     pianoHint: '密钥已自动处理，点按钮即可在客户端内打开钢琴',
+    musicHint: '密钥已自动处理，点按钮即可打开点歌播放器',
     uploadHint: '密钥已自动处理，点按钮打开上传页并选择文件',
     downloadHint: '密钥已自动处理，点按钮打开预览/下载页',
     opening: '打开中…',

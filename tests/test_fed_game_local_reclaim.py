@@ -1049,5 +1049,79 @@ class FedGameParkRestoreTests(unittest.TestCase):
         self.assertEqual(ended, [room])
 
 
+class FedReclaimThenEndTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server.clients.clear()
+        server.rooms.clear()
+        server.room_owners.clear()
+        server.room_games.clear()
+        server.room_game_authority.clear()
+        server.room_game_tokens.clear()
+        server.room_game_superseded_tokens.clear()
+        server.room_game_ended_ids.clear()
+        server.room_game_provisional.clear()
+        server.room_games_parked.clear()
+        federation._hub = None
+        server._greq_until.clear()
+
+    def test_end_after_reclaim_tombstones_peer_session(self) -> None:
+        """Peer still hosting the pre-reclaim session must not revive it on /game show."""
+        room = "wo"
+        host = DummyConn()
+        guest = DummyConn()
+        game = GomokuGame(host, "alice")
+        game.try_join(guest, "bob")
+        old_tok = "peer" + "0" * 28
+        server.room_games[room] = game
+        server.room_game_authority[room] = "peer-node"
+        server.room_game_tokens[room] = old_tok
+        server.clients[host] = {"name": "alice", "rooms": {room}, "current_room": room}
+        server.clients[guest] = {"name": "bob", "rooms": {room}, "current_room": room}
+        server.rooms[room] = {host, guest}
+
+        ended: list[str] = []
+
+        class FakeHub:
+            enabled = True
+            node_id = "Mathematics.local"
+            peer_count = 1
+
+            def sync_game(self, *a, **k):
+                return None
+
+            def end_game(self, r, authority, token=""):
+                ended.append(token)
+
+        class PeerStale:
+            name = "gomoku"
+            state = "playing"
+            _history = [(1, 1, 1)]
+
+        with mock.patch.object(
+            server, "_local_node_id", return_value="Mathematics.local"
+        ), mock.patch.object(
+            federation, "get_hub", return_value=FakeHub()
+        ), mock.patch.object(server, "_persist_after_game_change"):
+            self.assertFalse(server._should_forward_game(room, "end"))
+            new_tok = server.room_game_tokens[room]
+            self.assertNotEqual(new_tok, old_tok)
+
+            server.room_games.pop(room, None)
+            server._federation_notify_game_end(room)
+            self.assertIn(old_tok, ended)
+            self.assertIn(new_tok, ended)
+            self.assertEqual(server.room_game_ended_ids.get(old_tok), room)
+
+            ended.clear()
+            with mock.patch.object(
+                server.pickle, "loads", return_value=PeerStale()
+            ), mock.patch.object(server, "_rebind_game_services"):
+                server._fed_on_game_sync(
+                    "peer-node", room, "peer-node", "ZmFrZQ==", old_tok
+                )
+        self.assertNotIn(room, server.room_games)
+        self.assertEqual(ended, [old_tok])
+
+
 if __name__ == "__main__":
     unittest.main()

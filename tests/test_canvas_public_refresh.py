@@ -120,6 +120,65 @@ class CanvasPublicRefreshTests(unittest.TestCase):
         self.assertIn("https://fresh.trycloudflare.com/canvas/", sent[-1])
         self.assertNotIn("old-dead.trycloudflare.com", sent[-1])
 
+    def test_empty_latch_then_same_host_does_not_redeliver(self) -> None:
+        session = canvas_sharing.canvas_store.create_session(
+            creator="alice", participants=["bob"], room="lobby"
+        )
+        invited: list[str] = []
+        host = "https://same-host.trycloudflare.com"
+
+        with mock.patch.object(server, "file_http", FakeFileHttp(host)):
+            with mock.patch.object(
+                server,
+                "_deliver_canvas_invites",
+                side_effect=lambda s, only=None, refreshed=False: invited.append(
+                    f"{s.session_id}:{refreshed}"
+                ),
+            ):
+                with mock.patch.object(server, "_federation_push_all_canvas_announces"):
+                    with mock.patch.object(
+                        server, "_rediscover_piano_invites_for_public_change"
+                    ):
+                        with mock.patch.object(
+                            server, "_rediscover_clock_invites_for_public_change"
+                        ):
+                            server._maybe_refresh_canvas_invites_on_public_change(
+                                host, reason="boot"
+                            )
+                            server._maybe_refresh_canvas_invites_on_public_change(
+                                "", reason="cf-down"
+                            )
+                            self.assertEqual(server._LAST_CANVAS_PUBLIC_BASE, host)
+                            server._maybe_refresh_canvas_invites_on_public_change(
+                                host, reason="cf-up"
+                            )
+
+        self.assertEqual(invited, [f"{session.session_id}:True"])
+
+    def test_wait_live_file_public_returns_when_ready(self) -> None:
+        calls = {"n": 0}
+
+        def ready() -> str:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return ""
+            return "https://recovered.trycloudflare.com"
+
+        with mock.patch.object(server, "_local_file_public_ready", side_effect=ready):
+            with mock.patch.object(server.time, "sleep"):
+                self.assertEqual(
+                    server._wait_live_file_public(timeout=2.0),
+                    "https://recovered.trycloudflare.com",
+                )
+
+    def test_wait_live_file_public_times_out(self) -> None:
+        with mock.patch.object(server, "_local_file_public_ready", return_value=""):
+            with mock.patch.object(server.time, "sleep"):
+                with mock.patch.object(
+                    server.time, "monotonic", side_effect=[0.0, 0.5, 3.0]
+                ):
+                    self.assertEqual(server._wait_live_file_public(timeout=2.0), "")
+
 
 if __name__ == "__main__":
     unittest.main()

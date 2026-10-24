@@ -15,6 +15,8 @@ import time
 import unicodedata
 from typing import Optional, TYPE_CHECKING
 
+from session_store import DisconnectedSeat
+
 
 def stamp_new_session(game) -> None:
     """Mark a freshly created room game (/game new)."""
@@ -193,6 +195,32 @@ def _format_rating_result_lines(
         f"{prof_a['name']} {prof_a['delta']:+d} -> {prof_a['rating']}（{prof_a['level']}）；"
         f"{prof_b['name']} {prof_b['delta']:+d} -> {prof_b['rating']}（{prof_b['level']}）"
     ]
+
+
+def _format_ranking_rating_result_lines(
+    store: Optional[GameRatingStore],
+    game: str,
+    standings: list[tuple[str, int]],
+    *,
+    ranked: bool,
+) -> list[str]:
+    """Settle multi-player Elo from ordered standings (best first; lower score better)."""
+    if not ranked:
+        return ["练习局：本局不计入持久化积分。"]
+    if store is None or not is_rated_game(game) or len(standings) < 2:
+        return []
+    names = [name for name, _score in standings]
+    before = {name: store.profile(game, name)["rating"] for name in names}
+    for i, (a, score_a) in enumerate(standings):
+        for b, score_b in standings[i + 1 :]:
+            outcome = 0.5 if score_a == score_b else 1.0
+            store.record_result(game, a, b, outcome)
+    bits: list[str] = []
+    for name in names:
+        prof = store.profile(game, name)
+        delta = int(prof["rating"]) - int(before[name])
+        bits.append(f"{prof['name']} {delta:+d} -> {prof['rating']}（{prof['level']}）")
+    return ["积分结算：" + "；".join(bits)]
 
 
 _CHESS_AI_DEPTH = {"easy": 1, "normal": 2, "hard": 3}
@@ -11073,7 +11101,13 @@ class NiuTouWangGame:
     first_seat_desc = "房主"
     join_blurb = "其他玩家可用 /game join 加入，房主用 /game move start 开始"
 
-    def __init__(self, host_conn, host_name: str) -> None:
+    def __init__(
+        self,
+        host_conn,
+        host_name: str,
+        *,
+        rating_store: Optional[GameRatingStore] = None,
+    ) -> None:
         self.players: list[tuple[object, str]] = [(host_conn, host_name)]
         self.bot_names: set[str] = set()
         self.bot_conns: dict[str, object] = {}
@@ -11088,6 +11122,20 @@ class NiuTouWangGame:
         self.await_player: Optional[str] = None
         self.await_card: Optional[int] = None
         self.turn = 0
+        self.rating_store = rating_store
+        self._ratings_settled = False
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._ensure_compat_state()
+
+    def _ensure_compat_state(self) -> None:
+        """Keep active niutou games saved by older builds compatible."""
+        if not hasattr(self, "rating_store"):
+            self.rating_store = None
+        if not hasattr(self, "_ratings_settled"):
+            self._ratings_settled = False
+
     def _auto_add_bots(self) -> list[str]:
         human = sum(1 for c, _n in self.players if c is not None)
         if human >= 2:
@@ -11208,6 +11256,31 @@ class NiuTouWangGame:
             b.append(f"{name} 吃了第 {best_idx+1} 行，+{bulls} 牛头")
         return (b, False)
 
+    def _human_standings(self) -> list[tuple[str, int]]:
+        humans = [
+            (n, int(self.penalty.get(n, 0)))
+            for _c, n in self.players
+            if n not in self.bot_names
+        ]
+        return sorted(humans, key=lambda kv: (kv[1], kv[0].lower()))
+
+    def _settle_ratings(self) -> list[str]:
+        if self._ratings_settled:
+            return []
+        standings = self._human_standings()
+        ranked = len(standings) >= 2
+        lines = _format_ranking_rating_result_lines(
+            self.rating_store, self.name, standings, ranked=ranked
+        )
+        if lines:
+            self._ratings_settled = True
+        return lines
+
+    def _rating_lines(self) -> list[str]:
+        # Only human seats are rated; bots are local practice opponents.
+        humans = [n for _c, n in self.players if n not in self.bot_names]
+        return _format_rating_lines(self.rating_store, self.name, humans)
+
     def _finish_turn_or_next(self) -> list[str]:
         out = self._render_rows()
         if all(len(self.hands[n]) == 0 for _c, n in self.players):
@@ -11216,6 +11289,7 @@ class NiuTouWangGame:
             out.append("对局结束（牛头越少排名越高）：")
             for i, (n, p) in enumerate(rank, start=1):
                 out.append(f"{i}. {n} - {p}")
+            out.extend(self._settle_ratings())
             return out
         self.turn += 1
         self.picks.clear()
@@ -11270,6 +11344,7 @@ class NiuTouWangGame:
                 return (["对局已经开始。"], [], False)
             if conn is not self.players[0][0]:
                 return (["只有房主可以开始对局。"], [], False)
+            self._ratings_settled = False
             return ([], self._start(), False)
         if self.state == "waiting":
             return (["对局尚未开始。"], [], False)
@@ -11299,7 +11374,7 @@ class NiuTouWangGame:
             out.extend(self._resolve_queue_until_pause_or_end())
             out.extend(self._auto_bot_pick_until_resolve())
             return ([], out, self.state == "ended")
-        if cmd != "pick" or len(parts) < 2 or not parts[1].isdigit():
+        if cmd not in ("pick", "play") or len(parts) < 2 or not parts[1].isdigit():
             return (["用法：/game move pick <card>"], [], False)
         card = int(parts[1])
         hand = self.hands.get(name, [])
@@ -11331,6 +11406,7 @@ class NiuTouWangGame:
         lines = [f"牛头王 状态：{_game_state_zh(self.state)}", f"回合：{self.turn}"]
         if self.players:
             lines.append(f"房主：{self.players[0][1]}")
+        lines.extend(self._rating_lines())
         for _c, n in self.players:
             lines.append(f"- {n}：牛头={self.penalty.get(n, 0)}，手牌数={len(self.hands.get(n, []))}")
         lines.extend(self._render_rows() if self.rows else [])
@@ -11353,14 +11429,16 @@ class NiuTouWangGame:
                 break
         if idx is None:
             return ([], [], False)
-        _c, pname = self.players.pop(idx)
+        _c, pname = self.players[idx]
+        if self.state in ("playing", "await_row"):
+            # Keep seat + cards so restart / brief leave can resume (like board games).
+            self.players[idx] = (DisconnectedSeat(pname), pname)
+            return ([], [f"{name} 暂时离线，席位已保留；重连后可继续本局。"], False)
+        self.players.pop(idx)
         self.hands.pop(pname, None)
         self.picks.pop(pname, None)
         self.penalty.pop(pname, None)
         if not self.players:
-            self.state = "ended"
-            return ([], [f"{name} 离开，牛头王对局已结束"], True)
-        if self.state in ("playing", "await_row"):
             self.state = "ended"
             return ([], [f"{name} 离开，牛头王对局已结束"], True)
         return ([], [f"{name} 离开了牛头王对局"], False)
@@ -12689,6 +12767,14 @@ def create_game(
             creator_name,
             rating_store=rating_store,
         )
+    elif game_name == NiuTouWangGame.name:
+        if options:
+            raise RuntimeError("niutou 暂不支持额外开局参数。")
+        game = NiuTouWangGame(
+            creator_conn,
+            creator_name,
+            rating_store=rating_store,
+        )
     else:
         cls = GAMES.get(game_name)
         if cls is None:
@@ -12830,7 +12916,7 @@ HELP_LINES = (
     "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
     "[*] /game seats            显示双方与对局状态。",
     "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
-    "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
+    "[*] /game rating [游戏] [昵称]  查看棋类/牛头王持久化积分/等级；积分跨房间共享。",
     "[*] reversi（黑白棋）终端：/game move <行> <列>；无合法落点时 /game move pass。",
     "[*] darkchess（暗棋/翻翻棋）中英：翻 flip <行> <列> | 走 move <起行> <起列> <终行> <终列>；"
     "4×8，翻子定红黑；炮吃隔一子；将可吃除卒外任意已翻棋，卒可吃将。",

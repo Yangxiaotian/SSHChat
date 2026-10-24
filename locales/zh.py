@@ -31,13 +31,17 @@ MESSAGES: dict = {
         "[*]\n",
         "[*] /game ...      房间小游戏（chess、gomoku、xiangqi、sanguo）。/game list /new /join …；房主 /game on|off [all]、/game list off。\n",
         "[*]              详细用法用 /game help 查看。\n",
-        "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题与提要正文；默认每类 3 条。\n",
+        "[*] /news [中文|国际|科技|all] [条数]  从 RSS 查看标题、提要与原文链接；默认每类 3 条。\n",
+        "[*]              手机 App：+ → 新闻，点标题打开原文。\n",
         "[*] /news detail <分类> <序号>  更长提要（RSS 内；别名：详情）。\n",
         "[*] /news fetch <分类> <序号>  按 RSS 链接抓取网页正文（别名：全文；非 JS 站、可能截断）。\n",
         "[*] /library       列出图书馆书目（epub / txt / md / pdf；每人自带书签，翻页自动保存）。\n",
         "[*] /lib             /library 的简写。\n",
         "[*] /library open <序号|文件名>  打开图书（有书签则从书签继续）；next|prev|page 翻页。\n",
         "[*] /library find <关键词>        按书名查找书目；阅读中则在当前书中检索（别名：search / 搜索 / 查找）。\n",
+        "[*] /music         列出点歌曲目（联邦并集；mp3 / m4a / ogg / flac / wav；管理员放到 music 目录）。\n",
+        "[*] /song            /music 的简写。\n",
+        "[*] /music play [序号|文件名[@节点]]  打开网页播放器（省略则从第 1 首开始；列表为联邦并集，对端音频由藏曲节点提供）；别名：open / 播放。\n",
         "[*] /dict en|cn|hh <词>  词典：英→中、中→英、汉语释义；/dict <词> 自动识别。\n",
         "[*]\n",
         "[*] /sendfile      发送文件到当前房间（仅自己在线也可发，同名多端可下载）；你将收到上传网址，密钥另行单独给出。\n",
@@ -74,7 +78,7 @@ MESSAGES: dict = {
         "sanguo 可 2～6 人 join，房主 /game move 开始 开局）。",
         "[*] /game seats            显示双方与对局状态。",
         "[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。",
-        "[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。",
+        "[*] /game rating [游戏] [昵称]  查看棋类/牛头王持久化积分/等级；积分跨房间共享。",
         "[*] 终端玩法：reversi 黑白棋用 /game move 行 列（无合法落点时 pass）。",
         "[*] darkchess（暗棋/翻翻棋）中英指令：翻 flip <行> <列> | 走 move <起行> <起列> <终行> <终列>；"
         "4×8，翻子定红黑；炮吃须隔一子；将可吃除卒外任意已翻棋，卒可吃将。",
@@ -285,6 +289,12 @@ MESSAGES: dict = {
         ),
         "library_cmd_fail": (
             "[*] 图书馆命令处理失败，请稍后重试（详情见服务端日志）。\n"
+        ),
+        "music_cmd_fail": (
+            "[*] 点歌命令处理失败，请稍后重试（详情见服务端日志）。\n"
+        ),
+        "music_http_off": (
+            "[*] 点歌播放依赖文件网页服务，当前未启用。\n"
         ),
         "lang_usage": "[*] 用法：/lang [en|zh]\n",
         "lang_set": "[*] 界面语言已设为 {lang}。\n",

@@ -7,7 +7,7 @@ object CommandCompletions {
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
         "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
-        "/game", "/news", "/library", "/lib", "/dict", "/clear", "/cls", "/dnd",
+        "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     )
 
     private val SUBS = mapOf(
@@ -24,6 +24,8 @@ object CommandCompletions {
             "open", "read", "next", "n", "prev", "p", "page", "find", "search",
             "bookmarks", "bookmark", "reset", "close", "info", "show", "help",
         ),
+        "/music" to listOf("play", "open", "listen", "find", "search", "help"),
+        "/song" to listOf("play", "open", "listen", "find", "search", "help"),
         "/dict" to listOf("en", "cn", "hh", "help", "英", "中", "汉"),
         "/dnd" to listOf("on", "off"),
         "/lang" to listOf("en", "zh", "english", "chinese", "中文", "英文"),
@@ -41,10 +43,18 @@ object CommandCompletions {
         ("/game" to "undo") to listOf("accept", "reject", "cancel"),
         ("/game" to "draw") to listOf("accept", "reject", "cancel"),
         ("/game" to "restore") to listOf("swap"),
-        ("/game" to "move") to listOf("flip", "move", "翻", "翻子", "走", "移动"),
+        ("/game" to "move") to listOf(
+            "flip", "move", "翻", "翻子", "走", "移动",
+            "pick", "play", "row", "start", "bot",
+        ),
         ("/game" to "list") to listOf("off", "offline"),
         ("/game" to "on") to listOf("all"),
         ("/game" to "off") to listOf("all"),
+    )
+
+    private val NESTED3 = mapOf(
+        Triple("/game", "move", "bot") to listOf("easy", "hard", "pro"),
+        Triple("/game", "move", "row") to listOf("1", "2", "3", "4"),
     )
 
     private val ROOM_ARG_CMDS = setOf("/join", "/switch", "/part")
@@ -128,6 +138,29 @@ object CommandCompletions {
 
         if (parts.size == 1 && !trailingSpace) {
             return sorted(TOP.filter { it.startsWith(parts[0]) }, TOP)
+        }
+
+        if (parts.size >= 3) {
+            val sub = parts[1].lowercase()
+            val verb = parts[2].lowercase()
+            val deepItems = NESTED3[Triple(cmd, sub, verb)].orEmpty()
+            if (deepItems.isNotEmpty()) {
+                val base = "${parts[0]} ${parts[1]} ${parts[2]}"
+                val deepFull = deepItems.map { "$base $it" }
+                if (trailingSpace && parts.size == 3) {
+                    return sorted(deepFull, deepFull)
+                }
+                if (parts.size >= 4 && !trailingSpace) {
+                    val prefix = parts[3]
+                    return sorted(
+                        deepItems.filter { it.startsWith(prefix) }.map { "$base $it" },
+                        deepFull,
+                    )
+                }
+                if (!(parts.size == 3 && !trailingSpace)) {
+                    return emptyList()
+                }
+            }
         }
 
         if (parts.size >= 2) {

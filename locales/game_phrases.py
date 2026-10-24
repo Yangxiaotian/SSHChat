@@ -323,7 +323,7 @@ EXACT_ZH_TO_EN: dict[str, str] = {
     '[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部。': '[*] /game off <name>       Host disables a game (in-progress games unaffected); /game off all disables every game.',
     '[*] /game off <名称>       房主在本房下线某游戏（进行中的该局不受影响）；/game off all 下线全部；联邦节点同步。': '[*] /game off <name>       Host disables a game (in-progress games unaffected); /game off all disables every game; synced across federation.',
     '麻将开始：支持吃/碰/杠/胡；轮到你可 /game move discard <牌> 或 hu。': 'Mahjong start: chi/peng/gang/hu; on your turn discard <tile> or hu.',
-    '[*] /game rating [游戏] [昵称]  查看棋类持久化积分/等级；积分跨房间共享。': '[*] /game rating [game] [nick]  View persistent board-game ratings; shared across rooms.',
+    '[*] /game rating [游戏] [昵称]  查看棋类/牛头王持久化积分/等级；积分跨房间共享。': '[*] /game rating [game] [nick]  View persistent board-game / 6 Nimmt! ratings; shared across rooms.',
     '[*] /game show             重新显示棋盘（己方在下，对手视角自动翻转）。': '[*] /game show             Redisplay the board (you at bottom; opponent view flips).',
     '走法：先点己方棋子再点目标格；也可 /game move <起行> <起列> <终行> <终列>。': 'Move: click your piece then destination; or /game move <sr> <sc> <dr> <dc>.',
     '用法：/game move bot <easy|hard|pro>  或  bot add [人数]': 'Usage: /game move bot <easy|hard|pro>  or  bot add [count]',

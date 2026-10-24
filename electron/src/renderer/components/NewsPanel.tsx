@@ -9,6 +9,7 @@ type NewsItem = {
   source: string;
   title: string;
   body: string;
+  link: string;
 };
 
 function inferCategoryToken(label: string): string {
@@ -58,13 +59,18 @@ export default function NewsPanel() {
           source: titleMatch[2],
           title: titleMatch[3],
           body: '',
+          link: '',
         };
         continue;
       }
 
+      const trimmed = content.trim();
+      if (current && /^https?:\/\/\S+$/i.test(trimmed)) {
+        current.link = trimmed;
+        continue;
+      }
       if (current && content.startsWith('    ')) {
-        const line = content.trim();
-        if (line) current.body += `${line} `;
+        if (trimmed) current.body += `${trimmed} `;
       }
     }
     if (current) items.push(current);

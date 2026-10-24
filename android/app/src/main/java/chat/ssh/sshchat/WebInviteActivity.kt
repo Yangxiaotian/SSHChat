@@ -297,5 +297,12 @@ class WebInviteActivity : AppCompatActivity() {
                 .putExtra(EXTRA_TITLE, "棋钟")
                 .putExtra(EXTRA_CANVAS, true)
                 .putExtra(EXTRA_CLOCK, true)
+
+        fun music(ctx: Context, url: String, key: String): Intent =
+            Intent(ctx, WebInviteActivity::class.java)
+                .putExtra(EXTRA_URL, url)
+                .putExtra(EXTRA_KEY, key)
+                .putExtra(EXTRA_TITLE, "点歌")
+                .putExtra(EXTRA_CANVAS, false)
     }
 }

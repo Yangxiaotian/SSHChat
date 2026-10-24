@@ -31,6 +31,7 @@ import federation
 import games
 import i18n
 import library
+import music
 import file_sharing
 import file_http_server
 import piano_sharing
@@ -132,12 +133,20 @@ _capsule_stop = threading.Event()
 _capsule_thread: Optional[threading.Thread] = None
 # room -> active game session (e.g. games.ChessGame); at most one per room
 room_games: dict[str, object] = {}
+# Last successfully pickled room_games blob (base64). If a live pickle fails
+# (e.g. stray socket), keep the previous snapshot so a restart does not drop
+# an in-progress game.
+_last_good_game_blobs: dict[str, str] = {}
+_last_good_parked_blobs: dict[str, str] = {}
 # room -> parked (inactive) game kept across federation merge/partition
 room_games_parked: dict[str, object] = {}
 # room -> node_id that owns authoritative game state (federation)
 room_game_authority: dict[str, str] = {}
 # room -> random hex token used to break dual-authority conflicts deterministically
 room_game_tokens: dict[str, str] = {}
+# room -> peer's session id replaced by a local reclaim; the peer may still host
+# it, so /game end must tombstone it too or greq revives the board.
+room_game_superseded_tokens: dict[str, str] = {}
 # ended session id -> room (offline peers get this receipt on reconnect)
 room_game_ended_ids: OrderedDict[str, str] = OrderedDict()
 _ENDED_GAME_IDS_MAX = 64
@@ -163,6 +172,9 @@ library_reading: dict[object, dict[str, object]] = {}
 # req_id -> {"event": Event, "payload": dict|None, "error": str}
 _library_page_waiters: dict[str, dict[str, object]] = {}
 _library_page_waiters_lock = threading.Lock()
+# req_id -> {"event": Event, "payload": dict|None} for federated /music play
+_music_play_waiters: dict[str, dict[str, object]] = {}
+_music_play_waiters_lock = threading.Lock()
 # req_id -> {"event": Event, "payload": dict|None} for federation file-host proxy
 _file_host_waiters: dict[str, dict[str, object]] = {}
 _file_host_waiters_lock = threading.Lock()
@@ -195,6 +207,7 @@ _peer_announce_lock = threading.Lock()
 _library_watch_thread: Optional[threading.Thread] = None
 _library_watch_stop = threading.Event()
 _library_last_state: Optional[tuple[set[str], float]] = None
+_music_last_state: Optional[tuple[set[str], float]] = None
 PERSIST_DEBOUNCE_SECONDS = float(
     os.environ.get("SSHCHAT_SESSION_PERSIST_SECONDS", "2")
 )
@@ -1971,19 +1984,36 @@ def _pickle_game_for_storage(game) -> bytes:
             protocol=pickle.HIGHEST_PROTOCOL,
         )
     swaps: list[tuple[DisconnectedSeat, object]] = []
-    for conn, name in _iter_game_conn_seats(game):
-        if not _conn_needs_seat_swap(conn):
-            continue
-        seat = DisconnectedSeat(name)
-        _replace_conn_refs(game, conn, seat)
-        swaps.append((seat, conn))
+
+    def _swap_live_seats() -> None:
+        for conn, name in list(_iter_game_conn_seats(game)):
+            if not _conn_needs_seat_swap(conn):
+                continue
+            seat = DisconnectedSeat(name)
+            _replace_conn_refs(game, conn, seat)
+            swaps.append((seat, conn))
+
+    _swap_live_seats()
     # rating_store contains an RLock and cannot be pickled; it is rebound after
     # loading via _rebind_game_services, so strip it before serialising.
     saved_rs = getattr(game, "rating_store", _MISSING)
     if saved_rs is not _MISSING:
         game.rating_store = None
     try:
-        return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            # Second pass: force-swap any remaining seat-like live objects
+            # (stale sockets no longer in clients still break pickle).
+            for conn, name in list(_iter_game_conn_seats(game)):
+                if conn is None or isinstance(conn, (DisconnectedSeat, FederatedSeat)):
+                    continue
+                if type(conn) is object:  # bot placeholders
+                    continue
+                seat = DisconnectedSeat(name)
+                _replace_conn_refs(game, conn, seat)
+                swaps.append((seat, conn))
+            return pickle.dumps(game, protocol=pickle.HIGHEST_PROTOCOL)
     finally:
         if saved_rs is not _MISSING:
             game.rating_store = saved_rs
@@ -2001,8 +2031,9 @@ def _rebind_game_services(game) -> None:
         for g in game:
             _rebind_game_services(g)
         return
-    if hasattr(game, "rating_store"):
-        game.rating_store = rating_store
+    # Always attach after load. Older pickles (e.g. pre-rating niutou) omit the
+    # attribute entirely; hasattr-gated rebind left show()/seats() crashing.
+    setattr(game, "rating_store", rating_store)
     if getattr(game, "name", "") == "xiangqi":
         log = getattr(game, "_xq_ply_log", None)
         if not isinstance(log, list) or any(not isinstance(item, dict) for item in log):
@@ -2040,13 +2071,24 @@ def _build_session_payload_locked() -> dict[str, object]:
     games_blob: dict[str, str] = {}
     for room, game in room_games.items():
         if game is None or getattr(game, "state", "ended") == "ended":
+            _last_good_game_blobs.pop(room, None)
             continue
         try:
             raw = _pickle_game_for_storage(game)
         except Exception as e:
-            print(f"skip persisting room {room!r} game: {e!r}")
+            prev = _last_good_game_blobs.get(room)
+            if prev:
+                print(
+                    f"skip persisting room {room!r} game: {e!r}; "
+                    "keeping previous snapshot"
+                )
+                games_blob[room] = prev
+            else:
+                print(f"skip persisting room {room!r} game: {e!r}")
             continue
-        games_blob[room] = base64.b64encode(raw).decode("ascii")
+        encoded = base64.b64encode(raw).decode("ascii")
+        games_blob[room] = encoded
+        _last_good_game_blobs[room] = encoded
     parked_blob: dict[str, str] = {}
     for room, parked in room_games_parked.items():
         games_list = [
@@ -2055,15 +2097,26 @@ def _build_session_payload_locked() -> dict[str, object]:
             if g is not None and getattr(g, "state", "ended") != "ended"
         ]
         if not games_list:
+            _last_good_parked_blobs.pop(room, None)
             continue
         try:
             # Persist stack as-is (single game or list) so multi-kind parks survive.
             to_store: object = games_list[0] if len(games_list) == 1 else games_list
             raw = _pickle_game_for_storage(to_store)
         except Exception as e:
-            print(f"skip persisting parked room {room!r} game: {e!r}")
+            prev = _last_good_parked_blobs.get(room)
+            if prev:
+                print(
+                    f"skip persisting parked room {room!r} game: {e!r}; "
+                    "keeping previous snapshot"
+                )
+                parked_blob[room] = prev
+            else:
+                print(f"skip persisting parked room {room!r} game: {e!r}")
             continue
-        parked_blob[room] = base64.b64encode(raw).decode("ascii")
+        encoded = base64.b64encode(raw).decode("ascii")
+        parked_blob[room] = encoded
+        _last_good_parked_blobs[room] = encoded
     sessions: dict[str, dict[str, object]] = {}
     for key, sess in disconnected_sessions.items():
         rooms_set = sess.get("rooms") or set()
@@ -2127,6 +2180,11 @@ def _build_session_payload_locked() -> dict[str, object]:
             for room, tok in room_game_tokens.items()
             if isinstance(room, str) and isinstance(tok, str) and tok.strip()
         },
+        "room_game_superseded_tokens": {
+            room: tok
+            for room, tok in room_game_superseded_tokens.items()
+            if isinstance(room, str) and isinstance(tok, str) and tok.strip()
+        },
         "room_game_ended_ids": {
             tok: room
             for tok, room in room_game_ended_ids.items()
@@ -2149,6 +2207,7 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 print(f"skip restoring room {room!r} game: {e!r}")
                 continue
             room_games[room] = game
+            _last_good_game_blobs[room] = encoded
     parked_blob = payload.get("room_games_parked")
     if isinstance(parked_blob, dict):
         for room, encoded in parked_blob.items():
@@ -2161,6 +2220,7 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 print(f"skip restoring parked room {room!r} game: {e!r}")
                 continue
             room_games_parked[room] = game
+            _last_good_parked_blobs[room] = encoded
     sessions = payload.get("disconnected_sessions")
     if isinstance(sessions, dict):
         for key, sess in sessions.items():
@@ -2280,6 +2340,16 @@ def _apply_session_payload_locked(payload: dict[str, object]) -> bool:
                 and tok.strip()
             ):
                 room_game_tokens[room] = tok.strip()
+    superseded = payload.get("room_game_superseded_tokens")
+    if isinstance(superseded, dict):
+        for room, tok in superseded.items():
+            if (
+                isinstance(room, str)
+                and room in room_games
+                and isinstance(tok, str)
+                and tok.strip()
+            ):
+                room_game_superseded_tokens[room] = tok.strip()
     ended_blob = payload.get("room_game_ended_ids")
     if isinstance(ended_blob, dict):
         for tok, room in ended_blob.items():
@@ -3297,6 +3367,7 @@ def _send_news_item_fetched(conn, category: str, index_1based: int) -> None:
     link = _safe_http_url(item.get("link") or "")
     send_line(conn, f"[*] --- {label} 第 {index_1based} 条（网页正文）---\n")
     send_line(conn, f"[*] [{item['source']}] {item['title']}\n")
+    _send_news_original_link(conn, item)
     if not link:
         send_line(conn, "[*] RSS 未提供可用的 http(s) 链接，无法抓取正文。\n")
         return
@@ -3399,8 +3470,10 @@ def _get_news_items(category: str) -> list[dict[str, str]]:
             seen_titles.add(key)
             deduped.append(item)
 
-        with news_cache_lock:
-            news_cache[category] = (time.monotonic(), list(deduped))
+        # Don't cache a total miss — proxy blips would hide news for the TTL.
+        if deduped:
+            with news_cache_lock:
+                news_cache[category] = (time.monotonic(), list(deduped))
         return deduped
     finally:
         with news_cache_lock:
@@ -3425,6 +3498,13 @@ def _send_news_usage(conn) -> None:
 
 def _resolve_news_category(cat_token: str) -> Optional[str]:
     return NEWS_ALIASES.get(cat_token.lower()) or NEWS_ALIASES.get(cat_token)
+
+
+def _send_news_original_link(conn, item: dict[str, str]) -> None:
+    """One indented http(s) line so GUI clients can open the article as-is."""
+    link = _safe_http_url(item.get("link") or "")
+    if link:
+        send_line(conn, f"[*]    {link}\n")
 
 
 def _send_wrapped_news_body(conn, raw_body: str, max_chars: int) -> None:
@@ -3458,26 +3538,46 @@ def _send_news_item_detail(conn, category: str, index_1based: int) -> None:
     item = items[index_1based - 1]
     send_line(conn, f"[*] --- {label} 第 {index_1based} 条 ---\n")
     send_line(conn, f"[*] [{item['source']}] {item['title']}\n")
+    _send_news_original_link(conn, item)
     _send_wrapped_news_body(conn, item.get("body") or "", NEWS_DETAIL_MAX_CHARS)
 
 
-def _send_news_section(conn, category: str, limit: int) -> None:
+def _send_news_section(
+    conn, category: str, limit: int, items: Optional[list[dict[str, str]]] = None
+) -> None:
     label = NEWS_CATEGORIES[category]["label"]
     send_line(conn, f"[*] --- {label} ---\n")
-    items = _get_news_items(category)[:limit]
+    if items is None:
+        items = _get_news_items(category)
+    items = items[:limit]
     if not items:
         send_line(conn, "[*] 暂时没有取到新闻；稍后再试。\n")
         return
     for idx, item in enumerate(items, start=1):
         send_line(conn, f"[*] {idx}. [{item['source']}] {item['title']}\n")
         _send_wrapped_news_body(conn, item.get("body") or "", NEWS_BODY_MAX_CHARS)
+        _send_news_original_link(conn, item)
+
+
+def _send_news_all(conn, limit: int) -> None:
+    """Fetch categories in parallel and print each list as soon as it is ready."""
+    cats = ("cn", "world", "tech")
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(_get_news_items, cat): cat for cat in cats}
+        for fut in as_completed(futs):
+            cat = futs[fut]
+            try:
+                ready = fut.result() or []
+            except Exception as e:
+                print(f"news category error ({cat}): {e!r}")
+                ready = []
+            _send_news_section(conn, cat, limit, items=ready)
 
 
 def _handle_news(conn, payload: str) -> None:
     raw = payload[len("/news") :].strip()
     if not raw:
-        for category in ("cn", "world", "tech"):
-            _send_news_section(conn, category, NEWS_DEFAULT_ALL_LIMIT)
+        _send_news_all(conn, NEWS_DEFAULT_ALL_LIMIT)
         send_line(conn, "[*] 可用：/news 中文、/news 国际、/news 科技、/news all 5\n")
         send_line(conn, "[*] 单条更长提要：/news detail 中文 2（序号与上表一致；别名：详情）\n")
         send_line(conn, "[*] 抓取网页正文：/news fetch 中文 2（别名：全文；较慢，可能失败）\n")
@@ -3530,8 +3630,7 @@ def _handle_news(conn, payload: str) -> None:
 
     if topic in {"all", "全部"}:
         limit = _parse_news_limit(parts[1] if len(parts) > 1 else "", NEWS_DEFAULT_ALL_LIMIT)
-        for category in ("cn", "world", "tech"):
-            _send_news_section(conn, category, limit)
+        _send_news_all(conn, limit)
         return
 
     category = _resolve_news_category(topic)
@@ -3563,6 +3662,42 @@ def _fed_local_library_snapshot() -> list[dict]:
     if not lib_dir.is_dir():
         return []
     return [library.book_entry_to_meta(entry) for entry in library.list_books(lib_dir)]
+
+
+def _fed_local_music_snapshot() -> list[dict]:
+    music_dir = _music_dir()
+    if not music_dir.is_dir():
+        return []
+    return [music.song_entry_to_meta(entry) for entry in music.list_songs(music_dir)]
+
+
+def _union_music_catalog() -> list[music.CatalogItem]:
+    music_dir = _music_dir()
+    local = music.list_songs(music_dir) if music_dir.is_dir() else []
+    remote: dict[str, list[dict]] = {}
+    hub = federation.get_hub()
+    remote_fn = getattr(hub, "remote_music_catalogs", None) if hub is not None else None
+    if hub is not None and hub.enabled and callable(remote_fn):
+        remote = remote_fn() or {}
+    return music.merge_federated_catalog(local, remote)
+
+
+def _music_player_catalog_hook() -> list:
+    return _union_music_catalog()
+
+
+music.set_player_catalog_hook(_music_player_catalog_hook)
+
+
+def _federation_sync_music_catalog() -> None:
+    hub = federation.get_hub()
+    sync = getattr(hub, "sync_music_catalog", None) if hub is not None else None
+    if hub is None or not hub.enabled or not callable(sync):
+        return
+    try:
+        sync(_fed_local_music_snapshot())
+    except Exception as e:
+        print(f"federation: music catalog sync failed: {e!r}")
 
 
 def _union_library_catalog() -> list[library.CatalogItem]:
@@ -3602,18 +3737,49 @@ def _get_library_state() -> tuple[set[str], float]:
         return (set(), 0.0)
 
 
+def _get_music_state() -> tuple[set[str], float]:
+    """Get current music directory state (file names + mtime)."""
+    music_dir = _music_dir()
+    if not music_dir.is_dir():
+        return (set(), 0.0)
+    try:
+        dir_mtime = music_dir.stat().st_mtime
+        files = {
+            path.name
+            for path in music_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in music.MUSIC_EXTENSIONS
+        }
+        return (files, dir_mtime)
+    except OSError:
+        return (set(), 0.0)
+
+
+def _catalog_dir_changed(
+    prev: Optional[tuple[set[str], float]],
+    current: tuple[set[str], float],
+) -> tuple[bool, set[str], set[str]]:
+    if prev is None:
+        return False, set(), set()
+    prev_files, prev_mtime = prev
+    curr_files, curr_mtime = current
+    if prev_files == curr_files and abs(curr_mtime - prev_mtime) <= 0.01:
+        return False, set(), set()
+    return True, curr_files - prev_files, prev_files - curr_files
+
+
 def _library_watch_loop() -> None:
-    """Background thread that monitors library directory for changes."""
-    global _library_last_state
+    """Background thread that monitors library and music drop folders."""
+    global _library_last_state, _music_last_state
     
     # Get initial state
     _library_last_state = _get_library_state()
+    _music_last_state = _get_music_state()
     
     # Check interval in seconds
     watch_interval = float(os.environ.get("SSHCHAT_LIBRARY_WATCH_SECONDS", "5"))
     watch_interval = max(1.0, watch_interval)
     
-    print(f"federation: library watch started (interval={watch_interval}s)")
+    print(f"federation: library/music watch started (interval={watch_interval}s)")
     
     while not _library_watch_stop.is_set():
         time.sleep(watch_interval)
@@ -3627,35 +3793,45 @@ def _library_watch_loop() -> None:
         
         try:
             current_state = _get_library_state()
-            
-            if _library_last_state is None:
-                _library_last_state = current_state
-                continue
-            
-            prev_files, prev_mtime = _library_last_state
-            curr_files, curr_mtime = current_state
-            
-            # Check if there are changes (new/removed files or directory mtime changed)
-            if prev_files != curr_files or abs(curr_mtime - prev_mtime) > 0.01:
-                added = curr_files - prev_files
-                removed = prev_files - curr_files
-                
+            changed, added, removed = _catalog_dir_changed(
+                _library_last_state, current_state
+            )
+            if changed:
                 if added or removed:
                     print(
                         f"federation: library changed "
                         f"(+{len(added)} -{len(removed)}), syncing catalog"
                     )
-                elif curr_mtime != prev_mtime:
+                else:
                     print("federation: library directory modified, syncing catalog")
-                
-                # Sync catalog to federation peers
                 _federation_sync_library_catalog()
                 _library_last_state = current_state
-                
+            elif _library_last_state is None:
+                _library_last_state = current_state
         except Exception as e:
             print(f"federation: library watch error: {e!r}")
+
+        try:
+            current_music = _get_music_state()
+            changed, added, removed = _catalog_dir_changed(
+                _music_last_state, current_music
+            )
+            if changed:
+                if added or removed:
+                    print(
+                        f"federation: music changed "
+                        f"(+{len(added)} -{len(removed)}), syncing catalog"
+                    )
+                else:
+                    print("federation: music directory modified, syncing catalog")
+                _federation_sync_music_catalog()
+                _music_last_state = current_music
+            elif _music_last_state is None:
+                _music_last_state = current_music
+        except Exception as e:
+            print(f"federation: music watch error: {e!r}")
     
-    print("federation: library watch stopped")
+    print("federation: library/music watch stopped")
 
 
 def _fed_local_library_bookmarks_snapshot() -> list[dict]:
@@ -3785,6 +3961,53 @@ def _fed_on_library_page_request(
         hub.reply_library_page(requester, req_id, payload)
     except Exception as e:
         print(f"federation: reply_library_page failed: {e!r}")
+
+
+def _fed_on_music_play_request(
+    _owner: str,
+    req_id: str,
+    song_name: str,
+    requester: str,
+    nick: str = "",
+) -> None:
+    """Mint a local web-player session so a peer can play this node's song."""
+    hub = federation.get_hub()
+    if hub is None:
+        return
+    song_name = Path(str(song_name or "")).name
+    nick = str(nick or "").strip()
+    payload: dict = {"ok": False, "error": "not found", "req_id": req_id}
+    try:
+        if file_http is None:
+            payload["error"] = "music http off"
+        else:
+            music_dir = _music_dir()
+            catalog = music.list_songs(music_dir) if music_dir.is_dir() else []
+            entry = next((e for e in catalog if e.name == song_name), None)
+            if entry is None:
+                payload["error"] = f"song not found: {song_name}"
+            else:
+                base = str(file_http.get_base_url() or "").strip().rstrip("/")
+                if not base:
+                    payload["error"] = "music http off"
+                else:
+                    session = music.music_store.mint(entry.index, nick)
+                    payload = {
+                        "ok": True,
+                        "req_id": req_id,
+                        "url": f"{base}/music/{session.token}",
+                        "key": session.key,
+                        "name": entry.name,
+                        "ext": entry.ext,
+                        "size_bytes": entry.size_bytes,
+                        "start_index": entry.index,
+                    }
+    except Exception as e:
+        payload = {"ok": False, "error": str(e), "req_id": req_id}
+    try:
+        hub.reply_music_play(requester, req_id, payload)
+    except Exception as e:
+        print(f"federation: reply_music_play failed: {e!r}")
 
 
 def _fed_local_file_public() -> str:
@@ -4592,6 +4815,69 @@ def _fail_library_page_waiters(error: str) -> None:
             event.set()
 
 
+def _fed_on_music_play_result(_from_peer: str, req_id: str, payload: dict) -> None:
+    with _music_play_waiters_lock:
+        waiter = _music_play_waiters.get(req_id)
+        if not waiter:
+            return
+        waiter["payload"] = payload
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fail_music_play_waiters(error: str) -> None:
+    """Unblock pending federated /music play when a peer link drops."""
+    with _music_play_waiters_lock:
+        waiters = list(_music_play_waiters.values())
+    for waiter in waiters:
+        if waiter.get("payload") is not None:
+            continue
+        waiter["payload"] = {"ok": False, "error": error}
+        event = waiter.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+
+def _fetch_remote_music_play(
+    owner: str,
+    song_name: str,
+    *,
+    nick: str = "",
+    timeout: float = 30.0,
+) -> dict:
+    hub = federation.get_hub()
+    if hub is None or not hub.enabled:
+        return {"ok": False, "error": "federation disabled"}
+    req_id = secrets.token_hex(8)
+    event = threading.Event()
+    with _music_play_waiters_lock:
+        _music_play_waiters[req_id] = {"event": event, "payload": None}
+    try:
+        if not hub.request_music_play(owner, req_id, song_name, nick=nick):
+            return {"ok": False, "error": f"无法联系曲库所在节点 {owner}"}
+        if not event.wait(timeout):
+            return {"ok": False, "error": "等待对端点歌超时"}
+        with _music_play_waiters_lock:
+            payload = _music_play_waiters.get(req_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "对端返回无效"}
+        return payload
+    finally:
+        with _music_play_waiters_lock:
+            _music_play_waiters.pop(req_id, None)
+
+
+def _music_remote_page_url(origin: str, song_name: str, nick: str) -> str:
+    payload = _fetch_remote_music_play(origin, song_name, nick=nick)
+    if not payload.get("ok"):
+        return ""
+    return str(payload.get("url") or "").strip()
+
+
+music.set_remote_file_hook(_music_remote_page_url)
+
+
 def _fail_file_host_waiters(error: str) -> None:
     """Unblock pending federated /sendfile host requests when a peer drops."""
     with _file_host_waiters_lock:
@@ -5322,6 +5608,248 @@ def _handle_library(conn, payload: str) -> None:
     send_line(conn, "[*] 未知子命令。试试 /library help\n")
 
 
+def _music_dir() -> Path:
+    return music.default_music_dir()
+
+
+def _music_invite_message(
+    *,
+    url: str,
+    key: str,
+    song: music.CatalogItem,
+    lang: str,
+) -> str:
+    loc = "en" if str(lang).lower().startswith("en") else "zh"
+    where = song.display_origin()
+    if loc == "en":
+        return (
+            "[*] ========== Music ==========\n"
+            f"[*] Now playing: [{song.ext.upper()}] {song.name} "
+            f"({music.format_size(song.size_bytes)}){where}\n"
+            "[*] Player URL:\n"
+            f"[*] {url}\n"
+            f"[*] Access key: {key}\n"
+            "[*] Open the URL and enter the key (GUI clients do this for you).\n"
+            "[*] =====================================\n"
+            f"[*] gui-open music {url} {key}\n"
+        )
+    return (
+        "[*] ========== 点歌 ==========\n"
+        f"[*] 正在播放：[{song.ext.upper()}] {song.name} "
+        f"({music.format_size(song.size_bytes)}){where}\n"
+        "[*] 播放网址:\n"
+        f"[*] {url}\n"
+        f"[*] 访问密钥: {key}\n"
+        "[*] 打开网址后输入密钥（图形客户端会自动填）。\n"
+        "[*] =====================================\n"
+        f"[*] gui-open music {url} {key}\n"
+    )
+
+
+def _send_music_catalog(
+    conn, catalog: list[music.CatalogItem], *, query: str = ""
+) -> None:
+    loc = conn_locale(conn)
+    music_dir = _music_dir()
+    local_count = sum(1 for e in catalog if not e.origin)
+    remote_count = len(catalog) - local_count
+    send_line(
+        conn,
+        i18n.tr(en="[*] --- Music ---\n", zh="[*] --- 点歌 ---\n", locale=loc),
+    )
+    if not catalog:
+        if not music_dir.is_dir():
+            send_line(
+                conn,
+                i18n.tr(
+                    en=f"[*] Local music directory missing: {music_dir}\n",
+                    zh=f"[*] 本机点歌目录不存在：{music_dir}\n",
+                    locale=loc,
+                ),
+            )
+        else:
+            send_line(
+                conn,
+                i18n.tr(
+                    en=f"[*] Local folder is empty: {music_dir}\n",
+                    zh=f"[*] 本机目录为空：{music_dir}\n",
+                    locale=loc,
+                ),
+            )
+        if query:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] No matching songs.\n",
+                    zh="[*] 没有匹配的歌曲。\n",
+                    locale=loc,
+                ),
+            )
+        elif remote_count == 0:
+            send_line(
+                conn,
+                i18n.tr(
+                    en=(
+                        "[*] No federated songs yet. Place mp3 / m4a / ogg / flac / wav "
+                        f"in {music_dir}\n"
+                    ),
+                    zh=(
+                        "[*] 联邦暂无共享歌曲；把 mp3 / m4a / ogg / flac / wav "
+                        f"放到 {music_dir}\n"
+                    ),
+                    locale=loc,
+                ),
+            )
+        return
+    if query:
+        send_line(
+            conn,
+            i18n.tr(
+                en=(
+                    f"[*] {len(catalog)} match(es) for {query!r} "
+                    f"(federated union: local {local_count}, remote {remote_count}).\n"
+                ),
+                zh=(
+                    f"[*] 关键词 {query!r} 共 {len(catalog)} 首"
+                    f"（联邦并集：本机 {local_count}，对端 {remote_count}）。\n"
+                ),
+                locale=loc,
+            ),
+        )
+    else:
+        send_line(
+            conn,
+            i18n.tr(
+                en=(
+                    f"[*] Federated union: {len(catalog)} song(s) "
+                    f"(local {local_count}, remote {remote_count}).\n"
+                ),
+                zh=(
+                    f"[*] 联邦并集共 {len(catalog)} 首"
+                    f"（本机 {local_count}，对端 {remote_count}）。\n"
+                ),
+                locale=loc,
+            ),
+        )
+    for entry in catalog:
+        send_line(
+            conn,
+            f"[*] {entry.index}. [{entry.ext.upper()}] {entry.name} "
+            f"({music.format_size(entry.size_bytes)}){entry.display_origin()}\n",
+        )
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Play: /music play <index|filename[@node]>\n",
+            zh="[*] 播放：/music play <序号|文件名[@节点]>\n",
+            locale=loc,
+        ),
+    )
+
+
+def _handle_music(conn, payload: str) -> None:
+    if payload.startswith("/music"):
+        raw = payload[len("/music") :].strip()
+    elif payload.startswith("/song"):
+        raw = payload[len("/song") :].strip()
+    else:
+        raw = payload.strip()
+    music_dir = _music_dir()
+    loc = conn_locale(conn)
+    parts = raw.split(None, 1)
+    head = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if head in {"help", "?", "帮助"}:
+        for line in (
+            i18n.tr(en="[*] /music usage:\n", zh="[*] /music 用法：\n", locale=loc),
+            i18n.tr(
+                en="[*]   /music | /song                 Federated catalog\n",
+                zh="[*]   /music | /song                 联邦并集曲目\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /music find <keyword>           Filter by filename (or @node)\n",
+                zh="[*]   /music find <关键词> | 查找      按文件名筛选（也可搜节点名）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en="[*]   /music play [index|file[@node]] Open the web player (default: 1)\n",
+                zh="[*]   /music play [序号|文件名[@节点]] | 播放  打开网页播放器（默认第 1 首）\n",
+                locale=loc,
+            ),
+            i18n.tr(
+                en=f"[*] Local directory: {music_dir} (player lists the federated union; remote audio streams from the owning node)\n",
+                zh=f"[*] 本机目录：{music_dir}（播放器显示联邦并集；对端音频由藏曲节点提供）\n",
+                locale=loc,
+            ),
+        ):
+            send_line(conn, line)
+        return
+
+    catalog = _union_music_catalog()
+    if not head:
+        _send_music_catalog(conn, catalog)
+        return
+
+    if head in {"find", "search", "查找"}:
+        if not rest:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] Usage: /music find <keyword>\n",
+                    zh="[*] 用法：/music find <关键词>\n",
+                    locale=loc,
+                ),
+            )
+            return
+        _send_music_catalog(
+            conn, music.search_catalog_items(catalog, rest), query=rest
+        )
+        return
+
+    if head in {"play", "open", "listen", "播放", "听", "打开"}:
+        if not catalog:
+            _send_music_catalog(conn, catalog)
+            return
+        token = rest or "1"
+        entry = music.resolve_catalog_item(token, catalog)
+        if entry is None:
+            send_line(
+                conn,
+                i18n.tr(
+                    en="[*] Song not found. Use /music to list indexes.\n",
+                    zh="[*] 找不到这首歌。用 /music 查看序号。\n",
+                    locale=loc,
+                ),
+            )
+            return
+        if file_http is None:
+            send_line(conn, _ts(conn, "music_http_off"))
+            return
+        lang_q = "en" if str(loc).lower().startswith("en") else "zh"
+        nick = _client_name(conn)
+        session = music.music_store.mint(entry.index, nick)
+        url = (
+            f"{file_http.get_base_url().rstrip('/')}/music/{session.token}"
+            f"?lang={lang_q}"
+        )
+        send_line(
+            conn,
+            _music_invite_message(url=url, key=session.key, song=entry, lang=loc),
+        )
+        return
+
+    send_line(
+        conn,
+        i18n.tr(
+            en="[*] Unknown subcommand. Try /music help\n",
+            zh="[*] 未知子命令。试试 /music help\n",
+            locale=loc,
+        ),
+    )
+
+
 def _send_dict_help(conn) -> None:
     send_line(conn, "[*] /dict 用法：\n")
     send_line(conn, "[*]   /dict en <英文>     英→中（中英文词典）\n")
@@ -5641,6 +6169,8 @@ def _maybe_refresh_canvas_invites_on_public_change(
     cur = (cur or "").strip().rstrip("/")
     prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
     if not cur:
+        # Probe blip / origin down: keep prev so a later recovery of the *same*
+        # hostname does not re-spam gui-open piano/canvas at everyone.
         return
     if cur == prev:
         _LAST_CANVAS_PUBLIC_BASE = cur
@@ -5682,6 +6212,10 @@ def _deliver_canvas_invites(
         if file_http is None:
             return
         base_url = (file_http.get_base_url() or "").strip()
+        if not file_http_server.is_externally_reachable_url(base_url):
+            waited = _wait_live_file_public(timeout=8.0)
+            if waited:
+                base_url = waited
     else:
         base_url = (session.host_base_url or "").strip()
         # Federated mirrors freeze host_base_url at adopt time; prefer the peer's
@@ -5849,6 +6383,18 @@ def _local_file_public_ready() -> str:
     if not base or not file_http_server.is_externally_reachable_url(base):
         return ""
     return base
+
+
+def _wait_live_file_public(*, timeout: float = 8.0) -> str:
+    """Block briefly for the Quick Tunnel latch after a health drop/reconnect."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        base = _local_file_public_ready()
+        if base:
+            return base
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(0.4)
 
 
 def _try_claim_canvas_locally(
@@ -6495,6 +7041,10 @@ def _deliver_piano_invites(
         if file_http is None:
             return
         base_url = (file_http.get_base_url() or "").strip()
+        if not file_http_server.is_externally_reachable_url(base_url):
+            waited = _wait_live_file_public(timeout=8.0)
+            if waited:
+                base_url = waited
     else:
         base_url = (session.host_base_url or "").strip()
         if hub is not None and hub.enabled:
@@ -7011,6 +7561,29 @@ def _handle_piano(conn, sender: str, payload: str) -> None:
             f"[*] {sender} 关闭了共享钢琴。\n".encode("utf-8"),
         )
         return
+
+    if not _local_file_public_ready():
+        loc = conn_locale(conn)
+        if loc == "en":
+            send_line(
+                conn,
+                "[*] Public Cloudflare tunnel is recovering; waiting a few seconds…\n",
+            )
+        else:
+            send_line(conn, "[*] 公网隧道正在恢复，请稍候…\n")
+        if not _wait_live_file_public(timeout=10.0):
+            if loc == "en":
+                send_line(
+                    conn,
+                    "[*] Public tunnel is still down. The invite may not open; "
+                    "a fresh link is sent automatically when it recovers.\n",
+                )
+            else:
+                send_line(
+                    conn,
+                    "[*] 公网隧道暂不可用，发出的链接可能打不开；"
+                    "恢复后会自动重发邀请。\n",
+                )
 
     recipients: list[str] = []
     room_name: Optional[str] = None
@@ -8076,6 +8649,11 @@ def _federation_notify_game_end(room: str) -> None:
     local = hub.node_id if hub is not None else _local_node_id()
     with lock:
         token = (room_game_tokens.pop(room, None) or "").strip()
+        superseded = (room_game_superseded_tokens.pop(room, None) or "").strip()
+        if superseded == token:
+            superseded = ""
+        if superseded:
+            _remember_ended_game_locked(room, superseded)
         if token:
             _remember_ended_game_locked(room, token)
         room_game_authority[room] = local
@@ -8086,6 +8664,8 @@ def _federation_notify_game_end(room: str) -> None:
     if hub is None or not hub.enabled:
         return
     hub.end_game(room, local, token)
+    if superseded:
+        hub.end_game(room, local, superseded)
 
 
 def _game_progress_score(game) -> int:
@@ -8365,6 +8945,18 @@ def _fed_on_game_sync(
     keep_local = False
     greq = _greq_outstanding(room)
     with lock:
+        stale_ended = _game_id_is_ended_locked(conflict_token)
+    if stale_ended:
+        # Offline replica of a finished session; never revive by ply count.
+        # Echo the tombstone so the sender (which may still believe it hosts
+        # and ignored our earlier gend) drops its board too.
+        if hub is not None and getattr(hub, "enabled", False):
+            try:
+                hub.end_game(room, local_id, conflict_token)
+            except Exception as e:
+                print(f"federation: stale gsync gend failed room={room!r}: {e!r}")
+        return
+    with lock:
         local_game = room_games.get(room)
         local_auth = (room_game_authority.get(room) or "").strip()
         local_token = (room_game_tokens.get(room) or "").strip() or local_auth
@@ -8374,9 +8966,6 @@ def _fed_on_game_sync(
         )
         remote_active = getattr(game, "state", "ended") != "ended"
         we_host = local_auth == local_id
-        if _game_id_is_ended_locked(conflict_token):
-            # Offline replica of a finished session; never revive by ply count.
-            return
         if not local_active and remote_active and we_host:
             # Local host tombstone: reject only revival of *this* ended session.
             # A peer starting a new game in the same room (different token) must
@@ -8890,6 +9479,9 @@ def _reclaim_game_authority_for_local_seats(room: str) -> bool:
             return True
         if not _game_all_seat_nicks_present_locally_locked(room, game, local):
             return False
+        old_tok = (room_game_tokens.get(room) or "").strip()
+        if old_tok:
+            room_game_superseded_tokens[room] = old_tok
         room_game_authority[room] = local
         room_game_tokens[room] = secrets.token_hex(16)
         push = True
@@ -8988,6 +9580,10 @@ def _federation_peer_up_catchup(peer_node: str) -> None:
     except Exception as e:
         print(f"federation: peer-up library catalog sync error: {e!r}")
     try:
+        _federation_sync_music_catalog()
+    except Exception as e:
+        print(f"federation: peer-up music catalog sync error: {e!r}")
+    try:
         _federation_sync_file_public()
     except Exception as e:
         print(f"federation: peer-up file public sync error: {e!r}")
@@ -9080,6 +9676,7 @@ def _fed_on_peer_event(event: str, peer_node: str, reporter: str) -> None:
         else:
             text = f"[*] 联邦节点 {peer_node} 已退出（由 {reporter} 通报）\n"
         _fail_library_page_waiters(f"联邦节点 {peer_node} 已断开，图书页拉取中断")
+        _fail_music_play_waiters(f"联邦节点 {peer_node} 已断开，点歌中断")
         _fail_file_host_waiters(f"联邦节点 {peer_node} 已断开，文件代理中断")
         try:
             _fed_handle_unreachable_game_authority(peer_node)
@@ -9298,6 +9895,9 @@ def _ensure_federation_hub() -> None:
         _fed_on_file_host_result,
         _fed_local_file_public,
     )
+    _fed_hub.get_local_music = _fed_local_music_snapshot
+    _fed_hub.on_music_play_request = _fed_on_music_play_request
+    _fed_hub.on_music_play_result = _fed_on_music_play_result
     _fed_hub.start()
     _fed_hub.on_library_bookmark_clear = _fed_on_library_bookmark_clear
     _fed_hub.on_file_leave_clear = _fed_on_file_leave_clear
@@ -9314,6 +9914,7 @@ def _ensure_federation_hub() -> None:
     _fed_hub.on_capsules = _fed_on_capsules
     _fed_hub.on_capsule_cancel = _fed_on_capsule_cancel
     _federation_sync_library_catalog()
+    _federation_sync_music_catalog()
     # Push bookmarks for currently connected users once hub is up.
     for row in _fed_local_library_bookmarks_snapshot():
         _federation_sync_library_bookmarks(row["name"], row.get("books") or {})
@@ -9881,6 +10482,15 @@ def handle_command(conn, payload: str) -> None:
             print(f"/library error: {e!r}")
             traceback.print_exc()
             send_line(conn, _ts(conn, "library_cmd_fail"))
+        return
+
+    if cmd in {"/music", "/song"}:
+        try:
+            _handle_music(conn, payload)
+        except Exception as e:
+            print(f"/music error: {e!r}")
+            traceback.print_exc()
+            send_line(conn, _ts(conn, "music_cmd_fail"))
         return
 
     if cmd == "/dict":
@@ -10647,7 +11257,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -10757,7 +11367,7 @@ def run_server() -> int:
                 except Exception:
                     last = ""
                 while not _shutdown_requested:
-                    time.sleep(30)
+                    time.sleep(10)
                     if _shutdown_requested:
                         break
                     try:
