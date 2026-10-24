@@ -358,10 +358,13 @@ inherit_pip_proxy() {
 }
 
 # pip --timeout often does not fire on hung TCP/DNS; wrap with coreutils timeout when present.
+# Default wall is 20min: pymupdf + lxml wheels exceed PIP_TIMEOUT*2 (240s) and SIGTERM
+# looks like "Downloading lxml ... 0.0/5.2 MB" then "pip failed after 3 attempt(s)".
 pip_run_with_retry() {
   local attempt=1
   local delay=5
-  local wall="${SSHCHAT_PIP_WALL_TIMEOUT:-$(( PIP_TIMEOUT * 2 ))}"
+  local wall="${SSHCHAT_PIP_WALL_TIMEOUT:-1200}"
+  local rc=0
   local -a run
   while [[ "$attempt" -le "$PIP_CMD_RETRIES" ]]; do
     run=("$@")
@@ -373,8 +376,10 @@ pip_run_with_retry() {
         run=(timeout "$wall" "$@")
       fi
     fi
-    if "${run[@]}"; then
-      return 0
+    "${run[@]}" && return 0
+    rc=$?
+    if [[ "$rc" -eq 124 ]]; then
+      echo "warn: pip wall timeout (${wall}s) on attempt ${attempt}/${PIP_CMD_RETRIES}" >&2
     fi
     if [[ "$attempt" -ge "$PIP_CMD_RETRIES" ]]; then
       echo "error: pip failed after ${PIP_CMD_RETRIES} attempt(s): $*" >&2
@@ -383,7 +388,7 @@ pip_run_with_retry() {
       echo "      (sudo strips HTTP(S)_PROXY; use sudo -E or a local Clash port 7890/7897)" >&2
       return 1
     fi
-    echo "warn: pip attempt ${attempt}/${PIP_CMD_RETRIES} failed (${*:0:80}...); retrying in ${delay}s..." >&2
+    echo "warn: pip attempt ${attempt}/${PIP_CMD_RETRIES} failed rc=${rc} (${*:0:80}...); retrying in ${delay}s..." >&2
     sleep "$delay"
     attempt=$((attempt + 1))
     delay=$((delay * 2))
@@ -1223,13 +1228,19 @@ if is_ish && [[ -x "$PREFIX/venv/bin/python" ]]; then
 fi
 
 if [[ "$REUSE_VENV" -eq 0 ]]; then
-  rm -rf "$PREFIX/venv"
   # Use temp space under PREFIX: macOS /private/tmp can be tight; pip unpacks wheels there by default.
   DEPLOY_TMP="$PREFIX/.deploy-tmp"
   rm -rf "$DEPLOY_TMP"
   mkdir -p "$DEPLOY_TMP"
   export TMPDIR="$DEPLOY_TMP"
-  export PIP_NO_CACHE_DIR=1
+  # iSH/macOS tmp is tight; Linux keeps a cache so retries do not re-download pymupdf/lxml.
+  if is_ish || is_darwin; then
+    export PIP_NO_CACHE_DIR=1
+  else
+    mkdir -p "$PREFIX/.pip-cache"
+    export PIP_CACHE_DIR="$PREFIX/.pip-cache"
+    unset PIP_NO_CACHE_DIR || true
+  fi
 
   VENV_ARGS=()
   REQ_FILE="$SCRIPT_DIR/requirements-server.txt"
@@ -1243,8 +1254,13 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     fi
   fi
 
-  echo "info: creating venv at $PREFIX/venv (on iSH this can take several minutes)..."
-  python3 -m venv "${VENV_ARGS[@]}" "$PREFIX/venv"
+  if [[ -x "$PREFIX/venv/bin/python" ]] && "$PREFIX/venv/bin/python" -c 'import sys' 2>/dev/null; then
+    echo "info: reusing existing venv at $PREFIX/venv"
+  else
+    rm -rf "$PREFIX/venv"
+    echo "info: creating venv at $PREFIX/venv (on iSH this can take several minutes)..."
+    python3 -m venv "${VENV_ARGS[@]}" "$PREFIX/venv"
+  fi
 
   PIP_COMMON_ARGS=(--timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES")
   if [[ -n "$PIP_INDEX_URL_ARG" ]]; then
@@ -1289,7 +1305,12 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     fi
     echo "info: iSH Python deps OK (ebooklib uses system py3-lxml)"
   else
-    pip_run_with_retry "$PREFIX/venv/bin/pip" install "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"
+    if ! pip_run_with_retry "$PREFIX/venv/bin/pip" install "${PIP_COMMON_ARGS[@]}" --prefer-binary -r "$REQ_FILE"; then
+      echo "warn: requirements install failed; retrying via tuna without proxy" >&2
+      unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+      pip_run_with_retry "$PREFIX/venv/bin/pip" install --timeout "$PIP_TIMEOUT" --retries "$PIP_RETRIES" \
+        --index-url https://pypi.tuna.tsinghua.edu.cn/simple --prefer-binary -r "$REQ_FILE"
+    fi
   fi
   rm -rf "$DEPLOY_TMP"
 else
