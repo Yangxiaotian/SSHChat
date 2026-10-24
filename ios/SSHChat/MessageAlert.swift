@@ -42,16 +42,20 @@ enum MessageAlert {
             guard now - lastPlayAt >= minInterval else { return }
             lastPlayAt = now
 
-            // .ambient → silent when the mute switch is on (user request).
-            // Do NOT use .playback (ignores mute) or bare SystemSound IDs
-            // (1007 often no-ops on modern iOS).
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
-                try session.setActive(true, options: [])
-            } catch {}
-
-            _ = playWavBeep()
+            // Skip the beep while in-app music owns .playback — setCategory(.ambient)
+            // (or a second AVAudioPlayer) would stop the track on peer join/leave.
+            let musicPlaying = MusicPlayback.shared.playing
+            if !musicPlaying {
+                // .ambient → silent when the mute switch is on (user request).
+                // Do NOT use .playback (ignores mute) or bare SystemSound IDs
+                // (1007 often no-ops on modern iOS).
+                do {
+                    let session = AVAudioSession.sharedInstance()
+                    try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+                    try session.setActive(true, options: [])
+                } catch {}
+                _ = playWavBeep()
+            }
 
             let gen = UINotificationFeedbackGenerator()
             gen.prepare()

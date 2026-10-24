@@ -933,13 +933,16 @@ final class ChatViewModel: ObservableObject {
                 )
             case .music:
                 pendingFileMeta.reset()
-                appendText("[*] 打开点歌…")
+                // URLSession (native) can't reach LAN http without Local Network
+                // permission; WKWebView can — same path Android uses.
+                let native = SecureInvite.supportsNativeMusicPlayer(open.url)
+                appendText(native ? "[*] 打开点歌…" : "[*] 打开点歌（网页）…")
                 webInvite = WebInvitePayload(
                     title: "点歌",
                     url: open.url,
                     key: open.key,
                     isCanvas: false,
-                    isMusic: true
+                    isMusic: native
                 )
             }
             return
@@ -1114,7 +1117,20 @@ private struct WebInvitePresentations: ViewModifier {
                     pageURL: invite.url,
                     key: invite.key,
                     onMinimize: { model.webInvite = nil },
-                    onClose: { model.webInvite = nil }
+                    onClose: { model.webInvite = nil },
+                    onWebFallback: {
+                        let url = invite.url
+                        let key = invite.key
+                        model.webInvite = nil
+                        DispatchQueue.main.async {
+                            model.webInvite = ChatViewModel.WebInvitePayload(
+                                title: "点歌",
+                                url: url,
+                                key: key,
+                                isMusic: false
+                            )
+                        }
+                    }
                 )
             }
             .sheet(item: otherInvite) { invite in

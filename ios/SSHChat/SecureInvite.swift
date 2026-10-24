@@ -67,6 +67,33 @@ enum SecureInvite {
         return url
     }
 
+    /// Native AVPlayer uses URLSession, which needs Local Network permission for
+    /// LAN IPs; WKWebView does not (TN3179). Prefer WebView for http / private hosts.
+    static func supportsNativeMusicPlayer(_ url: String) -> Bool {
+        guard let u = URL(string: url), u.scheme?.lowercased() == "https" else { return false }
+        guard let host = u.host?.lowercased(), !host.isEmpty else { return false }
+        if host == "localhost" || host.hasSuffix(".local") { return false }
+        if isPrivateOrLocalHost(host) { return false }
+        return true
+    }
+
+    private static func isPrivateOrLocalHost(_ host: String) -> Bool {
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            return isPrivateOrLocalHost(String(host.dropFirst().dropLast()))
+        }
+        if host == "::1" || host.hasPrefix("fe80:") || host.hasPrefix("fc") || host.hasPrefix("fd") {
+            return true
+        }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        let a = parts[0], b = parts[1]
+        if a == 10 || a == 127 || a == 0 { return true }
+        if a == 192 && b == 168 { return true }
+        if a == 169 && b == 254 { return true }
+        if a == 172 && (16...31).contains(b) { return true }
+        return false
+    }
+
     static func parseGuiOpen(_ line: String) -> Open? {
         let t = normalize(line)
         let range = NSRange(t.startIndex..., in: t)

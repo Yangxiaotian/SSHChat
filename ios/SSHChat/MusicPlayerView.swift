@@ -38,6 +38,17 @@ final class MusicPlayback: ObservableObject {
     private var token = ""
     private var playTask: Task<Void, Never>?
     private var localFile: URL?
+    /// Fired once when URLSession cannot reach the player (LAN / dead tunnel).
+    var onWebFallback: (() -> Void)?
+
+    /// URLSession that waits through the Local Network permission sheet.
+    private lazy var http: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.waitsForConnectivity = true
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 120
+        return URLSession(configuration: cfg)
+    }()
 
     private init() {
         endObserver = NotificationCenter.default.addObserver(
@@ -75,14 +86,13 @@ final class MusicPlayback: ObservableObject {
             status = "无效点歌地址"
             return
         }
-        if token == tok, !songs.isEmpty {
-            loading = false
-            return
-        }
         self.pageURL = page
         self.key = key
+        // Same token + already playing: keep audio, but re-auth so a late
+        // federation catalog merge shows up (minimize → reopen used to skip).
+        let keepPlayback = token == tok && !songs.isEmpty && playing
         token = tok
-        Task { await authorizeAndPlay(page: page, key: key) }
+        Task { await authorizeAndPlay(page: page, key: key, restartIfNeeded: !keepPlayback) }
     }
 
     func close() {
@@ -132,10 +142,8 @@ final class MusicPlayback: ObservableObject {
     func next() { playAt(index + 1) }
     func prev() { playAt(index - 1) }
 
-    private func authorizeAndPlay(page: URL, key: String) async {
-        let auth = page.absoluteString.split(separator: "?").first.map(String.init) ?? page.absoluteString
-        let trimmed = auth.hasSuffix("/") ? String(auth.dropLast()) : auth
-        guard let authURL = URL(string: trimmed + "/auth") else {
+    private func authorizeAndPlay(page: URL, key: String, restartIfNeeded: Bool = true) async {
+        guard let authURL = Self.authURL(from: page) else {
             await MainActor.run {
                 loading = false
                 status = "无效点歌地址"
@@ -147,7 +155,7 @@ final class MusicPlayback: ObservableObject {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["key": key.uppercased()])
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await http.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             await MainActor.run {
@@ -157,6 +165,7 @@ final class MusicPlayback: ObservableObject {
                     return
                 }
                 let raw = obj["songs"] as? [[String: Any]] ?? []
+                let prevId = current?.id
                 songs = raw.compactMap { row in
                     guard let name = row["name"] as? String, !name.isEmpty else { return nil }
                     return Song(
@@ -165,20 +174,71 @@ final class MusicPlayback: ObservableObject {
                         origin: row["origin"] as? String ?? ""
                     )
                 }
-                let start = max(1, (obj["start"] as? NSNumber)?.intValue ?? 1)
-                index = min(max(0, start - 1), max(0, songs.count - 1))
                 if songs.isEmpty {
                     status = "曲库是空的"
                     return
                 }
-                playAt(index)
+                if restartIfNeeded {
+                    let start = max(1, (obj["start"] as? NSNumber)?.intValue
+                        ?? (obj["start"] as? Int)
+                        ?? 1)
+                    index = min(max(0, start - 1), songs.count - 1)
+                    playAt(index)
+                } else if let prevId,
+                          let keep = songs.firstIndex(where: { $0.id == prevId }) {
+                    index = keep
+                } else {
+                    index = min(index, songs.count - 1)
+                }
             }
         } catch {
             await MainActor.run {
                 loading = false
-                status = "无法连接点歌服务"
+                let ns = error as NSError
+                let host = page.host ?? page.absoluteString
+                // -1022 = ATS; -1004/-1009/-1020 = unreachable / local-network denied
+                if ns.domain == NSURLErrorDomain, ns.code == -1022 {
+                    status = "无法连接点歌服务（系统拦截了 HTTP）"
+                } else if Self.isConnectFailure(ns) {
+                    status = "无法连接 \(host)，改用网页播放…"
+                    let fb = onWebFallback
+                    onWebFallback = nil
+                    token = ""
+                    songs = []
+                    pageURL = nil
+                    fb?()
+                } else {
+                    status = "无法连接点歌服务（\(ns.localizedDescription)）"
+                }
             }
         }
+    }
+
+    private static func isConnectFailure(_ ns: NSError) -> Bool {
+        guard ns.domain == NSURLErrorDomain else { return false }
+        switch ns.code {
+        case NSURLErrorCannotConnectToHost,
+             NSURLErrorNetworkConnectionLost,
+             NSURLErrorNotConnectedToInternet,
+             NSURLErrorTimedOut,
+             NSURLErrorDataNotAllowed,
+             -1020: // local network denied (undocumented alias on some OS)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func authURL(from page: URL) -> URL? {
+        guard var comps = URLComponents(url: page, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        comps.query = nil
+        comps.fragment = nil
+        var path = comps.path
+        while path.hasSuffix("/") { path = String(path.dropLast()) }
+        comps.path = path + "/auth"
+        return comps.url
     }
 
     private func fetchAndPlay(_ remote: URL, name: String) async {
@@ -189,7 +249,7 @@ final class MusicPlayback: ObservableObject {
         do {
             var req = URLRequest(url: remote)
             req.cachePolicy = .reloadIgnoringLocalCacheData
-            let (tmp, resp) = try await URLSession.shared.download(for: req)
+            let (tmp, resp) = try await http.download(for: req)
             if Task.isCancelled { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200 ..< 300).contains(code) else {
@@ -321,6 +381,7 @@ struct MusicPlayerView: View {
     let key: String
     var onMinimize: () -> Void
     var onClose: () -> Void
+    var onWebFallback: (() -> Void)? = nil
     @ObservedObject private var playback = MusicPlayback.shared
 
     var body: some View {
@@ -414,7 +475,10 @@ struct MusicPlayerView: View {
                 }
             }
         }
-        .onAppear { playback.open(pageURL: pageURL, key: key) }
+        .onAppear {
+            playback.onWebFallback = onWebFallback
+            playback.open(pageURL: pageURL, key: key)
+        }
     }
 }
 
