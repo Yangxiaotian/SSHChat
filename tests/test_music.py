@@ -82,6 +82,21 @@ class MusicCatalogTests(unittest.TestCase):
         self.assertEqual(got.name, "a.mp3")
 
 
+class MusicStoreTests(unittest.TestCase):
+    def tearDown(self):
+        with music.music_store._lock:
+            music.music_store._sessions.clear()
+
+    def test_mint_reuses_live_session_for_nick(self):
+        first = music.music_store.mint(1, "ada")
+        again = music.music_store.mint(3, "ada")
+        self.assertEqual(first.token, again.token)
+        self.assertEqual(first.key, again.key)
+        self.assertEqual(again.start_index, 3)
+        other = music.music_store.mint(1, "bob")
+        self.assertNotEqual(first.token, other.token)
+
+
 class MusicHttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -116,6 +131,7 @@ class MusicHttpTests(unittest.TestCase):
         self.assertLess(html.find('id="closeBtn"'), html.find('id="lock"'))
         self.assertIn("/auth", html)
         self.assertIn("decodeAudioData", html)
+        self.assertIn("A-Z0-9]{6}", html)
         self.assertIn("location.origin", html)
         self.assertIn(sess.token, html)
 

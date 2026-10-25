@@ -29,8 +29,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.q267267275.SSHChat
         PRODUCT_NAME: SSHChat
-        MARKETING_VERSION: "0.3.34"
-        CURRENT_PROJECT_VERSION: "47"
+        MARKETING_VERSION: "0.3.35"
+        CURRENT_PROJECT_VERSION: "48"
         INFOPLIST_KEY_CFBundleDisplayName: SSHChat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
@@ -58,7 +58,7 @@ targets:
       path: SSHChat/Info.plist
       properties:
         CFBundleDisplayName: SSHChat
-        CFBundleShortVersionString: "0.3.34"
+        CFBundleShortVersionString: "0.3.35"
         CFBundleVersion: "45"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities: [armv7]

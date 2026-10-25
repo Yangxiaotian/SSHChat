@@ -476,6 +476,16 @@ final class ChatViewModel: ObservableObject {
 
     func startMusic() {
         guard connected else { toast = "请先连接"; return }
+        if MusicPlayback.shared.hasSession, let url = MusicPlayback.shared.pageURLString {
+            MusicPlayback.shared.setPanelOpen(true)
+            webInvite = WebInvitePayload(
+                title: "点歌",
+                url: url,
+                key: MusicPlayback.shared.key,
+                isMusic: SecureInvite.supportsNativeMusicPlayer(url)
+            )
+            return
+        }
         appendText("[*] 正在打开点歌…（/music play）")
         CommandUsage.record("/music play")
         Task { try? await session.send("/music play") }

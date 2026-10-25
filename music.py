@@ -438,17 +438,28 @@ class MusicStore:
 
     def mint(self, start_index: int, nick: str) -> MusicSession:
         now = time.time()
-        session = MusicSession(
-            token=_generate_token(),
-            key=_generate_key(),
-            start_index=max(1, int(start_index or 1)),
-            nick=(nick or "").strip(),
-            created=now,
-        )
+        nick = (nick or "").strip()
+        start_index = max(1, int(start_index or 1))
         with self._lock:
             self._purge_locked(now)
+            # Reopen must keep token+key: a new mint each /music play made the
+            # phone auth the latest key against an older still-open page.
+            if nick:
+                live = [s for s in self._sessions.values() if s.nick == nick]
+                if live:
+                    session = max(live, key=lambda s: s.created)
+                    session.start_index = start_index
+                    session.created = now
+                    return session
+            session = MusicSession(
+                token=_generate_token(),
+                key=_generate_key(),
+                start_index=start_index,
+                nick=nick,
+                created=now,
+            )
             self._sessions[session.token] = session
-        return session
+            return session
 
     def get(self, token: str) -> Optional[MusicSession]:
         token = (token or "").strip()

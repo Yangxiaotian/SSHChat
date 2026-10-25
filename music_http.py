@@ -144,6 +144,7 @@ const BAD_KEY = {json.dumps(t["bad_key"])};
 const PLAY_FAIL = {json.dumps(t["play_fail"])};
 let current = 0;
 let playGen = 0;
+let unlockGen = 0;
 let waCtx = null;
 let waNode = null;
 function $(id) {{ return document.getElementById(id); }}
@@ -224,6 +225,8 @@ function closePage() {{
 }}
 function unlock() {{
   const key = ($("key").value || "").trim().toUpperCase();
+  if (!/^[A-Z0-9]{{6}}$/.test(key)) return;
+  const gen = ++unlockGen;
   $("bad").hidden = true;
   fetch("/music/" + TOKEN + "/auth", {{
     method: "POST",
@@ -232,13 +235,18 @@ function unlock() {{
     body: JSON.stringify({{ key: key }}),
   }}).then((res) => res.json().then((data) => ({{ res: res, data: data }}), () => ({{ res: res, data: {{}} }})))
     .then((x) => {{
+      if (gen !== unlockGen) return;
       if (!x.res.ok) throw new Error((x.data && x.data.error) || BAD_KEY);
       $("lock").style.display = "none";
       $("stageWrap").style.display = "flex";
       if (!SONGS.length) {{ $("empty").hidden = false; }}
       else {{ playAt(Math.max(0, START - 1)); }}
     }})
-    .catch(() => {{ $("bad").hidden = false; $("bad").textContent = BAD_KEY; }});
+    .catch(() => {{
+      if (gen !== unlockGen) return;
+      $("bad").hidden = false;
+      $("bad").textContent = BAD_KEY;
+    }});
 }}
 $("closeBtn").onclick = closePage;
 $("unlockBtn").onclick = unlock;

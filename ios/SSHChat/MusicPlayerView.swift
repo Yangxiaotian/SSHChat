@@ -37,6 +37,8 @@ final class MusicPlayback: ObservableObject {
     private var pageURL: URL?
     private var token = ""
     private var playTask: Task<Void, Never>?
+    private var authTask: Task<Void, Never>?
+    private var authGen = 0
     private var localFile: URL?
     /// Fired once when URLSession cannot reach the player (LAN / dead tunnel).
     var onWebFallback: (() -> Void)?
@@ -88,14 +90,27 @@ final class MusicPlayback: ObservableObject {
         }
         self.pageURL = page
         self.key = key
-        // Same token + already playing: keep audio, but re-auth so a late
-        // federation catalog merge shows up (minimize → reopen used to skip).
-        let keepPlayback = token == tok && !songs.isEmpty && playing
+        let keepList = token == tok && !songs.isEmpty
+        let keepAudio = keepList && playing
         token = tok
-        Task { await authorizeAndPlay(page: page, key: key, restartIfNeeded: !keepPlayback) }
+        if keepList { loading = false }
+        authGen += 1
+        let gen = authGen
+        authTask?.cancel()
+        authTask = Task {
+            await authorizeAndPlay(
+                page: page,
+                key: key,
+                restartIfNeeded: !keepAudio,
+                gen: gen
+            )
+        }
     }
 
     func close() {
+        authGen += 1
+        authTask?.cancel()
+        authTask = nil
         playTask?.cancel()
         playTask = nil
         player.pause()
@@ -142,9 +157,15 @@ final class MusicPlayback: ObservableObject {
     func next() { playAt(index + 1) }
     func prev() { playAt(index - 1) }
 
-    private func authorizeAndPlay(page: URL, key: String, restartIfNeeded: Bool = true) async {
+    private func authorizeAndPlay(
+        page: URL,
+        key: String,
+        restartIfNeeded: Bool = true,
+        gen: Int
+    ) async {
         guard let authURL = Self.authURL(from: page) else {
             await MainActor.run {
+                guard gen == authGen else { return }
                 loading = false
                 status = "无效点歌地址"
             }
@@ -158,10 +179,16 @@ final class MusicPlayback: ObservableObject {
             let (data, resp) = try await http.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let ok = (obj["ok"] as? Bool) ?? (obj["ok"] as? NSNumber)?.boolValue ?? false
             await MainActor.run {
+                guard gen == authGen else { return }
                 loading = false
-                guard code == 200, obj["ok"] as? Bool == true else {
-                    status = "密钥不正确或点歌已关闭"
+                guard code == 200, ok else {
+                    if songs.isEmpty {
+                        status = code == 404
+                            ? "点歌已关闭，请再点一次点歌"
+                            : "密钥不正确或点歌已关闭"
+                    }
                     return
                 }
                 let raw = obj["songs"] as? [[String: Any]] ?? []
@@ -191,8 +218,11 @@ final class MusicPlayback: ObservableObject {
                     index = min(index, songs.count - 1)
                 }
             }
+        } catch is CancellationError {
+            return
         } catch {
             await MainActor.run {
+                guard gen == authGen else { return }
                 loading = false
                 let ns = error as NSError
                 let host = page.host ?? page.absoluteString
