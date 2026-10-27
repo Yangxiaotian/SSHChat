@@ -488,7 +488,7 @@ npm run build:portable
 | `/clock` | 当前房间棋钟（全屏网页，可在 Kindle 打开，设备上计时） |
 | `/clock 10+5` | 每方 10 分钟，每步加 5 秒 |
 | `/clock close` / `/clock new` | 发起人关闭当前房间棋钟；强制新开 |
-| `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（进后 5 分钟；昵称随机）。别名 `/tmplink` |
+| `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（默认 5 分钟，`/guest 10` 可改时长；昵称随机）。别名 `/tmplink` |
 | `/guest close` | 作废你在本房生成的临时链接 |
 | `/leave` | 查看你发出、对方尚未阅读的留言 |
 | `/leave 昵称` | 只看发给该昵称的未读留言（带编号） |
@@ -730,7 +730,7 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `canvas_sharing.py` / `canvas_http.py` | `/canvas` 共享画板会话与绘画网页 |
 | `piano_sharing.py` / `piano_http.py` / `piano_samples/` | `/piano` 房间钢琴会话、网页与 MP3 采样 |
 | `clock_sharing.py` / `clock_http.py` | `/clock` 棋钟（Kindle 可用的无脚本网页） |
-| `guest_sharing.py` / `guest_http.py` | `/guest` 一次性 5 分钟网页聊天（无私钥） |
+| `guest_sharing.py` / `guest_http.py` | `/guest` 一次性网页聊天（无私钥；默认 5 分钟） |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
 | `music.py` / `music_http.py` | `/music` 点歌曲库与网页播放器 |
 | `sshchat_gui.py` | 图形客户端源码 |

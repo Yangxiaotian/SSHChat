@@ -73,6 +73,24 @@ class GuestStoreTests(unittest.TestCase):
         self.assertEqual(len(nick), 8)
         self.assertNotRegex(nick, r"^[a-z_][a-z0-9_-]{0,31}$")
 
+    def test_parse_minutes_default_and_cap(self) -> None:
+        ok, err = guest_sharing.parse_minutes("10")
+        self.assertEqual((ok, err), (10, ""))
+        self.assertEqual(guest_sharing.parse_minutes("0")[1], "range")
+        self.assertEqual(guest_sharing.parse_minutes("61")[1], "range")
+        self.assertEqual(guest_sharing.parse_minutes("close")[1], "usage")
+
+    def test_custom_minutes_sets_chat_ttl(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby", 12)
+        assert link is not None
+        self.assertEqual(link.minutes, 12)
+        opened, err = guest_sharing.guest_store.open_once(link.token)
+        self.assertEqual(err, "")
+        assert opened is not None
+        left = guest_sharing.guest_store.remaining(opened)
+        self.assertGreater(left, 11 * 60)
+        self.assertLessEqual(left, 12 * 60)
+
     def test_open_once_assigns_random_nick_and_second_fails(self) -> None:
         link = guest_sharing.guest_store.create("Ada", "lobby")
         assert link is not None
@@ -153,6 +171,17 @@ class GuestCommandTests(unittest.TestCase):
                 remove_client=server.remove_client,
             )
 
+    def test_guest_minutes_arg(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest 10")
+        self.assertIn("10 minutes", self._out(self.alice))
+        self.alice.sent.clear()
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest 99")
+        self.assertIn("1 to 60", self._out(self.alice))
+
     def test_link_is_private_and_not_gui_open(self) -> None:
         fake_http = mock.Mock()
         fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
@@ -198,6 +227,8 @@ class GuestPageTests(unittest.TestCase):
         page = guest_http.render_guest_page(link, "zh")
         self.assertIn("请勿刷新", page)
         self.assertIn("倒计时", page)
+        self.assertIn("分", page)
+        self.assertIn("秒", page)
         self.assertNotIn('id="nick"', page)
         self.assertIn("/guest/", page)
 

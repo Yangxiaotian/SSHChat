@@ -37,7 +37,7 @@ _TEXTS = {
         "you": "你是",
         "enter": "进入聊天",
         "send": "发送",
-        "hint": "只能打开一次，进入后 5 分钟并有倒计时。昵称由系统随机分配。请勿刷新，刷新后立即失效。",
+        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。昵称由系统随机分配。请勿刷新，刷新后立即失效。",
         "used": "这个链接已经用过（或刚刷新过），不能再打开。请让对方重新发一条 /guest。",
         "expired": "临时聊天已结束。",
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
@@ -51,7 +51,7 @@ _TEXTS = {
         "you": "You are",
         "enter": "Enter chat",
         "send": "Send",
-        "hint": "One open only. After you enter you have 5 minutes and a countdown. Your nick is assigned at random. Do not refresh — a reload kills the link immediately.",
+        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is assigned at random. Do not refresh — a reload kills the link immediately.",
         "used": "This link was already used (or you refreshed). It cannot be opened again. Ask them to send /guest once more.",
         "expired": "Guest chat has ended.",
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
@@ -111,6 +111,7 @@ def _closed_page(handler: "BaseHTTPRequestHandler", lang: str, reason: str) -> N
 
 def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
     text = _TEXTS[lang]
+    minutes = link.minutes or guest_sharing.DEFAULT_MINUTES
     boot = {
         "token": link.token,
         "room": link.room,
@@ -157,7 +158,7 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
     <div id="left"></div>
   </div>
   <div id="gate">
-    <p class="warn">{html.escape(text['hint'])}</p>
+    <p class="warn">{html.escape(text['hint'].format(minutes=minutes))}</p>
     <p><button type="button" id="go">{html.escape(text['enter'])}</button></p>
     <p id="err" class="warn"></p>
   </div>
@@ -176,7 +177,9 @@ var ws, exp = 0;
 function fmt(s) {{
   s = Math.max(0, s|0);
   var m = Math.floor(s/60), r = s % 60;
-  return (m<10?'0':'')+m+':'+(r<10?'0':'')+r;
+  var ss = (r<10?'0':'')+r;
+  if (boot.lang === 'zh') return m + '分' + ss + '秒';
+  return m + 'm ' + ss + 's';
 }}
 function tick() {{
   if (!exp) return;
@@ -403,7 +406,7 @@ def _run_guest_ws(link: guest_sharing.GuestLink, sock) -> None:
             }
         )
         nick = link.nick or guest_sharing.random_guest_nick()
-        nick = attach(gconn, nick, link.room, link.locale) or nick
+        nick = attach(gconn, nick, link.room, link.locale, minutes=link.minutes) or nick
         attached = True
         link.nick = nick
         while not gconn.closed:

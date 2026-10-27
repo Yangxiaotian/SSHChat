@@ -1721,7 +1721,7 @@ def main():
         "/canvas | /canvas <nick> | /canvas #<room>  "
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
-        "/guest | /guest close  "
+        "/guest | /guest [min] | /guest close  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"

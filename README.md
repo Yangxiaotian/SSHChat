@@ -33,7 +33,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/canvas <nick>` | Private board with one user |
 | `/clock` | Fullscreen chess clock (Kindle-friendly; ticks on the device) |
 | `/clock 10+5` | 10 minutes each, plus 5 seconds a move |
-| `/guest` | Private one-shot web chat link (no SSH key; 5 minutes; random nick). Alias `/tmplink` |
+| `/guest` | Private one-shot web chat link (no SSH key; default 5 min, `/guest 10` for 10; random nick). Alias `/tmplink` |
 | `/guest close` | Revoke your guest link in this room |
 | `/pad` | Show room clipboard (shared sticky note; federated same-name rooms sync) |
 | `/pad <text>` | Set one line (use terminal `/pad edit` for newlines) |

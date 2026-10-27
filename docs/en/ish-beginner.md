@@ -88,9 +88,9 @@ Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). C
 
 ## 7. Guest link (no SSH key)
 
-Type `/guest`. **Only you see the URL.** Copy it to WeChat/SMS and send it to someone who has no SSH key. Do not open it yourself.
+Type `/guest` (default 5 minutes; `/guest 10` for 10, max 60). **Only you see the URL.** Copy it to WeChat/SMS and send it to someone who has no SSH key. Do not open it yourself.
 
-They open it once in a browser, then have **5 minutes** with a countdown. Refreshing the page kills the link immediately. Their nick is assigned at random (like `~gk7m2p`) so they cannot impersonate a registered user.
+They open it once in a browser; the page shows a **minutes + seconds** countdown. Refreshing the page kills the link immediately. Their nick is assigned at random (like `~gk7m2p`) so they cannot impersonate a registered user.
 
 Revoke with `/guest close`.
 

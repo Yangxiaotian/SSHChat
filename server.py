@@ -7814,9 +7814,12 @@ def _deliver_clock_url(
             print(f"[Clock] notify failed: {e}")
 
 
-def attach_guest(conn, name: str, room: str, locale: str = "en") -> str:
+def attach_guest(
+    conn, name: str, room: str, locale: str = "en", minutes: int | None = None
+) -> str:
     """Put a web guest into a room. Nick must already be a random `~g…` name."""
     nick = name if guest_sharing.is_guest_nick(name) else guest_sharing.random_guest_nick()
+    mins = guest_sharing.DEFAULT_MINUTES if minutes is None else minutes
     with lock:
         existing = {
             str(info.get("name") or "").lower() for info in clients.values()
@@ -7831,7 +7834,7 @@ def attach_guest(conn, name: str, room: str, locale: str = "en") -> str:
             "guest": True,
         }
         rooms[room].add(conn)
-    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=nick, minutes=5))
+    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=nick, minutes=mins))
     broadcast_room(
         room,
         f"[+] {nick} joined #{room}\n".encode("utf-8"),
@@ -7846,7 +7849,7 @@ def attach_guest(conn, name: str, room: str, locale: str = "en") -> str:
 
 
 def _handle_guest(conn, sender: str, payload: str) -> None:
-    """Handle /guest — private one-shot 5-minute web chat link."""
+    """Handle /guest — private one-shot web chat link (default 5 minutes)."""
     raw = payload.split(None, 1)
     arg = raw[1].strip().lower() if len(raw) > 1 else ""
     if arg in ("help", "?", "帮助"):
@@ -7879,15 +7882,23 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
                 conn, _ts(conn, "guest_closed", n=len(closed), room=room_name)
             )
         return
+    minutes = guest_sharing.DEFAULT_MINUTES
     if arg:
-        send_line(conn, _ts(conn, "guest_usage"))
-        return
-    link = guest_sharing.guest_store.create(sender, room_name)
+        minutes, err = guest_sharing.parse_minutes(arg)
+        if err == "range":
+            send_line(conn, _ts(conn, "guest_bad_minutes"))
+            return
+        if err or minutes is None:
+            send_line(conn, _ts(conn, "guest_usage"))
+            return
+    link = guest_sharing.guest_store.create(sender, room_name, minutes)
     if link is None:
         send_line(conn, _ts(conn, "guest_too_many"))
         return
     url = f"{file_http.get_base_url().rstrip('/')}/guest/{link.token}"
-    send_line(conn, _ts(conn, "guest_created", url=url, room=room_name))
+    send_line(
+        conn, _ts(conn, "guest_created", url=url, room=room_name, minutes=minutes)
+    )
 
 
 def _handle_clock(conn, sender: str, payload: str) -> None:

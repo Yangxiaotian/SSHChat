@@ -65,8 +65,8 @@ MESSAGES: dict = {
         "[*] /clock close      Creator closes the current room clock; /clock new forces a new one.\n",
         "[*]              Details: /clock help. After you move, tap your side (top/bottom).\n",
         "[*]              GUI clients open the board automatically; in a terminal, copy the URL into a browser.\n",
-        "[*] /guest         Private one-shot web chat link for someone without an SSH key (current room).\n",
-        "[*]              They may open it once; then 5 minutes with a countdown. Refresh kills it. Nick is random. Alias /tmplink.\n",
+        "[*] /guest [min]   Private one-shot web chat link (no SSH key; default 5 minutes, 1–60).\n",
+        "[*]              They may open it once; countdown shows minutes and seconds. Refresh kills it. Nick is random. Alias /tmplink.\n",
         "[*] /guest close   Revoke your guest link(s) in this room.\n",
         "[*] /help          Show this help.\n",
     ],
@@ -308,14 +308,15 @@ MESSAGES: dict = {
             "[*] Guest chat links need the file web service, which is currently off.\n"
         ),
         "guest_usage": (
-            "[*] Usage: /guest        private one-shot web link for the current room\n"
+            "[*] Usage: /guest [min]   private one-shot web link; default 5 minutes, 1–60\n"
             "[*]         /guest close  revoke your unused or live links in this room\n"
-            "[*] Send the URL out of band (chat app, SMS). They may open it once; then 5 minutes. Refresh kills it. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
+            "[*] Send the URL out of band (chat app, SMS). They may open it once; countdown shows minutes and seconds. Refresh kills it. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
         ),
+        "guest_bad_minutes": "[*] Minutes must be an integer from 1 to 60 (default 5).\n",
         "guest_created": (
             "[*] Temporary chat link (only you can see this — send it yourself, do not open it):\n"
             "[*] {url}\n"
-            "[*] Room #{room}. One open, then 5 minutes with a countdown; refresh kills it. Guest nick is random (~g…). Unused links expire in 30 minutes. Revoke: /guest close\n"
+            "[*] Room #{room}. One open, then {minutes} minutes with a mm:ss countdown; refresh kills it. Guest nick is random (~g…). Unused links expire in 30 minutes. Revoke: /guest close\n"
         ),
         "guest_closed": "[*] Revoked {n} guest chat link(s) in #{room}.\n",
         "guest_none": "[*] You have no guest chat links in #{room}.\n",

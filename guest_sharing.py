@@ -1,4 +1,4 @@
-"""One-shot 5-minute guest chat links for users without an SSH key.
+"""One-shot guest chat links for users without an SSH key.
 
 The first real page open burns the URL and starts the timer. Refresh is a
 new GET, so it fails immediately. A WebSocket ticket lives only in that
@@ -14,7 +14,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-CHAT_TTL_SEC = 5 * 60
+DEFAULT_MINUTES = 5
+MIN_MINUTES = 1
+MAX_MINUTES = 60  # ponytail: hard cap; longer = longer live-room leak
+CHAT_TTL_SEC = DEFAULT_MINUTES * 60
 UNUSED_TTL_SEC = 30 * 60
 MAX_ACTIVE_PER_CREATOR = 5
 MAX_MSG_CHARS = 500
@@ -32,6 +35,17 @@ def is_guest_nick(name: str) -> bool:
     return (name or "").startswith("~g")
 
 
+def parse_minutes(arg: str) -> tuple[Optional[int], str]:
+    """Parse `/guest 10`. Returns (minutes, '') or (None, 'usage'|'range')."""
+    raw = (arg or "").strip()
+    if not raw.isdigit():
+        return None, "usage"
+    n = int(raw)
+    if n < MIN_MINUTES or n > MAX_MINUTES:
+        return None, "range"
+    return n, ""
+
+
 @dataclass
 class GuestLink:
     token: str
@@ -44,6 +58,7 @@ class GuestLink:
     ws_ticket: str = ""
     nick: str = ""
     locale: str = "en"
+    minutes: int = DEFAULT_MINUTES
     closed: bool = False
     conn: object = None
     kick_started: bool = False
@@ -136,7 +151,9 @@ class GuestStore:
         self._lock = threading.Lock()
         self.links: dict[str, GuestLink] = {}
 
-    def create(self, creator: str, room: str) -> Optional[GuestLink]:
+    def create(
+        self, creator: str, room: str, minutes: int = DEFAULT_MINUTES
+    ) -> Optional[GuestLink]:
         now = time.time()
         with self._lock:
             self._purge_locked(now)
@@ -156,12 +173,14 @@ class GuestStore:
             if len(active) >= MAX_ACTIVE_PER_CREATOR:
                 return None
             token = secrets.token_urlsafe(24)
+            mins = max(MIN_MINUTES, min(MAX_MINUTES, int(minutes)))
             link = GuestLink(
                 token=token,
                 creator=creator,
                 room=room,
                 created_at=now,
                 unused_expires_at=now + UNUSED_TTL_SEC,
+                minutes=mins,
             )
             self.links[token] = link
             return link
@@ -192,7 +211,7 @@ class GuestStore:
                 self.links.pop(token, None)
                 return None, "expired"
             link.opened_at = now
-            link.chat_expires_at = now + CHAT_TTL_SEC
+            link.chat_expires_at = now + link.minutes * 60
             link.ws_ticket = secrets.token_urlsafe(16)
             link.nick = random_guest_nick()
             return link, ""

@@ -89,7 +89,7 @@ export const enMessages: MessageTree = {
       canvas: 'Shared canvas (current room / nick / #room)',
       piano: 'Room piano (current room / nick / #room)',
       clock: 'Chess clock (Kindle web page, no scripts)',
-      guest: 'Private one-shot 5-minute web chat link (no SSH key)',
+      guest: 'Private one-shot web chat link (no SSH key; default 5 min, /guest 10)',
       leave: 'List or recall unread leave-messages',
       clear: 'Clear local view (current room)',
       game: 'Game commands',
