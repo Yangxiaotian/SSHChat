@@ -26,6 +26,8 @@ from typing import Optional, Tuple
 
 import canvas_sharing
 import clock_sharing
+import guest_http
+import guest_sharing
 import dict_lookup
 import federation
 import games
@@ -7812,6 +7814,82 @@ def _deliver_clock_url(
             print(f"[Clock] notify failed: {e}")
 
 
+def attach_guest(conn, name: str, room: str, locale: str = "en") -> str:
+    """Put a web guest into a room. Nick must already be a random `~g…` name."""
+    nick = name if guest_sharing.is_guest_nick(name) else guest_sharing.random_guest_nick()
+    with lock:
+        existing = {
+            str(info.get("name") or "").lower() for info in clients.values()
+        }
+        while nick.lower() in existing:
+            nick = guest_sharing.random_guest_nick()
+        clients[conn] = {
+            "name": nick,
+            "rooms": {room},
+            "current_room": room,
+            "locale": locale,
+            "guest": True,
+        }
+        rooms[room].add(conn)
+    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=nick, minutes=5))
+    broadcast_room(
+        room,
+        f"[+] {nick} joined #{room}\n".encode("utf-8"),
+        exclude_conn=conn,
+        skip_federation=True,
+    )
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.notify_join(nick, room)
+    print(f"{nick} joined #{room} (guest)")
+    return nick
+
+
+def _handle_guest(conn, sender: str, payload: str) -> None:
+    """Handle /guest — private one-shot 5-minute web chat link."""
+    raw = payload.split(None, 1)
+    arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    if arg in ("help", "?", "帮助"):
+        send_line(conn, _ts(conn, "guest_usage"))
+        return
+    if file_http is None:
+        send_line(conn, _ts(conn, "guest_http_off"))
+        return
+    with lock:
+        info = clients.get(conn)
+        room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    if arg in ("close", "关闭"):
+        closed = guest_sharing.guest_store.close_for_creator(sender, room_name)
+        for link in closed:
+            old = link.conn
+            if old is None:
+                continue
+            try:
+                old.send_json({"t": "end", "why": "closed"})
+            except Exception:
+                pass
+            try:
+                remove_client(old)
+            except Exception:
+                pass
+        if not closed:
+            send_line(conn, _ts(conn, "guest_none", room=room_name))
+        else:
+            send_line(
+                conn, _ts(conn, "guest_closed", n=len(closed), room=room_name)
+            )
+        return
+    if arg:
+        send_line(conn, _ts(conn, "guest_usage"))
+        return
+    link = guest_sharing.guest_store.create(sender, room_name)
+    if link is None:
+        send_line(conn, _ts(conn, "guest_too_many"))
+        return
+    url = f"{file_http.get_base_url().rstrip('/')}/guest/{link.token}"
+    send_line(conn, _ts(conn, "guest_created", url=url, room=room_name))
+
+
 def _handle_clock(conn, sender: str, payload: str) -> None:
     """Handle /clock — shared chess clock as a script-free web page."""
     if file_http is None:
@@ -10000,7 +10078,8 @@ def remove_client(conn) -> None:
         joined_rooms = list(info["rooms"])
         current_room = info.get("current_room", DEFAULT_ROOM)
         library_reading.pop(conn, None)
-        _remember_session_locked(name, joined_rooms, current_room)
+        if not info.get("guest"):
+            _remember_session_locked(name, joined_rooms, current_room)
         game_notices: list[tuple[str, list[str]]] = []
         for room in joined_rooms:
             same_name_peer = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
@@ -10511,6 +10590,10 @@ def handle_command(conn, payload: str) -> None:
 
     if cmd == "/clock":
         _handle_clock(conn, name, payload)
+        return
+
+    if cmd in ("/guest", "/tmplink"):
+        _handle_guest(conn, name, payload)
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -11140,6 +11223,14 @@ def process_client_line(conn, raw_line: bytes) -> None:
             return
         room = info["current_room"]
         name = info["name"]
+        is_guest = bool(info.get("guest"))
+
+    if is_guest:
+        if payload.startswith("/"):
+            send_line(conn, _ts(conn, "guest_no_commands"))
+            return
+        if len(payload) > guest_sharing.MAX_MSG_CHARS:
+            payload = payload[: guest_sharing.MAX_MSG_CHARS]
 
     if payload.startswith("/file "):
         send_line(conn, "[*] File transfer is not supported.\n")
@@ -11257,7 +11348,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /guest /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -11332,6 +11423,13 @@ def handle_client(conn, addr) -> None:
         remove_client(conn)
 
 
+guest_http.bind_chat(
+    attach_guest=attach_guest,
+    process_client_line=process_client_line,
+    remove_client=remove_client,
+)
+
+
 def run_server() -> int:
     global _listen_socket, _shutdown_requested, _shutting_down, file_http
     global _capsule_thread
@@ -11346,6 +11444,14 @@ def run_server() -> int:
         )
         _capsule_thread.start()
     
+    # Guest WS must call *this* module's clients/rooms. `python server.py`
+    # runs as __main__; `import server` would be a second empty copy.
+    guest_http.bind_chat(
+        attach_guest=attach_guest,
+        process_client_line=process_client_line,
+        remove_client=remove_client,
+    )
+
     # Start file HTTP server
     file_enabled = os.environ.get("SSHCHAT_FILE_TRANSFER_ENABLED", "1") != "0"
     if file_enabled:
@@ -11428,6 +11534,7 @@ def run_server() -> int:
                             canvas_sharing.canvas_store.cleanup_expired()
                             piano_sharing.piano_store.cleanup_expired()
                             clock_sharing.clock_store.cleanup_expired()
+                            guest_sharing.guest_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

@@ -65,6 +65,9 @@ MESSAGES: dict = {
         "[*] /clock close      Creator closes the current room clock; /clock new forces a new one.\n",
         "[*]              Details: /clock help. After you move, tap your side (top/bottom).\n",
         "[*]              GUI clients open the board automatically; in a terminal, copy the URL into a browser.\n",
+        "[*] /guest         Private one-shot web chat link for someone without an SSH key (current room).\n",
+        "[*]              They may open it once; then 5 minutes with a countdown. Refresh kills it. Nick is random. Alias /tmplink.\n",
+        "[*] /guest close   Revoke your guest link(s) in this room.\n",
         "[*] /help          Show this help.\n",
     ],
     "game_help_lines": [
@@ -301,6 +304,24 @@ MESSAGES: dict = {
         "music_http_off": (
             "[*] Music playback needs the file web service, which is currently off.\n"
         ),
+        "guest_http_off": (
+            "[*] Guest chat links need the file web service, which is currently off.\n"
+        ),
+        "guest_usage": (
+            "[*] Usage: /guest        private one-shot web link for the current room\n"
+            "[*]         /guest close  revoke your unused or live links in this room\n"
+            "[*] Send the URL out of band (chat app, SMS). They may open it once; then 5 minutes. Refresh kills it. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
+        ),
+        "guest_created": (
+            "[*] Temporary chat link (only you can see this — send it yourself, do not open it):\n"
+            "[*] {url}\n"
+            "[*] Room #{room}. One open, then 5 minutes with a countdown; refresh kills it. Guest nick is random (~g…). Unused links expire in 30 minutes. Revoke: /guest close\n"
+        ),
+        "guest_closed": "[*] Revoked {n} guest chat link(s) in #{room}.\n",
+        "guest_none": "[*] You have no guest chat links in #{room}.\n",
+        "guest_too_many": "[*] Too many live guest chats; /guest close or wait for one to end.\n",
+        "guest_no_commands": "[*] Guest links can only send chat text, not slash commands.\n",
+        "guest_welcome": "[*] You are {nick} in #{room} for {minutes} minutes. Do not refresh.\n",
         "lang_usage": "[*] Usage: /lang [en|zh]\n",
         "lang_set": "[*] UI language set to {lang}.\n",
         "lang_current": "[*] Current UI language: {lang}\n",

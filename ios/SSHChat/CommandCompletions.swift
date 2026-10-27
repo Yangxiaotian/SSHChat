@@ -45,7 +45,7 @@ enum CommandCompletions {
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
+        "/canvas", "/board", "/piano", "/clock", "/guest", "/tmplink", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     ]
 
@@ -76,6 +76,8 @@ enum CommandCompletions {
         "/poll": ["new", "close", "help", "show"],
         "/later": ["list", "ls", "show", "cancel", "help"],
         "/clock": ["help", "close", "new"],
+        "/guest": ["help", "close"],
+        "/tmplink": ["help", "close"],
     ]
 
     private static let nested: [String: [String]] = [

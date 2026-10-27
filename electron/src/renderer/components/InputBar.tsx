@@ -29,6 +29,8 @@ const COMMAND_KEYS = [
   { name: '/board', key: 'input.commands.canvas' },
   { name: '/piano', key: 'input.commands.piano' },
   { name: '/clock', key: 'input.commands.clock' },
+  { name: '/guest', key: 'input.commands.guest' },
+  { name: '/tmplink', key: 'input.commands.guest' },
   { name: '/leave', key: 'input.commands.leave' },
   { name: '/announce', key: 'input.commands.announce' },
   { name: '/pad', key: 'input.commands.pad' },

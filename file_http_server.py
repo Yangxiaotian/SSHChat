@@ -12,6 +12,7 @@ Provides:
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
 - Piano WS:        GET  /piano/<token>/ws        - WebSocket note push/broadcast (ticket auth)
 - Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
+- Guest chat:      GET/POST /guest/<token>/...   - One-shot 5-minute web chat (no SSH key)
 - Music player:    GET  /music/<token>/...       - Playlist page + Range audio from the music drop folder
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
@@ -41,6 +42,7 @@ from typing import Optional
 import canvas_http
 import clock_http
 import file_sharing
+import guest_http
 import music_http
 import piano_http
 
@@ -1393,6 +1395,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             return
         if canvas_http.handle_canvas_post(self):
             return
+        if guest_http.handle_guest_post(self):
+            return
 
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
@@ -1743,6 +1747,10 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         if piano_http.handle_piano_websocket(self):
             return
         if canvas_http.handle_canvas_websocket(self):
+            return
+        if guest_http.handle_guest_websocket(self):
+            return
+        if guest_http.handle_guest_get(self):
             return
         if clock_http.handle_clock_get(self):
             return

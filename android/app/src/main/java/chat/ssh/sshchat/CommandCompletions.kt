@@ -6,7 +6,7 @@ object CommandCompletions {
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/clock", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
+        "/canvas", "/board", "/piano", "/clock", "/guest", "/tmplink", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     )
 
@@ -37,6 +37,8 @@ object CommandCompletions {
         "/poll" to listOf("new", "close", "help", "show"),
         "/later" to listOf("list", "ls", "show", "cancel", "help"),
         "/clock" to listOf("help", "close", "new"),
+        "/guest" to listOf("help", "close"),
+        "/tmplink" to listOf("help", "close"),
     )
 
     private val NESTED = mapOf(

@@ -165,6 +165,8 @@ _TOP_COMMANDS = (
     "/board",
     "/piano",
     "/clock",
+    "/guest",
+    "/tmplink",
     "/leave",
     "/unmsg",
     "/announce",
@@ -221,6 +223,11 @@ _CLOCK_SUBCOMMANDS = {
     "new": None,
 }
 
+_GUEST_SUBCOMMANDS = {
+    "help": None,
+    "close": None,
+}
+
 _FED_SUBCOMMANDS = {
     "help": None,
 }
@@ -240,6 +247,8 @@ _SUBCOMMANDS_BY_CMD = {
     "/pad": sorted(_PAD_SUBCOMMANDS),
     "/later": sorted(_LATER_SUBCOMMANDS),
     "/clock": sorted(_CLOCK_SUBCOMMANDS),
+    "/guest": sorted(_GUEST_SUBCOMMANDS),
+    "/tmplink": sorted(_GUEST_SUBCOMMANDS),
     "/fed": sorted(_FED_SUBCOMMANDS),
     "/peers": sorted(_FED_SUBCOMMANDS),
     "/federation": sorted(_FED_SUBCOMMANDS),
@@ -1712,6 +1721,7 @@ def main():
         "/canvas | /canvas <nick> | /canvas #<room>  "
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
+        "/guest | /guest close  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"
