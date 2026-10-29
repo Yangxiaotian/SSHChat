@@ -47,7 +47,28 @@ _TEXTS = {
         "enter": "进入聊天",
         "send": "发送",
         "pic": "图片",
-        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。昵称由系统随机分配。可发文字和图片。请勿刷新，刷新后立即失效。",
+        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字和图片，并用游戏区下棋。请勿刷新，刷新后立即失效。",
+        "remark": "备注（可选）",
+        "remark_ph": "怎么称呼你",
+        "game": "游戏",
+        "gjoin": "加入",
+        "gshow": "刷新棋盘",
+        "gresign": "认输",
+        "gpass": "停一手",
+        "gnew": "开局",
+        "ghint_stone": "点空位落子",
+        "ghint_piece": "先点己方棋子，再点目标格",
+        "ghint_dark": "点问号翻面；或先点己子再点目标",
+        "ghint_card": "社交/牌类请看聊天，在输入框操作",
+        "games": [
+            ["gomoku", "五子棋"],
+            ["reversi", "黑白棋"],
+            ["xiangqi", "象棋"],
+            ["chess", "国际象棋"],
+            ["go", "围棋"],
+            ["darkchess", "暗棋"],
+            ["doushou", "斗兽棋"],
+        ],
         "used": "这个链接已经用过（或刚刷新过），不能再打开。请让对方重新发一条 /guest。",
         "expired": "临时聊天已结束。",
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
@@ -68,7 +89,28 @@ _TEXTS = {
         "enter": "Enter chat",
         "send": "Send",
         "pic": "Image",
-        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is assigned at random. Text and images are allowed. Do not refresh — a reload kills the link immediately.",
+        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, and the game panel are allowed. Do not refresh — a reload kills the link immediately.",
+        "remark": "Remark (optional)",
+        "remark_ph": "What should we call you",
+        "game": "Games",
+        "gjoin": "Join",
+        "gshow": "Refresh",
+        "gresign": "Resign",
+        "gpass": "Pass",
+        "gnew": "New",
+        "ghint_stone": "Tap an empty point to move",
+        "ghint_piece": "Tap your piece, then the destination",
+        "ghint_dark": "Tap ? to flip, or tap a piece then a destination",
+        "ghint_card": "Social/card games: follow chat and type in the box",
+        "games": [
+            ["gomoku", "Gomoku"],
+            ["reversi", "Reversi"],
+            ["xiangqi", "Xiangqi"],
+            ["chess", "Chess"],
+            ["go", "Go"],
+            ["darkchess", "Dark chess"],
+            ["doushou", "Jungle"],
+        ],
         "used": "This link was already used (or you refreshed). It cannot be opened again. Ask them to send /guest once more.",
         "expired": "Guest chat has ended.",
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
@@ -132,6 +174,313 @@ def _closed_page(handler: "BaseHTTPRequestHandler", lang: str, reason: str) -> N
     _send_html(handler, page, 410)
 
 
+# Board UI for guests. Not an f-string — braces are JS.
+_GUEST_GAME_JS = r"""
+var gameBuf = [], snap = null, fromCell = null, gOpen = false, gDead = false;
+var HEADERS = [
+  ['xiangqi', /^xiangqi (?:对局)?[（(]([^）)]*)[）)]/],
+  ['chess', /^chess (?:对局)?[（(]([^）)]*)[）)]/],
+  ['go', /^go (?:对局)?[（(]([^）)]*)[）)]/],
+  ['gomoku', /^gomoku (?:对局)?[（(]([^）)]*)[）)]/],
+  ['doushou', /^doushou (?:对局)?[（(]([^）)]*)[）)]/],
+  ['darkchess', /^darkchess (?:对局)?[（(]([^）)]*)[）)]/],
+  ['reversi', /^reversi game [（(]([^）)]*)[）)]/]
+];
+function cmdGame(rest) {
+  if (!ws || ws.readyState !== 1 || gDead) return;
+  ws.send(JSON.stringify({t: 'msg', s: rest ? ('/game ' + rest) : '/game'}));
+}
+function detectHeader(line) {
+  var t = String(line || '').replace(/^\[#[^\]]+\] \[\*\] /, '').replace(/^\[\*\]\s?/, '').trim();
+  for (var i = 0; i < HEADERS.length; i++) {
+    var m = HEADERS[i][1].exec(t);
+    if (m) return [HEADERS[i][0], (m[1] || '').trim(), t];
+  }
+  return null;
+}
+function ingestGame(chunk) {
+  var parts = String(chunk || '').split(/\r?\n/);
+  for (var i = 0; i < parts.length; i++) {
+    var line = parts[i];
+    if (!line) continue;
+    var m = /^\[#[^\]]+\] \[\*\] (.*)$/.exec(line);
+    gameBuf.push(m ? m[1] : line.replace(/^\[\*\]\s?/, ''));
+  }
+  if (gameBuf.length > 400) gameBuf = gameBuf.slice(-300);
+  var next = parseGame(gameBuf);
+  if (next) { snap = next; fromCell = null; renderGame(); }
+}
+function parseGame(lines) {
+  var idx = -1, kind = '', state = '';
+  for (var i = lines.length - 1; i >= 0; i--) {
+    var h = detectHeader(lines[i]);
+    if (!h) continue;
+    idx = i; kind = h[0]; state = h[1]; break;
+  }
+  if (idx < 0) return null;
+  var block = lines.slice(idx);
+  var s = {kind: kind, state: state, header: block[0].trim(), board: null, flipped: false};
+  if (kind === 'gomoku' || kind === 'go' || kind === 'reversi') parseStones(s, block);
+  else if (kind === 'chess') parseChess(s, block);
+  else if (kind === 'xiangqi') parseXiangqi(s, block);
+  else if (kind === 'darkchess') parseDark(s, block);
+  else if (kind === 'doushou') parseDoushou(s, block);
+  return s;
+}
+function allMatches(re, s) {
+  var out = [], m;
+  re.lastIndex = 0;
+  while ((m = re.exec(s))) out.push(m);
+  return out;
+}
+function parseStones(s, block) {
+  var grid = [], labels = [], colLabels = [];
+  var tokRe = /\(([.#o])\)|!?([.#o])/g;
+  for (var i = 1; i < block.length; i++) {
+    var hdr = /^\s+(\d{1,2})(?:\s+\d{1,2})+\s*$/.exec(block[i]);
+    if (hdr && !colLabels.length) { colLabels = block[i].trim().split(/\s+/); continue; }
+    var m = /^\s*(\d{1,2})\s(.*)$/.exec(block[i]);
+    if (!m) continue;
+    var toks = allMatches(tokRe, m[2]).map(function (x) {
+      return {s: x[1] || x[2], hi: !!x[1] || x[0].charAt(0) === '!'};
+    });
+    if (toks.length < 5) continue;
+    if (grid.length && toks.length !== grid[0].length) continue;
+    grid.push(toks);
+    labels.push(+m[1]);
+  }
+  if (!grid.length || grid.length !== grid[0].length) return;
+  var cells = [], last = {};
+  for (var r = 0; r < grid.length; r++) for (var c = 0; c < grid[r].length; c++) {
+    var t = grid[r][c];
+    cells.push(t.s === '#' ? 'B' : t.s === 'o' ? 'W' : '');
+    if (t.hi) last[r * grid.length + c] = 1;
+  }
+  s.board = {rows: grid.length, cols: grid[0].length, cells: cells, last: last, rowLabels: labels, colLabels: colLabels};
+}
+function parseChess(s, block) {
+  var files = [], rows = [], ranks = [];
+  var tokRe = /\((.)\)|([♔♕♖♗♘♙♚♛♜♝♞♟·])/g;
+  for (var i = 1; i < block.length; i++) {
+    if (!files.length && /^\s*([a-h])(?:\s+[a-h]){7}\s*$/.test(block[i])) {
+      files = block[i].trim().split(/\s+/); continue;
+    }
+    var m = /^\s*(\d{1,2})\s(.*)$/.exec(block[i]);
+    if (!m) continue;
+    var toks = allMatches(tokRe, m[2]).map(function (x) {
+      return {s: x[1] || x[2], hi: !!x[1]};
+    });
+    if (toks.length !== 8) continue;
+    rows.push(toks); ranks.push(+m[1]);
+    if (rows.length === 8) break;
+  }
+  if (rows.length !== 8) return;
+  if (!files.length) files = 'abcdefgh'.split('');
+  var cells = [], last = {};
+  for (var r = 0; r < 8; r++) for (var c = 0; c < 8; c++) {
+    var t = rows[r][c];
+    cells.push(t.s === '·' ? '' : t.s);
+    if (t.hi) last[r * 8 + c] = 1;
+  }
+  s.board = {rows: 8, cols: 8, cells: cells, last: last, rowLabels: ranks, colLabels: files};
+  s.flipped = files[0] === 'h';
+}
+function collectRows(block, cols, maxRows, tokRe, numbered) {
+  var rows = [], labels = [];
+  for (var i = 1; i < block.length && rows.length < maxRows; i++) {
+    var rest = block[i], label = 0;
+    if (numbered) {
+      var m = /^\s*(\d{1,2})\s(.*)$/.exec(block[i]);
+      if (!m) continue;
+      label = +m[1]; rest = m[2];
+    }
+    tokRe.lastIndex = 0;
+    var toks = rest.match(tokRe);
+    if (!toks || toks.length !== cols) continue;
+    rows.push(toks); labels.push(label);
+  }
+  return {rows: rows, labels: labels};
+}
+function parseXiangqi(s, block) {
+  var pack = collectRows(block, 9, 10, /[+\-!][^\s·*+\-!]|·|\*/g, false);
+  if (pack.rows.length !== 10) return;
+  s.flipped = block.some(function (ln) { return ln.indexOf('己方在下方') >= 0 || /you are at the bottom/i.test(ln); });
+  var cells = [], last = {};
+  for (var r = 0; r < 10; r++) for (var c = 0; c < 9; c++) {
+    var tok = pack.rows[r][c], i = r * 9 + c;
+    if (tok === '·') { cells.push(''); continue; }
+    if (tok === '*') { cells.push(''); last[i] = 1; continue; }
+    var red = tok.charAt(0) === '+' || '帅仕相兵'.indexOf(tok.charAt(1)) >= 0;
+    if (tok.charAt(0) === '-') red = false;
+    if (tok.charAt(0) === '!') last[i] = 1;
+    cells.push((red ? 'r' : 'b') + tok.slice(1));
+  }
+  s.board = {rows: 10, cols: 9, cells: cells, last: last, rowLabels: [], colLabels: []};
+}
+function parseDark(s, block) {
+  var pack = collectRows(block, 8, 4, /!?(?:[+\-][^\s!+\-?.]|\?|\.)/g, true);
+  if (pack.rows.length !== 4) return;
+  var letters = {G:'将', A:'士', E:'象', R:'车', H:'马', C:'炮', S:'卒'};
+  var cells = [], last = {};
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 8; c++) {
+    var tok = pack.rows[r][c], i = r * 8 + c;
+    if (tok.charAt(0) === '!') { last[i] = 1; tok = tok.slice(1); }
+    if (tok === '?') cells.push('?');
+    else if (tok === '.') cells.push('');
+    else cells.push((tok.charAt(0) === '+' ? 'r' : 'b') + (letters[tok.charAt(1)] || tok.charAt(1)));
+  }
+  s.board = {rows: 4, cols: 8, cells: cells, last: last, rowLabels: pack.labels, colLabels: []};
+}
+function parseDoushou(s, block) {
+  var pack = collectRows(block, 7, 9, /!?[+\-][^\s·!]|黑陷|黑穴|红陷|红穴|河|·|bT|bD|rT|rD|RV/g, true);
+  if (pack.rows.length !== 9) return;
+  var letters = {R:'鼠', C:'猫', D:'狗', W:'狼', P:'豹', T:'虎', L:'狮', E:'象'};
+  var colLabels = [];
+  for (var i = 0; i < block.length; i++) {
+    if (/^\s*([1-7])(?:\s+[1-7]){6}\s*$/.test(block[i])) { colLabels = block[i].trim().split(/\s+/); break; }
+  }
+  var cells = [], last = {};
+  for (var r = 0; r < 9; r++) for (var c = 0; c < 7; c++) {
+    var tok = pack.rows[r][c], i = r * 7 + c;
+    if (tok.charAt(0) === '!') { last[i] = 1; tok = tok.slice(1); }
+    if (tok.length === 2 && (tok.charAt(0) === '+' || tok.charAt(0) === '-'))
+      cells.push((tok.charAt(0) === '+' ? 'r' : 'b') + (letters[tok.charAt(1)] || tok.charAt(1)));
+    else if (tok === '·' || tok === '.' || tok === '*') cells.push('');
+    else if (tok === 'RV') cells.push('河');
+    else if (tok === 'rD') cells.push('红穴');
+    else if (tok === 'bD') cells.push('黑穴');
+    else if (tok === 'rT') cells.push('红陷');
+    else if (tok === 'bT') cells.push('黑陷');
+    else cells.push(tok);
+  }
+  s.board = {rows: 9, cols: 7, cells: cells, last: last, rowLabels: pack.labels, colLabels: colLabels};
+  s.flipped = pack.labels[0] === 9;
+}
+function srvRC(s, r, c) {
+  var b = s.board;
+  if (s.kind === 'xiangqi') {
+    return [s.flipped ? b.rows - r : r + 1, s.flipped ? b.cols - c : c + 1];
+  }
+  var row = (b.rowLabels && b.rowLabels[r] != null) ? b.rowLabels[r] : r + 1;
+  var col;
+  if (b.colLabels && b.colLabels[c] != null && /^\d+$/.test(b.colLabels[c])) col = +b.colLabels[c];
+  else col = c + 1;
+  return [row, col];
+}
+function chessSq(s, r, c) {
+  var files = (s.board.colLabels && s.board.colLabels.length) ? s.board.colLabels : 'abcdefgh'.split('');
+  var ranks = (s.board.rowLabels && s.board.rowLabels.length) ? s.board.rowLabels : [8,7,6,5,4,3,2,1];
+  return String(files[c]) + String(ranks[r]);
+}
+function onCell(r, c) {
+  var s = snap; if (!s || !s.board || gDead) return;
+  var b = s.board, tok = b.cells[r * b.cols + c] || '';
+  if (s.kind === 'go' || s.kind === 'gomoku' || s.kind === 'reversi') {
+    if (tok && s.kind !== 'reversi') return;
+    var rc = srvRC(s, r, c);
+    cmdGame('move ' + rc[0] + ' ' + rc[1]);
+    return;
+  }
+  if (s.kind === 'chess') {
+    if (!fromCell) {
+      if (!tok) return;
+      fromCell = [r, c]; renderGame(); return;
+    }
+    var a = chessSq(s, fromCell[0], fromCell[1]), z = chessSq(s, r, c);
+    fromCell = null;
+    if (a !== z) cmdGame('move ' + a + z);
+    renderGame(); return;
+  }
+  if (s.kind === 'darkchess') {
+    var d = srvRC(s, r, c);
+    if (!fromCell) {
+      if (tok === '?') { cmdGame('move flip ' + d[0] + ' ' + d[1]); return; }
+      if (!tok) return;
+      fromCell = [r, c]; renderGame(); return;
+    }
+    var fr = fromCell[0], fc = fromCell[1];
+    var f = srvRC(s, fr, fc);
+    fromCell = null;
+    if (!(fr === r && fc === c))
+      cmdGame('move move ' + f[0] + ' ' + f[1] + ' ' + d[0] + ' ' + d[1]);
+    renderGame(); return;
+  }
+  if (s.kind === 'xiangqi' || s.kind === 'doushou') {
+    if (!fromCell) {
+      if (!tok || tok === '?' || tok.length < 2) return;
+      fromCell = [r, c]; renderGame(); return;
+    }
+    var a2 = srvRC(s, fromCell[0], fromCell[1]), z2 = srvRC(s, r, c);
+    fromCell = null;
+    if (a2[0] === z2[0] && a2[1] === z2[1]) { renderGame(); return; }
+    if (s.kind === 'xiangqi') cmdGame('move coord ' + a2[0] + ' ' + a2[1] + ' ' + z2[0] + ' ' + z2[1]);
+    else cmdGame('move ' + a2[0] + ' ' + a2[1] + ' ' + z2[0] + ' ' + z2[1]);
+    renderGame();
+  }
+}
+function btn(label, fn) {
+  var b = document.createElement('button');
+  b.type = 'button'; b.textContent = label; b.onclick = fn;
+  return b;
+}
+function renderGame() {
+  var body = document.getElementById('gbody');
+  var acts = document.getElementById('gacts');
+  var neu = document.getElementById('gnew');
+  var boardEl = document.getElementById('gboard');
+  var hint = document.getElementById('ghint');
+  var stat = document.getElementById('gstat');
+  acts.innerHTML = ''; neu.innerHTML = ''; boardEl.innerHTML = '';
+  acts.appendChild(btn(L.gjoin, function () { cmdGame('join'); }));
+  acts.appendChild(btn(L.gshow, function () { cmdGame('show'); }));
+  acts.appendChild(btn(L.gresign, function () { cmdGame('resign'); }));
+  if (snap && snap.kind === 'go') acts.appendChild(btn(L.gpass, function () { cmdGame('move pass'); }));
+  (boot.games || []).forEach(function (g) {
+    neu.appendChild(btn(g[1], function () { cmdGame('new ' + g[0]); }));
+  });
+  if (!snap) {
+    stat.textContent = '';
+    hint.textContent = L.gnew;
+    return;
+  }
+  stat.textContent = snap.header;
+  if (!gOpen) { gOpen = true; body.style.display = 'block'; }
+  var b = snap.board;
+  if (!b) {
+    hint.textContent = L.ghint_card;
+    return;
+  }
+  boardEl.style.gridTemplateColumns = 'repeat(' + b.cols + ', minmax(1.35rem, 1fr))';
+  for (var r = 0; r < b.rows; r++) for (var c = 0; c < b.cols; c++) {
+    (function (rr, cc) {
+      var cell = document.createElement('button');
+      cell.type = 'button';
+      var tok = b.cells[rr * b.cols + cc] || '';
+      var cls = '';
+      if (tok === 'B') cls = 'c-B';
+      else if (tok === 'W') cls = 'c-W';
+      else if (tok.charAt(0) === 'r') cls = 'c-r';
+      else if (tok.charAt(0) === 'b') cls = 'c-b';
+      if (b.last && b.last[rr * b.cols + cc]) cls += ' c-last';
+      if (fromCell && fromCell[0] === rr && fromCell[1] === cc) cls += ' c-sel';
+      cell.className = cls;
+      cell.textContent = tok === 'B' ? '●' : tok === 'W' ? '○' : (tok.charAt(0) === 'r' || tok.charAt(0) === 'b' ? tok.slice(1) : tok);
+      cell.onclick = function () { onCell(rr, cc); };
+      boardEl.appendChild(cell);
+    })(r, c);
+  }
+  if (snap.kind === 'darkchess') hint.textContent = L.ghint_dark;
+  else if (snap.kind === 'xiangqi' || snap.kind === 'chess' || snap.kind === 'doushou') hint.textContent = L.ghint_piece;
+  else hint.textContent = L.ghint_stone;
+}
+document.getElementById('gtog').onclick = function () {
+  gOpen = !gOpen;
+  document.getElementById('gbody').style.display = gOpen ? 'block' : 'none';
+  if (gOpen) renderGame();
+};
+"""
+
+
 def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
     text = _TEXTS[lang]
     minutes = link.minutes or guest_sharing.DEFAULT_MINUTES
@@ -140,6 +489,7 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
         "room": link.room,
         "lang": lang,
         "maxImage": guest_sharing.MAX_IMAGE_BYTES,
+        "games": text["games"],
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     labels = json.dumps(
@@ -155,6 +505,17 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
             "not_image": text["not_image"],
             "too_big": text["too_big"],
             "file_off": text["file_off"],
+            "remark": text["remark"],
+            "game": text["game"],
+            "gjoin": text["gjoin"],
+            "gshow": text["gshow"],
+            "gresign": text["gresign"],
+            "gpass": text["gpass"],
+            "gnew": text["gnew"],
+            "ghint_stone": text["ghint_stone"],
+            "ghint_piece": text["ghint_piece"],
+            "ghint_dark": text["ghint_dark"],
+            "ghint_card": text["ghint_card"],
         },
         ensure_ascii=False,
     )
@@ -178,9 +539,25 @@ html,body {{ margin:0; height:100%; background:#111; color:#eee; font-family:san
 #row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; }}
 #gate {{ padding:1.5rem; max-width:28rem; }}
 #gate p {{ line-height:1.5; color:#ccc; }}
+#gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; }}
 button {{ padding:.6rem 1rem; font-size:16px; }}
 .warn {{ color:#f6a; }}
 #pic {{ display:none; }}
+#game {{ background:#1a1a1a; border-bottom:1px solid #333; flex-shrink:0; }}
+#ghead {{ display:flex; align-items:center; gap:.6rem; padding:.4rem .7rem; }}
+#gstat {{ flex:1; font-size:13px; color:#bbb; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+#gbody {{ display:none; padding:0 .7rem .7rem; }}
+#gacts, #gnew {{ display:flex; flex-wrap:wrap; gap:.35rem; margin-bottom:.45rem; }}
+#gacts button, #gnew button, #gtog {{ padding:.35rem .6rem; font-size:13px; }}
+#gboard {{ display:grid; gap:1px; overflow:auto; max-height:min(52vh, 420px); width:max-content; max-width:100%; }}
+#gboard button {{ min-width:1.45rem; min-height:1.45rem; padding:0; font-size:12px; aspect-ratio:1; line-height:1; touch-action:manipulation; }}
+#gboard button.c-B {{ background:#222; color:#eee; border-radius:50%; }}
+#gboard button.c-W {{ background:#f2f2f2; color:#111; border-radius:50%; }}
+#gboard button.c-r {{ color:#e66; background:#2a1a1a; }}
+#gboard button.c-b {{ color:#9cf; background:#1a1a2a; }}
+#gboard button.c-last {{ outline:2px solid gold; }}
+#gboard button.c-sel {{ outline:2px solid #6cf; }}
+#ghint {{ font-size:12px; color:#888; margin-top:.35rem; }}
 </style>
 </head>
 <body>
@@ -191,10 +568,26 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
   </div>
   <div id="gate">
     <p class="warn">{html.escape(text['hint'].format(minutes=minutes))}</p>
+    <p>
+      <label for="remark">{html.escape(text['remark'])}</label><br>
+      <input id="remark" type="text" maxlength="{guest_sharing.MAX_REMARK_CHARS}" placeholder="{html.escape(text['remark_ph'])}" autocomplete="nickname">
+    </p>
     <p><button type="button" id="go">{html.escape(text['enter'])}</button></p>
     <p id="err" class="warn"></p>
   </div>
   <div id="chat">
+    <div id="game">
+      <div id="ghead">
+        <button type="button" id="gtog">{html.escape(text['game'])}</button>
+        <span id="gstat"></span>
+      </div>
+      <div id="gbody">
+        <div id="gacts"></div>
+        <div id="gnew"></div>
+        <div id="gboard"></div>
+        <div id="ghint"></div>
+      </div>
+    </div>
     <div id="log"></div>
     <form id="row">
       <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
@@ -223,8 +616,10 @@ function tick() {{
 }}
 function over(msg) {{
   append('\\n' + msg);
+  gDead = true;
   document.getElementById('msg').disabled = true;
   document.getElementById('pick').disabled = true;
+  document.getElementById('gtog').disabled = true;
   try {{ ws && ws.close(); }} catch (e) {{}}
 }}
 function append(s) {{
@@ -264,10 +659,11 @@ function proto() {{ return location.protocol === 'https:' ? 'wss:' : 'ws:'; }}
 function connect(tkt) {{
   ticket = tkt;
   ws = new WebSocket(proto() + '//' + location.host + '/guest/' + boot.token + '/ws?k=' + encodeURIComponent(ticket));
+  ws.onopen = function () {{ cmdGame('show'); }};
   ws.onmessage = function (ev) {{
     var m;
     try {{ m = JSON.parse(ev.data); }} catch (e) {{ return; }}
-    if (m.t === 'line') append(m.s);
+    if (m.t === 'line') {{ append(m.s); ingestGame(m.s); }}
     if (m.t === 'hello' && m.exp) exp = m.exp;
     if (m.t === 'end') over(m.why === 'timeout' ? L.expired : L.used);
   }};
@@ -306,10 +702,11 @@ function sendImage(file) {{
     }});
 }}
 document.getElementById('go').onclick = function () {{
+  var remark = (document.getElementById('remark') && document.getElementById('remark').value) || '';
   fetch('/guest/' + boot.token + '/join?lang=' + encodeURIComponent(boot.lang), {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: '{{}}'
+    body: JSON.stringify({{remark: remark}})
   }}).then(function (r) {{ return r.json().then(function (j) {{ return {{ok: r.ok, j: j}}; }}); }})
     .then(function (x) {{
       if (!x.ok || !x.j.ok) {{
@@ -317,7 +714,7 @@ document.getElementById('go').onclick = function () {{
         return;
       }}
       exp = x.j.exp;
-      document.getElementById('who').textContent = L.you + ' ' + x.j.nick + ' · #' + boot.room;
+      document.getElementById('who').textContent = L.you + ' ' + (x.j.label || x.j.nick) + ' · #' + boot.room;
       document.getElementById('gate').style.display = 'none';
       document.getElementById('chat').style.display = 'flex';
       connect(x.j.ticket);
@@ -353,6 +750,7 @@ document.getElementById('row').onsubmit = function (e) {{
   box.value = '';
 }};
 setInterval(tick, 250);
+{_GUEST_GAME_JS}
 </script>
 </body>
 </html>
@@ -397,13 +795,17 @@ def handle_guest_post(handler: "BaseHTTPRequestHandler") -> bool:
 def _handle_guest_join(handler: "BaseHTTPRequestHandler", token: str) -> bool:
     lang = _lang(handler)
     text = _TEXTS[lang]
+    body = {}
     if hasattr(handler, "_read_json_body"):
-        handler._read_json_body()  # type: ignore[attr-defined]
+        raw = handler._read_json_body()  # type: ignore[attr-defined]
+        if isinstance(raw, dict):
+            body = raw
     link, err = guest_sharing.guest_store.open_once(token)
     if link is None:
         _send_json(handler, 410, {"ok": False, "error": text.get(err, text["used"])})
         return True
     link.locale = lang
+    link.remark = guest_sharing.sanitize_remark(str(body.get("remark") or ""))
     _schedule_kick(link)
     _send_json(
         handler,
@@ -413,6 +815,7 @@ def _handle_guest_join(handler: "BaseHTTPRequestHandler", token: str) -> bool:
             "ticket": link.ws_ticket,
             "exp": int(link.chat_expires_at),
             "nick": link.nick,
+            "label": guest_sharing.display_nick(link.nick, link.remark),
             "room": link.room,
         },
     )
@@ -593,7 +996,17 @@ def _run_guest_ws(link: guest_sharing.GuestLink, sock) -> None:
             }
         )
         nick = link.nick or guest_sharing.random_guest_nick()
-        nick = attach(gconn, nick, link.room, link.locale, minutes=link.minutes) or nick
+        nick = (
+            attach(
+                gconn,
+                nick,
+                link.room,
+                link.locale,
+                minutes=link.minutes,
+                remark=link.remark,
+            )
+            or nick
+        )
         attached = True
         link.nick = nick
         while not gconn.closed:

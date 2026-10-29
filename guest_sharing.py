@@ -24,6 +24,8 @@ MAX_MSG_CHARS = 500
 # Guest page image uploads (jpeg/png/gif/webp); keep small for short-lived links.
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+# Optional display remark shown as `~gxxxxxx (备注)` — not an identity nick.
+MAX_REMARK_CHARS = 16
 
 
 def looks_like_image(data: bytes, filename: str = "") -> bool:
@@ -71,6 +73,57 @@ def is_guest_nick(name: str) -> bool:
     return (name or "").startswith("~g")
 
 
+def sanitize_remark(raw: str) -> str:
+    """Optional human label for guests. Never becomes the login nick."""
+    text = (raw or "").replace("\x00", "")
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+    low = text.lower()
+    if low.startswith("~") or low.startswith("/"):
+        return ""
+    for ch in ("[", "]", "(", ")", "{", "}", "|", "/", "\\", "@"):
+        text = text.replace(ch, " ")
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+    if len(text) > MAX_REMARK_CHARS:
+        text = text[:MAX_REMARK_CHARS].rstrip()
+    return text
+
+
+def display_nick(nick: str, remark: str = "") -> str:
+    """Chat label: `~gabc123` or `~gabc123 (小明)`."""
+    base = (nick or "").strip() or "?"
+    note = sanitize_remark(remark)
+    if note:
+        return f"{base} ({note})"
+    return base
+
+
+# Guests may play via the web UI, which sends /game. Not /game end/on/off.
+GUEST_GAME_SUBS = frozenset(
+    {"help", "list", "show", "seats", "join", "move", "new", "resign", "draw"}
+)
+
+
+def guest_allowed_slash(payload: str) -> bool:
+    """True if a guest may send this line (chat, or a playable /game subcommand)."""
+    raw = (payload or "").strip()
+    if not raw.startswith("/"):
+        return True
+    parts = raw.split(None, 1)
+    if not parts or parts[0].lower() != "/game":
+        return False
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    if not rest:
+        return True
+    sub = rest.split(None, 1)[0].lower()
+    if sub in {"求和"}:
+        sub = "draw"
+    return sub in GUEST_GAME_SUBS
+
+
 def parse_minutes(arg: str) -> tuple[Optional[int], str]:
     """Parse `/guest 10`. Returns (minutes, '') or (None, 'usage'|'range')."""
     raw = (arg or "").strip()
@@ -93,6 +146,7 @@ class GuestLink:
     chat_expires_at: float = 0.0
     ws_ticket: str = ""
     nick: str = ""
+    remark: str = ""
     locale: str = "en"
     minutes: int = DEFAULT_MINUTES
     closed: bool = False

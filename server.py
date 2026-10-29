@@ -7816,12 +7816,28 @@ def _deliver_clock_url(
             print(f"[Clock] notify failed: {e}")
 
 
+def _guest_label(info: dict | None) -> str:
+    """Chat display: guests may add a remark in parentheses."""
+    if not info:
+        return "?"
+    name = str(info.get("name") or "")
+    if info.get("guest"):
+        return guest_sharing.display_nick(name, str(info.get("remark") or ""))
+    return name
+
+
 def attach_guest(
-    conn, name: str, room: str, locale: str = "en", minutes: int | None = None
+    conn,
+    name: str,
+    room: str,
+    locale: str = "en",
+    minutes: int | None = None,
+    remark: str = "",
 ) -> str:
     """Put a web guest into a room. Nick must already be a random `~g…` name."""
     nick = name if guest_sharing.is_guest_nick(name) else guest_sharing.random_guest_nick()
     mins = guest_sharing.DEFAULT_MINUTES if minutes is None else minutes
+    note = guest_sharing.sanitize_remark(remark)
     with lock:
         existing = {
             str(info.get("name") or "").lower() for info in clients.values()
@@ -7834,19 +7850,21 @@ def attach_guest(
             "current_room": room,
             "locale": locale,
             "guest": True,
+            "remark": note,
         }
         rooms[room].add(conn)
-    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=nick, minutes=mins))
+    label = guest_sharing.display_nick(nick, note)
+    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=label, minutes=mins))
     broadcast_room(
         room,
-        f"[+] {nick} joined #{room}\n".encode("utf-8"),
+        f"[+] {label} joined #{room}\n".encode("utf-8"),
         exclude_conn=conn,
         skip_federation=True,
     )
     hub = federation.get_hub()
     if hub is not None and hub.enabled:
         hub.notify_join(nick, room)
-    print(f"{nick} joined #{room} (guest)")
+    print(f"{label} joined #{room} (guest)")
     return nick
 
 
@@ -7962,7 +7980,13 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
         return
     # Prefer a live Cloudflare / public base. Tunnel helper remints on a timer;
     # wait briefly so phones do not get a LAN/virtual IP during the gap.
-    base, is_public = file_http_server.wait_for_public_base_url(file_http.get_base_url)
+    wait = getattr(file_http_server, "wait_for_public_base_url", None)
+    if callable(wait):
+        base, is_public = wait(file_http.get_base_url)
+    else:
+        base = (file_http.get_base_url() or "").rstrip("/")
+        check = getattr(file_http_server, "is_externally_reachable_url", None)
+        is_public = bool(check(base)) if callable(check) else False
     if not base:
         base = (file_http.get_base_url() or "").rstrip("/")
     url = f"{base.rstrip('/')}/guest/{link.token}"
@@ -10158,6 +10182,7 @@ def remove_client(conn) -> None:
                 pass
             return
         name = info["name"]
+        leave_label = _guest_label(info)
         joined_rooms = list(info["rooms"])
         current_room = info.get("current_room", DEFAULT_ROOM)
         library_reading.pop(conn, None)
@@ -10251,7 +10276,7 @@ def remove_client(conn) -> None:
             and hub.enabled
             and hub.same_name_in_room(room, name, False)
         )
-        leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
+        leave_msg = f"[!] {leave_label} left #{room}\n".encode("utf-8")
         # Local delivery only: federation uses notify_leave (presence), not msg,
         # otherwise peers see the leave line twice. Skip the local notice when the
         # same nick is still visible via federation (multi-device), but always
@@ -10676,7 +10701,12 @@ def handle_command(conn, payload: str) -> None:
         return
 
     if cmd in ("/guest", "/tmplink"):
-        _handle_guest(conn, name, payload)
+        try:
+            _handle_guest(conn, name, payload)
+        except Exception as e:
+            print(f"/guest error: user={name} payload={payload!r} err={e!r}")
+            traceback.print_exc()
+            send_line(conn, _ts(conn, "guest_cmd_fail"))
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -11307,9 +11337,10 @@ def process_client_line(conn, raw_line: bytes) -> None:
         room = info["current_room"]
         name = info["name"]
         is_guest = bool(info.get("guest"))
+        label = _guest_label(info)
 
     if is_guest:
-        if payload.startswith("/"):
+        if payload.startswith("/") and not guest_sharing.guest_allowed_slash(payload):
             send_line(conn, _ts(conn, "guest_no_commands"))
             return
         if len(payload) > guest_sharing.MAX_MSG_CHARS:
@@ -11323,7 +11354,7 @@ def process_client_line(conn, raw_line: bytes) -> None:
         handle_command(conn, payload)
         return
 
-    line_out = f"[#{room}] [{name}] {payload}\n".encode("utf-8")
+    line_out = f"[#{room}] [{label}] {payload}\n".encode("utf-8")
     broadcast_room(room, line_out)
 
 

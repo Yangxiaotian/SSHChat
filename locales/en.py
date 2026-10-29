@@ -66,7 +66,7 @@ MESSAGES: dict = {
         "[*]              Details: /clock help. After you move, tap your side (top/bottom).\n",
         "[*]              GUI clients open the board automatically; in a terminal, copy the URL into a browser.\n",
         "[*] /guest [min]   Private one-shot web chat link (no SSH key; default 5 minutes, 1–60).\n",
-        "[*]              They may open it once; text and images OK; countdown shows minutes and seconds. Refresh kills it. Nick is random. Alias /tmplink.\n",
+        "[*]              They may open it once; text, images, and the page game panel are OK; optional remark shows as ~g… (remark). Countdown shows minutes and seconds. Refresh kills it. Nick is random. Alias /tmplink.\n",
         "[*] /guest close   Revoke your guest link(s) in this room.\n",
         "[*] /help          Show this help.\n",
     ],
@@ -307,16 +307,19 @@ MESSAGES: dict = {
         "guest_http_off": (
             "[*] Guest chat links need the file web service, which is currently off.\n"
         ),
+        "guest_cmd_fail": (
+            "[*] Could not create the guest link; try again later (see server log).\n"
+        ),
         "guest_usage": (
             "[*] Usage: /guest [min]   private one-shot web link; default 5 minutes, 1–60\n"
             "[*]         /guest close  revoke your unused or live links in this room\n"
-            "[*] Send the URL out of band (chat app, SMS). They may open it once; text and images are allowed; countdown shows minutes and seconds. Refresh kills it. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
+            "[*] Send the URL out of band (chat app, SMS). They may open it once; text, images, and the page game panel are allowed; optional remark shows as ~g… (remark). Countdown shows minutes and seconds. Refresh kills it. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
         ),
         "guest_bad_minutes": "[*] Minutes must be an integer from 1 to 60 (default 5).\n",
         "guest_created": (
             "[*] Temporary chat link (only you can see this — send it yourself, do not open it):\n"
             "[*] {url}\n"
-            "[*] Room #{room}. One open, then {minutes} minutes (text + images) with a mm:ss countdown; refresh kills it. Guest nick is random (~g…). Unused links expire in 30 minutes. Revoke: /guest close\n"
+            "[*] Room #{room}. One open, then {minutes} minutes (text, images, game panel) with a mm:ss countdown; refresh kills it. Guest nick is random (~g…). Unused links expire in 30 minutes. Revoke: /guest close\n"
         ),
         "guest_closed": "[*] Revoked {n} guest chat link(s) in #{room}.\n",
         "guest_none": "[*] You have no guest chat links in #{room}.\n",
@@ -325,8 +328,8 @@ MESSAGES: dict = {
             "[*] Note: no Cloudflare public hostname yet (link may be a LAN/virtual IP). "
             "The tunnel helper remints on a timer; try /guest again shortly, or check sshchat-cloudflared.\n"
         ),
-        "guest_no_commands": "[*] Guest links can only send chat text and images, not slash commands.\n",
-        "guest_welcome": "[*] You are {nick} in #{room} for {minutes} minutes. Text and images OK. Do not refresh.\n",
+        "guest_no_commands": "[*] Guests may send chat and images, and play via the game panel; other slash commands are blocked.\n",
+        "guest_welcome": "[*] You are {nick} in #{room} for {minutes} minutes. Text, images, and the game panel are OK. Do not refresh.\n",
         "lang_usage": "[*] Usage: /lang [en|zh]\n",
         "lang_set": "[*] UI language set to {lang}.\n",
         "lang_current": "[*] Current UI language: {lang}\n",

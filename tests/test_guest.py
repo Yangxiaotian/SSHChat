@@ -33,13 +33,14 @@ class DummyConn:
 
 
 class FakeHandler:
-    def __init__(self, path: str, *, lang: str = "zh") -> None:
+    def __init__(self, path: str, *, lang: str = "zh", json_body: dict | None = None) -> None:
         self.path = path
         self.headers = {"Accept-Language": lang}
         self.status = 0
         self.sent_headers: list[tuple[str, str]] = []
         self.body = io.BytesIO()
         self.wfile = self.body
+        self._json_body = json_body if json_body is not None else {"nick": "alice"}
 
     def send_response(self, code, _message=None):
         self.status = code
@@ -51,7 +52,7 @@ class FakeHandler:
         pass
 
     def _read_json_body(self, limit: int = 64 * 1024) -> dict:
-        return {"nick": "alice"}
+        return dict(self._json_body)
 
 
 class GuestStoreTests(unittest.TestCase):
@@ -120,6 +121,21 @@ class GuestStoreTests(unittest.TestCase):
         self.assertNotEqual(link.nick, "~alice")
         self.assertNotIn("alice", link.nick.lower())
         self.assertTrue(guest_sharing.is_guest_nick(link.nick))
+        self.assertEqual(link.remark, "")
+
+    def test_join_keeps_optional_remark(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        handler = FakeHandler(
+            f"/guest/{link.token}/join", json_body={"remark": "小明", "nick": "alice"}
+        )
+        self.assertTrue(guest_http.handle_guest_post(handler))
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(guest_sharing.is_guest_nick(link.nick))
+        self.assertNotIn("alice", link.nick.lower())
+        self.assertEqual(link.remark, "小明")
+        payload = handler.body.getvalue().decode("utf-8")
+        self.assertIn("(小明)", payload)
 
 
 class GuestCommandTests(unittest.TestCase):
@@ -151,7 +167,7 @@ class GuestCommandTests(unittest.TestCase):
     def test_bind_chat_uses_this_server_not_a_second_import(self) -> None:
         seen: list[str] = []
 
-        def fake_attach(conn, name, room, locale="en"):
+        def fake_attach(conn, name, room, locale="en", **_kw):
             seen.append(f"{name}@{room}")
             return name
 
@@ -213,10 +229,57 @@ class GuestCommandTests(unittest.TestCase):
         self.assertNotEqual(nick.lower(), "alice")
         gconn.sent.clear()
         server.process_client_line(gconn, b"/help")
-        self.assertIn("Guest links can only send chat text and images", self._out(gconn))
+        self.assertIn("other slash commands are blocked", self._out(gconn))
         gconn.sent.clear()
         server.process_client_line(gconn, b"hello from guest")
         self.assertIn("[#lobby] [" + nick + "] hello from guest", self._out(self.alice))
+
+    def test_guest_can_use_game_play_commands_but_not_end(self) -> None:
+        gconn = DummyConn()
+        server.attach_guest(gconn, "alice", "lobby", "en")
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game show")
+        out = self._out(gconn)
+        self.assertNotIn("other slash commands are blocked", out)
+        self.assertTrue(out)
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game end")
+        self.assertIn("other slash commands are blocked", self._out(gconn))
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game on")
+        self.assertIn("other slash commands are blocked", self._out(gconn))
+
+    def test_guest_allowed_slash_whitelist(self) -> None:
+        self.assertTrue(guest_sharing.guest_allowed_slash("hi"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game show"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game join"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game move 8 8"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game new gomoku"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game resign"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/help"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game end"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game abort"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game on"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game off"))
+
+    def test_guest_remark_shows_in_parentheses(self) -> None:
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "alice", "lobby", "en", remark="小明")
+        self.assertTrue(guest_sharing.is_guest_nick(nick))
+        self.assertIn("[+] " + nick + " (小明) joined #lobby", self._out(self.alice))
+        gconn.sent.clear()
+        self.alice.sent.clear()
+        server.process_client_line(gconn, b"hi")
+        self.assertIn("[#lobby] [" + nick + " (小明)] hi", self._out(self.alice))
+        self.assertNotIn("[#lobby] [小明]", self._out(self.alice))
+
+    def test_sanitize_remark_strips_identity_tricks(self) -> None:
+        self.assertEqual(guest_sharing.sanitize_remark("  小明  "), "小明")
+        self.assertEqual(guest_sharing.sanitize_remark("~admin"), "")
+        self.assertEqual(guest_sharing.sanitize_remark("/help"), "")
+        self.assertNotIn("[", guest_sharing.sanitize_remark("a[b]c"))
+        self.assertLessEqual(len(guest_sharing.sanitize_remark("x" * 40)), 16)
 
     def test_publish_guest_image_notifies_room(self) -> None:
         # Minimal 1x1 PNG
@@ -262,10 +325,16 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("分", page)
         self.assertIn("秒", page)
         self.assertNotIn('id="nick"', page)
+        self.assertIn('id="remark"', page)
         self.assertIn("/guest/", page)
         self.assertIn('id="pick"', page)
         self.assertIn("/guest/' + boot.token + '/image", page)
         self.assertIn("可发文字和图片", page)
+        self.assertIn('id="game"', page)
+        self.assertIn('id="gboard"', page)
+        self.assertIn("function cmdGame", page)
+        self.assertIn("/game ", page)
+        self.assertIn("gomoku", page)
 
 
 if __name__ == "__main__":
