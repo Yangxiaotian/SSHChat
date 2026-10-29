@@ -226,6 +226,11 @@ _CLOCK_SUBCOMMANDS = {
 _GUEST_SUBCOMMANDS = {
     "help": None,
     "close": None,
+    "5": None,
+    "10": None,
+    "15": None,
+    "30": None,
+    "60": None,
 }
 
 _FED_SUBCOMMANDS = {

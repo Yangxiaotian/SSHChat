@@ -37,8 +37,8 @@ object CommandCompletions {
         "/poll" to listOf("new", "close", "help", "show"),
         "/later" to listOf("list", "ls", "show", "cancel", "help"),
         "/clock" to listOf("help", "close", "new"),
-        "/guest" to listOf("help", "close"),
-        "/tmplink" to listOf("help", "close"),
+        "/guest" to listOf("help", "close", "5", "10", "15", "30", "60"),
+        "/tmplink" to listOf("help", "close", "5", "10", "15", "30", "60"),
     )
 
     private val NESTED = mapOf(

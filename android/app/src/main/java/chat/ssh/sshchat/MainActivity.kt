@@ -686,9 +686,59 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
             return
         }
-        appendLine("[*] 正在生成访客临时链接…（/guest）")
+        if (isFinishing || isDestroyed) return
+        val presets = intArrayOf(5, 10, 15, 30, 60)
+        val labels = arrayOf("5 分钟", "10 分钟", "15 分钟", "30 分钟", "60 分钟", "自定义…")
+        AlertDialog.Builder(this)
+            .setTitle("临时聊天时长")
+            .setItems(labels) { _, which ->
+                if (which in presets.indices) sendGuest(presets[which])
+                else showGuestCustomMinutes()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showGuestCustomMinutes() {
+        if (isFinishing || isDestroyed) return
+        val pad = dp(20)
+        val et = android.widget.EditText(this).apply {
+            hint = "1～60"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText("5")
+            setSelection(text.length)
+        }
+        val wrap = FrameLayout(this).apply {
+            setPadding(pad, dp(8), pad, 0)
+            addView(et)
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("自定义分钟")
+            .setMessage("对方进入后开始倒计时，最长 60 分钟")
+            .setView(wrap)
+            .setPositiveButton("生成", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val n = et.text?.toString()?.trim()?.toIntOrNull()
+                if (n == null || n !in 1..60) {
+                    Toast.makeText(this, "请填写 1～60 的整数分钟", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                sendGuest(n)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun sendGuest(minutes: Int) {
+        val mins = minutes.coerceIn(1, 60)
+        val cmd = "/guest $mins"
+        appendLine("[*] 正在生成访客临时链接…（$cmd）")
         CommandUsage.record("/guest")
-        client?.send("/guest")
+        client?.send(cmd)
     }
 
     private fun openPollMenu() {

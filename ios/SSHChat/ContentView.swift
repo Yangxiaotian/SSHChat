@@ -53,6 +53,9 @@ final class ChatViewModel: ObservableObject {
     @Published var showSendTargetPicker = false
     @Published var showPadEditor = false
     @Published var padEditorText = ""
+    @Published var showGuestMenu = false
+    @Published var showGuestCustom = false
+    @Published var guestMinutesDraft = "5"
     @Published var showPollMenu = false
     @Published var showPollEditor = false
     @Published var pollQuestion = ""
@@ -478,9 +481,30 @@ final class ChatViewModel: ObservableObject {
 
     func startGuest() {
         guard connected else { toast = "请先连接"; return }
-        appendText("[*] 正在生成访客临时链接…（/guest）")
+        showGuestMenu = true
+    }
+
+    func sendGuest(minutes: Int) {
+        guard connected else { toast = "请先连接"; return }
+        let mins = min(60, max(1, minutes))
+        let cmd = "/guest \(mins)"
+        appendText("[*] 正在生成访客临时链接…（\(cmd)）")
         CommandUsage.record("/guest")
-        Task { try? await session.send("/guest") }
+        Task { try? await session.send(cmd) }
+    }
+
+    func openGuestCustom() {
+        guestMinutesDraft = "5"
+        showGuestCustom = true
+    }
+
+    func sendGuestCustom() {
+        let raw = guestMinutesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let n = Int(raw), (1...60).contains(n) else {
+            toast = "请填写 1～60 的整数分钟"
+            return
+        }
+        sendGuest(minutes: n)
     }
 
     func openPollMenu() {
@@ -1374,6 +1398,30 @@ struct ContentView: View {
             Button("从相册选择") { model.launchPhotoLibrary() }
             Button("录像发送") { model.launchCameraVideo() }
             Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("临时聊天时长", isPresented: $model.showGuestMenu, titleVisibility: .visible) {
+            Button("5 分钟") { model.sendGuest(minutes: 5) }
+            Button("10 分钟") { model.sendGuest(minutes: 10) }
+            Button("15 分钟") { model.sendGuest(minutes: 15) }
+            Button("30 分钟") { model.sendGuest(minutes: 30) }
+            Button("60 分钟") { model.sendGuest(minutes: 60) }
+            Button("自定义…") {
+                Task {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    model.openGuestCustom()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("对方进入后开始倒计时，最长 60 分钟")
+        }
+        .alert("自定义分钟", isPresented: $model.showGuestCustom) {
+            TextField("1～60", text: $model.guestMinutesDraft)
+                .keyboardType(.numberPad)
+            Button("生成") { model.sendGuestCustom() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("进入后的聊天时长（分钟）")
         }
         .confirmationDialog("房间投票", isPresented: $model.showPollMenu, titleVisibility: .visible) {
             Button("发起投票") { model.startPollCreate() }

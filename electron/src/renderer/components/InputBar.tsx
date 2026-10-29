@@ -101,6 +101,8 @@ const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
   '/poll': ['new', 'close', 'help', 'show'],
   '/later': ['list', 'ls', 'show', 'cancel', 'help'],
   '/clock': ['help', 'close', 'new'],
+  '/guest': ['help', 'close', '5', '10', '15', '30', '60'],
+  '/tmplink': ['help', 'close', '5', '10', '15', '30', '60'],
 };
 
 function subcommandSuggestions(value: string): SuggestionItem[] {

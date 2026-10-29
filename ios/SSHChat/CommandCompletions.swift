@@ -76,8 +76,8 @@ enum CommandCompletions {
         "/poll": ["new", "close", "help", "show"],
         "/later": ["list", "ls", "show", "cancel", "help"],
         "/clock": ["help", "close", "new"],
-        "/guest": ["help", "close"],
-        "/tmplink": ["help", "close"],
+        "/guest": ["help", "close", "5", "10", "15", "30", "60"],
+        "/tmplink": ["help", "close", "5", "10", "15", "30", "60"],
     ]
 
     private static let nested: [String: [String]] = [
