@@ -131,9 +131,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=$HELPER
-Restart=on-failure
-# Boot often races WAN/DNS; retry quickly instead of waiting 5 minutes.
-RestartSec=30
+# Helper self-remints Quick Tunnels; always restart if the outer process dies.
+Restart=always
+RestartSec=15
 Environment=SSHCHAT_ENV_FILE=$ENV_FILE
 Environment=SSHCHAT_FILE_LOCAL_URL=$LOCAL_URL
 Environment=SSHCHAT_PREFIX=$PREFIX
@@ -223,7 +223,7 @@ install_macos_daemon() {
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>
-  <integer>60</integer>
+  <integer>15</integer>
   <key>StandardOutPath</key>
   <string>$STATE_DIR/launchd.out</string>
   <key>StandardErrorPath</key>
@@ -434,6 +434,22 @@ probe_public_url() {
     echo "error: PUBLIC_URL has no DNS A record (NXDOMAIN?): $host" >&2
     echo "hint: Cloudflare Quick Tunnel sometimes mint a name that never resolves; restart tunnel for a new URL" >&2
     return 2
+  fi
+
+  # Clash TUN fake-ip (198.18.x): local dig/HTTP are poisoned; phones use real DNS.
+  # Accept the URL once cloudflared has registered (ha>=1) or metrics are up.
+  if [[ "$ip" =~ ^198\.18\. ]]; then
+    local ha=0
+    ha=$(curl -s --noproxy '*' --max-time 2 http://127.0.0.1:20241/metrics 2>/dev/null \
+      | awk '/^cloudflared_tunnel_ha_connections/{print int($NF); found=1; exit} END{if(!found) exit 1}' || echo 0)
+    if [[ "${ha:-0}" -ge 1 ]]; then
+      echo "warning: Clash fake-ip DNS ($ip); trusting connector ha=$ha and advertising $url" >&2
+      echo "info: PUBLIC_URL=$url (clash-tolerant)"
+      return 0
+    fi
+    echo "warning: Clash fake-ip DNS ($ip) and ha=$ha; still accepting Quick Tunnel URL for phones" >&2
+    echo "info: PUBLIC_URL=$url (clash-tolerant)"
+    return 0
   fi
 
   _probe_http() {

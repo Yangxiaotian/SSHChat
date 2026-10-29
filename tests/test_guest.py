@@ -213,10 +213,42 @@ class GuestCommandTests(unittest.TestCase):
         self.assertNotEqual(nick.lower(), "alice")
         gconn.sent.clear()
         server.process_client_line(gconn, b"/help")
-        self.assertIn("Guest links can only send chat text", self._out(gconn))
+        self.assertIn("Guest links can only send chat text and images", self._out(gconn))
         gconn.sent.clear()
         server.process_client_line(gconn, b"hello from guest")
         self.assertIn("[#lobby] [" + nick + "] hello from guest", self._out(self.alice))
+
+    def test_publish_guest_image_notifies_room(self) -> None:
+        # Minimal 1x1 PNG
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00"
+            b"\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+            b"\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "~gabcdef", "lobby", "en")
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            ok, err = server.publish_guest_image(nick, "lobby", "hi.png", png)
+        self.assertTrue(ok, err)
+        self.assertEqual(err, "")
+        # Upload-complete callback is async; mark_upload_complete already ran.
+        # Recipients should include Alice/Bob once notify fires — poll store.
+        store = __import__("file_sharing", fromlist=["file_transfer_store"]).file_transfer_store
+        found = [
+            t
+            for t in store.transfers.values()
+            if t.sender == nick and t.upload_used and t.filename.endswith(".png")
+        ]
+        self.assertTrue(found)
+        self.assertIn("Alice", found[0].download_tokens)
+        self.assertIn("Bob", found[0].download_tokens)
+
+    def test_looks_like_image_rejects_text(self) -> None:
+        self.assertFalse(guest_sharing.looks_like_image(b"hello", "x.txt"))
+        self.assertTrue(guest_sharing.looks_like_image(b"\xff\xd8\xff\xe0", "x.bin"))
 
 
 class GuestPageTests(unittest.TestCase):
@@ -231,6 +263,9 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("秒", page)
         self.assertNotIn('id="nick"', page)
         self.assertIn("/guest/", page)
+        self.assertIn('id="pick"', page)
+        self.assertIn("/guest/' + boot.token + '/image", page)
+        self.assertIn("可发文字和图片", page)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,11 @@ object SecureInvite {
         """^https?://\S+/clock/[A-Za-z0-9_-]+/?$""",
         RegexOption.IGNORE_CASE,
     )
+    /** Bare private /guest one-shot URL line (mobile auto-copies to clipboard). */
+    private val guestUrlOnly = Regex(
+        """^https?://\S+/guest/[A-Za-z0-9_-]+/?$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val metaLine = Regex(
         """^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|房间|发送者|正在播放|""" +
             """From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]""",
@@ -112,6 +117,13 @@ object SecureInvite {
     fun parseClockUrl(line: String): String? {
         val t = normalize(line)
         val m = clockUrlOnly.matchEntire(t) ?: return null
+        return m.value.trimEnd('/')
+    }
+
+    /** Private /guest link line from `guest_created` (only the creator sees it). */
+    fun parseGuestUrl(line: String): String? {
+        val t = normalize(line)
+        val m = guestUrlOnly.matchEntire(t) ?: return null
         return m.value.trimEnd('/')
     }
 

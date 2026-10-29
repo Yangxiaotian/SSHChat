@@ -238,6 +238,38 @@ def needs_federation_file_proxy(base_url: Optional[str] = None) -> bool:
     return not is_externally_reachable_url(base_url or "")
 
 
+def wait_for_public_base_url(
+    get_base_url,
+    *,
+    timeout: Optional[float] = None,
+    poll: float = 0.5,
+) -> tuple[str, bool]:
+    """Poll until get_base_url() looks public (Cloudflare latch back), or timeout.
+
+    Returns (base_url, is_public). Used by /guest so a brief tunnel remint can
+    finish instead of handing out a LAN/virtual IP.
+    """
+    try:
+        default_timeout = float(os.environ.get("SSHCHAT_GUEST_WAIT_PUBLIC_SEC", "12") or "12")
+    except ValueError:
+        default_timeout = 12.0
+    limit = default_timeout if timeout is None else float(timeout)
+    if limit < 0:
+        limit = 0.0
+    deadline = time.monotonic() + limit
+    last = ""
+    while True:
+        try:
+            last = str(get_base_url() or "").strip().rstrip("/")
+        except Exception:
+            last = ""
+        if is_externally_reachable_url(last):
+            return last, True
+        if time.monotonic() >= deadline:
+            return last, False
+        time.sleep(max(0.1, float(poll)))
+
+
 def content_disposition(filename: str, inline: bool) -> str:
     """Build a Content-Disposition header that survives non-ASCII filenames."""
     disposition = "inline" if inline else "attachment"

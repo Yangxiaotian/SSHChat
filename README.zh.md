@@ -202,7 +202,7 @@ git fetch github develop && git checkout -B develop github/develop
 | `SSHCHAT_TICKET_TTL_SECONDS` | 预览/下载一次性链接的有效期，默认 `600`（10 分钟） |
 | `SSHCHAT_MAX_PREVIEW_SIZE` | 超过这个大小就不预览、直接走下载，默认 25MB |
 
-Quick Tunnel 无账号、**每次成功部署都会停掉旧隧道并换新的 `*.trycloudflare.com`**，同时写回 `sshchat.env` 并重启聊天服务。进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活。若被 Cloudflare 限流，可稍后执行仓库里的 `scripts/start-cloudflared-once.sh`。
+Quick Tunnel 无账号、**每次成功部署都会停掉旧隧道并换新的 `*.trycloudflare.com`**，同时写回 `sshchat.env`。进程由 `sshchat-cloudflared`（Linux systemd）或 `com.sshchat.cloudflared`（macOS LaunchDaemon）保活：定时探测公网健康，失败则摘掉旧域名、自动重开隧道（限流时会拉长冷却）。`/guest` 生成链接时也会短暂等待公网域名恢复，避免短暂空窗期发到内网/虚拟 IP。若被 Cloudflare 长时间限流，可执行仓库里的 `scripts/start-cloudflared-once.sh`。
 
 ### 2. 给聊天的人开账号并登记公钥
 
@@ -488,7 +488,7 @@ npm run build:portable
 | `/clock` | 当前房间棋钟（全屏网页，可在 Kindle 打开，设备上计时） |
 | `/clock 10+5` | 每方 10 分钟，每步加 5 秒 |
 | `/clock close` / `/clock new` | 发起人关闭当前房间棋钟；强制新开 |
-| `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（默认 5 分钟，`/guest 10` 可改时长；昵称随机）。别名 `/tmplink` |
+| `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（默认 5 分钟，`/guest 10` 可改时长；昵称随机；访客可发文字和图片）。别名 `/tmplink` |
 | `/guest close` | 作废你在本房生成的临时链接 |
 | `/leave` | 查看你发出、对方尚未阅读的留言 |
 | `/leave 昵称` | 只看发给该昵称的未读留言（带编号） |

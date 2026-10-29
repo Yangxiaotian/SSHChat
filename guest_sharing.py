@@ -21,6 +21,42 @@ CHAT_TTL_SEC = DEFAULT_MINUTES * 60
 UNUSED_TTL_SEC = 30 * 60
 MAX_ACTIVE_PER_CREATOR = 5
 MAX_MSG_CHARS = 500
+# Guest page image uploads (jpeg/png/gif/webp); keep small for short-lived links.
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def looks_like_image(data: bytes, filename: str = "") -> bool:
+    """True if bytes look like a common image (magic) or filename ends with one."""
+    if not data:
+        return False
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return True
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    name = (filename or "").lower()
+    return any(name.endswith(ext) for ext in IMAGE_EXTS)
+
+
+def image_ext_for(data: bytes, filename: str = "") -> str:
+    """Pick a safe extension from magic bytes, else from filename, else .img."""
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    name = (filename or "").lower()
+    for ext in IMAGE_EXTS:
+        if name.endswith(ext):
+            return ext
+    return ".img"
 # `~` is not allowed in Linux usernames (admin-add-user.sh), so this can never
 # collide with a pubkey account. The rest is random — guests do not pick a nick.
 _NICK_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"

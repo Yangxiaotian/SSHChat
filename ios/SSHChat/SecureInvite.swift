@@ -67,6 +67,21 @@ enum SecureInvite {
         return url
     }
 
+    /// Private /guest one-shot URL from `guest_created` (mobile auto-copies).
+    static func parseGuestUrl(_ line: String) -> String? {
+        let t = normalize(line)
+        guard let re = try? NSRegularExpression(
+            pattern: #"^https?://\S+/guest/[A-Za-z0-9_-]+/?$"#,
+            options: [.caseInsensitive]
+        ),
+        let m = re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+        let r = Range(m.range, in: t)
+        else { return nil }
+        var url = String(t[r])
+        while url.hasSuffix("/") { url.removeLast() }
+        return url
+    }
+
     /// Native AVPlayer uses URLSession, which needs Local Network permission for
     /// LAN IPs; WKWebView does not (TN3179). Prefer WebView for http / private hosts.
     static func supportsNativeMusicPlayer(_ url: String) -> Bool {

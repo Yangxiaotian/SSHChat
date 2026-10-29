@@ -241,6 +241,14 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startPadEdit()
         }
+        binding.btnGuest.setOnClickListener {
+            hidePlusPanel()
+            startGuest()
+        }
+        binding.btnPoll.setOnClickListener {
+            hidePlusPanel()
+            openPollMenu()
+        }
         binding.btnClear.setOnClickListener {
             hidePlusPanel()
             clearScreen(announce = true)
@@ -671,6 +679,154 @@ class MainActivity : AppCompatActivity() {
         appendLine("[*] 正在打开点歌…（/music play）")
         CommandUsage.record("/music play")
         client?.send("/music play")
+    }
+
+    private fun startGuest() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLine("[*] 正在生成访客临时链接…（/guest）")
+        CommandUsage.record("/guest")
+        client?.send("/guest")
+    }
+
+    private fun openPollMenu() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = arrayOf("发起投票", "查看当前投票", "结束投票")
+        AlertDialog.Builder(this)
+            .setTitle("房间投票")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showPollCreateDialog()
+                    1 -> {
+                        appendLine("[*] 查看当前投票…（/poll）")
+                        CommandUsage.record("/poll")
+                        client?.send("/poll")
+                    }
+                    2 -> {
+                        appendLine("[*] 结束投票…（/poll close）")
+                        CommandUsage.record("/poll close")
+                        client?.send("/poll close")
+                    }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showPollCreateDialog() {
+        if (isFinishing || isDestroyed) return
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pad = dp(16)
+        val gap = dp(8)
+        val question = android.widget.EditText(this).apply {
+            hint = "问题（如：今晚吃啥）"
+            maxLines = 2
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
+        val optionsBox = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        fun addOptionField(hintText: String) {
+            if (optionsBox.childCount >= 8) {
+                Toast.makeText(this, "最多 8 个选项", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val et = android.widget.EditText(this).apply {
+                hint = hintText
+                maxLines = 1
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            }
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = gap }
+            optionsBox.addView(et, lp)
+        }
+        addOptionField("选项 1")
+        addOptionField("选项 2")
+        val addBtn = android.widget.Button(this).apply {
+            text = "添加选项"
+            setOnClickListener {
+                addOptionField("选项 ${optionsBox.childCount + 1}")
+                isEnabled = optionsBox.childCount < 8
+            }
+        }
+        val form = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, dp(8), pad, dp(4))
+            addView(
+                question,
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                optionsBox,
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                addBtn,
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = gap },
+            )
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(form) }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("发起投票")
+            .setView(scroll)
+            .setPositiveButton("发起", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val q = question.text?.toString().orEmpty().replace("|", " ").trim()
+                if (q.isEmpty()) {
+                    Toast.makeText(this, "请填写问题", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                if (q.length > 120) {
+                    Toast.makeText(this, "问题过长（最多 120 字）", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val opts = mutableListOf<String>()
+                for (i in 0 until optionsBox.childCount) {
+                    val et = optionsBox.getChildAt(i) as? android.widget.EditText ?: continue
+                    val t = et.text?.toString().orEmpty().replace("|", " ").trim()
+                    if (t.isEmpty()) continue
+                    if (t.length > 60) {
+                        Toast.makeText(this, "选项过长（最多 60 字）", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    opts.add(t)
+                }
+                if (opts.size < 2) {
+                    Toast.makeText(this, "至少需要 2 个选项", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val cmd = "/poll new " + (listOf(q) + opts).joinToString(" | ")
+                appendLine("[*] 正在发起投票…")
+                CommandUsage.record("/poll new")
+                client?.send(cmd)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
     }
 
     private fun cancelPadEditWait() {
@@ -1417,6 +1573,13 @@ class MainActivity : AppCompatActivity() {
             startActivity(WebInviteActivity.clock(this, clockUrl))
             return
         }
+        SecureInvite.parseGuestUrl(stripped)?.let { guestUrl ->
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("sshchat-guest", guestUrl))
+            Toast.makeText(this, "临时链接已复制，可粘贴发给对方", Toast.LENGTH_SHORT).show()
+            appendLine(stripped)
+            return
+        }
         if (pendingUpload != null && SecureInvite.isSendfileFailure(stripped)) {
             cancelUploadWait()
             pendingUpload = null
@@ -1880,6 +2043,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnClock.isEnabled = on
         binding.btnBoard.isEnabled = on
         binding.btnPad.isEnabled = on
+        binding.btnGuest.isEnabled = on
+        binding.btnPoll.isEnabled = on
         binding.btnLibrary.isEnabled = on
         binding.btnNews.isEnabled = on
         binding.btnHelp.isEnabled = on
@@ -1898,6 +2063,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnClock.alpha = iconAlpha
         binding.btnBoard.alpha = iconAlpha
         binding.btnPad.alpha = iconAlpha
+        binding.btnGuest.alpha = iconAlpha
+        binding.btnPoll.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
         binding.btnNews.alpha = iconAlpha
         binding.btnHelp.alpha = iconAlpha

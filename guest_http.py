@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cgi
 import html
 import json
 import struct
@@ -21,13 +22,21 @@ if TYPE_CHECKING:
 _attach_guest = None
 _process_client_line = None
 _remove_client = None
+_publish_guest_image = None
 
 
-def bind_chat(*, attach_guest, process_client_line, remove_client) -> None:
-    global _attach_guest, _process_client_line, _remove_client
+def bind_chat(
+    *,
+    attach_guest,
+    process_client_line,
+    remove_client,
+    publish_guest_image=None,
+) -> None:
+    global _attach_guest, _process_client_line, _remove_client, _publish_guest_image
     _attach_guest = attach_guest
     _process_client_line = process_client_line
     _remove_client = remove_client
+    _publish_guest_image = publish_guest_image
 
 
 _TEXTS = {
@@ -37,13 +46,20 @@ _TEXTS = {
         "you": "你是",
         "enter": "进入聊天",
         "send": "发送",
-        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。昵称由系统随机分配。请勿刷新，刷新后立即失效。",
+        "pic": "图片",
+        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。昵称由系统随机分配。可发文字和图片。请勿刷新，刷新后立即失效。",
         "used": "这个链接已经用过（或刚刷新过），不能再打开。请让对方重新发一条 /guest。",
         "expired": "临时聊天已结束。",
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
         "left": "剩余",
         "placeholder": "说点什么…",
         "fail": "进不去。",
+        "uploading": "正在发送图片…",
+        "upload_ok": "图片已发送。",
+        "upload_fail": "图片发送失败。",
+        "not_image": "只能发送图片（jpg/png/gif/webp）。",
+        "too_big": "图片太大（最多 8MB）。",
+        "file_off": "文件服务未启用，无法发图。",
     },
     "en": {
         "title": "SSHChat guest chat",
@@ -51,13 +67,20 @@ _TEXTS = {
         "you": "You are",
         "enter": "Enter chat",
         "send": "Send",
-        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is assigned at random. Do not refresh — a reload kills the link immediately.",
+        "pic": "Image",
+        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is assigned at random. Text and images are allowed. Do not refresh — a reload kills the link immediately.",
         "used": "This link was already used (or you refreshed). It cannot be opened again. Ask them to send /guest once more.",
         "expired": "Guest chat has ended.",
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
         "left": "Left",
         "placeholder": "Message…",
         "fail": "Could not join.",
+        "uploading": "Sending image…",
+        "upload_ok": "Image sent.",
+        "upload_fail": "Could not send image.",
+        "not_image": "Images only (jpg/png/gif/webp).",
+        "too_big": "Image too large (max 8MB).",
+        "file_off": "File service is off; cannot send images.",
     },
 }
 
@@ -116,6 +139,7 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
         "token": link.token,
         "room": link.room,
         "lang": lang,
+        "maxImage": guest_sharing.MAX_IMAGE_BYTES,
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     labels = json.dumps(
@@ -125,6 +149,12 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
             "used": text["used"],
             "left": text["left"],
             "you": text["you"],
+            "uploading": text["uploading"],
+            "upload_ok": text["upload_ok"],
+            "upload_fail": text["upload_fail"],
+            "not_image": text["not_image"],
+            "too_big": text["too_big"],
+            "file_off": text["file_off"],
         },
         ensure_ascii=False,
     )
@@ -143,12 +173,14 @@ html,body {{ margin:0; height:100%; background:#111; color:#eee; font-family:san
 #gate, #chat {{ flex:1; display:flex; flex-direction:column; }}
 #chat {{ display:none; }}
 #log {{ flex:1; overflow:auto; padding:1rem; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,monospace; font-size:14px; }}
-#row {{ display:flex; padding:.5rem; gap:.5rem; }}
-#row input {{ flex:1; padding:.6rem; font-size:16px; }}
+#log img.preview {{ display:block; max-width:min(100%,320px); max-height:240px; margin:.4rem 0; border-radius:6px; }}
+#row {{ display:flex; padding:.5rem; gap:.5rem; align-items:center; }}
+#row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; }}
 #gate {{ padding:1.5rem; max-width:28rem; }}
 #gate p {{ line-height:1.5; color:#ccc; }}
 button {{ padding:.6rem 1rem; font-size:16px; }}
 .warn {{ color:#f6a; }}
+#pic {{ display:none; }}
 </style>
 </head>
 <body>
@@ -165,7 +197,9 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
   <div id="chat">
     <div id="log"></div>
     <form id="row">
-      <input id="msg" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
+      <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
+      <button type="button" id="pick">{html.escape(text['pic'])}</button>
+      <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
       <button type="submit">{html.escape(text['send'])}</button>
     </form>
   </div>
@@ -173,7 +207,7 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
 <script>
 var boot = {boot_json};
 var L = {labels};
-var ws, exp = 0;
+var ws, exp = 0, ticket = '', busy = false;
 function fmt(s) {{
   s = Math.max(0, s|0);
   var m = Math.floor(s/60), r = s % 60;
@@ -188,17 +222,47 @@ function tick() {{
   if (left <= 0) over(L.expired);
 }}
 function over(msg) {{
-  document.getElementById('log').textContent += '\\n' + msg;
+  append('\\n' + msg);
   document.getElementById('msg').disabled = true;
+  document.getElementById('pick').disabled = true;
   try {{ ws && ws.close(); }} catch (e) {{}}
 }}
 function append(s) {{
   var log = document.getElementById('log');
-  log.textContent += s;
+  log.appendChild(document.createTextNode(s));
+  log.scrollTop = log.scrollHeight;
+  maybePreview(s);
+}}
+function appendImg(src, alt) {{
+  var log = document.getElementById('log');
+  var img = document.createElement('img');
+  img.className = 'preview';
+  img.alt = alt || 'image';
+  img.src = src;
+  log.appendChild(img);
+  log.appendChild(document.createTextNode('\\n'));
   log.scrollTop = log.scrollHeight;
 }}
+function maybePreview(chunk) {{
+  var m = /gui-open\\s+download\\s+(https?:\\/\\/\\S+)\\s+([A-Z0-9]{{6}})/i.exec(chunk);
+  if (!m) return;
+  var url = m[1], key = m[2].toUpperCase();
+  var path = url.replace(/^https?:\\/\\/[^/]+/i, '');
+  var parts = path.split('/').filter(Boolean);
+  if (parts.length < 2 || parts[0] !== 'download') return;
+  var token = parts[1];
+  fetch('/download/' + token + '/ticket', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{key: key}})
+  }}).then(function (r) {{ return r.json(); }}).then(function (j) {{
+    if (!j || !j.preview) return;
+    appendImg(j.preview, j.filename || 'image');
+  }}).catch(function () {{}});
+}}
 function proto() {{ return location.protocol === 'https:' ? 'wss:' : 'ws:'; }}
-function connect(ticket) {{
+function connect(tkt) {{
+  ticket = tkt;
   ws = new WebSocket(proto() + '//' + location.host + '/guest/' + boot.token + '/ws?k=' + encodeURIComponent(ticket));
   ws.onmessage = function (ev) {{
     var m;
@@ -210,6 +274,36 @@ function connect(ticket) {{
   ws.onclose = function () {{
     if (exp && Date.now()/1000 < exp) over(L.used);
   }};
+}}
+function sendImage(file) {{
+  if (!file || !ticket || busy) return;
+  if (file.size > boot.maxImage) {{ append('\\n' + L.too_big + '\\n'); return; }}
+  if (file.type && file.type.indexOf('image/') !== 0) {{ append('\\n' + L.not_image + '\\n'); return; }}
+  busy = true;
+  append('\\n' + L.uploading + '\\n');
+  var localUrl = '';
+  try {{ localUrl = URL.createObjectURL(file); appendImg(localUrl, file.name || 'image'); }} catch (e) {{}}
+  var fd = new FormData();
+  fd.append('file', file, file.name || 'image.jpg');
+  fetch('/guest/' + boot.token + '/image?k=' + encodeURIComponent(ticket) + '&lang=' + encodeURIComponent(boot.lang), {{
+    method: 'POST',
+    body: fd
+  }}).then(function (r) {{ return r.json().then(function (j) {{ return {{ok: r.ok, j: j}}; }}); }})
+    .then(function (x) {{
+      busy = false;
+      if (!x.ok || !x.j.ok) {{
+        var err = (x.j && x.j.error) || L.upload_fail;
+        if (x.j && x.j.code === 'not_image') err = L.not_image;
+        if (x.j && x.j.code === 'too_big') err = L.too_big;
+        if (x.j && x.j.code === 'file_off') err = L.file_off;
+        append(err + '\\n');
+        return;
+      }}
+      append(L.upload_ok + '\\n');
+    }}).catch(function () {{
+      busy = false;
+      append(L.upload_fail + '\\n');
+    }});
 }}
 document.getElementById('go').onclick = function () {{
   fetch('/guest/' + boot.token + '/join?lang=' + encodeURIComponent(boot.lang), {{
@@ -232,6 +326,24 @@ document.getElementById('go').onclick = function () {{
       document.getElementById('err').textContent = L.fail;
     }});
 }};
+document.getElementById('pick').onclick = function () {{
+  document.getElementById('pic').click();
+}};
+document.getElementById('pic').onchange = function () {{
+  var f = this.files && this.files[0];
+  this.value = '';
+  if (f) sendImage(f);
+}};
+document.addEventListener('paste', function (e) {{
+  if (!ticket || !e.clipboardData) return;
+  var items = e.clipboardData.items || [];
+  for (var i = 0; i < items.length; i++) {{
+    if (items[i].type && items[i].type.indexOf('image/') === 0) {{
+      var f = items[i].getAsFile();
+      if (f) {{ e.preventDefault(); sendImage(f); return; }}
+    }}
+  }}
+}});
 document.getElementById('row').onsubmit = function (e) {{
   e.preventDefault();
   var box = document.getElementById('msg');
@@ -273,11 +385,18 @@ def handle_guest_get(handler: "BaseHTTPRequestHandler") -> bool:
 def handle_guest_post(handler: "BaseHTTPRequestHandler") -> bool:
     parsed = urlparse(handler.path)
     parts = [p for p in parsed.path.strip("/").split("/") if p]
-    if len(parts) != 3 or parts[0] != "guest" or parts[2] != "join":
+    if len(parts) != 3 or parts[0] != "guest":
         return False
+    if parts[2] == "join":
+        return _handle_guest_join(handler, parts[1])
+    if parts[2] == "image":
+        return _handle_guest_image(handler, parts[1])
+    return False
+
+
+def _handle_guest_join(handler: "BaseHTTPRequestHandler", token: str) -> bool:
     lang = _lang(handler)
     text = _TEXTS[lang]
-    token = parts[1]
     if hasattr(handler, "_read_json_body"):
         handler._read_json_body()  # type: ignore[attr-defined]
     link, err = guest_sharing.guest_store.open_once(token)
@@ -297,6 +416,74 @@ def handle_guest_post(handler: "BaseHTTPRequestHandler") -> bool:
             "room": link.room,
         },
     )
+    return True
+
+
+def _handle_guest_image(handler: "BaseHTTPRequestHandler", token: str) -> bool:
+    lang = _lang(handler)
+    text = _TEXTS[lang]
+    ticket = ((parse_qs(urlparse(handler.path).query or "").get("k") or [""])[0] or "").strip()
+    link, err = guest_sharing.guest_store.ws_ok(token, ticket)
+    if link is None:
+        _send_json(
+            handler,
+            403,
+            {"ok": False, "code": err or "gone", "error": text.get(err, text["used"])},
+        )
+        return True
+    if _publish_guest_image is None:
+        _send_json(
+            handler,
+            503,
+            {"ok": False, "code": "file_off", "error": text["file_off"]},
+        )
+        return True
+    content_type = handler.headers.get("Content-Type", "")
+    if not content_type.startswith("multipart/form-data"):
+        _send_json(handler, 400, {"ok": False, "code": "bad", "error": text["upload_fail"]})
+        return True
+    try:
+        form = cgi.FieldStorage(
+            fp=handler.rfile,
+            headers=handler.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+            },
+        )
+    except Exception:
+        _send_json(handler, 400, {"ok": False, "code": "bad", "error": text["upload_fail"]})
+        return True
+    if "file" not in form:
+        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
+        return True
+    file_item = form["file"]
+    if not getattr(file_item, "file", None):
+        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
+        return True
+    raw = file_item.file.read(guest_sharing.MAX_IMAGE_BYTES + 1)
+    if not raw:
+        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
+        return True
+    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
+        _send_json(handler, 413, {"ok": False, "code": "too_big", "error": text["too_big"]})
+        return True
+    filename = getattr(file_item, "filename", None) or "image.jpg"
+    if not guest_sharing.looks_like_image(raw, filename):
+        _send_json(
+            handler,
+            400,
+            {"ok": False, "code": "not_image", "error": text["not_image"]},
+        )
+        return True
+    nick = link.nick or guest_sharing.random_guest_nick()
+    ok, code = _publish_guest_image(nick, link.room, filename, raw)
+    if not ok:
+        msg = text.get(code) or text["upload_fail"]
+        status = 413 if code == "too_big" else 400 if code == "not_image" else 503
+        _send_json(handler, status, {"ok": False, "code": code or "fail", "error": msg})
+        return True
+    _send_json(handler, 200, {"ok": True})
     return True
 
 

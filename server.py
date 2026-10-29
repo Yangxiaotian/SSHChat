@@ -4759,7 +4759,11 @@ def _federation_sync_file_public() -> None:
 
 
 def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
-    """Peer Cloudflare/public file URL changed — rewrite canvas mirror links."""
+    """Peer Cloudflare/public file URL changed — rewrite canvas mirror links.
+
+    Do not re-spam gui-open invites into chat; users who need the board again
+    can /canvas|/piano once more and get the live hostname.
+    """
     try:
         n = canvas_sharing.canvas_store.refresh_host_base_url(node_id, base_url)
     except Exception as e:
@@ -4770,27 +4774,15 @@ def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
     print(
         f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
     )
-    # Clients still hold the old trycloudflare invite; push fresh URLs.
-    host = (node_id or "").strip()
     try:
-        with canvas_sharing.canvas_store.lock:
-            sessions = [
-                s
-                for s in canvas_sharing.canvas_store.sessions.values()
-                if not s.closed
-                and not s.parked
-                and (s.host_node or "").strip() == host
-            ]
-        for session in sessions:
-            try:
-                _deliver_canvas_invites(session, refreshed=True)
-            except Exception as e:
-                print(
-                    f"[Canvas] re-invite after peer CF change failed "
-                    f"({session.session_id[:12]}…): {e!r}"
-                )
+        n_piano = piano_sharing.piano_store.refresh_host_base_url(node_id, base_url)
     except Exception as e:
-        print(f"[Canvas] peer CF re-invite sweep failed: {e!r}")
+        print(f"[Piano] refresh_host_base_url error: {e!r}")
+        n_piano = 0
+    if n_piano:
+        print(
+            f"[Piano] updated {n_piano} federated mirror(s) for {node_id} -> {base_url}"
+        )
 
 
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
@@ -6166,24 +6158,34 @@ def _rediscover_clock_invites_for_public_change(reason: str = "") -> int:
 def _maybe_refresh_canvas_invites_on_public_change(
     cur: str, *, reason: str
 ) -> None:
-    """If live public base changed since last invite wave, re-deliver + csync."""
+    """If live public base changed, remember it and quietly csync peers.
+
+    Deliberately does **not** re-broadcast gui-open piano/canvas/clock invites.
+    Reminting Quick Tunnel used to flood every open session into chat; users
+    who still need the board can run /canvas|/piano|/clock again.
+    """
     global _LAST_CANVAS_PUBLIC_BASE
     cur = (cur or "").strip().rstrip("/")
     prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
     if not cur:
-        # Probe blip / origin down: keep prev so a later recovery of the *same*
-        # hostname does not re-spam gui-open piano/canvas at everyone.
+        # Probe blip / origin down: keep prev so recovery of the same host is a no-op.
         return
     if cur == prev:
         _LAST_CANVAS_PUBLIC_BASE = cur
         return
-    _rediscover_canvas_invites_for_public_change(reason)
-    _rediscover_piano_invites_for_public_change(reason)
-    _rediscover_clock_invites_for_public_change(reason)
+    suffix = f" ({reason})" if reason else ""
+    print(
+        f"[FileTransfer] public base {prev or '(none)'} -> {cur}{suffix}; "
+        f"not re-spamming old piano/canvas/clock invites"
+    )
     try:
         _federation_push_all_canvas_announces()
     except Exception as e:
         print(f"[Canvas] csync after public change failed: {e!r}")
+    try:
+        _federation_push_all_piano_announces()
+    except Exception as e:
+        print(f"[Piano] psync after public change failed: {e!r}")
     _LAST_CANVAS_PUBLIC_BASE = cur
     _save_last_canvas_public_base(cur)
 
@@ -7848,6 +7850,69 @@ def attach_guest(
     return nick
 
 
+def publish_guest_image(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
+    """Guest page uploaded an image — fan out via the normal one-time file path."""
+    if file_http is None:
+        return False, "file_off"
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
+        return False, "too_big"
+    if not guest_sharing.looks_like_image(raw, filename):
+        return False, "not_image"
+    room_name = normalize_room(room) or DEFAULT_ROOM
+    with lock:
+        if room_name not in rooms:
+            return False, "no_room"
+        sender_lower = (nick or "").strip().lower()
+        seen = {sender_lower} if sender_lower else set()
+        recipients: list[str] = []
+        for c in rooms.get(room_name) or ():
+            info = clients.get(c)
+            if not info:
+                continue
+            other = str(info.get("name") or "").strip()
+            key = other.lower()
+            if not other or key in seen:
+                continue
+            recipients.append(other)
+            seen.add(key)
+    if not recipients:
+        recipients = [nick]
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        seen = {n.lower() for n in recipients}
+        seen.add((nick or "").lower())
+        for remote_name in hub.names_in_room(room_name):
+            rk = remote_name.lower()
+            if rk not in seen:
+                recipients.append(remote_name)
+                seen.add(rk)
+    ext = guest_sharing.image_ext_for(raw, filename)
+    safe = file_sharing.sanitize_filename(filename or f"guest{ext}")
+    if not any(safe.lower().endswith(e) for e in guest_sharing.IMAGE_EXTS):
+        safe = f"{safe}{ext}" if safe else f"guest{ext}"
+    store = file_sharing.file_transfer_store
+    transfer = store.create_upload_session(
+        sender=nick,
+        recipients=recipients,
+        filename=safe,
+        room=room_name,
+        upload_ttl_minutes=10,
+        download_ttl_minutes=60,
+    )
+    path = store.get_file_path(transfer.transfer_id, safe)
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+    except OSError:
+        return False, "save_fail"
+    if not store.mark_upload_complete(transfer.upload_token, path, len(raw), safe):
+        return False, "save_fail"
+    return True, ""
+
+
 def _handle_guest(conn, sender: str, payload: str) -> None:
     """Handle /guest — private one-shot web chat link (default 5 minutes)."""
     raw = payload.split(None, 1)
@@ -7895,10 +7960,17 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
     if link is None:
         send_line(conn, _ts(conn, "guest_too_many"))
         return
-    url = f"{file_http.get_base_url().rstrip('/')}/guest/{link.token}"
+    # Prefer a live Cloudflare / public base. Tunnel helper remints on a timer;
+    # wait briefly so phones do not get a LAN/virtual IP during the gap.
+    base, is_public = file_http_server.wait_for_public_base_url(file_http.get_base_url)
+    if not base:
+        base = (file_http.get_base_url() or "").rstrip("/")
+    url = f"{base.rstrip('/')}/guest/{link.token}"
     send_line(
         conn, _ts(conn, "guest_created", url=url, room=room_name, minutes=minutes)
     )
+    if not is_public:
+        send_line(conn, _ts(conn, "guest_lan_url_warn"))
 
 
 def _handle_clock(conn, sender: str, payload: str) -> None:
@@ -11438,6 +11510,7 @@ guest_http.bind_chat(
     attach_guest=attach_guest,
     process_client_line=process_client_line,
     remove_client=remove_client,
+    publish_guest_image=publish_guest_image,
 )
 
 
@@ -11461,6 +11534,7 @@ def run_server() -> int:
         attach_guest=attach_guest,
         process_client_line=process_client_line,
         remove_client=remove_client,
+        publish_guest_image=publish_guest_image,
     )
 
     # Start file HTTP server
@@ -11492,9 +11566,8 @@ def run_server() -> int:
                         if cur != last:
                             last = cur
                             _federation_sync_file_public()
-                            # Room canvas invites embed the CF hostname; re-send
-                            # private invites + csync so clients/peers leave the
-                            # dead trycloudflare URL behind.
+                            # Remember new CF hostname + quiet federation sync.
+                            # Do not re-spam old gui-open invites into chat.
                             try:
                                 _maybe_refresh_canvas_invites_on_public_change(
                                     cur, reason="cf-watch"
