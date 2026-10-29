@@ -47,7 +47,7 @@ _TEXTS = {
         "enter": "进入聊天",
         "send": "发送",
         "pic": "图片",
-        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字和图片，并用游戏区下棋。请勿刷新，刷新后立即失效。",
+        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字和图片，并用游戏区下棋。最小化或切走浏览器不会提前结束；同一标签刷新可恢复。不要关掉这个标签。",
         "remark": "备注（可选）",
         "remark_ph": "怎么称呼你",
         "game": "游戏",
@@ -68,7 +68,13 @@ _TEXTS = {
             ["go", "围棋"],
             ["darkchess", "暗棋"],
             ["doushou", "斗兽棋"],
+            ["niutou", "牛头王"],
         ],
+        "gstart": "开始",
+        "grow": "行",
+        "ghand": "手牌",
+        "ghint_niutou": "点手牌出牌",
+        "ghint_niutou_row": "这张牌比所有行尾都小，点一行吃掉",
         "used": "这个链接已经用过（或刚刷新过），不能再打开。请让对方重新发一条 /guest。",
         "expired": "临时聊天已结束。",
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
@@ -81,6 +87,8 @@ _TEXTS = {
         "not_image": "只能发送图片（jpg/png/gif/webp）。",
         "too_big": "图片太大（最多 8MB）。",
         "file_off": "文件服务未启用，无法发图。",
+        "joining": "正在进入…",
+        "rejoin": "连接中断，正在重连…",
     },
     "en": {
         "title": "SSHChat guest chat",
@@ -89,7 +97,7 @@ _TEXTS = {
         "enter": "Enter chat",
         "send": "Send",
         "pic": "Image",
-        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, and the game panel are allowed. Do not refresh — a reload kills the link immediately.",
+        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, and the game panel are allowed. Minimizing or switching away does not end it early; a reload in this same tab can resume. Do not close this tab.",
         "remark": "Remark (optional)",
         "remark_ph": "What should we call you",
         "game": "Games",
@@ -110,7 +118,13 @@ _TEXTS = {
             ["go", "Go"],
             ["darkchess", "Dark chess"],
             ["doushou", "Jungle"],
+            ["niutou", "6 Nimmt!"],
         ],
+        "gstart": "Start",
+        "grow": "Row",
+        "ghand": "Hand",
+        "ghint_niutou": "Tap a card in your hand",
+        "ghint_niutou_row": "Lower than every row end — tap a row to take it",
         "used": "This link was already used (or you refreshed). It cannot be opened again. Ask them to send /guest once more.",
         "expired": "Guest chat has ended.",
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
@@ -123,6 +137,8 @@ _TEXTS = {
         "not_image": "Images only (jpg/png/gif/webp).",
         "too_big": "Image too large (max 8MB).",
         "file_off": "File service is off; cannot send images.",
+        "joining": "Entering…",
+        "rejoin": "Disconnected, reconnecting…",
     },
 }
 
@@ -184,7 +200,10 @@ var HEADERS = [
   ['gomoku', /^gomoku (?:对局)?[（(]([^）)]*)[）)]/],
   ['doushou', /^doushou (?:对局)?[（(]([^）)]*)[）)]/],
   ['darkchess', /^darkchess (?:对局)?[（(]([^）)]*)[）)]/],
-  ['reversi', /^reversi game [（(]([^）)]*)[）)]/]
+  ['reversi', /^reversi game [（(]([^）)]*)[）)]/],
+  ['niutou', /^(?:牛头王 状态|6 Nimmt! status)[：:]\s*(.+)$/],
+  ['niutou', /^牛头王开始/],
+  ['niutou', /^6 Nimmt! start/]
 ];
 function cmdGame(rest) {
   if (!ws || ws.readyState !== 1 || gDead) return;
@@ -225,6 +244,7 @@ function parseGame(lines) {
   else if (kind === 'xiangqi') parseXiangqi(s, block);
   else if (kind === 'darkchess') parseDark(s, block);
   else if (kind === 'doushou') parseDoushou(s, block);
+  else if (kind === 'niutou') parseNiutou(s, block);
   return s;
 }
 function allMatches(re, s) {
@@ -356,6 +376,100 @@ function parseDoushou(s, block) {
   s.board = {rows: 9, cols: 7, cells: cells, last: last, rowLabels: pack.labels, colLabels: colLabels};
   s.flipped = pack.labels[0] === 9;
 }
+function parseNiutou(s, block) {
+  s.rows = [[], [], [], []];
+  s.rowBulls = [0, 0, 0, 0];
+  s.hand = [];
+  s.mustRow = false;
+  s.seats = [];
+  var rowRe = /^(?:第(\d)行|Row (\d))[：:]\s*([\d\s]+?)\s*[（(](?:牛头|bulls)=(\d+)[）)]/;
+  var seatRe = /^-\s+(\S+?)[：:]\s*(?:牛头|bulls)=(\d+)[，,]\s*(?:手牌数|cards)=(\d+)/;
+  var handRe = /^(?:你的手牌|Your hand)[：:]\s*(.*)$/;
+  for (var i = 1; i < block.length; i++) {
+    var t = block[i].trim();
+    var m = rowRe.exec(t);
+    if (m) {
+      var idx = +(m[1] || m[2]) - 1;
+      if (idx >= 0 && idx < 4) {
+        s.rows[idx] = m[3].trim().split(/\s+/).map(Number).filter(function (n) { return n === n; });
+        s.rowBulls[idx] = +m[4];
+      }
+      continue;
+    }
+    m = seatRe.exec(t);
+    if (m) { s.seats.push(m[1] + ' 🐂' + m[2]); continue; }
+    m = handRe.exec(t);
+    if (m) {
+      s.hand = m[1].trim().split(/\s+/).filter(function (x) { return /^\d+$/.test(x); });
+      continue;
+    }
+    if (t.indexOf('必须选择一行') >= 0 || /must choose a row/i.test(t) || /must pick a row/i.test(t))
+      s.mustRow = true;
+  }
+}
+function ntwBulls(n) {
+  n = +n;
+  if (n === 55) return 7;
+  if (n % 11 === 0) return 5;
+  if (n % 10 === 0) return 3;
+  if (n % 5 === 0) return 2;
+  return 1;
+}
+function ntwCard(n, onClick) {
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'ntw';
+  b.textContent = n + ' 🐂' + ntwBulls(n);
+  if (onClick) b.onclick = onClick;
+  else b.disabled = true;
+  return b;
+}
+function renderNiutou() {
+  var boardEl = document.getElementById('gboard');
+  var hint = document.getElementById('ghint');
+  boardEl.className = 'ntw';
+  var s = snap;
+  if (s.seats && s.seats.length) {
+    var seats = document.createElement('div');
+    seats.className = 'ntw-line';
+    seats.textContent = s.seats.join(' · ');
+    boardEl.appendChild(seats);
+  }
+  for (var i = 0; i < 4; i++) {
+    var line = document.createElement('div');
+    line.className = 'ntw-line';
+    var lab = document.createElement('span');
+    lab.textContent = (L.grow || '行') + (i + 1);
+    line.appendChild(lab);
+    (s.rows[i] || []).forEach(function (n) { line.appendChild(ntwCard(n)); });
+    var bulls = document.createElement('span');
+    bulls.textContent = '🐂' + (s.rowBulls[i] || 0);
+    line.appendChild(bulls);
+    if (s.mustRow) {
+      (function (idx) {
+        var take = document.createElement('button');
+        take.type = 'button';
+        take.className = 'ntw ntw-take';
+        take.textContent = L.grow + idx;
+        take.onclick = function () { cmdGame('move row ' + idx); };
+        line.appendChild(take);
+      })(i + 1);
+    }
+    boardEl.appendChild(line);
+  }
+  var hand = document.createElement('div');
+  hand.className = 'ntw-line';
+  var hl = document.createElement('span');
+  hl.textContent = L.ghand || '手牌';
+  hand.appendChild(hl);
+  if (!s.mustRow) {
+    (s.hand || []).forEach(function (n) {
+      hand.appendChild(ntwCard(n, function () { cmdGame('move pick ' + n); }));
+    });
+  }
+  boardEl.appendChild(hand);
+  hint.textContent = s.mustRow ? L.ghint_niutou_row : L.ghint_niutou;
+}
 function srvRC(s, r, c) {
   var b = s.board;
   if (s.kind === 'xiangqi') {
@@ -430,11 +544,13 @@ function renderGame() {
   var boardEl = document.getElementById('gboard');
   var hint = document.getElementById('ghint');
   var stat = document.getElementById('gstat');
-  acts.innerHTML = ''; neu.innerHTML = ''; boardEl.innerHTML = '';
+  acts.innerHTML = ''; neu.innerHTML = ''; boardEl.innerHTML = ''; boardEl.className = '';
   acts.appendChild(btn(L.gjoin, function () { cmdGame('join'); }));
   acts.appendChild(btn(L.gshow, function () { cmdGame('show'); }));
   acts.appendChild(btn(L.gresign, function () { cmdGame('resign'); }));
   if (snap && snap.kind === 'go') acts.appendChild(btn(L.gpass, function () { cmdGame('move pass'); }));
+  if (snap && (String(snap.state).indexOf('等待') >= 0 || /wait/i.test(snap.state)))
+    acts.appendChild(btn(L.gstart, function () { cmdGame('move start'); }));
   (boot.games || []).forEach(function (g) {
     neu.appendChild(btn(g[1], function () { cmdGame('new ' + g[0]); }));
   });
@@ -445,6 +561,7 @@ function renderGame() {
   }
   stat.textContent = snap.header;
   if (!gOpen) { gOpen = true; body.style.display = 'block'; }
+  if (snap.kind === 'niutou') { renderNiutou(); return; }
   var b = snap.board;
   if (!b) {
     hint.textContent = L.ghint_card;
@@ -473,11 +590,14 @@ function renderGame() {
   else if (snap.kind === 'xiangqi' || snap.kind === 'chess' || snap.kind === 'doushou') hint.textContent = L.ghint_piece;
   else hint.textContent = L.ghint_stone;
 }
-document.getElementById('gtog').onclick = function () {
-  gOpen = !gOpen;
-  document.getElementById('gbody').style.display = gOpen ? 'block' : 'none';
-  if (gOpen) renderGame();
-};
+(function () {
+  var t = document.getElementById('gtog');
+  if (t) t.onclick = function () {
+    gOpen = !gOpen;
+    document.getElementById('gbody').style.display = gOpen ? 'block' : 'none';
+    if (gOpen) renderGame();
+  };
+})();
 """
 
 
@@ -516,6 +636,13 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
             "ghint_piece": text["ghint_piece"],
             "ghint_dark": text["ghint_dark"],
             "ghint_card": text["ghint_card"],
+            "gstart": text["gstart"],
+            "grow": text["grow"],
+            "ghand": text["ghand"],
+            "ghint_niutou": text["ghint_niutou"],
+            "ghint_niutou_row": text["ghint_niutou_row"],
+            "joining": text["joining"],
+            "rejoin": text["rejoin"],
         },
         ensure_ascii=False,
     )
@@ -527,16 +654,23 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
 <meta name="robots" content="noindex">
 <title>{html.escape(text['title'])}</title>
 <style>
-html,body {{ margin:0; height:100%; background:#111; color:#eee; font-family:sans-serif; }}
-#app {{ display:flex; flex-direction:column; height:100%; }}
-#bar {{ padding:.6rem 1rem; background:#000; display:flex; justify-content:space-between; gap:1rem; }}
-#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#f66; }}
-#gate, #chat {{ flex:1; display:flex; flex-direction:column; }}
+html,body {{ margin:0; height:100%; height:100dvh; overflow:hidden; background:#111; color:#eee; font-family:sans-serif; }}
+#app {{ display:flex; flex-direction:column; height:100%; overflow:hidden; }}
+#bar {{ padding:.45rem .8rem; background:#000; display:flex; align-items:center; gap:.6rem; flex-shrink:0; }}
+#who {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }}
+#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#f66; white-space:nowrap; font-size:13px; }}
+#gate, #chat {{ flex:1; display:flex; flex-direction:column; min-height:0; }}
 #chat {{ display:none; }}
-#log {{ flex:1; overflow:auto; padding:1rem; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,monospace; font-size:14px; }}
-#log img.preview {{ display:block; max-width:min(100%,320px); max-height:240px; margin:.4rem 0; border-radius:6px; }}
-#row {{ display:flex; padding:.5rem; gap:.5rem; align-items:center; }}
-#row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; }}
+#log {{ flex:1; overflow:auto; padding:.7rem .8rem; display:flex; flex-direction:column; gap:.45rem; }}
+#log .bubble {{ max-width:82%; padding:.45rem .7rem; border-radius:14px; word-break:break-word; font-size:15px; line-height:1.4; }}
+#log .bubble.them {{ align-self:flex-start; background:#2a2a2a; }}
+#log .bubble.me {{ align-self:flex-end; background:#1b6; color:#041; }}
+#log .bubble .nm {{ font-size:11px; color:#9ab; margin-bottom:.15rem; }}
+#log .bubble.me .nm {{ color:#063; }}
+#log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#8a8; text-align:center; }}
+#log img.preview {{ display:block; max-width:min(100%,240px); max-height:200px; margin-top:.3rem; border-radius:8px; }}
+#row {{ display:flex; padding:.5rem; gap:.45rem; align-items:center; flex-shrink:0; background:#161616; border-top:1px solid #333; }}
+#row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; min-width:0; }}
 #gate {{ padding:1.5rem; max-width:28rem; }}
 #gate p {{ line-height:1.5; color:#ccc; }}
 #gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; }}
@@ -557,6 +691,10 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
 #gboard button.c-b {{ color:#9cf; background:#1a1a2a; }}
 #gboard button.c-last {{ outline:2px solid gold; }}
 #gboard button.c-sel {{ outline:2px solid #6cf; }}
+#gboard.ntw {{ display:flex; flex-direction:column; gap:.4rem; width:100%; max-width:100%; }}
+#gboard.ntw .ntw-line {{ display:flex; flex-wrap:wrap; align-items:center; gap:.3rem; }}
+#gboard.ntw button.ntw {{ min-width:2.5rem; min-height:2.4rem; aspect-ratio:auto; padding:.15rem .4rem; font-size:12px; background:#fff3e0; color:#212121; border-radius:6px; border:1px solid #ff8a65; }}
+#gboard.ntw button.ntw-take {{ background:#333; color:#eee; border:1px solid #888; min-width:auto; }}
 #ghint {{ font-size:12px; color:#888; margin-top:.35rem; }}
 </style>
 </head>
@@ -564,7 +702,6 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
 <div id="app">
   <div id="bar">
     <div id="who">{html.escape(text['title'])} · {html.escape(text['room'])} #{html.escape(link.room)}</div>
-    <div id="left"></div>
   </div>
   <div id="gate">
     <p class="warn">{html.escape(text['hint'].format(minutes=minutes))}</p>
@@ -590,6 +727,7 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
     </div>
     <div id="log"></div>
     <form id="row">
+      <div id="left"></div>
       <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
       <button type="button" id="pick">{html.escape(text['pic'])}</button>
       <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
@@ -600,7 +738,25 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
 <script>
 var boot = {boot_json};
 var L = {labels};
-var ws, exp = 0, ticket = '', busy = false;
+var ws, exp = 0, ticket = '', busy = false, ended = false, reconnectTimer = null, toldRejoin = false;
+var meLabel = '', meNick = '', pendingSys = [];
+function sessionKey() {{ return 'sshchat-guest-' + boot.token; }}
+function saveSession() {{
+  if (!ticket || !exp) return;
+  try {{
+    sessionStorage.setItem(sessionKey(), JSON.stringify({{
+      k: ticket, exp: exp, who: document.getElementById('who').textContent,
+      meLabel: meLabel, meNick: meNick
+    }}));
+  }} catch (e) {{}}
+}}
+function loadSession() {{
+  try {{
+    var o = JSON.parse(sessionStorage.getItem(sessionKey()) || 'null');
+    if (!o || !o.k || !o.exp || o.exp <= Date.now()/1000) return null;
+    return o;
+  }} catch (e) {{ return null; }}
+}}
 function fmt(s) {{
   s = Math.max(0, s|0);
   var m = Math.floor(s/60), r = s % 60;
@@ -615,28 +771,85 @@ function tick() {{
   if (left <= 0) over(L.expired);
 }}
 function over(msg) {{
-  append('\\n' + msg);
+  if (ended) return;
+  ended = true;
   gDead = true;
+  append('\\n' + msg);
   document.getElementById('msg').disabled = true;
   document.getElementById('pick').disabled = true;
-  document.getElementById('gtog').disabled = true;
-  try {{ ws && ws.close(); }} catch (e) {{}}
+  var tog = document.getElementById('gtog');
+  if (tog) tog.disabled = true;
+  try {{ if (ws) {{ ws.onclose = null; ws.close(); }} }} catch (e) {{}}
+}}
+function scrollLog() {{
+  var log = document.getElementById('log');
+  log.scrollTop = log.scrollHeight;
+}}
+function isMe(name) {{
+  return !!name && (name === meLabel || name === meNick);
+}}
+function flushSys() {{
+  if (!pendingSys.length) return;
+  if (pendingSys.length >= 4) addSys(pendingSys[0]);
+  else for (var i = 0; i < pendingSys.length; i++) addSys(pendingSys[i]);
+  pendingSys = [];
+}}
+function addSys(text) {{
+  if (!text) return;
+  var d = document.createElement('div');
+  d.className = 'sys';
+  d.textContent = text;
+  document.getElementById('log').appendChild(d);
+  scrollLog();
+}}
+function addBubble(who, text) {{
+  flushSys();
+  var wrap = document.createElement('div');
+  wrap.className = 'bubble ' + (isMe(who) ? 'me' : 'them');
+  if (!isMe(who) && who) {{
+    var n = document.createElement('div');
+    n.className = 'nm';
+    n.textContent = who;
+    wrap.appendChild(n);
+  }}
+  var b = document.createElement('div');
+  b.className = 'txt';
+  b.textContent = text;
+  wrap.appendChild(b);
+  document.getElementById('log').appendChild(wrap);
+  scrollLog();
+}}
+function addLine(line) {{
+  line = String(line || '').replace(/\\s+$/,'');
+  if (!line) return;
+  var m = /^\\[#[^\\]]+\\] \\[([^\\]]+)\\] (.*)$/.exec(line);
+  if (m && m[1] !== '*') {{ addBubble(m[1], m[2]); return; }}
+  var star = /^\\[#[^\\]]+\\] \\[\\*\\] (.*)$/.exec(line);
+  if (star) {{ pendingSys.push(star[1]); return; }}
+  var plus = /^\\[\\+\\] (.*)$/.exec(line);
+  if (plus) {{ flushSys(); addSys(plus[1]); return; }}
+  var minus = /^\\[-\\] (.*)$/.exec(line);
+  if (minus) {{ flushSys(); addSys(minus[1]); return; }}
+  flushSys();
+  addSys(line);
 }}
 function append(s) {{
-  var log = document.getElementById('log');
-  log.appendChild(document.createTextNode(s));
-  log.scrollTop = log.scrollHeight;
+  var parts = String(s || '').split(/\\r?\\n/);
+  for (var i = 0; i < parts.length; i++) addLine(parts[i]);
+  flushSys();
   maybePreview(s);
 }}
-function appendImg(src, alt) {{
-  var log = document.getElementById('log');
+function appendImg(src, alt, mine) {{
+  flushSys();
+  var wrap = document.createElement('div');
+  wrap.className = 'bubble ' + (mine ? 'me' : 'them');
   var img = document.createElement('img');
   img.className = 'preview';
   img.alt = alt || 'image';
   img.src = src;
-  log.appendChild(img);
-  log.appendChild(document.createTextNode('\\n'));
-  log.scrollTop = log.scrollHeight;
+  wrap.appendChild(img);
+  document.getElementById('log').appendChild(wrap);
+  scrollLog();
 }}
 function maybePreview(chunk) {{
   var m = /gui-open\\s+download\\s+(https?:\\/\\/\\S+)\\s+([A-Z0-9]{{6}})/i.exec(chunk);
@@ -656,19 +869,34 @@ function maybePreview(chunk) {{
   }}).catch(function () {{}});
 }}
 function proto() {{ return location.protocol === 'https:' ? 'wss:' : 'ws:'; }}
+function scheduleReconnect() {{
+  if (ended || reconnectTimer || !ticket) return;
+  if (!toldRejoin) {{ toldRejoin = true; append('\\n' + (L.rejoin || '') + '\\n'); }}
+  reconnectTimer = setTimeout(function () {{
+    reconnectTimer = null;
+    if (!ended) connect(ticket);
+  }}, 800);
+}}
 function connect(tkt) {{
   ticket = tkt;
+  saveSession();
+  try {{ if (ws) {{ ws.onclose = null; if (ws.readyState < 2) ws.close(); }} }} catch (e) {{}}
   ws = new WebSocket(proto() + '//' + location.host + '/guest/' + boot.token + '/ws?k=' + encodeURIComponent(ticket));
-  ws.onopen = function () {{ cmdGame('show'); }};
+  ws.onopen = function () {{
+    toldRejoin = false;
+    if (typeof cmdGame === 'function') cmdGame('show');
+  }};
   ws.onmessage = function (ev) {{
     var m;
     try {{ m = JSON.parse(ev.data); }} catch (e) {{ return; }}
-    if (m.t === 'line') {{ append(m.s); ingestGame(m.s); }}
-    if (m.t === 'hello' && m.exp) exp = m.exp;
+    if (m.t === 'line') {{ append(m.s); if (typeof ingestGame === 'function') ingestGame(m.s); }}
+    if (m.t === 'hello' && m.exp) {{ exp = m.exp; saveSession(); }}
     if (m.t === 'end') over(m.why === 'timeout' ? L.expired : L.used);
   }};
   ws.onclose = function () {{
-    if (exp && Date.now()/1000 < exp) over(L.used);
+    if (ended) return;
+    if (!exp || Date.now()/1000 >= exp) {{ over(L.expired); return; }}
+    scheduleReconnect();
   }};
 }}
 function sendImage(file) {{
@@ -678,7 +906,7 @@ function sendImage(file) {{
   busy = true;
   append('\\n' + L.uploading + '\\n');
   var localUrl = '';
-  try {{ localUrl = URL.createObjectURL(file); appendImg(localUrl, file.name || 'image'); }} catch (e) {{}}
+  try {{ localUrl = URL.createObjectURL(file); appendImg(localUrl, file.name || 'image', true); }} catch (e) {{}}
   var fd = new FormData();
   fd.append('file', file, file.name || 'image.jpg');
   fetch('/guest/' + boot.token + '/image?k=' + encodeURIComponent(ticket) + '&lang=' + encodeURIComponent(boot.lang), {{
@@ -702,25 +930,40 @@ function sendImage(file) {{
     }});
 }}
 document.getElementById('go').onclick = function () {{
+  var btn = this;
+  var err = document.getElementById('err');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  err.textContent = L.joining || '';
   var remark = (document.getElementById('remark') && document.getElementById('remark').value) || '';
   fetch('/guest/' + boot.token + '/join?lang=' + encodeURIComponent(boot.lang), {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
     body: JSON.stringify({{remark: remark}})
-  }}).then(function (r) {{ return r.json().then(function (j) {{ return {{ok: r.ok, j: j}}; }}); }})
-    .then(function (x) {{
+  }}).then(function (r) {{
+    return r.text().then(function (t) {{
+      var j = {{}};
+      try {{ j = JSON.parse(t); }} catch (e) {{}}
+      return {{ok: r.ok, j: j}};
+    }});
+  }}).then(function (x) {{
       if (!x.ok || !x.j.ok) {{
-        document.getElementById('err').textContent = (x.j && x.j.error) || L.fail;
+        btn.disabled = false;
+        err.textContent = (x.j && x.j.error) || L.fail;
         return;
       }}
       exp = x.j.exp;
-      document.getElementById('who').textContent = L.you + ' ' + (x.j.label || x.j.nick) + ' · #' + boot.room;
+      meNick = x.j.nick || '';
+      meLabel = x.j.label || meNick;
+      document.getElementById('who').textContent = L.you + ' ' + (meLabel || meNick) + ' · #' + boot.room;
       document.getElementById('gate').style.display = 'none';
       document.getElementById('chat').style.display = 'flex';
       connect(x.j.ticket);
       tick();
+      saveSession();
     }}).catch(function () {{
-      document.getElementById('err').textContent = L.fail;
+      btn.disabled = false;
+      err.textContent = L.fail;
     }});
 }};
 document.getElementById('pick').onclick = function () {{
@@ -750,6 +993,29 @@ document.getElementById('row').onsubmit = function (e) {{
   box.value = '';
 }};
 setInterval(tick, 250);
+(function () {{
+  var s = loadSession();
+  if (!s) return;
+  ticket = s.k;
+  exp = s.exp;
+  meLabel = s.meLabel || '';
+  meNick = s.meNick || '';
+  if (s.who) document.getElementById('who').textContent = s.who;
+  document.getElementById('gate').style.display = 'none';
+  document.getElementById('chat').style.display = 'flex';
+  connect(ticket);
+  tick();
+}})();
+document.addEventListener('visibilitychange', function () {{
+  if (document.hidden || ended || !ticket) return;
+  if (!ws || ws.readyState > 1) connect(ticket);
+}});
+window.addEventListener('pageshow', function () {{
+  if (ended || !ticket) return;
+  if (!ws || ws.readyState > 1) connect(ticket);
+}});
+</script>
+<script>
 {_GUEST_GAME_JS}
 </script>
 </body>
@@ -774,7 +1040,12 @@ def handle_guest_get(handler: "BaseHTTPRequestHandler") -> bool:
         _closed_page(handler, lang, "gone")
         return True
     if link.opened_at:
-        _closed_page(handler, lang, "used")
+        if link.closed or time.time() >= (link.chat_expires_at or 0):
+            _closed_page(handler, lang, "expired")
+            return True
+        # Same tab can resume via sessionStorage ticket; other browsers still
+        # cannot join. Chrome tab discard reloads the URL after minimize.
+        _send_html(handler, render_guest_page(link, lang))
         return True
     _send_html(handler, render_guest_page(link, lang))
     return True

@@ -247,18 +247,12 @@ class GuestStore:
         now = time.time()
         with self._lock:
             self._purge_locked(now)
-            mine = [
-                link
-                for link in self.links.values()
-                if link.creator == creator and not link.closed
-            ]
-            for link in mine:
-                if not link.opened_at:
-                    link.closed = True
             active = [
                 link
                 for link in self.links.values()
-                if link.creator == creator and not link.closed
+                if link.creator == creator
+                and link.room == room
+                and not link.closed
             ]
             if len(active) >= MAX_ACTIVE_PER_CREATOR:
                 return None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import unittest
 from unittest import mock
 
@@ -81,6 +82,30 @@ class GuestStoreTests(unittest.TestCase):
         self.assertEqual(guest_sharing.parse_minutes("61")[1], "range")
         self.assertEqual(guest_sharing.parse_minutes("close")[1], "usage")
 
+    def test_create_keeps_unused_links_for_multiple_invites(self) -> None:
+        first = guest_sharing.guest_store.create("Ada", "lobby")
+        second = guest_sharing.guest_store.create("Ada", "lobby")
+        assert first is not None and second is not None
+        self.assertNotEqual(first.token, second.token)
+        self.assertFalse(first.closed)
+        self.assertFalse(second.closed)
+        self.assertEqual(first.opened_at, 0.0)
+        self.assertEqual(second.opened_at, 0.0)
+        still, err = guest_sharing.guest_store.open_once(first.token)
+        self.assertEqual(err, "")
+        self.assertIsNotNone(still)
+
+    def test_create_caps_unused_and_live_together(self) -> None:
+        made = [
+            guest_sharing.guest_store.create("Ada", "lobby")
+            for _ in range(guest_sharing.MAX_ACTIVE_PER_CREATOR)
+        ]
+        self.assertTrue(all(link is not None for link in made))
+        extra = guest_sharing.guest_store.create("Ada", "lobby")
+        self.assertIsNone(extra)
+        other = guest_sharing.guest_store.create("Ada", "other")
+        self.assertIsNotNone(other)
+
     def test_custom_minutes_sets_chat_ttl(self) -> None:
         link = guest_sharing.guest_store.create("Ada", "lobby", 12)
         assert link is not None
@@ -103,14 +128,27 @@ class GuestStoreTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(err2, "used")
 
-    def test_refresh_get_fails_after_join(self) -> None:
+    def test_refresh_get_after_join_serves_resume_page(self) -> None:
         link = guest_sharing.guest_store.create("Ada", "lobby")
         assert link is not None
         guest_sharing.guest_store.open_once(link.token)
         handler = FakeHandler(f"/guest/{link.token}")
         self.assertTrue(guest_http.handle_guest_get(handler))
+        self.assertEqual(handler.status, 200)
+        page = handler.body.getvalue().decode("utf-8")
+        self.assertIn("sshchat-guest-", page)
+        self.assertIn("loadSession", page)
+        self.assertIn("scheduleReconnect", page)
+
+    def test_get_after_chat_ttl_is_expired(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        guest_sharing.guest_store.open_once(link.token)
+        link.chat_expires_at = 1
+        handler = FakeHandler(f"/guest/{link.token}")
+        self.assertTrue(guest_http.handle_guest_get(handler))
         self.assertEqual(handler.status, 410)
-        self.assertIn("用过", handler.body.getvalue().decode("utf-8"))
+        self.assertIn("过期", handler.body.getvalue().decode("utf-8"))
 
     def test_join_ignores_client_supplied_nick(self) -> None:
         link = guest_sharing.guest_store.create("Ada", "lobby")
@@ -320,7 +358,7 @@ class GuestPageTests(unittest.TestCase):
         link = guest_sharing.guest_store.create("Ada", "lobby")
         assert link is not None
         page = guest_http.render_guest_page(link, "zh")
-        self.assertIn("请勿刷新", page)
+        self.assertIn("不要关掉这个标签", page)
         self.assertIn("倒计时", page)
         self.assertIn("分", page)
         self.assertIn("秒", page)
@@ -335,6 +373,23 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("function cmdGame", page)
         self.assertIn("/game ", page)
         self.assertIn("gomoku", page)
+        self.assertIn("牛头王", page)
+        self.assertIn("parseNiutou", page)
+        self.assertIn("move pick", page)
+        self.assertIn("loadSession", page)
+        self.assertIn("scheduleReconnect", page)
+        self.assertIn("100dvh", page)
+        self.assertIn("addBubble", page)
+        self.assertIn("className = 'bubble '", page)
+        row = re.search(r'<form id="row">(.*?)</form>', page, re.S)
+        self.assertIsNotNone(row)
+        self.assertIn('id="left"', row.group(1))
+        self.assertNotIn('id="left"', page.split('<form id="row">', 1)[0])
+        scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+        self.assertGreaterEqual(len(scripts), 2)
+        self.assertIn("getElementById('go')", scripts[0])
+        self.assertNotIn("parseNiutou", scripts[0])
+        self.assertIn("parseNiutou", scripts[1])
 
 
 if __name__ == "__main__":
