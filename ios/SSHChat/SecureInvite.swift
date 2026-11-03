@@ -71,7 +71,7 @@ enum SecureInvite {
     static func parseGuestUrl(_ line: String) -> String? {
         let t = normalize(line)
         guard let re = try? NSRegularExpression(
-            pattern: #"^https?://\S+/guest/[A-Za-z0-9_-]+/?$"#,
+            pattern: #"^https?://\S+/guest/[A-Za-z0-9_-]+/?(?:\?lang=(?:en|zh))?$"#,
             options: [.caseInsensitive]
         ),
         let m = re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),

@@ -70,6 +70,15 @@ EXACT_ZH_TO_EN: dict[str, str] = {
     '对局尚未开始。': 'The game has not started yet.',
     '对局已经开始。': 'The game has already started.',
     '对局未进行中。': 'No game in progress.',
+    '本房没有进行中的对局。': 'No game in progress in this room.',
+    '本房没有进行中的对局；用 /game new … 开局。':
+        'No game in progress in this room; /game new … to start.',
+    '本房没有进行中的对局；用 /game new chess 开局。':
+        'No game in progress in this room; /game new chess to start.',
+    '本房没有进行中的对局，或席位无法续玩。':
+        'No game in progress in this room, or the seat cannot resume.',
+    '本房没有进行中的对局，或席位无法续玩；可试 /game show。':
+        'No game in progress in this room, or the seat cannot resume; try /game show.',
     '弃牌 fold': 'fold',
     '房间人数已满。': 'The room is full.',
     '无人吃碰杠胡。': 'No one chi/peng/gang/hu.',

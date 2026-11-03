@@ -47,7 +47,7 @@ object SecureInvite {
     )
     /** Bare private /guest one-shot URL line (mobile auto-copies to clipboard). */
     private val guestUrlOnly = Regex(
-        """^https?://\S+/guest/[A-Za-z0-9_-]+/?$""",
+        """^https?://\S+/guest/[A-Za-z0-9_-]+/?(?:\?lang=(?:en|zh))?$""",
         RegexOption.IGNORE_CASE,
     )
     private val metaLine = Regex(

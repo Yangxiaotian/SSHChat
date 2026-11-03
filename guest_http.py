@@ -559,6 +559,21 @@ function btn(label, fn) {
   b.type = 'button'; b.textContent = label; b.onclick = fn;
   return b;
 }
+function cellLabel(tok) {
+  if (tok === 'B') return '●';
+  if (tok === 'W') return '○';
+  var body = (tok.charAt(0) === 'r' || tok.charAt(0) === 'b') ? tok.slice(1) : tok;
+  if (boot.lang !== 'en' || !snap) return body;
+  var m = snap.kind === 'doushou' ? {
+    '狮':'L','虎':'T','豹':'P','狼':'W','狗':'D','猫':'C','鼠':'R','象':'E',
+    '河':'RV','红穴':'rD','黑穴':'bD','红陷':'rT','黑陷':'bT'
+  } : snap.kind === 'darkchess' ? {
+    '将':'G','士':'A','象':'E','车':'R','马':'H','炮':'C','卒':'S'
+  } : snap.kind === 'xiangqi' ? {
+    '帅':'K','将':'K','仕':'A','士':'A','相':'E','象':'E','车':'R','马':'H','炮':'C','兵':'P','卒':'P'
+  } : null;
+  return (m && m[body]) || body;
+}
 function renderGame() {
   var body = document.getElementById('gbody');
   var acts = document.getElementById('gacts');
@@ -603,7 +618,7 @@ function renderGame() {
       if (b.last && b.last[rr * b.cols + cc]) cls += ' c-last';
       if (fromCell && fromCell[0] === rr && fromCell[1] === cc) cls += ' c-sel';
       cell.className = cls;
-      cell.textContent = tok === 'B' ? '●' : tok === 'W' ? '○' : (tok.charAt(0) === 'r' || tok.charAt(0) === 'b' ? tok.slice(1) : tok);
+      cell.textContent = cellLabel(tok);
       cell.onclick = function () { onCell(rr, cc); };
       boardEl.appendChild(cell);
     })(r, c);

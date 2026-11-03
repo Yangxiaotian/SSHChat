@@ -8031,7 +8031,7 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
         is_public = bool(check(base)) if callable(check) else False
     if not base:
         base = (file_http.get_base_url() or "").rstrip("/")
-    url = f"{base.rstrip('/')}/guest/{link.token}"
+    url = f"{base.rstrip('/')}/guest/{link.token}?lang={conn_locale(conn)}"
     send_line(
         conn, _ts(conn, "guest_created", url=url, room=room_name, minutes=minutes)
     )

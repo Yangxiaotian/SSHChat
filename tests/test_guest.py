@@ -128,6 +128,15 @@ class GuestStoreTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(err2, "used")
 
+    def test_page_lang_from_query_overrides_accept(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        handler = FakeHandler(f"/guest/{link.token}?lang=en", lang="zh")
+        self.assertTrue(guest_http.handle_guest_get(handler))
+        page = handler.body.getvalue().decode("utf-8")
+        self.assertIn("Enter chat", page)
+        self.assertIn('lang="en"', page)
+
     def test_refresh_get_after_join_serves_resume_page(self) -> None:
         link = guest_sharing.guest_store.create("Ada", "lobby")
         assert link is not None
@@ -182,6 +191,7 @@ class GuestCommandTests(unittest.TestCase):
         server.clients.clear()
         server.rooms.clear()
         server.room_owners.clear()
+        server.room_games.clear()
         self.alice = DummyConn()
         self.bob = DummyConn()
         server.clients[self.alice] = {
@@ -243,9 +253,19 @@ class GuestCommandTests(unittest.TestCase):
             server.handle_command(self.alice, "/guest")
         alice = self._out(self.alice)
         self.assertIn("/guest/", alice)
+        self.assertIn("?lang=en", alice)
         self.assertIn("only you", alice.lower())
         self.assertNotIn("gui-open", alice)
         self.assertEqual(self._out(self.bob), "")
+
+    def test_guest_url_follows_creator_lang(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        server.clients[self.alice]["locale"] = "zh"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest")
+        self.assertIn("?lang=zh", self._out(self.alice))
+        self.assertNotIn("?lang=en", self._out(self.alice))
 
     def test_attach_guest_conn_joins_room(self) -> None:
         gconn = guest_sharing.GuestConn()
@@ -271,6 +291,34 @@ class GuestCommandTests(unittest.TestCase):
         gconn.sent.clear()
         server.process_client_line(gconn, b"hello from guest")
         self.assertIn("[#lobby] [" + nick + "] hello from guest", self._out(self.alice))
+
+    def test_guest_game_show_follows_locale(self) -> None:
+        zh = DummyConn()
+        server.attach_guest(zh, "alice", "lobby", "zh")
+        zh.sent.clear()
+        server.process_client_line(zh, b"/game show")
+        self.assertIn("本房没有进行中的对局", self._out(zh))
+        en = DummyConn()
+        server.attach_guest(en, "bob", "lobby", "en")
+        en.sent.clear()
+        server.process_client_line(en, b"/game show")
+        self.assertIn("No game in progress in this room", self._out(en))
+
+    def test_guest_board_show_follows_locale(self) -> None:
+        server.handle_command(self.alice, "/game new gomoku")
+        zh = DummyConn()
+        server.attach_guest(zh, "alice", "lobby", "zh")
+        zh.sent.clear()
+        server.process_client_line(zh, b"/game show")
+        zh_out = self._out(zh)
+        self.assertIn("黑", zh_out)
+        en = DummyConn()
+        server.attach_guest(en, "bob", "lobby", "en")
+        en.sent.clear()
+        server.process_client_line(en, b"/game show")
+        en_out = self._out(en)
+        self.assertIn("Black", en_out)
+        self.assertNotIn("黑：", en_out)
 
     def test_guest_can_use_game_play_commands_but_not_end(self) -> None:
         gconn = DummyConn()
@@ -417,6 +465,7 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("gomoku", page)
         self.assertIn("牛头王", page)
         self.assertIn("parseNiutou", page)
+        self.assertIn("function cellLabel", page)
         self.assertIn("move pick", page)
         self.assertIn("loadSession", page)
         self.assertIn("scheduleReconnect", page)
@@ -432,6 +481,20 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("getElementById('go')", scripts[0])
         self.assertNotIn("parseNiutou", scripts[0])
         self.assertIn("parseNiutou", scripts[1])
+
+    def test_landing_en_board_labels(self) -> None:
+        guest_sharing.guest_store = guest_sharing.GuestStore()
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        page = guest_http.render_guest_page(link, "en")
+        self.assertIn("Enter chat", page)
+        self.assertIn("Gomoku", page)
+        self.assertIn("Refresh", page)
+        self.assertIn("6 Nimmt!", page)
+        self.assertIn("'狮':'L'", page)
+        self.assertIn("'将':'G'", page)
+        self.assertIn("'帅':'K'", page)
+        self.assertNotIn("不要关掉这个标签", page)
 
 
 if __name__ == "__main__":
