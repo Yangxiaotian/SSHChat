@@ -18,7 +18,11 @@ enum SecureDownload {
         let filename = (ticket["filename"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = (filename?.isEmpty == false) ? filename! : "file"
         var mime = (ticket["mime"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if mime.isEmpty { mime = MediaMime.guess(name) }
+        if mime.isEmpty {
+            mime = MediaMime.guess(name)
+        } else if MediaMime.isAudio(mime, name: name), mime.lowercased().hasPrefix("video/") {
+            mime = MediaMime.guess(name)
+        }
         guard let rel = ticket["download"] as? String, !rel.isEmpty else {
             throw DownloadError.message("no download ticket")
         }

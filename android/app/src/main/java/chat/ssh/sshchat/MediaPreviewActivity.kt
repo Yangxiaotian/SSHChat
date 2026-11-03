@@ -29,7 +29,12 @@ class MediaPreviewActivity : AppCompatActivity() {
 
         val path = intent.getStringExtra(EXTRA_PATH).orEmpty()
         val name = intent.getStringExtra(EXTRA_NAME).orEmpty().ifBlank { File(path).name }
-        val mime = intent.getStringExtra(EXTRA_MIME).orEmpty().ifBlank { MediaMime.guess(name) }
+        val rawMime = intent.getStringExtra(EXTRA_MIME).orEmpty().ifBlank { MediaMime.guess(name) }
+        val mime = when {
+            MediaMime.isAudio(rawMime, name) && rawMime.startsWith("video/", ignoreCase = true) ->
+                MediaMime.guess(name).takeIf { it.startsWith("audio/") } ?: "audio/webm"
+            else -> rawMime
+        }
         val file = File(path)
         if (!file.isFile) {
             Toast.makeText(this, "文件不存在", Toast.LENGTH_SHORT).show()
@@ -43,8 +48,8 @@ class MediaPreviewActivity : AppCompatActivity() {
 
         when {
             MediaMime.isImage(mime) -> showImage(file)
+            MediaMime.isAudio(mime, name) -> showAudio(file)
             MediaMime.isVideo(mime) -> showVideo(file)
-            MediaMime.isAudio(mime) -> showAudio(file)
             else -> {
                 binding.tvHint.text = "可分享到其他应用打开"
                 binding.image.visibility = View.GONE

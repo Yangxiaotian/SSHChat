@@ -51,8 +51,8 @@ _TEXTS = {
         "enter": "进入聊天",
         "send": "发送",
         "pic": "图片",
-        "voice": "按住说话",
-        "voice_rec": "松开发送",
+        "voice": "语音",
+        "voice_rec": "松开",
         "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字、图片和语音，并用游戏区下棋。最小化或切走浏览器不会提前结束；同一标签刷新可恢复。不要关掉这个标签。",
         "remark": "备注（可选）",
         "remark_ph": "怎么称呼你",
@@ -110,8 +110,8 @@ _TEXTS = {
         "enter": "Enter chat",
         "send": "Send",
         "pic": "Image",
-        "voice": "Hold to talk",
-        "voice_rec": "Release to send",
+        "voice": "Talk",
+        "voice_rec": "Send",
         "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, voice notes, and the game panel are allowed. Minimizing or switching away does not end it early; a reload in this same tab can resume. Do not close this tab.",
         "remark": "Remark (optional)",
         "remark_ph": "What should we call you",
@@ -705,7 +705,7 @@ html,body {{ margin:0; height:100%; height:100dvh; overflow:hidden; background:#
 #app {{ display:flex; flex-direction:column; height:100%; overflow:hidden; }}
 #bar {{ padding:.45rem .8rem; background:#000; display:flex; align-items:center; gap:.6rem; flex-shrink:0; }}
 #who {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }}
-#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#f66; white-space:nowrap; font-size:13px; }}
+#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#f66; white-space:nowrap; font-size:13px; flex-shrink:0; }}
 #gate, #chat {{ flex:1; display:flex; flex-direction:column; min-height:0; }}
 #chat {{ display:none; }}
 #log {{ flex:1; overflow:auto; padding:.7rem .8rem; display:flex; flex-direction:column; gap:.45rem; }}
@@ -717,12 +717,13 @@ html,body {{ margin:0; height:100%; height:100dvh; overflow:hidden; background:#
 #log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#8a8; text-align:center; }}
 #log img.preview {{ display:block; max-width:min(100%,240px); max-height:200px; margin-top:.3rem; border-radius:8px; }}
 #log audio.preview {{ display:block; width:min(100%,240px); margin-top:.25rem; }}
-#row {{ display:flex; padding:.5rem; gap:.45rem; align-items:center; flex-shrink:0; background:#161616; border-top:1px solid #333; }}
-#row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; min-width:0; }}
+#row {{ display:flex; flex-wrap:nowrap; padding:.4rem .45rem; gap:.35rem; align-items:center; flex-shrink:0; background:#161616; border-top:1px solid #333; }}
+#row input[type=text] {{ flex:1 1 auto; padding:.55rem .6rem; font-size:16px; min-width:0; width:0; }}
 #gate {{ padding:1.5rem; max-width:28rem; }}
 #gate p {{ line-height:1.5; color:#ccc; }}
 #gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; }}
-button {{ padding:.6rem 1rem; font-size:16px; }}
+button {{ padding:.55rem .7rem; font-size:15px; }}
+#row button {{ flex:0 0 auto; padding:.55rem .55rem; font-size:14px; white-space:nowrap; }}
 #voice {{ touch-action:none; user-select:none; -webkit-user-select:none; white-space:nowrap; }}
 #voice.rec {{ background:#c62828; color:#fff; }}
 .warn {{ color:#f6a; }}
@@ -752,6 +753,7 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
 <div id="app">
   <div id="bar">
     <div id="who">{html.escape(text['title'])} · {html.escape(text['room'])} #{html.escape(link.room)}</div>
+    <div id="left"></div>
   </div>
   <div id="gate">
     <p class="warn">{html.escape(text['hint'].format(minutes=minutes))}</p>
@@ -777,7 +779,6 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
     </div>
     <div id="log"></div>
     <form id="row">
-      <div id="left"></div>
       <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
       <button type="button" id="voice">{html.escape(text['voice'])}</button>
       <button type="button" id="pick">{html.escape(text['pic'])}</button>
@@ -1012,7 +1013,8 @@ function sendImage(file) {{
 }}
 var mediaRec = null, mediaStream = null, voiceChunks = [], voiceStart = 0, voiceMime = '';
 function pickVoiceMime() {{
-  var cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+  // Prefer mp4/aac when available (Safari); Chrome still lands on webm/opus.
+  var cands = ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg'];
   if (!window.MediaRecorder) return '';
   for (var i = 0; i < cands.length; i++) {{
     try {{ if (MediaRecorder.isTypeSupported(cands[i])) return cands[i]; }} catch (e) {{}}
@@ -1021,9 +1023,68 @@ function pickVoiceMime() {{
 }}
 function voiceFileExt(mime) {{
   var m = String(mime || '').toLowerCase();
+  if (m.indexOf('wav') >= 0) return '.wav';
   if (m.indexOf('mp4') >= 0 || m.indexOf('m4a') >= 0 || m.indexOf('aac') >= 0) return '.m4a';
+  if (m.indexOf('mpeg') >= 0 || m.indexOf('mp3') >= 0) return '.mp3';
   if (m.indexOf('ogg') >= 0) return '.ogg';
   return '.webm';
+}}
+function voiceNeedsWav(mime) {{
+  var m = String(mime || '').toLowerCase();
+  // Native Android/iOS players often fail on browser Opus-in-WebM/Ogg.
+  return m.indexOf('webm') >= 0 || m.indexOf('ogg') >= 0 || m.indexOf('opus') >= 0;
+}}
+function writeWavString(view, offset, str) {{
+  for (var i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+}}
+function audioBufferToWav(buf) {{
+  var numCh = buf.numberOfChannels;
+  var sampleRate = buf.sampleRate;
+  var frames = buf.length;
+  var ch0 = buf.getChannelData(0);
+  var ch1 = numCh > 1 ? buf.getChannelData(1) : null;
+  var bytes = frames * 2;
+  var ab = new ArrayBuffer(44 + bytes);
+  var view = new DataView(ab);
+  writeWavString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + bytes, true);
+  writeWavString(view, 8, 'WAVE');
+  writeWavString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeWavString(view, 36, 'data');
+  view.setUint32(40, bytes, true);
+  var off = 44;
+  for (var i = 0; i < frames; i++) {{
+    var s = ch1 ? ((ch0[i] + ch1[i]) * 0.5) : ch0[i];
+    s = Math.max(-1, Math.min(1, s));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }}
+  return ab;
+}}
+function blobToPlayableVoice(blob, mime) {{
+  if (!blob || !voiceNeedsWav(mime)) {{
+    return Promise.resolve({{blob: blob, mime: mime || 'audio/webm'}});
+  }}
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return Promise.resolve({{blob: blob, mime: mime || 'audio/webm'}});
+  var ctx = new AC();
+  return blob.arrayBuffer().then(function (raw) {{
+    return ctx.decodeAudioData(raw.slice(0));
+  }}).then(function (buf) {{
+    try {{ ctx.close(); }} catch (e) {{}}
+    var wav = audioBufferToWav(buf);
+    return {{blob: new Blob([wav], {{type: 'audio/wav'}}), mime: 'audio/wav'}};
+  }}).catch(function () {{
+    try {{ ctx.close(); }} catch (e) {{}}
+    return {{blob: blob, mime: mime || 'audio/webm'}};
+  }});
 }}
 function setVoiceUi(rec) {{
   var btn = document.getElementById('voice');
@@ -1099,7 +1160,9 @@ function stopVoice(send) {{
     if (elapsed < 400) {{ append('\\n' + L.voice_short + '\\n'); return; }}
     if (!chunks.length) {{ append('\\n' + L.voice_fail + '\\n'); return; }}
     var blob = new Blob(chunks, {{type: mime || 'audio/webm'}});
-    sendVoiceBlob(blob, mime);
+    blobToPlayableVoice(blob, mime).then(function (out) {{
+      sendVoiceBlob(out.blob, out.mime);
+    }});
   }};
   try {{ rec.stop(); }} catch (e) {{
     releaseVoiceStream();
