@@ -351,6 +351,43 @@ class GuestCommandTests(unittest.TestCase):
         self.assertFalse(guest_sharing.looks_like_image(b"hello", "x.txt"))
         self.assertTrue(guest_sharing.looks_like_image(b"\xff\xd8\xff\xe0", "x.bin"))
 
+    def test_looks_like_audio(self) -> None:
+        self.assertTrue(guest_sharing.looks_like_audio(b"\x1a\x45\xdf\xa3xxxx", "a.bin"))
+        self.assertTrue(guest_sharing.looks_like_audio(b"OggSxxxx", "a.bin"))
+        self.assertTrue(guest_sharing.looks_like_audio(b"ID3xxxx", "a.bin"))
+        self.assertTrue(
+            guest_sharing.looks_like_audio(b"\x00\x00\x00\x18ftypM4A ", "a.bin")
+        )
+        self.assertTrue(guest_sharing.looks_like_audio(b"xxxx", "voice.webm"))
+        self.assertFalse(guest_sharing.looks_like_audio(b"hello", "x.txt"))
+        self.assertEqual(
+            guest_sharing.audio_ext_for(b"\x1a\x45\xdf\xa3xxxx", "a.bin"), ".webm"
+        )
+        self.assertEqual(
+            guest_sharing.audio_ext_for(b"\x00\x00\x00\x18ftypM4A ", "a.bin"), ".m4a"
+        )
+
+    def test_publish_guest_voice_notifies_room(self) -> None:
+        # Minimal EBML/WebM-looking header is enough for looks_like_audio.
+        webm = b"\x1a\x45\xdf\xa3" + b"\x00" * 64
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "~gabcdef", "lobby", "en")
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            ok, err = server.publish_guest_voice(nick, "lobby", "note.webm", webm)
+        self.assertTrue(ok, err)
+        self.assertEqual(err, "")
+        store = __import__("file_sharing", fromlist=["file_transfer_store"]).file_transfer_store
+        found = [
+            t
+            for t in store.transfers.values()
+            if t.sender == nick and t.upload_used and "voice" in t.filename.lower()
+        ]
+        self.assertTrue(found)
+        self.assertIn("Alice", found[0].download_tokens)
+        self.assertTrue(found[0].filename.lower().endswith(".webm"))
+
 
 class GuestPageTests(unittest.TestCase):
     def test_landing_has_countdown_and_no_nick_box(self) -> None:
@@ -366,8 +403,13 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn('id="remark"', page)
         self.assertIn("/guest/", page)
         self.assertIn('id="pick"', page)
+        self.assertIn('id="voice"', page)
         self.assertIn("/guest/' + boot.token + '/image", page)
-        self.assertIn("可发文字和图片", page)
+        self.assertIn("/guest/' + boot.token + '/voice", page)
+        self.assertIn("可发文字、图片和语音", page)
+        self.assertIn("MediaRecorder", page)
+        self.assertIn("startVoice", page)
+        self.assertIn("appendAudio", page)
         self.assertIn('id="game"', page)
         self.assertIn('id="gboard"', page)
         self.assertIn("function cmdGame", page)

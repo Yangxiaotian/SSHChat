@@ -7868,21 +7868,11 @@ def attach_guest(
     return nick
 
 
-def publish_guest_image(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
-    """Guest page uploaded an image — fan out via the normal one-time file path."""
-    if file_http is None:
-        return False, "file_off"
-    raw = data or b""
-    if not raw:
-        return False, "empty"
-    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
-        return False, "too_big"
-    if not guest_sharing.looks_like_image(raw, filename):
-        return False, "not_image"
-    room_name = normalize_room(room) or DEFAULT_ROOM
+def _guest_file_recipients(nick: str, room_name: str) -> list[str]:
+    """Room members (and federated peers) who should receive a guest upload."""
     with lock:
         if room_name not in rooms:
-            return False, "no_room"
+            return []
         sender_lower = (nick or "").strip().lower()
         seen = {sender_lower} if sender_lower else set()
         recipients: list[str] = []
@@ -7907,28 +7897,80 @@ def publish_guest_image(nick: str, room: str, filename: str, data: bytes) -> tup
             if rk not in seen:
                 recipients.append(remote_name)
                 seen.add(rk)
-    ext = guest_sharing.image_ext_for(raw, filename)
-    safe = file_sharing.sanitize_filename(filename or f"guest{ext}")
-    if not any(safe.lower().endswith(e) for e in guest_sharing.IMAGE_EXTS):
-        safe = f"{safe}{ext}" if safe else f"guest{ext}"
+    return recipients
+
+
+def _publish_guest_bytes(
+    nick: str,
+    room: str,
+    filename: str,
+    data: bytes,
+    *,
+    safe_name: str,
+) -> tuple[bool, str]:
+    """Write guest upload bytes into the normal one-time file-transfer path."""
+    if file_http is None:
+        return False, "file_off"
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    room_name = normalize_room(room) or DEFAULT_ROOM
+    recipients = _guest_file_recipients(nick, room_name)
+    if not recipients:
+        return False, "no_room"
     store = file_sharing.file_transfer_store
     transfer = store.create_upload_session(
         sender=nick,
         recipients=recipients,
-        filename=safe,
+        filename=safe_name,
         room=room_name,
         upload_ttl_minutes=10,
         download_ttl_minutes=60,
     )
-    path = store.get_file_path(transfer.transfer_id, safe)
+    path = store.get_file_path(transfer.transfer_id, safe_name)
     try:
         with open(path, "wb") as f:
             f.write(raw)
     except OSError:
         return False, "save_fail"
-    if not store.mark_upload_complete(transfer.upload_token, path, len(raw), safe):
+    if not store.mark_upload_complete(transfer.upload_token, path, len(raw), safe_name):
         return False, "save_fail"
     return True, ""
+
+
+def publish_guest_image(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
+    """Guest page uploaded an image — fan out via the normal one-time file path."""
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
+        return False, "too_big"
+    if not guest_sharing.looks_like_image(raw, filename):
+        return False, "not_image"
+    ext = guest_sharing.image_ext_for(raw, filename)
+    safe = file_sharing.sanitize_filename(filename or f"guest{ext}")
+    if not any(safe.lower().endswith(e) for e in guest_sharing.IMAGE_EXTS):
+        safe = f"{safe}{ext}" if safe else f"guest{ext}"
+    return _publish_guest_bytes(nick, room, filename, raw, safe_name=safe)
+
+
+def publish_guest_voice(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
+    """Guest page uploaded a voice note — fan out via the normal one-time file path."""
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    if len(raw) > guest_sharing.MAX_VOICE_BYTES:
+        return False, "too_big"
+    if not guest_sharing.looks_like_audio(raw, filename):
+        return False, "not_audio"
+    ext = guest_sharing.audio_ext_for(raw, filename)
+    # Prefix voice- so mime mapping treats .webm as audio/webm, not video/webm.
+    base = file_sharing.sanitize_filename(filename or f"voice{ext}")
+    if not base.lower().startswith("voice"):
+        base = f"voice-{base}"
+    if not any(base.lower().endswith(e) for e in guest_sharing.AUDIO_EXTS):
+        base = f"{base}{ext}" if base else f"voice{ext}"
+    return _publish_guest_bytes(nick, room, filename, raw, safe_name=base)
 
 
 def _handle_guest(conn, sender: str, payload: str) -> None:
@@ -11542,6 +11584,7 @@ guest_http.bind_chat(
     process_client_line=process_client_line,
     remove_client=remove_client,
     publish_guest_image=publish_guest_image,
+    publish_guest_voice=publish_guest_voice,
 )
 
 
@@ -11566,6 +11609,7 @@ def run_server() -> int:
         process_client_line=process_client_line,
         remove_client=remove_client,
         publish_guest_image=publish_guest_image,
+        publish_guest_voice=publish_guest_voice,
     )
 
     # Start file HTTP server

@@ -155,6 +155,10 @@ _SECURE_KEY_LINE_RE = re.compile(
     re.I,
 )
 _SECURE_HTTP_URL_RE = re.compile(r"^https?://\S+\s*$", re.I)
+_GUEST_URL_ONLY_RE = re.compile(
+    r"^https?://\S+/guest/[A-Za-z0-9_-]+/?$",
+    re.I,
+)
 _SECURE_META_LINE_RE = re.compile(
     r"^(发起人|发件人|文件名|大小|范围|来自房间|标题|接收者|正在播放|"
     r"From|Sender|Filename|Size|Room|Recipients?|Now playing)\s*[:：]",
@@ -205,6 +209,116 @@ def _path_looks_like_image(path: Path) -> bool:
             return _sniff_raster_image(f.read(64))
     except OSError:
         return False
+
+
+_AUDIO_NAME_EXTS = (
+    ".m4a",
+    ".aac",
+    ".mp3",
+    ".ogg",
+    ".oga",
+    ".wav",
+    ".amr",
+    ".weba",
+)
+
+
+def _is_audio_media(name: str, mime: str = "") -> bool:
+    """True for voice notes / audio files (align with mobile MediaMime)."""
+    m = (mime or "").lower().strip()
+    n = Path(name or "").name.lower()
+    if m.startswith("audio/"):
+        return True
+    if any(n.endswith(ext) for ext in _AUDIO_NAME_EXTS):
+        return True
+    # Guest/browser MediaRecorder often lands as voice-*.webm tagged video/webm.
+    if n.endswith(".webm") and (n.startswith("voice") or "voice-" in n):
+        return True
+    if m == "video/webm" and (n.startswith("voice") or "voice-" in n):
+        return True
+    return False
+
+
+def _guess_media_mime(name: str, mime: str = "") -> str:
+    """Normalize ticket/filename mime so .m4a / voice-*.webm play as audio."""
+    n = Path(name or "").name.lower()
+    raw = (mime or "").strip()
+    if n.endswith(".m4a"):
+        return "audio/mp4"
+    if n.endswith(".aac"):
+        return "audio/aac"
+    if n.endswith((".webm", ".weba")) and (
+        n.startswith("voice") or "voice-" in n or n.endswith(".weba")
+    ):
+        return "audio/webm"
+    if raw:
+        return raw
+    return mimetypes.guess_type(name or "")[0] or "application/octet-stream"
+
+
+def _play_audio_file(path: Path) -> tuple[bool, str, subprocess.Popen | None]:
+    """Play a local audio file without blocking the Tk UI.
+
+    Returns (ok, how_or_error, process). Caller may terminate process to stop.
+    """
+    if not path.is_file():
+        return False, "missing", None
+    target = str(path.resolve())
+    cmds: list[list[str]] = []
+    if sys.platform == "darwin":
+        cmds.append(["afplay", target])
+    elif sys.platform.startswith("win"):
+        # Prefer ffplay/mpv; SoundPlayer only does WAV; start opens the default app.
+        for bin_name in ("ffplay", "mpv"):
+            exe = shutil.which(bin_name)
+            if exe:
+                if bin_name == "ffplay":
+                    cmds.append(
+                        [exe, "-nodisp", "-autoexit", "-loglevel", "quiet", target]
+                    )
+                else:
+                    cmds.append([exe, "--no-video", "--really-quiet", target])
+                break
+        if target.lower().endswith(".wav"):
+            cmds.append(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f'(New-Object Media.SoundPlayer "{target}").PlaySync()',
+                ]
+            )
+        cmds.append(["cmd", "/c", "start", "", target])
+    else:
+        for bin_name, args in (
+            ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+            ("mpv", ["--no-video", "--really-quiet"]),
+            ("paplay", []),
+            ("play", ["-q"]),  # sox
+        ):
+            exe = shutil.which(bin_name)
+            if exe:
+                cmds.append([exe, *args, target])
+        # Last resort: open default handler (may pop a window).
+        xdg = shutil.which("xdg-open")
+        if xdg:
+            cmds.append([xdg, target])
+    last_err = "no player"
+    for cmd in cmds:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True, cmd[0], proc
+        except OSError as e:
+            last_err = str(e)
+            continue
+    return False, last_err, None
+
+
 _PAD_DUMP_MARKER = "<<PADDUMP>>"
 _PAD_MAX_CHARS = 8000  # keep in sync with server.MAX_PAD_LEN
 
@@ -711,6 +825,31 @@ def _parse_file_meta_field(body: str) -> tuple[str, str] | None:
     return None
 
 
+def _looks_like_secure_invite_url(url: str) -> bool:
+    """Bare http(s) lines to collapse — exclude /guest (creator must see + copy)."""
+    u = url.lower()
+    return any(
+        p in u
+        for p in (
+            "/download/",
+            "/upload/",
+            "/canvas/",
+            "/piano/",
+            "/clock/",
+            "/music/",
+        )
+    )
+
+
+def _parse_guest_url(body: str) -> str | None:
+    """Private /guest one-shot URL line from guest_created (creator-only)."""
+    t = body.strip()
+    m = _GUEST_URL_ONLY_RE.match(t)
+    if not m:
+        return None
+    return m.group(0).rstrip("/")
+
+
 def _is_secure_invite_noise(body: str) -> bool:
     """True for multi-line file/canvas invite lines that GUI clients collapse."""
     t = body.strip()
@@ -720,7 +859,9 @@ def _is_secure_invite_noise(body: str) -> bool:
         return True
     if _SECURE_URL_LABEL_RE.search(t) or _SECURE_KEY_LINE_RE.match(t):
         return True
-    if _SECURE_HTTP_URL_RE.match(t):
+    # Bare http(s) may also be /news article links or /guest URLs — only hide
+    # file/canvas/piano/clock/music invite URLs (same rule as Android SecureInvite).
+    if _SECURE_HTTP_URL_RE.match(t) and _looks_like_secure_invite_url(t):
         return True
     if (
         _GUI_OPEN_UPLOAD_RE.match(t)
@@ -778,11 +919,7 @@ def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
         body=json.dumps({"key": key.upper()}).encode("utf-8"),
     )
     filename = str(tickets.get("filename") or "file").strip() or "file"
-    mime = str(
-        tickets.get("mime")
-        or mimetypes.guess_type(filename)[0]
-        or "application/octet-stream"
-    )
+    mime = _guess_media_mime(filename, str(tickets.get("mime") or ""))
     download_rel = tickets.get("download")
     if not download_rel:
         raise RuntimeError("no download ticket")
@@ -794,13 +931,15 @@ def _fetch_secure_download(url: str, key: str) -> dict[str, Any]:
     path = Path(tmp_name)
     path.write_bytes(data)
     # Prefer magic bytes over ticket mime — CF/HTML error pages often keep .jpg names.
+    is_image = _sniff_raster_image(data)
     return {
         "_kind": "media",
         "name": filename,
         "mime": mime,
         "path": str(path),
         "size": len(data),
-        "is_image": _sniff_raster_image(data),
+        "is_image": is_image,
+        "is_audio": (not is_image) and _is_audio_media(filename, mime),
     }
 
 
@@ -815,20 +954,22 @@ def _media_from_local_path(
     if not resolved.is_file():
         raise FileNotFoundError(str(path))
     name = (display_name or resolved.name).replace("\\", "_").replace("/", "_")[:200] or "file"
-    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    mime = _guess_media_mime(name, mimetypes.guess_type(name)[0] or "")
     # Copy into a stable temp so clipboard temps / user moves don't break history.
     suffix = Path(name).suffix or mimetypes.guess_extension(mime) or ".bin"
     fd, tmp_name = tempfile.mkstemp(prefix="sshchat-sent-", suffix=suffix)
     os.close(fd)
     dest = Path(tmp_name)
     shutil.copy2(resolved, dest)
+    is_image = _path_looks_like_image(dest)
     return {
         "_kind": "media",
         "name": name,
         "mime": mime,
         "path": str(dest),
         "size": dest.stat().st_size,
-        "is_image": _path_looks_like_image(dest),
+        "is_image": is_image,
+        "is_audio": (not is_image) and _is_audio_media(name, mime),
         "sender": (sender or "").strip() or None,
     }
 
@@ -2349,10 +2490,12 @@ class SSHChatGUI:
         self._photo_refs: list[Any] = []
         self._media_save_targets: dict[str, tuple[str, str]] = {}
         self._media_preview_targets: dict[str, tuple[str, str]] = {}
+        self._media_play_targets: dict[str, tuple[str, str]] = {}
         self._canvas_open_targets: dict[str, tuple[str, str]] = {}
         self._piano_open_targets: dict[str, tuple[str, str]] = {}
         self._media_tag_seq = 0
         self._preview_win: ImagePreviewWindow | None = None
+        self._audio_play_proc: subprocess.Popen | None = None
         self._send_target_kind = "room"
         self._send_target_value = ""
         self._online_users: list[str] = []
@@ -2505,6 +2648,7 @@ class SSHChatGUI:
         self.log.tag_configure("xq_black", foreground="#263238")
         self.log.tag_configure("media_save", foreground="#0b57d0", underline=True)
         self.log.tag_configure("media_preview", foreground="#0b57d0", underline=True)
+        self.log.tag_configure("media_play", foreground="#0b57d0", underline=True)
         self.log.tag_configure("canvas_open", foreground="#0b57d0", underline=True)
         self.log.tag_configure("piano_open", foreground="#0b57d0", underline=True)
         self.log.bind("<<Paste>>", self._on_paste_file, add="+")
@@ -2591,6 +2735,9 @@ class SSHChatGUI:
         )
         self.btn_clock, _ = self._pack_icon_btn(
             self._input_row, "⏱", "棋钟", self._start_clock
+        )
+        self.btn_guest, _ = self._pack_icon_btn(
+            self._input_row, "🔗", "临时访客链接", self._start_guest
         )
         self.btn_library, _ = self._pack_icon_btn(
             self._input_row, "📚", "图书馆", self._start_library
@@ -3051,6 +3198,7 @@ class SSHChatGUI:
         self._photo_refs.clear()
         self._media_save_targets.clear()
         self._media_preview_targets.clear()
+        self._media_play_targets.clear()
         self._canvas_open_targets.clear()
         self._piano_open_targets.clear()
         for entry in entries:
@@ -3217,6 +3365,60 @@ class SSHChatGUI:
             self._chan_send_bytes((cmd + "\n").encode("utf-8"))
         except Exception as e:
             messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _start_guest(self) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        for mins in (5, 10, 15, 30, 60):
+            menu.add_command(
+                label=f"{mins} 分钟",
+                command=lambda m=mins: self._send_guest(m),
+            )
+        menu.add_separator()
+        menu.add_command(label="自定义…", command=self._send_guest_custom)
+        try:
+            btn = self.btn_guest
+            menu.tk_popup(
+                btn.winfo_rootx(),
+                btn.winfo_rooty() + btn.winfo_height(),
+            )
+        finally:
+            menu.grab_release()
+
+    def _send_guest_custom(self) -> None:
+        n = simpledialog.askinteger(
+            "SSHChat",
+            "对方进入后开始倒计时（1～60 分钟）:",
+            parent=self.root,
+            minvalue=1,
+            maxvalue=60,
+            initialvalue=5,
+        )
+        if n is not None:
+            self._send_guest(n)
+
+    def _send_guest(self, minutes: int) -> None:
+        if not self._chan or self._chan.closed:
+            messagebox.showwarning("SSHChat", "请先连接")
+            return
+        mins = max(1, min(60, int(minutes)))
+        cmd = f"/guest {mins}"
+        self._append_chat_line(f"[*] 正在生成访客临时链接…（{cmd}）", local_sent=True)
+        try:
+            self._chan_send_bytes((cmd + "\n").encode("utf-8"))
+        except Exception as e:
+            messagebox.showerror("SSHChat", f"发送失败: {e}")
+
+    def _copy_text_to_clipboard(self, text: str) -> bool:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update_idletasks()
+            return True
+        except tk.TclError:
+            return False
 
     def _start_piano(self) -> None:
         if not self._chan or self._chan.closed:
@@ -3600,6 +3802,10 @@ class SSHChatGUI:
             if prev:
                 self._open_media_preview(Path(prev[0]), prev[1])
                 return
+            play = self._media_play_targets.get(tag)
+            if play:
+                self._play_media_audio(Path(play[0]), play[1])
+                return
             canvas = self._canvas_open_targets.get(tag)
             if canvas:
                 # Re-join so we get the latest key (keys may have rotated since
@@ -3663,6 +3869,40 @@ class SSHChatGUI:
             else:
                 messagebox.showerror("SSHChat", f"预览失败: {e}")
 
+    def _stop_media_audio(self) -> None:
+        proc = self._audio_play_proc
+        self._audio_play_proc = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except OSError:
+            pass
+
+    def _play_media_audio(
+        self, path: Path, name: str, *, quiet: bool = False
+    ) -> None:
+        """Play a received voice/audio file (auto or click 「播放」)."""
+        if not path.is_file():
+            msg = "本地语音已失效，请重新接收"
+            if quiet:
+                self._set_status(msg)
+            else:
+                messagebox.showwarning("SSHChat", msg)
+            return
+        self._stop_media_audio()
+        ok, how, proc = _play_audio_file(path)
+        if not ok:
+            msg = f"无法播放语音: {name}（{how}；可另存为后用系统播放器打开）"
+            if quiet:
+                self._set_status(msg)
+            else:
+                messagebox.showinfo("SSHChat", msg)
+            return
+        self._audio_play_proc = proc
+        self._set_status(f"正在播放: {name}")
+
     def _insert_media_entry(self, media: dict[str, Any]) -> None:
         """
         Insert file/image notice without embedding images or child widgets in Text.
@@ -3673,8 +3913,14 @@ class SSHChatGUI:
         name = str(media.get("name") or "file")
         size = int(media.get("size") or 0)
         path = Path(str(media.get("path") or ""))
+        mime = str(media.get("mime") or "")
         is_image = bool(media.get("is_image") and path.is_file())
-        kind = "图片" if is_image else "文件"
+        is_audio = bool(
+            media.get("is_audio")
+            if "is_audio" in media
+            else _is_audio_media(name, mime)
+        ) and path.is_file() and not is_image
+        kind = "图片" if is_image else ("语音" if is_audio else "文件")
         sender = str(media.get("sender") or "").strip()
         prefix = f"来自 {sender} · " if sender else ""
         caption = f"{prefix}[{kind}] {name} ({self._format_file_size(size)})  "
@@ -3690,6 +3936,10 @@ class SSHChatGUI:
             if is_image:
                 self._media_preview_targets[tag] = (str(path), name)
                 self.log.insert(tk.END, "预览", ("media_preview", tag))
+                self.log.insert(tk.END, "  ")
+            elif is_audio:
+                self._media_play_targets[tag] = (str(path), name)
+                self.log.insert(tk.END, "播放", ("media_play", tag))
                 self.log.insert(tk.END, "  ")
             self.log.insert(tk.END, "另存为", ("media_save", tag))
             self.log.insert(tk.END, "\n")
@@ -3708,8 +3958,23 @@ class SSHChatGUI:
                 self._insert_media_entry(media)
                 self.log.see(tk.END)
                 self.log.configure(state=tk.DISABLED)
-                # Do not auto-open image windows — privacy (shared screen / shoulder).
-                # User clicks 「预览」 when ready.
+                # Images: do not auto-open — privacy (shared screen / shoulder).
+                # Voice: auto-play like mobile (user can click 「播放」 again).
+                name = str(media.get("name") or "file")
+                mime = str(media.get("mime") or "")
+                path = Path(str(media.get("path") or ""))
+                is_audio = bool(
+                    media.get("is_audio")
+                    if "is_audio" in media
+                    else _is_audio_media(name, mime)
+                ) and path.is_file() and not media.get("is_image")
+                if is_audio:
+                    self.root.after(
+                        80,
+                        lambda p=path, n=name: self._play_media_audio(
+                            p, n, quiet=True
+                        ),
+                    )
             except Exception as e:
                 self._set_status(f"预览失败: {e}")
                 try:
@@ -3825,6 +4090,11 @@ class SSHChatGUI:
             return
         if parsed and parsed[1] == "*" and self._try_handle_download_invite(parsed[2]):
             return
+        guest_url = (
+            _parse_guest_url(parsed[2]) if parsed and parsed[1] == "*" else None
+        )
+        if guest_url and self._copy_text_to_clipboard(guest_url):
+            self._set_status("临时链接已复制，可粘贴发给对方")
         if parsed and parsed[1] == "*":
             body = parsed[2].strip()
             if _SECURE_BANNER_START_RE.match(body):

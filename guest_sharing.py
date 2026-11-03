@@ -24,6 +24,9 @@ MAX_MSG_CHARS = 500
 # Guest page image uploads (jpeg/png/gif/webp); keep small for short-lived links.
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+# Guest push-to-talk voice notes (webm/ogg/m4a/wav/mp3); shorter than images.
+MAX_VOICE_BYTES = 4 * 1024 * 1024
+AUDIO_EXTS = (".webm", ".weba", ".ogg", ".oga", ".wav", ".mp3", ".m4a", ".aac", ".mp4")
 # Optional display remark shown as `~gxxxxxx (备注)` — not an identity nick.
 MAX_REMARK_CHARS = 16
 
@@ -59,6 +62,53 @@ def image_ext_for(data: bytes, filename: str = "") -> str:
         if name.endswith(ext):
             return ext
     return ".img"
+
+
+def looks_like_audio(data: bytes, filename: str = "") -> bool:
+    """True if bytes look like a common audio container or filename ends with one."""
+    if not data:
+        return False
+    # EBML / WebM (MediaRecorder audio/webm)
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return True
+    # Ogg (Opus/Vorbis)
+    if data[:4] == b"OggS":
+        return True
+    # WAV
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return True
+    # MP3 frame sync or ID3
+    if data[:3] == b"ID3" or (len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return True
+    # MP4 / M4A / AAC-in-MP4: ....ftyp
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return True
+    name = (filename or "").lower()
+    return any(name.endswith(ext) for ext in AUDIO_EXTS)
+
+
+def audio_ext_for(data: bytes, filename: str = "") -> str:
+    """Pick a safe audio extension from magic bytes, else filename, else .webm."""
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return ".webm"
+    if data[:4] == b"OggS":
+        return ".ogg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return ".wav"
+    if data[:3] == b"ID3" or (
+        len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+    ):
+        return ".mp3"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"M4A ", b"M4B ", b"mp42", b"isom", b"iso2", b"mp41"):
+            return ".m4a"
+        return ".m4a"
+    name = (filename or "").lower()
+    for ext in AUDIO_EXTS:
+        if name.endswith(ext):
+            return ".m4a" if ext == ".mp4" else ext
+    return ".webm"
 # `~` is not allowed in Linux usernames (admin-add-user.sh), so this can never
 # collide with a pubkey account. The rest is random — guests do not pick a nick.
 _NICK_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"

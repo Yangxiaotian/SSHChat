@@ -65,8 +65,9 @@ PREVIEWABLE_TYPES = {
     'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
     # Videos
     'video/mp4', 'video/webm', 'video/ogg',
-    # Audio
+    # Audio (include mp4/m4a/aac so mobile + guest voice notes preview)
     'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/ogg', 'audio/webm',
+    'audio/mp4', 'audio/aac', 'audio/x-m4a', 'audio/x-wav',
     # Documents
     'application/pdf',
     # Text
@@ -77,6 +78,16 @@ PREVIEWABLE_TYPES = {
 
 def get_mime_type(filename: str) -> str:
     """Get MIME type for a file."""
+    name = (filename or "").lower()
+    # stdlib mimetypes often maps .m4a → audio/x-m4a and .webm → video/webm.
+    if name.endswith(".m4a"):
+        return "audio/mp4"
+    if name.endswith(".aac"):
+        return "audio/aac"
+    if name.endswith((".webm", ".weba")) and (
+        name.startswith("voice") or "/voice" in name or name.endswith(".weba")
+    ):
+        return "audio/webm"
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or 'application/octet-stream'
 

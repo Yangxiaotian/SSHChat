@@ -23,6 +23,7 @@ _attach_guest = None
 _process_client_line = None
 _remove_client = None
 _publish_guest_image = None
+_publish_guest_voice = None
 
 
 def bind_chat(
@@ -31,12 +32,15 @@ def bind_chat(
     process_client_line,
     remove_client,
     publish_guest_image=None,
+    publish_guest_voice=None,
 ) -> None:
-    global _attach_guest, _process_client_line, _remove_client, _publish_guest_image
+    global _attach_guest, _process_client_line, _remove_client
+    global _publish_guest_image, _publish_guest_voice
     _attach_guest = attach_guest
     _process_client_line = process_client_line
     _remove_client = remove_client
     _publish_guest_image = publish_guest_image
+    _publish_guest_voice = publish_guest_voice
 
 
 _TEXTS = {
@@ -47,7 +51,9 @@ _TEXTS = {
         "enter": "进入聊天",
         "send": "发送",
         "pic": "图片",
-        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字和图片，并用游戏区下棋。最小化或切走浏览器不会提前结束；同一标签刷新可恢复。不要关掉这个标签。",
+        "voice": "按住说话",
+        "voice_rec": "松开发送",
+        "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字、图片和语音，并用游戏区下棋。最小化或切走浏览器不会提前结束；同一标签刷新可恢复。不要关掉这个标签。",
         "remark": "备注（可选）",
         "remark_ph": "怎么称呼你",
         "game": "游戏",
@@ -84,9 +90,16 @@ _TEXTS = {
         "uploading": "正在发送图片…",
         "upload_ok": "图片已发送。",
         "upload_fail": "图片发送失败。",
+        "voice_uploading": "正在发送语音…",
+        "voice_ok": "语音已发送。",
+        "voice_fail": "语音发送失败。",
+        "voice_short": "录音太短。",
+        "voice_denied": "需要麦克风权限才能发语音。",
+        "voice_unsupported": "当前浏览器不支持录音。",
         "not_image": "只能发送图片（jpg/png/gif/webp）。",
-        "too_big": "图片太大（最多 8MB）。",
-        "file_off": "文件服务未启用，无法发图。",
+        "not_audio": "只能发送语音（webm/ogg/m4a/wav/mp3）。",
+        "too_big": "文件太大（图片最多 8MB，语音最多 4MB）。",
+        "file_off": "文件服务未启用，无法发图或语音。",
         "joining": "正在进入…",
         "rejoin": "连接中断，正在重连…",
     },
@@ -97,7 +110,9 @@ _TEXTS = {
         "enter": "Enter chat",
         "send": "Send",
         "pic": "Image",
-        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, and the game panel are allowed. Minimizing or switching away does not end it early; a reload in this same tab can resume. Do not close this tab.",
+        "voice": "Hold to talk",
+        "voice_rec": "Release to send",
+        "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, voice notes, and the game panel are allowed. Minimizing or switching away does not end it early; a reload in this same tab can resume. Do not close this tab.",
         "remark": "Remark (optional)",
         "remark_ph": "What should we call you",
         "game": "Games",
@@ -134,9 +149,16 @@ _TEXTS = {
         "uploading": "Sending image…",
         "upload_ok": "Image sent.",
         "upload_fail": "Could not send image.",
+        "voice_uploading": "Sending voice…",
+        "voice_ok": "Voice sent.",
+        "voice_fail": "Could not send voice.",
+        "voice_short": "Recording too short.",
+        "voice_denied": "Microphone permission is required for voice notes.",
+        "voice_unsupported": "This browser cannot record audio.",
         "not_image": "Images only (jpg/png/gif/webp).",
-        "too_big": "Image too large (max 8MB).",
-        "file_off": "File service is off; cannot send images.",
+        "not_audio": "Voice only (webm/ogg/m4a/wav/mp3).",
+        "too_big": "File too large (images max 8MB, voice max 4MB).",
+        "file_off": "File service is off; cannot send images or voice.",
         "joining": "Entering…",
         "rejoin": "Disconnected, reconnecting…",
     },
@@ -609,6 +631,7 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
         "room": link.room,
         "lang": lang,
         "maxImage": guest_sharing.MAX_IMAGE_BYTES,
+        "maxVoice": guest_sharing.MAX_VOICE_BYTES,
         "games": text["games"],
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
@@ -622,7 +645,16 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
             "uploading": text["uploading"],
             "upload_ok": text["upload_ok"],
             "upload_fail": text["upload_fail"],
+            "voice_uploading": text["voice_uploading"],
+            "voice_ok": text["voice_ok"],
+            "voice_fail": text["voice_fail"],
+            "voice_short": text["voice_short"],
+            "voice_denied": text["voice_denied"],
+            "voice_unsupported": text["voice_unsupported"],
+            "voice": text["voice"],
+            "voice_rec": text["voice_rec"],
             "not_image": text["not_image"],
+            "not_audio": text["not_audio"],
             "too_big": text["too_big"],
             "file_off": text["file_off"],
             "remark": text["remark"],
@@ -669,12 +701,15 @@ html,body {{ margin:0; height:100%; height:100dvh; overflow:hidden; background:#
 #log .bubble.me .nm {{ color:#063; }}
 #log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#8a8; text-align:center; }}
 #log img.preview {{ display:block; max-width:min(100%,240px); max-height:200px; margin-top:.3rem; border-radius:8px; }}
+#log audio.preview {{ display:block; width:min(100%,240px); margin-top:.25rem; }}
 #row {{ display:flex; padding:.5rem; gap:.45rem; align-items:center; flex-shrink:0; background:#161616; border-top:1px solid #333; }}
 #row input[type=text] {{ flex:1; padding:.6rem; font-size:16px; min-width:0; }}
 #gate {{ padding:1.5rem; max-width:28rem; }}
 #gate p {{ line-height:1.5; color:#ccc; }}
 #gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; }}
 button {{ padding:.6rem 1rem; font-size:16px; }}
+#voice {{ touch-action:none; user-select:none; -webkit-user-select:none; white-space:nowrap; }}
+#voice.rec {{ background:#c62828; color:#fff; }}
 .warn {{ color:#f6a; }}
 #pic {{ display:none; }}
 #game {{ background:#1a1a1a; border-bottom:1px solid #333; flex-shrink:0; }}
@@ -729,6 +764,7 @@ button {{ padding:.6rem 1rem; font-size:16px; }}
     <form id="row">
       <div id="left"></div>
       <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
+      <button type="button" id="voice">{html.escape(text['voice'])}</button>
       <button type="button" id="pick">{html.escape(text['pic'])}</button>
       <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
       <button type="submit">{html.escape(text['send'])}</button>
@@ -774,9 +810,12 @@ function over(msg) {{
   if (ended) return;
   ended = true;
   gDead = true;
+  try {{ stopVoice(false); }} catch (e) {{}}
   append('\\n' + msg);
   document.getElementById('msg').disabled = true;
   document.getElementById('pick').disabled = true;
+  var vb = document.getElementById('voice');
+  if (vb) vb.disabled = true;
   var tog = document.getElementById('gtog');
   if (tog) tog.disabled = true;
   try {{ if (ws) {{ ws.onclose = null; ws.close(); }} }} catch (e) {{}}
@@ -851,6 +890,25 @@ function appendImg(src, alt, mine) {{
   document.getElementById('log').appendChild(wrap);
   scrollLog();
 }}
+function appendAudio(src, name, mine) {{
+  flushSys();
+  var wrap = document.createElement('div');
+  wrap.className = 'bubble ' + (mine ? 'me' : 'them');
+  if (!mine && name) {{
+    var n = document.createElement('div');
+    n.className = 'nm';
+    n.textContent = name;
+    wrap.appendChild(n);
+  }}
+  var audio = document.createElement('audio');
+  audio.className = 'preview';
+  audio.controls = true;
+  audio.preload = 'metadata';
+  audio.src = src;
+  wrap.appendChild(audio);
+  document.getElementById('log').appendChild(wrap);
+  scrollLog();
+}}
 function maybePreview(chunk) {{
   var m = /gui-open\\s+download\\s+(https?:\\/\\/\\S+)\\s+([A-Z0-9]{{6}})/i.exec(chunk);
   if (!m) return;
@@ -865,7 +923,15 @@ function maybePreview(chunk) {{
     body: JSON.stringify({{key: key}})
   }}).then(function (r) {{ return r.json(); }}).then(function (j) {{
     if (!j || !j.preview) return;
-    appendImg(j.preview, j.filename || 'image');
+    var mime = String(j.mime || '').toLowerCase();
+    var fn = String(j.filename || '').toLowerCase();
+    if (mime.indexOf('audio/') === 0 || (mime === 'video/webm' && fn.indexOf('voice') === 0)) {{
+      appendAudio(j.preview, j.filename || 'voice');
+      return;
+    }}
+    if (mime.indexOf('image/') === 0 || !mime) {{
+      appendImg(j.preview, j.filename || 'image');
+    }}
   }}).catch(function () {{}});
 }}
 function proto() {{ return location.protocol === 'https:' ? 'wss:' : 'ws:'; }}
@@ -929,6 +995,148 @@ function sendImage(file) {{
       append(L.upload_fail + '\\n');
     }});
 }}
+var mediaRec = null, mediaStream = null, voiceChunks = [], voiceStart = 0, voiceMime = '';
+function pickVoiceMime() {{
+  var cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+  if (!window.MediaRecorder) return '';
+  for (var i = 0; i < cands.length; i++) {{
+    try {{ if (MediaRecorder.isTypeSupported(cands[i])) return cands[i]; }} catch (e) {{}}
+  }}
+  return '';
+}}
+function voiceFileExt(mime) {{
+  var m = String(mime || '').toLowerCase();
+  if (m.indexOf('mp4') >= 0 || m.indexOf('m4a') >= 0 || m.indexOf('aac') >= 0) return '.m4a';
+  if (m.indexOf('ogg') >= 0) return '.ogg';
+  return '.webm';
+}}
+function setVoiceUi(rec) {{
+  var btn = document.getElementById('voice');
+  if (!btn) return;
+  if (rec) {{
+    btn.classList.add('rec');
+    btn.textContent = L.voice_rec || L.voice;
+  }} else {{
+    btn.classList.remove('rec');
+    btn.textContent = L.voice;
+  }}
+}}
+function releaseVoiceStream() {{
+  try {{
+    if (mediaStream) {{
+      var tracks = mediaStream.getTracks();
+      for (var i = 0; i < tracks.length; i++) tracks[i].stop();
+    }}
+  }} catch (e) {{}}
+  mediaStream = null;
+}}
+function sendVoiceBlob(blob, mime) {{
+  if (!blob || !ticket || busy) return;
+  if (blob.size > (boot.maxVoice || 4194304)) {{ append('\\n' + L.too_big + '\\n'); return; }}
+  busy = true;
+  append('\\n' + L.voice_uploading + '\\n');
+  var name = 'voice-' + Date.now() + voiceFileExt(mime);
+  try {{
+    var localUrl = URL.createObjectURL(blob);
+    appendAudio(localUrl, name, true);
+  }} catch (e) {{}}
+  var fd = new FormData();
+  fd.append('file', blob, name);
+  fetch('/guest/' + boot.token + '/voice?k=' + encodeURIComponent(ticket) + '&lang=' + encodeURIComponent(boot.lang), {{
+    method: 'POST',
+    body: fd
+  }}).then(function (r) {{ return r.json().then(function (j) {{ return {{ok: r.ok, j: j}}; }}); }})
+    .then(function (x) {{
+      busy = false;
+      if (!x.ok || !x.j.ok) {{
+        var err = (x.j && x.j.error) || L.voice_fail;
+        if (x.j && x.j.code === 'not_audio') err = L.not_audio;
+        if (x.j && x.j.code === 'too_big') err = L.too_big;
+        if (x.j && x.j.code === 'file_off') err = L.file_off;
+        append(err + '\\n');
+        return;
+      }}
+      append(L.voice_ok + '\\n');
+    }}).catch(function () {{
+      busy = false;
+      append(L.voice_fail + '\\n');
+    }});
+}}
+function stopVoice(send) {{
+  var rec = mediaRec;
+  mediaRec = null;
+  setVoiceUi(false);
+  if (!rec) {{
+    releaseVoiceStream();
+    voiceChunks = [];
+    return;
+  }}
+  var elapsed = Date.now() - voiceStart;
+  var mime = voiceMime || rec.mimeType || '';
+  rec.ondataavailable = function (ev) {{
+    if (ev.data && ev.data.size) voiceChunks.push(ev.data);
+  }};
+  rec.onstop = function () {{
+    releaseVoiceStream();
+    var chunks = voiceChunks;
+    voiceChunks = [];
+    if (!send) return;
+    if (elapsed < 400) {{ append('\\n' + L.voice_short + '\\n'); return; }}
+    if (!chunks.length) {{ append('\\n' + L.voice_fail + '\\n'); return; }}
+    var blob = new Blob(chunks, {{type: mime || 'audio/webm'}});
+    sendVoiceBlob(blob, mime);
+  }};
+  try {{ rec.stop(); }} catch (e) {{
+    releaseVoiceStream();
+    voiceChunks = [];
+  }}
+}}
+function startVoice(ev) {{
+  if (ev) {{
+    try {{ ev.preventDefault(); }} catch (e) {{}}
+  }}
+  if (!ticket || busy || ended || mediaRec) return;
+  voiceMime = pickVoiceMime();
+  if (!voiceMime && !window.MediaRecorder) {{
+    append('\\n' + L.voice_unsupported + '\\n');
+    return;
+  }}
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+    append('\\n' + L.voice_unsupported + '\\n');
+    return;
+  }}
+  navigator.mediaDevices.getUserMedia({{audio: true}}).then(function (stream) {{
+    if (ended || !ticket || mediaRec) {{
+      try {{ stream.getTracks().forEach(function (t) {{ t.stop(); }}); }} catch (e) {{}}
+      return;
+    }}
+    mediaStream = stream;
+    voiceChunks = [];
+    voiceStart = Date.now();
+    try {{
+      mediaRec = voiceMime
+        ? new MediaRecorder(stream, {{mimeType: voiceMime}})
+        : new MediaRecorder(stream);
+      voiceMime = mediaRec.mimeType || voiceMime || '';
+    }} catch (e) {{
+      releaseVoiceStream();
+      append('\\n' + L.voice_unsupported + '\\n');
+      return;
+    }}
+    mediaRec.ondataavailable = function (ev) {{
+      if (ev.data && ev.data.size) voiceChunks.push(ev.data);
+    }};
+    try {{ mediaRec.start(250); }} catch (e2) {{
+      releaseVoiceStream();
+      mediaRec = null;
+      append('\\n' + L.voice_fail + '\\n');
+      return;
+    }}
+    setVoiceUi(true);
+  }}).catch(function () {{
+    append('\\n' + L.voice_denied + '\\n');
+  }});
+}}
 document.getElementById('go').onclick = function () {{
   var btn = this;
   var err = document.getElementById('err');
@@ -974,6 +1182,33 @@ document.getElementById('pic').onchange = function () {{
   this.value = '';
   if (f) sendImage(f);
 }};
+(function () {{
+  var btn = document.getElementById('voice');
+  if (!btn) return;
+  var armed = false;
+  function down(ev) {{
+    if (btn.disabled) return;
+    armed = true;
+    startVoice(ev);
+  }}
+  function up(ev) {{
+    if (!armed) return;
+    armed = false;
+    stopVoice(true);
+  }}
+  function cancel(ev) {{
+    if (!armed) return;
+    armed = false;
+    stopVoice(false);
+  }}
+  btn.addEventListener('pointerdown', down);
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', cancel);
+  btn.addEventListener('pointerleave', function (ev) {{
+    if (armed && mediaRec) cancel(ev);
+  }});
+  btn.addEventListener('contextmenu', function (ev) {{ try {{ ev.preventDefault(); }} catch (e) {{}} }});
+}})();
 document.addEventListener('paste', function (e) {{
   if (!ticket || !e.clipboardData) return;
   var items = e.clipboardData.items || [];
@@ -1060,6 +1295,8 @@ def handle_guest_post(handler: "BaseHTTPRequestHandler") -> bool:
         return _handle_guest_join(handler, parts[1])
     if parts[2] == "image":
         return _handle_guest_image(handler, parts[1])
+    if parts[2] == "voice":
+        return _handle_guest_voice(handler, parts[1])
     return False
 
 
@@ -1156,6 +1393,94 @@ def _handle_guest_image(handler: "BaseHTTPRequestHandler", token: str) -> bool:
         msg = text.get(code) or text["upload_fail"]
         status = 413 if code == "too_big" else 400 if code == "not_image" else 503
         _send_json(handler, status, {"ok": False, "code": code or "fail", "error": msg})
+        return True
+    _send_json(handler, 200, {"ok": True})
+    return True
+
+
+def _read_guest_upload(
+    handler: "BaseHTTPRequestHandler",
+    *,
+    max_bytes: int,
+    text: dict,
+) -> tuple[bytes | None, str, str | None]:
+    """Return (raw, filename, error_code). error_code set on failure."""
+    content_type = handler.headers.get("Content-Type", "")
+    if not content_type.startswith("multipart/form-data"):
+        return None, "", "bad"
+    try:
+        form = cgi.FieldStorage(
+            fp=handler.rfile,
+            headers=handler.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+            },
+        )
+    except Exception:
+        return None, "", "bad"
+    if "file" not in form:
+        return None, "", "empty"
+    file_item = form["file"]
+    if not getattr(file_item, "file", None):
+        return None, "", "empty"
+    raw = file_item.file.read(max_bytes + 1)
+    if not raw:
+        return None, "", "empty"
+    if len(raw) > max_bytes:
+        return None, "", "too_big"
+    filename = getattr(file_item, "filename", None) or "upload.bin"
+    return raw, filename, None
+
+
+def _handle_guest_voice(handler: "BaseHTTPRequestHandler", token: str) -> bool:
+    lang = _lang(handler)
+    text = _TEXTS[lang]
+    ticket = ((parse_qs(urlparse(handler.path).query or "").get("k") or [""])[0] or "").strip()
+    link, err = guest_sharing.guest_store.ws_ok(token, ticket)
+    if link is None:
+        _send_json(
+            handler,
+            403,
+            {"ok": False, "code": err or "gone", "error": text.get(err, text["used"])},
+        )
+        return True
+    if _publish_guest_voice is None:
+        _send_json(
+            handler,
+            503,
+            {"ok": False, "code": "file_off", "error": text["file_off"]},
+        )
+        return True
+    raw, filename, code = _read_guest_upload(
+        handler, max_bytes=guest_sharing.MAX_VOICE_BYTES, text=text
+    )
+    if code:
+        msg = text.get(code) or text["voice_fail"]
+        status = 413 if code == "too_big" else 400
+        _send_json(handler, status, {"ok": False, "code": code, "error": msg})
+        return True
+    if not guest_sharing.looks_like_audio(raw or b"", filename):
+        _send_json(
+            handler,
+            400,
+            {"ok": False, "code": "not_audio", "error": text["not_audio"]},
+        )
+        return True
+    nick = link.nick or guest_sharing.random_guest_nick()
+    ok, pub_code = _publish_guest_voice(nick, link.room, filename, raw or b"")
+    if not ok:
+        msg = text.get(pub_code) or text["voice_fail"]
+        status = (
+            413
+            if pub_code == "too_big"
+            else 400
+            if pub_code == "not_audio"
+            else 503
+        )
+        _send_json(
+            handler, status, {"ok": False, "code": pub_code or "fail", "error": msg}
+        )
         return True
     _send_json(handler, 200, {"ok": True})
     return True
