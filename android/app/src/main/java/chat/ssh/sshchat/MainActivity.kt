@@ -1606,6 +1606,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 SecureInvite.Kind.CLOCK -> {
                     MessageAlert.play(this)
+                    val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("sshchat-clock", open.url))
+                    Toast.makeText(this, "棋钟链接已复制", Toast.LENGTH_SHORT).show()
                     appendLine("[*] 打开棋钟…")
                     startActivity(WebInviteActivity.clock(this, open.url))
                 }
@@ -1619,6 +1622,9 @@ class MainActivity : AppCompatActivity() {
         }
         SecureInvite.parseClockUrl(stripped)?.let { clockUrl ->
             MessageAlert.play(this)
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("sshchat-clock", clockUrl))
+            Toast.makeText(this, "棋钟链接已复制", Toast.LENGTH_SHORT).show()
             appendLine("[*] 打开棋钟…")
             startActivity(WebInviteActivity.clock(this, clockUrl))
             return

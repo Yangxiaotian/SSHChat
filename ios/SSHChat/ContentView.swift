@@ -1049,6 +1049,8 @@ final class ChatViewModel: ObservableObject {
                 }
             case .clock:
                 MessageAlert.play()
+                UIPasteboard.general.string = open.url
+                toast = "棋钟链接已复制"
                 appendText("[*] 打开棋钟…")
                 webInvite = WebInvitePayload(
                     title: "棋钟",
@@ -1076,6 +1078,8 @@ final class ChatViewModel: ObservableObject {
 
         if let clockUrl = SecureInvite.parseClockUrl(stripped) {
             MessageAlert.play()
+            UIPasteboard.general.string = clockUrl
+            toast = "棋钟链接已复制"
             appendText("[*] 打开棋钟…")
             webInvite = WebInvitePayload(
                 title: "棋钟",

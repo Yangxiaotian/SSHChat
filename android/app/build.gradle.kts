@@ -12,8 +12,8 @@ android {
         applicationId = "chat.ssh.sshchat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 72
-        versionName = "0.3.59"
+        versionCode = 73
+        versionName = "0.3.60"
         buildConfigField("String", "DEFAULT_HOST", "\"stdlib.gicp.net\"")
         buildConfigField("int", "DEFAULT_PORT", "44681")
     }
