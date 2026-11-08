@@ -18,6 +18,7 @@ UNIT=/etc/systemd/system/sshchat-cloudflared.service
 PLIST=/Library/LaunchDaemons/com.sshchat.cloudflared.plist
 WAIT_URL_SEC=90
 INSTALL_ONLY=0
+FORCE_REFRESH=0
 
 is_darwin() { [[ "$(uname -s)" == "Darwin" ]]; }
 
@@ -31,6 +32,7 @@ Options:
   --port N           Local file HTTP port (default: $FILE_HTTP_PORT)
   --wait-url SEC     Seconds to wait for trycloudflare URL after start (default: $WAIT_URL_SEC; 0=skip)
   --install-only     Install binary + unit/helper; do not start / wait
+  --force-refresh    Always mint a new Quick Tunnel URL (default: keep URL if still valid)
   -h, --help         Show this help
 EOF
 }
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --port) FILE_HTTP_PORT=${2:?}; shift 2 ;;
     --wait-url) WAIT_URL_SEC=${2:?}; shift 2 ;;
     --install-only) INSTALL_ONLY=1; shift ;;
+    --force-refresh) FORCE_REFRESH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -235,7 +238,7 @@ EOF
 }
 
 stop_existing() {
-  echo "info: stopping any existing Cloudflare Quick Tunnel (force fresh URL on deploy)"
+  echo "info: stopping Cloudflare Quick Tunnel (will mint a new public URL)"
   if command -v systemctl >/dev/null 2>&1 && [[ -f "$UNIT" || -f /etc/systemd/system/sshchat-cloudflared.service ]]; then
     systemctl stop sshchat-cloudflared.service 2>/dev/null || true
   fi
@@ -256,13 +259,18 @@ stop_existing() {
       echo "info: removed leftover user LaunchAgent $user_plist"
     done
   fi
-  # KillMode=process used to leave orphans; always reap them so the next start gets a NEW trycloudflare URL.
+  # KillMode=process used to leave orphans; reap them before minting a new URL.
   pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   pkill -f '/usr/local/sbin/sshchat-cloudflared-tunnel.sh' 2>/dev/null || true
   pkill -f '/Users/.*/var/sshchat-cloudflared/run-tunnel.sh' 2>/dev/null || true
   sleep 1
   pkill -9 -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
   rm -f "$STATE_DIR/public_url"
+}
+
+cloudflared_connector_running() {
+  pgrep -f 'cloudflared tunnel --no-autoupdate --url' >/dev/null 2>&1 \
+    || pgrep -f '/usr/local/sbin/sshchat-cloudflared-tunnel.sh' >/dev/null 2>&1
 }
 
 restart_sshchat_service() {
@@ -392,7 +400,6 @@ start_service() {
 
 install_cloudflared_bin || exit 1
 install_helper
-stop_existing
 if is_darwin; then
   install_macos_server_daemon
   install_macos_daemon
@@ -526,29 +533,63 @@ refresh_tunnel_for_resolvable_url() {
   return 1
 }
 
-start_service
-# Capture log offset AFTER start so we never treat a pre-start URL as "new".
-LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
-rm -f "$STATE_DIR/public_url" 2>/dev/null || true
+reuse_existing_if_healthy() {
+  # Deploy should keep a working Quick Tunnel URL so phones/Kindle guest links
+  # stay valid. Only remint when forced or the current URL/connector is dead.
+  local url
+  if [[ "$FORCE_REFRESH" -eq 1 ]]; then
+    echo "info: --force-refresh set; minting a new Quick Tunnel URL"
+    return 1
+  fi
+  [[ -f "$STATE_DIR/public_url" ]] || return 1
+  url=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+  [[ "$url" =~ ^https://[a-zA-Z0-9-]+\.trycloudflare\.com$ ]] || return 1
+  if [[ "${url#https://}" == "api.trycloudflare.com" ]]; then
+    return 1
+  fi
+  if ! cloudflared_connector_running; then
+    echo "info: no live cloudflared connector; will mint a new Quick Tunnel" >&2
+    return 1
+  fi
+  if ! probe_public_url "$url"; then
+    echo "warning: existing PUBLIC_URL not usable; will mint a new Quick Tunnel" >&2
+    return 1
+  fi
+  echo "info: keeping existing Cloudflare URL (still valid): $url"
+  ensure_env_matches_public_url || return 1
+  return 0
+}
 
 wait_rc=0
-wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
-
-if [[ "$wait_rc" -eq 2 ]]; then
-  echo "error: Cloudflare rate-limited quick tunnels" >&2
-elif [[ -f "$STATE_DIR/public_url" ]]; then
-  if ! refresh_tunnel_for_resolvable_url 2; then
-    echo "error: could not obtain a DNS-resolvable Cloudflare PUBLIC_URL" >&2
-    echo "hint: sudo $SCRIPT_DIR/start-cloudflared-once.sh   # after cooldown if rate-limited" >&2
-    wait_rc=1
-  else
-    wait_rc=0
-    PUBLIC=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
-    echo "info: /sendfile + /canvas public URL: $PUBLIC"
-  fi
+if reuse_existing_if_healthy; then
+  wait_rc=0
+  PUBLIC=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+  echo "info: /sendfile + /canvas public URL: $PUBLIC"
 else
-  echo "error: deploy did not obtain a Cloudflare public URL; /sendfile links will break" >&2
-  wait_rc=1
+  stop_existing
+  start_service
+  # Capture log offset AFTER start so we never treat a pre-start URL as "new".
+  LOG_MARK=$(wc -c <"$STATE_DIR/tunnel.log" 2>/dev/null || echo 0)
+  rm -f "$STATE_DIR/public_url" 2>/dev/null || true
+
+  wait_for_url "$WAIT_URL_SEC" "$LOG_MARK" || wait_rc=$?
+
+  if [[ "$wait_rc" -eq 2 ]]; then
+    echo "error: Cloudflare rate-limited quick tunnels" >&2
+  elif [[ -f "$STATE_DIR/public_url" ]]; then
+    if ! refresh_tunnel_for_resolvable_url 2; then
+      echo "error: could not obtain a DNS-resolvable Cloudflare PUBLIC_URL" >&2
+      echo "hint: sudo $SCRIPT_DIR/start-cloudflared-once.sh   # after cooldown if rate-limited" >&2
+      wait_rc=1
+    else
+      wait_rc=0
+      PUBLIC=$(tr -d '[:space:]' <"$STATE_DIR/public_url")
+      echo "info: /sendfile + /canvas public URL: $PUBLIC"
+    fi
+  else
+    echo "error: deploy did not obtain a Cloudflare public URL; /sendfile links will break" >&2
+    wait_rc=1
+  fi
 fi
 
 if [[ -f "$ENV_FILE" ]]; then

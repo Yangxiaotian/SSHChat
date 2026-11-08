@@ -57,15 +57,23 @@ _TEXTS = {
         "remark": "备注（可选）",
         "remark_ph": "怎么称呼你",
         "game": "游戏",
+        "gclose": "收起",
         "gjoin": "加入",
         "gshow": "刷新棋盘",
         "gresign": "认输",
+        "gresign_sent": "已发送认输…",
         "gpass": "停一手",
         "gnew": "开局",
         "ghint_stone": "点空位落子",
         "ghint_piece": "先点己方棋子，再点目标格",
         "ghint_dark": "点问号翻面；或先点己子再点目标",
         "ghint_card": "社交/牌类请看聊天，在输入框操作",
+        "gpromo": "升变选择",
+        "gpromo_q": "后",
+        "gpromo_r": "车",
+        "gpromo_b": "象",
+        "gpromo_n": "马",
+        "gpromo_cancel": "取消",
         "games": [
             ["gomoku", "五子棋"],
             ["reversi", "黑白棋"],
@@ -81,6 +89,7 @@ _TEXTS = {
         "ghand": "手牌",
         "ghint_niutou": "点手牌出牌",
         "ghint_niutou_row": "这张牌比所有行尾都小，点一行吃掉",
+        "gended": "对局已结束，可在下方开新局",
         "used": "这个链接已经用过（或刚刷新过），不能再打开。请让对方重新发一条 /guest。",
         "expired": "临时聊天已结束。",
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
@@ -116,15 +125,23 @@ _TEXTS = {
         "remark": "Remark (optional)",
         "remark_ph": "What should we call you",
         "game": "Games",
+        "gclose": "Close",
         "gjoin": "Join",
         "gshow": "Refresh",
         "gresign": "Resign",
+        "gresign_sent": "Resign sent…",
         "gpass": "Pass",
         "gnew": "New",
         "ghint_stone": "Tap an empty point to move",
         "ghint_piece": "Tap your piece, then the destination",
         "ghint_dark": "Tap ? to flip, or tap a piece then a destination",
         "ghint_card": "Social/card games: follow chat and type in the box",
+        "gpromo": "Promote to",
+        "gpromo_q": "Queen",
+        "gpromo_r": "Rook",
+        "gpromo_b": "Bishop",
+        "gpromo_n": "Knight",
+        "gpromo_cancel": "Cancel",
         "games": [
             ["gomoku", "Gomoku"],
             ["reversi", "Reversi"],
@@ -140,6 +157,7 @@ _TEXTS = {
         "ghand": "Hand",
         "ghint_niutou": "Tap a card in your hand",
         "ghint_niutou_row": "Lower than every row end — tap a row to take it",
+        "gended": "Game over — start a new game below",
         "used": "This link was already used (or you refreshed). It cannot be opened again. Ask them to send /guest once more.",
         "expired": "Guest chat has ended.",
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
@@ -199,6 +217,69 @@ def _send_json(handler: "BaseHTTPRequestHandler", code: int, data: dict) -> None
     handler.wfile.write(body)
 
 
+def _ui_pack(lang: str) -> dict:
+    """Client strings for one locale (both packs are embedded for live switching)."""
+    text = _TEXTS[lang]
+    return {
+        "title": text["title"],
+        "room": text["room"],
+        "enter": text["enter"],
+        "send": text["send"],
+        "pic": text["pic"],
+        "placeholder": text["placeholder"],
+        "hint": text["hint"],
+        "remark": text["remark"],
+        "remark_ph": text["remark_ph"],
+        "fail": text["fail"],
+        "expired": text["expired"],
+        "used": text["used"],
+        "left": text["left"],
+        "you": text["you"],
+        "uploading": text["uploading"],
+        "upload_ok": text["upload_ok"],
+        "upload_fail": text["upload_fail"],
+        "voice_uploading": text["voice_uploading"],
+        "voice_ok": text["voice_ok"],
+        "voice_fail": text["voice_fail"],
+        "voice_short": text["voice_short"],
+        "voice_denied": text["voice_denied"],
+        "voice_unsupported": text["voice_unsupported"],
+        "voice": text["voice"],
+        "voice_rec": text["voice_rec"],
+        "not_image": text["not_image"],
+        "not_audio": text["not_audio"],
+        "too_big": text["too_big"],
+        "file_off": text["file_off"],
+        "game": text["game"],
+        "gclose": text["gclose"],
+        "gjoin": text["gjoin"],
+        "gshow": text["gshow"],
+        "gresign": text["gresign"],
+        "gresign_sent": text["gresign_sent"],
+        "gpass": text["gpass"],
+        "gnew": text["gnew"],
+        "ghint_stone": text["ghint_stone"],
+        "ghint_piece": text["ghint_piece"],
+        "ghint_dark": text["ghint_dark"],
+        "ghint_card": text["ghint_card"],
+        "gpromo": text["gpromo"],
+        "gpromo_q": text["gpromo_q"],
+        "gpromo_r": text["gpromo_r"],
+        "gpromo_b": text["gpromo_b"],
+        "gpromo_n": text["gpromo_n"],
+        "gpromo_cancel": text["gpromo_cancel"],
+        "gstart": text["gstart"],
+        "grow": text["grow"],
+        "ghand": text["ghand"],
+        "ghint_niutou": text["ghint_niutou"],
+        "ghint_niutou_row": text["ghint_niutou_row"],
+        "gended": text["gended"],
+        "joining": text["joining"],
+        "rejoin": text["rejoin"],
+        "games": text["games"],
+    }
+
+
 def _closed_page(handler: "BaseHTTPRequestHandler", lang: str, reason: str) -> None:
     text = _TEXTS[lang]
     msg = text.get(reason) or text["gone"]
@@ -206,7 +287,7 @@ def _closed_page(handler: "BaseHTTPRequestHandler", lang: str, reason: str) -> N
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
         f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         f"<title>{html.escape(text['title'])}</title></head>"
-        f"<body style=\"font-family:sans-serif;padding:1.5rem\">"
+        f"<body style=\"font-family:sans-serif;padding:1.5rem;background:#fff;color:#111\">"
         f"<p>{html.escape(msg)}</p></body></html>"
     )
     _send_html(handler, page, 410)
@@ -214,12 +295,16 @@ def _closed_page(handler: "BaseHTTPRequestHandler", lang: str, reason: str) -> N
 
 # Board UI for guests. Not an f-string — braces are JS.
 _GUEST_GAME_JS = r"""
-var gameBuf = [], snap = null, fromCell = null, gOpen = false, gDead = false;
+var gameBuf = [], snap = null, fromCell = null, gOpen = false, gDead = false, pendingPromo = null;
+var lastResult = '';
 var HEADERS = [
   ['xiangqi', /^xiangqi (?:对局)?[（(]([^）)]*)[）)]/],
+  ['xiangqi', /^xiangqi 对局状态[：:]\s*(\S+)/],
   ['chess', /^chess (?:对局)?[（(]([^）)]*)[）)]/],
+  ['chess', /^chess 对局状态[：:]\s*(\S+)/],
   ['go', /^go (?:对局)?[（(]([^）)]*)[）)]/],
   ['gomoku', /^gomoku (?:对局)?[（(]([^）)]*)[）)]/],
+  ['gomoku', /^gomoku 对局状态[：:]\s*(\S+)/],
   ['doushou', /^doushou (?:对局)?[（(]([^）)]*)[）)]/],
   ['darkchess', /^darkchess (?:对局)?[（(]([^）)]*)[）)]/],
   ['reversi', /^reversi game [（(]([^）)]*)[）)]/],
@@ -227,9 +312,81 @@ var HEADERS = [
   ['niutou', /^牛头王开始/],
   ['niutou', /^6 Nimmt! start/]
 ];
+var END_RE = /对局结束|认负|resigns?|获胜|和棋|1-0|0-1|1\/2|game over|\bdraw\b|wins?\b|离开 —|离开 —|终止了对局|取消了对局/i;
+/* /game end removes the room game — not the same as resign's "ended" board. */
+var ROOM_CLEARED_RE = /结束了本房的对局/;
+function isEnded(s) {
+  if (!s) return false;
+  if (s.ended) return true;
+  var st = String(s.state || '');
+  return /^ended$/i.test(st) || /结束/.test(st);
+}
+function isStoneKind(k) {
+  return k === 'go' || k === 'gomoku' || k === 'reversi';
+}
+function clearRoomGame(reason) {
+  snap = null;
+  fromCell = null;
+  lastResult = reason || '';
+  hidePromo();
+  if (gOpen) renderGame();
+  else {
+    var neu = document.getElementById('gnew');
+    if (neu) neu.className = '';
+    var stat = document.getElementById('gstat');
+    if (stat) stat.textContent = reason || (L.gended || '');
+  }
+}
+function gameNote(msg) {
+  if (!msg) return;
+  var t = String(msg).replace(/^\s+|\s+$/g, '');
+  if (!t) return;
+  var stat = document.getElementById('gstat');
+  var hint = document.getElementById('ghint');
+  if (stat) stat.textContent = t;
+  if (hint && gOpen) hint.textContent = t;
+}
+function markGameOver(text) {
+  var t = String(text || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !END_RE.test(t)) return false;
+  lastResult = t;
+  if (snap) {
+    snap.ended = true;
+    snap.result = t;
+  }
+  gameNote(t);
+  var neu = document.getElementById('gnew');
+  if (neu) neu.className = '';
+  return true;
+}
+function maybeGameNote(text) {
+  /* Fullscreen board covers chat — surface resign / seat / end on the board chrome. */
+  if (!text) return;
+  var t = String(text).replace(/^\s+|\s+$/g, '');
+  if (!t) return;
+  if (ROOM_CLEARED_RE.test(t)) {
+    clearRoomGame(t);
+    return;
+  }
+  if (!gOpen) return;
+  if (markGameOver(t)) return;
+  if (/不是对局|无需认|没有进行中|无法识别|无法走|不是你的回合|You are not|not one of the players|has not started|already ended/.test(t)) {
+    gameNote(t);
+  }
+}
 function cmdGame(rest) {
-  if (!ws || ws.readyState !== 1 || gDead) return;
+  if (!ws || ws.readyState !== 1 || gDead) {
+    gameNote(L.rejoin || L.fail);
+    return;
+  }
+  if (rest && rest.indexOf('new ') === 0) {
+    lastResult = '';
+    hidePromo();
+    fromCell = null;
+    if (snap) { snap.ended = false; snap.result = ''; }
+  }
   ws.send(JSON.stringify({t: 'msg', s: rest ? ('/game ' + rest) : '/game'}));
+  if (rest === 'resign') gameNote(L.gresign_sent || L.gresign);
 }
 function detectHeader(line) {
   var t = String(line || '').replace(/^\[#[^\]]+\] \[\*\] /, '').replace(/^\[\*\]\s?/, '').trim();
@@ -241,15 +398,41 @@ function detectHeader(line) {
 }
 function ingestGame(chunk) {
   var parts = String(chunk || '').split(/\r?\n/);
+  var sawEnd = false;
+  var clearedMsg = '';
   for (var i = 0; i < parts.length; i++) {
     var line = parts[i];
     if (!line) continue;
     var m = /^\[#[^\]]+\] \[\*\] (.*)$/.exec(line);
-    gameBuf.push(m ? m[1] : line.replace(/^\[\*\]\s?/, ''));
+    var body = m ? m[1] : line.replace(/^\[\*\]\s?/, '');
+    gameBuf.push(body);
+    if (ROOM_CLEARED_RE.test(body)) clearedMsg = body;
+    if (markGameOver(body)) sawEnd = true;
   }
   if (gameBuf.length > 400) gameBuf = gameBuf.slice(-300);
+  if (clearedMsg) {
+    clearRoomGame(clearedMsg);
+    return;
+  }
   var next = parseGame(gameBuf);
-  if (next) { snap = next; fromCell = null; renderGame(); }
+  if (next) {
+    if (lastResult && isEnded(next) && !next.result) next.result = lastResult;
+    snap = next;
+    fromCell = null;
+    hidePromo();
+    renderGame();
+  } else if (sawEnd && snap) {
+    snap.ended = true;
+    if (lastResult) snap.result = lastResult;
+    renderGame();
+  }
+}
+function findRecentResult(lines) {
+  for (var i = lines.length - 1; i >= 0 && i >= lines.length - 40; i--) {
+    var t = String(lines[i] || '').replace(/^\s+|\s+$/g, '');
+    if (END_RE.test(t)) return t;
+  }
+  return '';
 }
 function parseGame(lines) {
   var idx = -1, kind = '', state = '';
@@ -260,13 +443,15 @@ function parseGame(lines) {
   }
   if (idx < 0) return null;
   var block = lines.slice(idx);
-  var s = {kind: kind, state: state, header: block[0].trim(), board: null, flipped: false};
+  var s = {kind: kind, state: state, header: block[0].trim(), board: null, flipped: false, ended: false, result: ''};
+  if (/^ended$/i.test(state) || /结束/.test(state)) s.ended = true;
   if (kind === 'gomoku' || kind === 'go' || kind === 'reversi') parseStones(s, block);
   else if (kind === 'chess') parseChess(s, block);
   else if (kind === 'xiangqi') parseXiangqi(s, block);
   else if (kind === 'darkchess') parseDark(s, block);
   else if (kind === 'doushou') parseDoushou(s, block);
   else if (kind === 'niutou') parseNiutou(s, block);
+  if (s.ended) s.result = findRecentResult(lines) || lastResult || '';
   return s;
 }
 function allMatches(re, s) {
@@ -510,6 +695,10 @@ function chessSq(s, r, c) {
 }
 function onCell(r, c) {
   var s = snap; if (!s || !s.board || gDead) return;
+  if (isEnded(s)) {
+    gameNote(s.result || lastResult || L.gended || s.header);
+    return;
+  }
   var b = s.board, tok = b.cells[r * b.cols + c] || '';
   if (s.kind === 'go' || s.kind === 'gomoku' || s.kind === 'reversi') {
     if (tok && s.kind !== 'reversi') return;
@@ -518,13 +707,26 @@ function onCell(r, c) {
     return;
   }
   if (s.kind === 'chess') {
+    if (pendingPromo) return;
     if (!fromCell) {
       if (!tok) return;
       fromCell = [r, c]; renderGame(); return;
     }
-    var a = chessSq(s, fromCell[0], fromCell[1]), z = chessSq(s, r, c);
+    var fr = fromCell[0], fc = fromCell[1];
+    var a = chessSq(s, fr, fc), z = chessSq(s, r, c);
+    var fromTok = b.cells[fr * b.cols + fc] || '';
     fromCell = null;
-    if (a !== z) cmdGame('move ' + a + z);
+    if (a !== z) {
+      var mv = a + z;
+      var whitePawn = fromTok === '♙' || fromTok === 'P';
+      var blackPawn = fromTok === '♟' || fromTok === 'p';
+      if ((whitePawn && z.charAt(1) === '8') || (blackPawn && z.charAt(1) === '1')) {
+        renderGame();
+        showPromo(mv, whitePawn);
+        return;
+      }
+      cmdGame('move ' + mv);
+    }
     renderGame(); return;
   }
   if (s.kind === 'darkchess') {
@@ -554,9 +756,60 @@ function onCell(r, c) {
     renderGame();
   }
 }
+function hidePromo() {
+  pendingPromo = null;
+  var box = document.getElementById('gpromo');
+  if (!box) return;
+  box.style.display = 'none';
+  box.innerHTML = '';
+}
+function showPromo(mv, white) {
+  pendingPromo = {mv: mv, white: !!white};
+  var box = document.getElementById('gpromo');
+  if (!box) {
+    cmdGame('move ' + mv + 'q');
+    return;
+  }
+  box.style.display = 'flex';
+  box.innerHTML = '';
+  var lab = document.createElement('span');
+  lab.textContent = L.gpromo || 'Promote';
+  box.appendChild(lab);
+  var opts = [
+    ['q', L.gpromo_q || 'Queen'],
+    ['r', L.gpromo_r || 'Rook'],
+    ['b', L.gpromo_b || 'Bishop'],
+    ['n', L.gpromo_n || 'Knight']
+  ];
+  opts.forEach(function (o) {
+    box.appendChild(btn(o[1], function () {
+      var uci = mv + o[0];
+      hidePromo();
+      cmdGame('move ' + uci);
+    }));
+  });
+  box.appendChild(btn(L.gpromo_cancel || 'Cancel', function () {
+    hidePromo();
+    fromCell = null;
+    renderGame();
+  }));
+  gameNote(L.gpromo || '');
+  try { fitBoard(); } catch (e) {}
+}
 function btn(label, fn) {
   var b = document.createElement('button');
-  b.type = 'button'; b.textContent = label; b.onclick = fn;
+  b.type = 'button'; b.textContent = label;
+  /* Kindle Silk often drops click; touchend + short lock avoids double-fire. */
+  var lock = 0;
+  function run(ev) {
+    var now = Date.now();
+    if (now < lock) return;
+    lock = now + 450;
+    try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) {}
+    fn();
+  }
+  b.onclick = run;
+  b.ontouchend = run;
   return b;
 }
 function cellLabel(tok) {
@@ -574,17 +827,194 @@ function cellLabel(tok) {
   } : null;
   return (m && m[body]) || body;
 }
-function renderGame() {
+function setGameOpen(on) {
+  gOpen = !!on;
   var body = document.getElementById('gbody');
+  var game = document.getElementById('game');
+  var t = document.getElementById('gtog');
+  if (body) body.style.display = gOpen ? 'block' : 'none';
+  if (game) {
+    if (gOpen) game.className = 'gfs';
+    else game.className = '';
+  }
+  if (t) t.textContent = gOpen ? (L.gclose || L.game) : L.game;
+  if (gOpen) setTimeout(fitBoard, 0);
+}
+function chromeH() {
+  var n = 0, ids = ['ghead', 'gacts', 'gnew', 'gpromo', 'ghint'];
+  for (var i = 0; i < ids.length; i++) {
+    var el = document.getElementById(ids[i]);
+    if (!el || el.className === 'hid' || el.style.display === 'none') continue;
+    n += el.offsetHeight || 0;
+  }
+  return n + 16;
+}
+function boardPadX() {
+  var body = document.getElementById('gbody');
+  if (!body) return 16;
+  var cs = window.getComputedStyle ? getComputedStyle(body) : null;
+  if (!cs) return 16;
+  return (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+}
+function boardCellSize(b) {
+  var ww = window.innerWidth || document.documentElement.clientWidth || 320;
+  var wh = window.innerHeight || document.documentElement.clientHeight || 480;
+  /* gbody 左右 padding 未扣时，棋盘会略宽于可视区，手机端右侧被 overflow 裁掉一点 */
+  var availW = Math.max(1, ww - boardPadX() - 2);
+  var cell = Math.floor(Math.min(availW / b.cols, (wh - chromeH()) / b.rows));
+  return cell < 18 ? 18 : cell;
+}
+function stoneStars(n) {
+  if (n === 19) return [3, 9, 15];
+  if (n === 15) return [3, 7, 11];
+  if (n === 9) return [2, 4, 6];
+  return [];
+}
+function drawStonesCanvas(canvas, b, cell) {
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  var w = b.cols * cell, h = b.rows * cell;
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  ctx.fillStyle = '#c4a673';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = '#5d4037';
+  ctx.lineWidth = 1;
+  var r, c;
+  for (r = 0; r < b.rows; r++) {
+    var y = (r + 0.5) * cell;
+    ctx.beginPath();
+    ctx.moveTo(0.5 * cell, y);
+    ctx.lineTo((b.cols - 0.5) * cell, y);
+    ctx.stroke();
+  }
+  for (c = 0; c < b.cols; c++) {
+    var x = (c + 0.5) * cell;
+    ctx.beginPath();
+    ctx.moveTo(x, 0.5 * cell);
+    ctx.lineTo(x, (b.rows - 0.5) * cell);
+    ctx.stroke();
+  }
+  var stars = stoneStars(b.rows);
+  ctx.fillStyle = '#3e2723';
+  for (r = 0; r < stars.length; r++) for (c = 0; c < stars.length; c++) {
+    ctx.beginPath();
+    ctx.arc((stars[c] + 0.5) * cell, (stars[r] + 0.5) * cell, cell * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (r = 0; r < b.rows; r++) for (c = 0; c < b.cols; c++) {
+    var tok = b.cells[r * b.cols + c] || '';
+    if (!tok) continue;
+    var cx = (c + 0.5) * cell, cy = (r + 0.5) * cell, rad = cell * 0.42;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+    ctx.fillStyle = tok === 'B' ? '#111' : '#fff';
+    ctx.fill();
+    if (tok === 'W') {
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    if (b.last && b.last[r * b.cols + c]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, cell * 0.18, 0, Math.PI * 2);
+      ctx.strokeStyle = '#e65100';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+}
+function hitStoneCell(ev, canvas, b, cell) {
+  var rect = canvas.getBoundingClientRect();
+  var clientX = (ev.changedTouches && ev.changedTouches[0])
+    ? ev.changedTouches[0].clientX
+    : ev.clientX;
+  var clientY = (ev.changedTouches && ev.changedTouches[0])
+    ? ev.changedTouches[0].clientY
+    : ev.clientY;
+  var x = (clientX - rect.left) * (canvas.width / Math.max(rect.width, 1));
+  var y = (clientY - rect.top) * (canvas.height / Math.max(rect.height, 1));
+  var c = Math.floor(x / cell), r = Math.floor(y / cell);
+  if (r < 0 || c < 0 || r >= b.rows || c >= b.cols) return null;
+  return [r, c];
+}
+function renderStonesBoard(boardEl, b, ended) {
+  boardEl.className = 'stones';
+  boardEl.style.background = 'transparent';
+  var canvas = document.createElement('canvas');
+  canvas.id = 'gstone';
+  canvas.style.display = 'block';
+  canvas.style.margin = '0 auto';
+  canvas.style.touchAction = 'manipulation';
+  var cell = boardCellSize(b);
+  drawStonesCanvas(canvas, b, cell);
+  boardEl.style.width = (cell * b.cols) + 'px';
+  boardEl.style.height = (cell * b.rows) + 'px';
+  boardEl.style.maxHeight = 'none';
+  boardEl.appendChild(canvas);
+  if (ended) return;
+  var lock = 0;
+  function tap(ev) {
+    var now = Date.now();
+    if (now < lock) return;
+    lock = now + 450;
+    try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) {}
+    var cellNow = canvas.width / Math.max(b.cols, 1);
+    var rc = hitStoneCell(ev, canvas, b, cellNow);
+    if (rc) onCell(rc[0], rc[1]);
+  }
+  canvas.onclick = tap;
+  canvas.ontouchend = tap;
+}
+function fitBoard() {
+  if (!gOpen || !snap || !snap.board) return;
+  var boardEl = document.getElementById('gboard');
+  if (!boardEl || boardEl.className === 'ntw') return;
+  var b = snap.board;
+  var cell = boardCellSize(b);
+  var bw = cell * b.cols, bh = cell * b.rows;
+  boardEl.style.width = bw + 'px';
+  boardEl.style.height = bh + 'px';
+  boardEl.style.maxHeight = 'none';
+  if (boardEl.className === 'stones') {
+    var canvas = document.getElementById('gstone');
+    if (canvas) drawStonesCanvas(canvas, b, cell);
+    return;
+  }
+  var tds = boardEl.getElementsByTagName('td');
+  for (var i = 0; i < tds.length; i++) {
+    tds[i].style.width = cell + 'px';
+    tds[i].style.height = cell + 'px';
+  }
+  var btns = boardEl.getElementsByTagName('button');
+  var fs1 = Math.max(11, Math.floor(cell * 0.58));
+  /* 黑陷/红穴 等二字地形：按 Android 缩小字号，避免手机端撑破格子 */
+  var fs2 = Math.max(9, Math.floor(cell * 0.36));
+  for (var j = 0; j < btns.length; j++) {
+    btns[j].style.width = cell + 'px';
+    btns[j].style.height = cell + 'px';
+    var lab = btns[j].textContent || '';
+    btns[j].style.fontSize = (lab.length >= 2 ? fs2 : fs1) + 'px';
+  }
+}
+function renderGame() {
+  var keepPromo = pendingPromo;
+  hidePromo();
   var acts = document.getElementById('gacts');
   var neu = document.getElementById('gnew');
   var boardEl = document.getElementById('gboard');
   var hint = document.getElementById('ghint');
   var stat = document.getElementById('gstat');
   acts.innerHTML = ''; neu.innerHTML = ''; boardEl.innerHTML = ''; boardEl.className = '';
+  boardEl.removeAttribute('style');
   acts.appendChild(btn(L.gjoin, function () { cmdGame('join'); }));
   acts.appendChild(btn(L.gshow, function () { cmdGame('show'); }));
-  acts.appendChild(btn(L.gresign, function () { cmdGame('resign'); }));
+  acts.appendChild(btn(L.gresign, function () {
+    cmdGame('resign');
+    setTimeout(function () { cmdGame('show'); }, 350);
+  }));
   if (snap && snap.kind === 'go') acts.appendChild(btn(L.gpass, function () { cmdGame('move pass'); }));
   if (snap && (String(snap.state).indexOf('等待') >= 0 || /wait/i.test(snap.state)))
     acts.appendChild(btn(L.gstart, function () { cmdGame('move start'); }));
@@ -594,46 +1024,88 @@ function renderGame() {
   if (!snap) {
     stat.textContent = '';
     hint.textContent = L.gnew;
+    neu.className = '';
+    if (keepPromo) showPromo(keepPromo.mv, keepPromo.white);
     return;
   }
-  stat.textContent = snap.header;
-  if (!gOpen) { gOpen = true; body.style.display = 'block'; }
-  if (snap.kind === 'niutou') { renderNiutou(); return; }
+  var ended = isEnded(snap);
+  var result = snap.result || lastResult || '';
+  stat.textContent = ended && result ? result : snap.header;
+  if (!gOpen) setGameOpen(true);
+  /* Hide new-game picker only while a live game is on the board. */
+  neu.className = (!ended && (snap.board || snap.kind === 'niutou')) ? 'hid' : '';
+  if (snap.kind === 'niutou') {
+    renderNiutou();
+    if (ended) {
+      gameNote(result || L.gended || snap.header);
+      hint.textContent = L.gended || result || snap.header;
+    }
+    if (keepPromo) showPromo(keepPromo.mv, keepPromo.white);
+    return;
+  }
   var b = snap.board;
   if (!b) {
-    hint.textContent = L.ghint_card;
+    hint.textContent = ended ? (L.gended || result || snap.header) : L.ghint_card;
+    neu.className = '';
+    if (ended && result) gameNote(result);
+    if (keepPromo) showPromo(keepPromo.mv, keepPromo.white);
     return;
   }
-  boardEl.style.gridTemplateColumns = 'repeat(' + b.cols + ', minmax(1.35rem, 1fr))';
-  for (var r = 0; r < b.rows; r++) for (var c = 0; c < b.cols; c++) {
-    (function (rr, cc) {
-      var cell = document.createElement('button');
-      cell.type = 'button';
-      var tok = b.cells[rr * b.cols + cc] || '';
-      var cls = '';
-      if (tok === 'B') cls = 'c-B';
-      else if (tok === 'W') cls = 'c-W';
-      else if (tok.charAt(0) === 'r') cls = 'c-r';
-      else if (tok.charAt(0) === 'b') cls = 'c-b';
-      if (b.last && b.last[rr * b.cols + cc]) cls += ' c-last';
-      if (fromCell && fromCell[0] === rr && fromCell[1] === cc) cls += ' c-sel';
-      cell.className = cls;
-      cell.textContent = cellLabel(tok);
-      cell.onclick = function () { onCell(rr, cc); };
-      boardEl.appendChild(cell);
-    })(r, c);
+  /* Match mobile: go / gomoku / reversi stones sit on line intersections. */
+  if (isStoneKind(snap.kind)) {
+    renderStonesBoard(boardEl, b, ended);
+  } else {
+    var table = document.createElement('table');
+    table.style.borderCollapse = 'collapse';
+    table.style.margin = '0 auto';
+    for (var r = 0; r < b.rows; r++) {
+      var tr = document.createElement('tr');
+      for (var c = 0; c < b.cols; c++) {
+        (function (rr, cc) {
+          var td = document.createElement('td');
+          var cell = document.createElement('button');
+          cell.type = 'button';
+          var tok = b.cells[rr * b.cols + cc] || '';
+          var cls = '';
+          if (tok === 'B') cls = 'c-B';
+          else if (tok === 'W') cls = 'c-W';
+          else if (tok.charAt(0) === 'r') cls = 'c-r';
+          else if (tok.charAt(0) === 'b') cls = 'c-b';
+          if (b.last && b.last[rr * b.cols + cc]) cls += ' c-last';
+          if (!ended && fromCell && fromCell[0] === rr && fromCell[1] === cc) cls += ' c-sel';
+          cell.className = cls;
+          cell.textContent = cellLabel(tok);
+          if (ended) cell.disabled = true;
+          else cell.onclick = function () { onCell(rr, cc); };
+          td.appendChild(cell);
+          tr.appendChild(td);
+        })(r, c);
+      }
+      table.appendChild(tr);
+    }
+    boardEl.appendChild(table);
   }
-  if (snap.kind === 'darkchess') hint.textContent = L.ghint_dark;
+  if (ended) {
+    gameNote(result || L.gended || snap.header);
+    hint.textContent = (L.gended || '') + (result ? ' · ' + result : '');
+  } else if (snap.kind === 'darkchess') hint.textContent = L.ghint_dark;
   else if (snap.kind === 'xiangqi' || snap.kind === 'chess' || snap.kind === 'doushou') hint.textContent = L.ghint_piece;
   else hint.textContent = L.ghint_stone;
+  if (keepPromo && !ended) showPromo(keepPromo.mv, keepPromo.white);
+  setTimeout(fitBoard, 0);
 }
 (function () {
   var t = document.getElementById('gtog');
   if (t) t.onclick = function () {
-    gOpen = !gOpen;
-    document.getElementById('gbody').style.display = gOpen ? 'block' : 'none';
+    setGameOpen(!gOpen);
     if (gOpen) renderGame();
   };
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(fitBoard, 80);
+  });
+  window.addEventListener('orientationchange', function () { setTimeout(fitBoard, 200); });
 })();
 """
 
@@ -645,120 +1117,107 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
         "token": link.token,
         "room": link.room,
         "lang": lang,
+        "minutes": minutes,
         "maxImage": guest_sharing.MAX_IMAGE_BYTES,
         "maxVoice": guest_sharing.MAX_VOICE_BYTES,
         "games": text["games"],
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
-    labels = json.dumps(
-        {
-            "fail": text["fail"],
-            "expired": text["expired"],
-            "used": text["used"],
-            "left": text["left"],
-            "you": text["you"],
-            "uploading": text["uploading"],
-            "upload_ok": text["upload_ok"],
-            "upload_fail": text["upload_fail"],
-            "voice_uploading": text["voice_uploading"],
-            "voice_ok": text["voice_ok"],
-            "voice_fail": text["voice_fail"],
-            "voice_short": text["voice_short"],
-            "voice_denied": text["voice_denied"],
-            "voice_unsupported": text["voice_unsupported"],
-            "voice": text["voice"],
-            "voice_rec": text["voice_rec"],
-            "not_image": text["not_image"],
-            "not_audio": text["not_audio"],
-            "too_big": text["too_big"],
-            "file_off": text["file_off"],
-            "remark": text["remark"],
-            "game": text["game"],
-            "gjoin": text["gjoin"],
-            "gshow": text["gshow"],
-            "gresign": text["gresign"],
-            "gpass": text["gpass"],
-            "gnew": text["gnew"],
-            "ghint_stone": text["ghint_stone"],
-            "ghint_piece": text["ghint_piece"],
-            "ghint_dark": text["ghint_dark"],
-            "ghint_card": text["ghint_card"],
-            "gstart": text["gstart"],
-            "grow": text["grow"],
-            "ghand": text["ghand"],
-            "ghint_niutou": text["ghint_niutou"],
-            "ghint_niutou_row": text["ghint_niutou_row"],
-            "joining": text["joining"],
-            "rejoin": text["rejoin"],
-        },
+    packs_json = json.dumps(
+        {"zh": _ui_pack("zh"), "en": _ui_pack("en")},
         ensure_ascii=False,
     )
     return f"""<!DOCTYPE html>
 <html lang="{'zh-CN' if lang == 'zh' else 'en'}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="robots" content="noindex">
 <title>{html.escape(text['title'])}</title>
 <style>
-html,body {{ margin:0; height:100%; height:100dvh; overflow:hidden; background:#111; color:#eee; font-family:sans-serif; }}
+html,body {{ margin:0; height:100%; height:100vh; height:100dvh; overflow:hidden; background:#fff; color:#111; font-family:sans-serif; }}
 #app {{ display:flex; flex-direction:column; height:100%; overflow:hidden; }}
-#bar {{ padding:.45rem .8rem; background:#000; display:flex; align-items:center; gap:.6rem; flex-shrink:0; }}
+#bar {{ padding:.45rem .8rem; background:#f0f0f0; color:#111; border-bottom:1px solid #ccc; display:flex; align-items:center; gap:.45rem; flex-shrink:0; }}
 #who {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }}
-#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#f66; white-space:nowrap; font-size:13px; flex-shrink:0; }}
+#langs {{ display:flex; gap:.25rem; flex-shrink:0; }}
+#langs button {{ padding:.25rem .45rem; font-size:12px; }}
+#langs button.on {{ background:#111; color:#fff; }}
+#left {{ font-variant-numeric:tabular-nums; font-weight:bold; color:#c00; white-space:nowrap; font-size:13px; flex-shrink:0; }}
 #gate, #chat {{ flex:1; display:flex; flex-direction:column; min-height:0; }}
 #chat {{ display:none; }}
 #log {{ flex:1; overflow:auto; padding:.7rem .8rem; display:flex; flex-direction:column; gap:.45rem; }}
 #log .bubble {{ max-width:82%; padding:.45rem .7rem; border-radius:14px; word-break:break-word; font-size:15px; line-height:1.4; }}
-#log .bubble.them {{ align-self:flex-start; background:#2a2a2a; }}
-#log .bubble.me {{ align-self:flex-end; background:#1b6; color:#041; }}
-#log .bubble .nm {{ font-size:11px; color:#9ab; margin-bottom:.15rem; }}
+#log .bubble.them {{ align-self:flex-start; background:#eee; color:#111; }}
+#log .bubble.me {{ align-self:flex-end; background:#d4edda; color:#041; }}
+#log .bubble .nm {{ font-size:11px; color:#555; margin-bottom:.15rem; }}
 #log .bubble.me .nm {{ color:#063; }}
-#log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#8a8; text-align:center; }}
+#log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#666; text-align:center; }}
 #log img.preview {{ display:block; max-width:min(100%,240px); max-height:200px; margin-top:.3rem; border-radius:8px; }}
 #log audio.preview {{ display:block; width:min(100%,240px); margin-top:.25rem; }}
-#row {{ display:flex; flex-wrap:nowrap; padding:.4rem .45rem; gap:.35rem; align-items:center; flex-shrink:0; background:#161616; border-top:1px solid #333; }}
+#row {{ display:flex; flex-wrap:nowrap; padding:.4rem .45rem; gap:.35rem; align-items:center; flex-shrink:0; background:#f5f5f5; border-top:1px solid #ccc; }}
 #row input[type=text] {{ flex:1 1 auto; padding:.55rem .6rem; font-size:16px; min-width:0; width:0; }}
-#gate {{ padding:1.5rem; max-width:28rem; }}
-#gate p {{ line-height:1.5; color:#ccc; }}
-#gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; }}
+#gate {{ padding:1.5rem; max-width:28rem; background:#fff; color:#111; }}
+#gate p {{ line-height:1.5; color:#333; }}
+#gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; background:#fff; color:#111; border:1px solid #999; }}
 button {{ padding:.55rem .7rem; font-size:15px; }}
 #row button {{ flex:0 0 auto; padding:.55rem .55rem; font-size:14px; white-space:nowrap; }}
 #voice {{ touch-action:none; user-select:none; -webkit-user-select:none; white-space:nowrap; }}
 #voice.rec {{ background:#c62828; color:#fff; }}
-.warn {{ color:#f6a; }}
+.warn {{ color:#a40; }}
 #pic {{ display:none; }}
-#game {{ background:#1a1a1a; border-bottom:1px solid #333; flex-shrink:0; }}
-#ghead {{ display:flex; align-items:center; gap:.6rem; padding:.4rem .7rem; }}
-#gstat {{ flex:1; font-size:13px; color:#bbb; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+#game {{ background:#fff; color:#111; border-bottom:1px solid #ccc; flex-shrink:0; }}
+#ghead {{ display:flex; align-items:center; gap:.6rem; padding:.4rem .7rem; flex-shrink:0; }}
+#gstat {{ flex:1; font-size:13px; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 #gbody {{ display:none; padding:0 .7rem .7rem; }}
-#gacts, #gnew {{ display:flex; flex-wrap:wrap; gap:.35rem; margin-bottom:.45rem; }}
-#gacts button, #gnew button, #gtog {{ padding:.35rem .6rem; font-size:13px; }}
-#gboard {{ display:grid; gap:1px; overflow:auto; max-height:min(52vh, 420px); width:max-content; max-width:100%; }}
-#gboard button {{ min-width:1.45rem; min-height:1.45rem; padding:0; font-size:12px; aspect-ratio:1; line-height:1; touch-action:manipulation; }}
-#gboard button.c-B {{ background:#222; color:#eee; border-radius:50%; }}
-#gboard button.c-W {{ background:#f2f2f2; color:#111; border-radius:50%; }}
-#gboard button.c-r {{ color:#e66; background:#2a1a1a; }}
-#gboard button.c-b {{ color:#9cf; background:#1a1a2a; }}
-#gboard button.c-last {{ outline:2px solid gold; }}
-#gboard button.c-sel {{ outline:2px solid #6cf; }}
-#gboard.ntw {{ display:flex; flex-direction:column; gap:.4rem; width:100%; max-width:100%; }}
-#gboard.ntw .ntw-line {{ display:flex; flex-wrap:wrap; align-items:center; gap:.3rem; }}
-#gboard.ntw button.ntw {{ min-width:2.5rem; min-height:2.4rem; aspect-ratio:auto; padding:.15rem .4rem; font-size:12px; background:#fff3e0; color:#212121; border-radius:6px; border:1px solid #ff8a65; }}
-#gboard.ntw button.ntw-take {{ background:#333; color:#eee; border:1px solid #888; min-width:auto; }}
-#ghint {{ font-size:12px; color:#888; margin-top:.35rem; }}
+#gacts, #gnew, #gpromo {{ display:flex; flex-wrap:wrap; gap:.35rem; margin-bottom:.45rem; flex-shrink:0; align-items:center; }}
+#gpromo {{ display:none; }}
+#gacts button, #gnew button, #gpromo button, #gtog {{ padding:.45rem .7rem; font-size:14px; }}
+#gboard {{ overflow:auto; max-height:52vh; width:100%; max-width:100%; box-sizing:border-box; background:#ccc; border-collapse:collapse; }}
+#gboard td {{ padding:0; }}
+#gboard button {{ display:block; box-sizing:border-box; width:100%; height:100%; margin:0; padding:0; font-size:12px; line-height:1; overflow:hidden; white-space:nowrap; touch-action:manipulation; background:#fff; color:#111; border:1px solid #999; }}
+#gboard button.c-B {{ background:#111; color:#fff; border-radius:50%; }}
+#gboard button.c-W {{ background:#fff; color:#111; border-radius:50%; border:2px solid #111; }}
+/* Kindle/e-ink: red/black → white/black fill so sides stay distinct. */
+#gboard button.c-r {{ color:#111; background:#fff; border:2px solid #111; font-weight:bold; }}
+#gboard button.c-b {{ color:#fff; background:#111; border:2px solid #111; font-weight:bold; }}
+#gboard button.c-last {{ outline:2px solid #000; outline-offset:-2px; }}
+#gboard button.c-sel {{ outline:3px solid #000; outline-offset:-3px; }}
+#gboard.ntw {{ display:block; background:transparent; max-height:none; }}
+#gboard.ntw .ntw-line {{ display:block; margin:.3rem 0; }}
+#gboard.ntw button.ntw {{ display:inline-block; width:auto; height:auto; min-width:2.5rem; min-height:2.4rem; padding:.15rem .4rem; font-size:12px; background:#fff; color:#111; border-radius:6px; border:1px solid #111; margin:0 .2rem .2rem 0; }}
+#gboard.ntw button.ntw-take {{ background:#111; color:#fff; border:1px solid #111; min-width:auto; }}
+#ghint {{ font-size:12px; color:#555; margin-top:.35rem; flex-shrink:0; }}
+/* Fullscreen game — no media query (Kindle Silk width is unreliable). */
+#game.gfs {{
+  position:fixed; top:0; right:0; bottom:0; left:0; z-index:30;
+  display:block; background:#fff; color:#111; border:none;
+  height:100%; height:100vh; width:100%; overflow:hidden;
+}}
+#game.gfs #ghead {{ position:relative; z-index:1; }}
+#game.gfs #gbody {{
+  display:block !important; padding:.35rem .4rem .5rem; overflow:hidden;
+  height:auto;
+}}
+#game.gfs #gboard {{ max-height:none; margin:0 auto; overflow:hidden; }}
+#gboard.stones {{ background:transparent; margin:0 auto; }}
+#gboard.stones canvas {{ display:block; margin:0 auto; }}
+#game.gfs #gnew.hid {{ display:none; }}
 </style>
 </head>
 <body>
 <div id="app">
   <div id="bar">
     <div id="who">{html.escape(text['title'])} · {html.escape(text['room'])} #{html.escape(link.room)}</div>
+    <div id="langs">
+      <button type="button" id="langZh" class="{'on' if lang == 'zh' else ''}">中文</button>
+      <button type="button" id="langEn" class="{'on' if lang == 'en' else ''}">EN</button>
+    </div>
     <div id="left"></div>
   </div>
   <div id="gate">
-    <p class="warn">{html.escape(text['hint'].format(minutes=minutes))}</p>
+    <p class="warn" id="gateHint">{html.escape(text['hint'].format(minutes=minutes))}</p>
     <p>
-      <label for="remark">{html.escape(text['remark'])}</label><br>
+      <label for="remark" id="remarkLab">{html.escape(text['remark'])}</label><br>
       <input id="remark" type="text" maxlength="{guest_sharing.MAX_REMARK_CHARS}" placeholder="{html.escape(text['remark_ph'])}" autocomplete="nickname">
     </p>
     <p><button type="button" id="go">{html.escape(text['enter'])}</button></p>
@@ -773,6 +1232,7 @@ button {{ padding:.55rem .7rem; font-size:15px; }}
       <div id="gbody">
         <div id="gacts"></div>
         <div id="gnew"></div>
+        <div id="gpromo"></div>
         <div id="gboard"></div>
         <div id="ghint"></div>
       </div>
@@ -783,15 +1243,58 @@ button {{ padding:.55rem .7rem; font-size:15px; }}
       <button type="button" id="voice">{html.escape(text['voice'])}</button>
       <button type="button" id="pick">{html.escape(text['pic'])}</button>
       <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
-      <button type="submit">{html.escape(text['send'])}</button>
+      <button type="submit" id="send">{html.escape(text['send'])}</button>
     </form>
   </div>
 </div>
 <script>
 var boot = {boot_json};
-var L = {labels};
+var PACKS = {packs_json};
+var L = PACKS[boot.lang] || PACKS.en;
 var ws, exp = 0, ticket = '', busy = false, ended = false, reconnectTimer = null, toldRejoin = false;
 var meLabel = '', meNick = '', pendingSys = [];
+function applyLang(lang) {{
+  if (!PACKS[lang]) return;
+  boot.lang = lang;
+  L = PACKS[lang];
+  boot.games = L.games;
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+  document.title = L.title;
+  var zhBtn = document.getElementById('langZh');
+  var enBtn = document.getElementById('langEn');
+  if (zhBtn) zhBtn.className = lang === 'zh' ? 'on' : '';
+  if (enBtn) enBtn.className = lang === 'en' ? 'on' : '';
+  if (!meLabel) {{
+    document.getElementById('who').textContent = L.title + ' · ' + L.room + ' #' + boot.room;
+  }} else {{
+    document.getElementById('who').textContent = L.you + ' ' + meLabel + ' · #' + boot.room;
+  }}
+  var hint = document.getElementById('gateHint');
+  if (hint) hint.textContent = String(L.hint || '').split('{{minutes}}').join(String(boot.minutes));
+  var lab = document.getElementById('remarkLab');
+  if (lab) lab.textContent = L.remark;
+  var rem = document.getElementById('remark');
+  if (rem) rem.placeholder = L.remark_ph;
+  var go = document.getElementById('go');
+  if (go) go.textContent = L.enter;
+  var msg = document.getElementById('msg');
+  if (msg) msg.placeholder = L.placeholder;
+  var voice = document.getElementById('voice');
+  if (voice && voice.className.indexOf('rec') < 0) voice.textContent = L.voice;
+  var pick = document.getElementById('pick');
+  if (pick) pick.textContent = L.pic;
+  var send = document.getElementById('send');
+  if (send) send.textContent = L.send;
+  var tog = document.getElementById('gtog');
+  if (tog) tog.textContent = gOpen ? (L.gclose || L.game) : L.game;
+  try {{ tick(); }} catch (e) {{}}
+  try {{ if (typeof renderGame === 'function') renderGame(); }} catch (e) {{}}
+  try {{
+    var u = new URL(location.href);
+    u.searchParams.set('lang', lang);
+    history.replaceState(null, '', u.pathname + u.search);
+  }} catch (e) {{}}
+}}
 function sessionKey() {{ return 'sshchat-guest-' + boot.token; }}
 function saveSession() {{
   if (!ticket || !exp) return;
@@ -856,6 +1359,7 @@ function addSys(text) {{
   d.textContent = text;
   document.getElementById('log').appendChild(d);
   scrollLog();
+  try {{ if (typeof maybeGameNote === 'function') maybeGameNote(text); }} catch (e) {{}}
 }}
 function addBubble(who, text) {{
   flushSys();
@@ -1215,6 +1719,12 @@ function startVoice(ev) {{
     append('\\n' + L.voice_denied + '\\n');
   }});
 }}
+(function () {{
+  var zh = document.getElementById('langZh');
+  var en = document.getElementById('langEn');
+  if (zh) zh.onclick = function () {{ applyLang('zh'); }};
+  if (en) en.onclick = function () {{ applyLang('en'); }};
+}})();
 document.getElementById('go').onclick = function () {{
   var btn = this;
   var err = document.getElementById('err');

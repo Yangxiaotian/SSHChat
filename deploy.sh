@@ -1651,10 +1651,11 @@ if [[ "$USE_CLOUDFLARE" -eq 1 ]]; then
   CF_SETUP="$SCRIPT_DIR/scripts/setup-cloudflared-file-tunnel.sh"
   if [[ -f "$CF_SETUP" ]]; then
     chmod +x "$CF_SETUP" "$SCRIPT_DIR/scripts/sshchat-cloudflared-tunnel.sh" 2>/dev/null || true
-    echo "info: refreshing Cloudflare Quick Tunnel (new public URL required every deploy)..."
+    echo "info: ensuring Cloudflare Quick Tunnel has a usable public URL (keep if still valid)..."
     if ! "$CF_SETUP" --prefix "$PREFIX" --env-file "$PREFIX/sshchat.env" --port "$FILE_HTTP_PORT" --wait-url 120; then
       echo "error: Cloudflare tunnel did not publish a usable URL; /sendfile will fail until fixed" >&2
       echo "hint: sudo $CF_SETUP --prefix $PREFIX" >&2
+      echo "hint: force a new URL: sudo $CF_SETUP --prefix $PREFIX --force-refresh" >&2
       echo "hint: if rate-limited: sudo $SCRIPT_DIR/scripts/start-cloudflared-once.sh" >&2
     fi
     # Re-apply env ownership if the tunnel helper rewrote sshchat.env as root

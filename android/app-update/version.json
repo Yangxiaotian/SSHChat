@@ -1,9 +1,9 @@
 {
   "android": {
-    "versionCode": 73,
-    "versionName": "0.3.60",
+    "versionCode": 74,
+    "versionName": "0.3.61",
     "apkFile": "SSHChat-latest.apk",
-    "builtAt": "2026-11-06T06:44:49Z",
-    "sizeBytes": 9696080
+    "builtAt": "2026-11-08T06:51:40Z",
+    "sizeBytes": 9695876
   }
 }
