@@ -67,6 +67,12 @@ final class GameBoardModel: ObservableObject {
     func feedLine(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
+        // /game end removes the room game; show lobby so a new game can be started.
+        if t.contains("结束了本房的对局") {
+            clear()
+            statusText = t
+            return
+        }
         if buffer.count >= 240 {
             buffer.removeFirst(min(40, buffer.count))
         }
@@ -108,6 +114,14 @@ final class GameBoardModel: ObservableObject {
     }
 
     private func buildStatus(_ s: GameSnapshot) -> String {
+        if s.isEnded {
+            var parts: [String] = ["\(s.kind.title) · 已结束"]
+            if let result = s.messages.first ?? s.info.first ?? s.hints.first, !result.isEmpty {
+                parts.append(result)
+            }
+            parts.append("下方可开新局")
+            return parts.joined(separator: "  ·  ")
+        }
         var parts: [String] = ["\(s.kind.title) · \(s.state)"]
         let seats = s.players.map { "\(sideZh($0.key))\($0.value)" }.joined(separator: "  ")
         if !seats.isEmpty { parts.append(seats) }
@@ -148,6 +162,10 @@ final class GameBoardModel: ObservableObject {
 
     func onBoardTap(r: Int, c: Int, primary: Bool) {
         guard let s = snapshot else { return }
+        if s.isEnded {
+            toast = "对局已结束，请点下方开新局"
+            return
+        }
         switch s.kind {
         case .go, .gomoku, .reversi: tapStone(s, r, c)
         case .chess: tapChess(s, r, c)
@@ -722,15 +740,18 @@ struct GamePanelView: View {
 
     // MARK: lobby
 
-    private var lobbyActions: some View {
-        let games: [(String, String)] = [
+    private var newGameList: [(String, String)] {
+        [
             ("xiangqi", "象棋"), ("chess", "国际象棋"), ("go", "围棋"), ("gomoku", "五子"),
             ("doushou", "斗兽"), ("junqi", "军棋"), ("darkchess", "暗棋"), ("reversi", "黑白"),
             ("battleship", "海战"), ("holdem", "德州"), ("zjh", "金花"), ("niutou", "牛头"),
             ("mahjong", "麻将"), ("sanguo", "三国杀"), ("werewolf", "狼人"),
         ]
-        return actionScroll {
-            ForEach(games, id: \.0) { id, label in
+    }
+
+    private var lobbyActions: some View {
+        actionScroll {
+            ForEach(newGameList, id: \.0) { id, label in
                 chip(label) { model.send("/game new \(id)") }
             }
             chip("列表") { model.send("/game list") }
@@ -745,8 +766,13 @@ struct GamePanelView: View {
         chip("刷新") { model.send("/game show") }
         chip("席位") { model.send("/game seats") }
         if s.isPlaying { chip("认负") { confirmResign = true } }
-        chip("结束") { confirmEnd = true }
-        if s.kind == .go || s.kind == .reversi {
+        if !s.isEnded { chip("结束") { confirmEnd = true } }
+        if s.isEnded {
+            ForEach(newGameList, id: \.0) { id, label in
+                chip(label) { model.send("/game new \(id)") }
+            }
+        }
+        if (s.kind == .go || s.kind == .reversi) && s.isPlaying {
             chip("停一手") { model.sendMove("pass") }
         }
     }

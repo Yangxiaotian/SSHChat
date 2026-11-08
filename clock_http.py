@@ -144,7 +144,8 @@ def render_clock_page(session: clock_sharing.ClockSession, lang: str) -> str:
         ensure_ascii=False,
     )
     other_lang = "en" if lang == "zh" else "zh"
-    other_label = "English" if lang == "zh" else "中文"
+    # Short labels so the mid toolbar stays one row on phones.
+    other_label = "EN" if lang == "zh" else "中"
     base_links = []
     inc_links = []
     inc_sec = session.inc_ms // 1000
@@ -223,15 +224,24 @@ html, body {{
   right: 0;
   top: 46%;
   height: 8%;
-  text-align: center;
-  font-size: 3vh;
-  line-height: 8vh;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: space-evenly;
+  align-items: center;
+  font-size: clamp(11px, 2.6vw, 3vh);
+  line-height: 1.2;
   z-index: 3;
   background: #fff;
+  overflow: hidden;
+  padding: 0 1vw;
+  box-sizing: border-box;
 }}
 #mid a {{
   color: #000;
-  margin: 0 1vw;
+  margin: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+  text-decoration: underline;
 }}
 #setup {{
   display: none;

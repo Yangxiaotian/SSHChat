@@ -86,7 +86,15 @@ Then: `ssh sshchat`.
 
 Type `/clock` in chat (or `/clock 10+5` for 10 minutes plus 5 seconds a move). Copy the URL into the **Kindle browser**. The page fills the screen and ticks on the device. Sides are top and bottom, not a color; after you move, tap your side.
 
-## 7. Shared drawing board
+## 7. Guest link (no SSH key)
+
+Type `/guest` (default 5 minutes; `/guest 10` for 10, max 60). **Only you see the URL.** Copy it to WeChat/SMS and send it to someone who has no SSH key. Do not open it yourself.
+
+They open it once in a browser; they can send **text and images**, play **board games** on the page (join / new / tap to move), and may type an optional **remark** shown as `~gk7m2p (Ada)`. The page shows a **minutes + seconds** countdown. Minimizing does not end it early; a reload in the same tab can resume. Closing the tab kills it. Their nick is assigned at random (like `~gk7m2p`) so they cannot impersonate a registered user.
+
+You can send `/guest` several times to invite different people; unused links stay valid. Max 5 unused + live links per person **in this room**. Revoke with `/guest close`.
+
+## 8. Shared drawing board
 
 Type `/canvas` in chat. You get a **URL** and a **6-character key on a separate line**. Copy the URL into Safari (iSH cannot open the web page), enter the key, then draw. Strokes sync to everyone who unlocked the board.
 

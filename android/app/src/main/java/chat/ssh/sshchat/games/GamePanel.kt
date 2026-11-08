@@ -256,6 +256,11 @@ class GamePanel @JvmOverloads constructor(
     fun feedLine(text: String) {
         val t = text.trimEnd()
         if (t.isEmpty()) return
+        // /game end removes the room game; show lobby so a new game can be started.
+        if (t.contains("结束了本房的对局")) {
+            clear()
+            return
+        }
         if (buffer.size >= 240) {
             repeat(40) { if (buffer.isNotEmpty()) buffer.removeFirst() }
         }
@@ -307,6 +312,15 @@ class GamePanel @JvmOverloads constructor(
     }
 
     private fun buildStatus(s: GameSnapshot): String = buildString {
+        if (s.isEnded) {
+            append("已结束")
+            val result = s.messages.firstOrNull()
+                ?: s.info.firstOrNull()
+                ?: s.hints.firstOrNull()
+            if (!result.isNullOrBlank()) append("  ·  ").append(result)
+            append("  ·  下方可开新局")
+            return@buildString
+        }
         val seats = s.players.entries.joinToString("  ") { "${sideZh(it.key)}${it.value}" }
         if (seats.isNotEmpty()) append(seats)
         if (s.turnName != null) {
@@ -388,6 +402,10 @@ class GamePanel @JvmOverloads constructor(
 
     private fun onBoardTap(r: Int, c: Int, primary: Boolean) {
         val s = snap ?: return
+        if (s.isEnded) {
+            toast("对局已结束，请点下方开新局")
+            return
+        }
         when (s.kind) {
             GameKind.GO, GameKind.GOMOKU, GameKind.REVERSI -> tapStone(s, r, c)
             GameKind.CHESS -> tapChess(s, r, c)
@@ -864,19 +882,21 @@ class GamePanel @JvmOverloads constructor(
                 confirmDanger("确认认负？", "认负后本局立刻结束，无法恢复。", "/game resign")
             })
         }
-        actions.addView(GameUi.btn(context, "结束") {
-            confirmDanger("确认结束棋局？", "结束后本局作废，无法恢复。", "/game end")
-        })
-        if (s.kind == GameKind.GO) {
+        if (!s.isEnded) {
+            actions.addView(GameUi.btn(context, "结束") {
+                confirmDanger("确认结束棋局？", "结束后本局作废，无法恢复。", "/game end")
+            })
+        }
+        if (s.kind == GameKind.GO && s.isPlaying) {
             actions.addView(GameUi.btn(context, "停一手") { sendMove("pass") })
         }
-        if (s.kind == GameKind.REVERSI) {
+        if (s.kind == GameKind.REVERSI && s.isPlaying) {
             actions.addView(GameUi.btn(context, "停一手") { sendMove("pass") })
         }
+        if (s.isEnded) addNewGameActions()
     }
 
-    private fun addLobbyActions() {
-        actions.removeAllViews()
+    private fun addNewGameActions() {
         val games = listOf(
             "xiangqi" to "象棋", "chess" to "国际象棋", "go" to "围棋", "gomoku" to "五子",
             "doushou" to "斗兽", "junqi" to "军棋", "darkchess" to "暗棋", "reversi" to "黑白",
@@ -886,6 +906,11 @@ class GamePanel @JvmOverloads constructor(
         games.forEach { (id, label) ->
             actions.addView(GameUi.btn(context, label) { send("/game new $id") })
         }
+    }
+
+    private fun addLobbyActions() {
+        actions.removeAllViews()
+        addNewGameActions()
         actions.addView(GameUi.btn(context, "列表") { send("/game list") })
         actions.addView(GameUi.btn(context, "加入") { send("/game join") })
     }

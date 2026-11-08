@@ -1,0 +1,536 @@
+"""One-shot 5-minute guest chat links."""
+
+from __future__ import annotations
+
+import io
+import re
+import unittest
+from unittest import mock
+
+import guest_http
+import guest_sharing
+import server
+
+
+class DummyConn:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self._timeout = None
+
+    def gettimeout(self):
+        return self._timeout
+
+    def settimeout(self, value) -> None:
+        self._timeout = value
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def send(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def close(self) -> None:
+        pass
+
+
+class FakeHandler:
+    def __init__(self, path: str, *, lang: str = "zh", json_body: dict | None = None) -> None:
+        self.path = path
+        self.headers = {"Accept-Language": lang}
+        self.status = 0
+        self.sent_headers: list[tuple[str, str]] = []
+        self.body = io.BytesIO()
+        self.wfile = self.body
+        self._json_body = json_body if json_body is not None else {"nick": "alice"}
+
+    def send_response(self, code, _message=None):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.sent_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def _read_json_body(self, limit: int = 64 * 1024) -> dict:
+        return dict(self._json_body)
+
+
+class GuestStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        guest_sharing.guest_store = guest_sharing.GuestStore()
+
+    def test_guest_conn_can_be_a_client_key(self) -> None:
+        conn = guest_sharing.GuestConn()
+        bucket = {conn: True}
+        self.assertTrue(bucket[conn])
+        rooms: set[object] = set()
+        rooms.add(conn)
+        self.assertIn(conn, rooms)
+
+    def test_random_nick_cannot_be_a_linux_user(self) -> None:
+        nick = guest_sharing.random_guest_nick()
+        self.assertTrue(guest_sharing.is_guest_nick(nick))
+        self.assertTrue(nick.startswith("~g"))
+        self.assertEqual(len(nick), 8)
+        self.assertNotRegex(nick, r"^[a-z_][a-z0-9_-]{0,31}$")
+
+    def test_parse_minutes_default_and_cap(self) -> None:
+        ok, err = guest_sharing.parse_minutes("10")
+        self.assertEqual((ok, err), (10, ""))
+        self.assertEqual(guest_sharing.parse_minutes("0")[1], "range")
+        self.assertEqual(guest_sharing.parse_minutes("61")[1], "range")
+        self.assertEqual(guest_sharing.parse_minutes("close")[1], "usage")
+
+    def test_create_keeps_unused_links_for_multiple_invites(self) -> None:
+        first = guest_sharing.guest_store.create("Ada", "lobby")
+        second = guest_sharing.guest_store.create("Ada", "lobby")
+        assert first is not None and second is not None
+        self.assertNotEqual(first.token, second.token)
+        self.assertFalse(first.closed)
+        self.assertFalse(second.closed)
+        self.assertEqual(first.opened_at, 0.0)
+        self.assertEqual(second.opened_at, 0.0)
+        still, err = guest_sharing.guest_store.open_once(first.token)
+        self.assertEqual(err, "")
+        self.assertIsNotNone(still)
+
+    def test_create_caps_unused_and_live_together(self) -> None:
+        made = [
+            guest_sharing.guest_store.create("Ada", "lobby")
+            for _ in range(guest_sharing.MAX_ACTIVE_PER_CREATOR)
+        ]
+        self.assertTrue(all(link is not None for link in made))
+        extra = guest_sharing.guest_store.create("Ada", "lobby")
+        self.assertIsNone(extra)
+        other = guest_sharing.guest_store.create("Ada", "other")
+        self.assertIsNotNone(other)
+
+    def test_custom_minutes_sets_chat_ttl(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby", 12)
+        assert link is not None
+        self.assertEqual(link.minutes, 12)
+        opened, err = guest_sharing.guest_store.open_once(link.token)
+        self.assertEqual(err, "")
+        assert opened is not None
+        left = guest_sharing.guest_store.remaining(opened)
+        self.assertGreater(left, 11 * 60)
+        self.assertLessEqual(left, 12 * 60)
+
+    def test_open_once_assigns_random_nick_and_second_fails(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        first, err = guest_sharing.guest_store.open_once(link.token)
+        self.assertEqual(err, "")
+        assert first is not None
+        self.assertTrue(guest_sharing.is_guest_nick(first.nick))
+        second, err2 = guest_sharing.guest_store.open_once(link.token)
+        self.assertIsNone(second)
+        self.assertEqual(err2, "used")
+
+    def test_page_lang_from_query_overrides_accept(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        handler = FakeHandler(f"/guest/{link.token}?lang=en", lang="zh")
+        self.assertTrue(guest_http.handle_guest_get(handler))
+        page = handler.body.getvalue().decode("utf-8")
+        self.assertIn("Enter chat", page)
+        self.assertIn('lang="en"', page)
+
+    def test_refresh_get_after_join_serves_resume_page(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        guest_sharing.guest_store.open_once(link.token)
+        handler = FakeHandler(f"/guest/{link.token}")
+        self.assertTrue(guest_http.handle_guest_get(handler))
+        self.assertEqual(handler.status, 200)
+        page = handler.body.getvalue().decode("utf-8")
+        self.assertIn("sshchat-guest-", page)
+        self.assertIn("loadSession", page)
+        self.assertIn("scheduleReconnect", page)
+
+    def test_get_after_chat_ttl_is_expired(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        guest_sharing.guest_store.open_once(link.token)
+        link.chat_expires_at = 1
+        handler = FakeHandler(f"/guest/{link.token}")
+        self.assertTrue(guest_http.handle_guest_get(handler))
+        self.assertEqual(handler.status, 410)
+        self.assertIn("过期", handler.body.getvalue().decode("utf-8"))
+
+    def test_join_ignores_client_supplied_nick(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        handler = FakeHandler(f"/guest/{link.token}/join")
+        self.assertTrue(guest_http.handle_guest_post(handler))
+        self.assertEqual(handler.status, 200)
+        self.assertNotEqual(link.nick, "~alice")
+        self.assertNotIn("alice", link.nick.lower())
+        self.assertTrue(guest_sharing.is_guest_nick(link.nick))
+        self.assertEqual(link.remark, "")
+
+    def test_join_keeps_optional_remark(self) -> None:
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        handler = FakeHandler(
+            f"/guest/{link.token}/join", json_body={"remark": "小明", "nick": "alice"}
+        )
+        self.assertTrue(guest_http.handle_guest_post(handler))
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(guest_sharing.is_guest_nick(link.nick))
+        self.assertNotIn("alice", link.nick.lower())
+        self.assertEqual(link.remark, "小明")
+        payload = handler.body.getvalue().decode("utf-8")
+        self.assertIn("(小明)", payload)
+
+
+class GuestCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        guest_sharing.guest_store = guest_sharing.GuestStore()
+        server.clients.clear()
+        server.rooms.clear()
+        server.room_owners.clear()
+        server.room_games.clear()
+        self.alice = DummyConn()
+        self.bob = DummyConn()
+        server.clients[self.alice] = {
+            "name": "Alice",
+            "rooms": {"lobby"},
+            "current_room": "lobby",
+            "locale": "en",
+        }
+        server.clients[self.bob] = {
+            "name": "Bob",
+            "rooms": {"lobby"},
+            "current_room": "lobby",
+            "locale": "en",
+        }
+        server.rooms["lobby"] = {self.alice, self.bob}
+        server.room_owners["lobby"] = self.alice
+
+    def _out(self, conn: DummyConn) -> str:
+        return b"".join(conn.sent).decode("utf-8")
+
+    def test_bind_chat_uses_this_server_not_a_second_import(self) -> None:
+        seen: list[str] = []
+
+        def fake_attach(conn, name, room, locale="en", **_kw):
+            seen.append(f"{name}@{room}")
+            return name
+
+        guest_http.bind_chat(
+            attach_guest=fake_attach,
+            process_client_line=server.process_client_line,
+            remove_client=server.remove_client,
+        )
+        try:
+            self.assertIs(guest_http._attach_guest, fake_attach)
+            self.assertEqual(fake_attach(None, "~gabc123", "lobby"), "~gabc123")
+            self.assertEqual(seen, ["~gabc123@lobby"])
+        finally:
+            guest_http.bind_chat(
+                attach_guest=server.attach_guest,
+                process_client_line=server.process_client_line,
+                remove_client=server.remove_client,
+            )
+
+    def test_guest_minutes_arg(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest 10")
+        self.assertIn("10 minutes", self._out(self.alice))
+        self.alice.sent.clear()
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest 99")
+        self.assertIn("1 to 60", self._out(self.alice))
+
+    def test_link_is_private_and_not_gui_open(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest")
+        alice = self._out(self.alice)
+        self.assertIn("/guest/", alice)
+        self.assertIn("?lang=en", alice)
+        self.assertIn("only you", alice.lower())
+        self.assertNotIn("gui-open", alice)
+        self.assertEqual(self._out(self.bob), "")
+
+    def test_guest_url_follows_creator_lang(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        server.clients[self.alice]["locale"] = "zh"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest")
+        self.assertIn("?lang=zh", self._out(self.alice))
+        self.assertNotIn("?lang=en", self._out(self.alice))
+
+    def test_attach_guest_conn_joins_room(self) -> None:
+        gconn = guest_sharing.GuestConn()
+        with mock.patch.object(server, "send_line"), mock.patch.object(
+            server, "broadcast_room"
+        ):
+            nick = server.attach_guest(gconn, "alice", "lobby", "en")
+        self.assertTrue(guest_sharing.is_guest_nick(nick))
+        self.assertIn(gconn, server.clients)
+        self.assertIn(gconn, server.rooms["lobby"])
+        with mock.patch.object(gconn, "close"):
+            server.remove_client(gconn)
+        self.assertNotIn(gconn, server.clients)
+
+    def test_guest_cannot_use_slash_commands_or_pick_nick(self) -> None:
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "alice", "lobby", "en")
+        self.assertTrue(guest_sharing.is_guest_nick(nick))
+        self.assertNotEqual(nick.lower(), "alice")
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/help")
+        self.assertIn("other slash commands are blocked", self._out(gconn))
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"hello from guest")
+        self.assertIn("[#lobby] [" + nick + "] hello from guest", self._out(self.alice))
+
+    def test_guest_game_show_follows_locale(self) -> None:
+        zh = DummyConn()
+        server.attach_guest(zh, "alice", "lobby", "zh")
+        zh.sent.clear()
+        server.process_client_line(zh, b"/game show")
+        self.assertIn("本房没有进行中的对局", self._out(zh))
+        en = DummyConn()
+        server.attach_guest(en, "bob", "lobby", "en")
+        en.sent.clear()
+        server.process_client_line(en, b"/game show")
+        self.assertIn("No game in progress in this room", self._out(en))
+
+    def test_guest_board_show_follows_locale(self) -> None:
+        server.handle_command(self.alice, "/game new gomoku")
+        zh = DummyConn()
+        server.attach_guest(zh, "alice", "lobby", "zh")
+        zh.sent.clear()
+        server.process_client_line(zh, b"/game show")
+        zh_out = self._out(zh)
+        self.assertIn("黑", zh_out)
+        en = DummyConn()
+        server.attach_guest(en, "bob", "lobby", "en")
+        en.sent.clear()
+        server.process_client_line(en, b"/game show")
+        en_out = self._out(en)
+        self.assertIn("Black", en_out)
+        self.assertNotIn("黑：", en_out)
+
+    def test_guest_can_use_game_play_commands_but_not_end(self) -> None:
+        gconn = DummyConn()
+        server.attach_guest(gconn, "alice", "lobby", "en")
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game show")
+        out = self._out(gconn)
+        self.assertNotIn("other slash commands are blocked", out)
+        self.assertTrue(out)
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game end")
+        self.assertIn("other slash commands are blocked", self._out(gconn))
+        gconn.sent.clear()
+        server.process_client_line(gconn, b"/game on")
+        self.assertIn("other slash commands are blocked", self._out(gconn))
+
+    def test_guest_allowed_slash_whitelist(self) -> None:
+        self.assertTrue(guest_sharing.guest_allowed_slash("hi"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game show"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game join"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game move 8 8"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game new gomoku"))
+        self.assertTrue(guest_sharing.guest_allowed_slash("/game resign"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/help"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game end"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game abort"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game on"))
+        self.assertFalse(guest_sharing.guest_allowed_slash("/game off"))
+
+    def test_guest_remark_shows_in_parentheses(self) -> None:
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "alice", "lobby", "en", remark="小明")
+        self.assertTrue(guest_sharing.is_guest_nick(nick))
+        self.assertIn("[+] " + nick + " (小明) joined #lobby", self._out(self.alice))
+        gconn.sent.clear()
+        self.alice.sent.clear()
+        server.process_client_line(gconn, b"hi")
+        self.assertIn("[#lobby] [" + nick + " (小明)] hi", self._out(self.alice))
+        self.assertNotIn("[#lobby] [小明]", self._out(self.alice))
+
+    def test_sanitize_remark_strips_identity_tricks(self) -> None:
+        self.assertEqual(guest_sharing.sanitize_remark("  小明  "), "小明")
+        self.assertEqual(guest_sharing.sanitize_remark("~admin"), "")
+        self.assertEqual(guest_sharing.sanitize_remark("/help"), "")
+        self.assertNotIn("[", guest_sharing.sanitize_remark("a[b]c"))
+        self.assertLessEqual(len(guest_sharing.sanitize_remark("x" * 40)), 16)
+
+    def test_publish_guest_image_notifies_room(self) -> None:
+        # Minimal 1x1 PNG
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00"
+            b"\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+            b"\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "~gabcdef", "lobby", "en")
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            ok, err = server.publish_guest_image(nick, "lobby", "hi.png", png)
+        self.assertTrue(ok, err)
+        self.assertEqual(err, "")
+        # Upload-complete callback is async; mark_upload_complete already ran.
+        # Recipients should include Alice/Bob once notify fires — poll store.
+        store = __import__("file_sharing", fromlist=["file_transfer_store"]).file_transfer_store
+        found = [
+            t
+            for t in store.transfers.values()
+            if t.sender == nick and t.upload_used and t.filename.endswith(".png")
+        ]
+        self.assertTrue(found)
+        self.assertIn("Alice", found[0].download_tokens)
+        self.assertIn("Bob", found[0].download_tokens)
+
+    def test_looks_like_image_rejects_text(self) -> None:
+        self.assertFalse(guest_sharing.looks_like_image(b"hello", "x.txt"))
+        self.assertTrue(guest_sharing.looks_like_image(b"\xff\xd8\xff\xe0", "x.bin"))
+
+    def test_looks_like_audio(self) -> None:
+        self.assertTrue(guest_sharing.looks_like_audio(b"\x1a\x45\xdf\xa3xxxx", "a.bin"))
+        self.assertTrue(guest_sharing.looks_like_audio(b"OggSxxxx", "a.bin"))
+        self.assertTrue(guest_sharing.looks_like_audio(b"ID3xxxx", "a.bin"))
+        self.assertTrue(
+            guest_sharing.looks_like_audio(b"\x00\x00\x00\x18ftypM4A ", "a.bin")
+        )
+        self.assertTrue(guest_sharing.looks_like_audio(b"xxxx", "voice.webm"))
+        self.assertFalse(guest_sharing.looks_like_audio(b"hello", "x.txt"))
+        self.assertEqual(
+            guest_sharing.audio_ext_for(b"\x1a\x45\xdf\xa3xxxx", "a.bin"), ".webm"
+        )
+        self.assertEqual(
+            guest_sharing.audio_ext_for(b"\x00\x00\x00\x18ftypM4A ", "a.bin"), ".m4a"
+        )
+
+    def test_publish_guest_voice_notifies_room(self) -> None:
+        # Minimal EBML/WebM-looking header is enough for looks_like_audio.
+        webm = b"\x1a\x45\xdf\xa3" + b"\x00" * 64
+        gconn = DummyConn()
+        nick = server.attach_guest(gconn, "~gabcdef", "lobby", "en")
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            ok, err = server.publish_guest_voice(nick, "lobby", "note.webm", webm)
+        self.assertTrue(ok, err)
+        self.assertEqual(err, "")
+        store = __import__("file_sharing", fromlist=["file_transfer_store"]).file_transfer_store
+        found = [
+            t
+            for t in store.transfers.values()
+            if t.sender == nick and t.upload_used and "voice" in t.filename.lower()
+        ]
+        self.assertTrue(found)
+        self.assertIn("Alice", found[0].download_tokens)
+        self.assertTrue(found[0].filename.lower().endswith(".webm"))
+
+
+class GuestPageTests(unittest.TestCase):
+    def test_landing_has_countdown_and_no_nick_box(self) -> None:
+        guest_sharing.guest_store = guest_sharing.GuestStore()
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        page = guest_http.render_guest_page(link, "zh")
+        self.assertIn("不要关掉这个标签", page)
+        self.assertIn("倒计时", page)
+        self.assertIn("分", page)
+        self.assertIn("秒", page)
+        self.assertNotIn('id="nick"', page)
+        self.assertIn('id="remark"', page)
+        self.assertIn("/guest/", page)
+        self.assertIn('id="pick"', page)
+        self.assertIn('id="voice"', page)
+        self.assertIn("/guest/' + boot.token + '/image", page)
+        self.assertIn("/guest/' + boot.token + '/voice", page)
+        self.assertIn("可发文字、图片和语音", page)
+        self.assertIn("MediaRecorder", page)
+        self.assertIn("startVoice", page)
+        self.assertIn("appendAudio", page)
+        self.assertIn('id="game"', page)
+        self.assertIn('id="gboard"', page)
+        self.assertIn("function setGameOpen", page)
+        self.assertIn("function fitBoard", page)
+        self.assertIn("function drawStonesCanvas", page)
+        self.assertIn("function renderStonesBoard", page)
+        self.assertIn("function clearRoomGame", page)
+        self.assertIn("结束了本房的对局", page)
+        self.assertIn("function applyLang", page)
+        self.assertIn("function maybeGameNote", page)
+        self.assertIn("gresign_sent", page)
+        self.assertIn("function showPromo", page)
+        self.assertIn('id="gpromo"', page)
+        self.assertIn("gpromo_q", page)
+        self.assertIn("function isEnded", page)
+        self.assertIn("function markGameOver", page)
+        self.assertIn("gended", page)
+        self.assertIn('id="langZh"', page)
+        self.assertIn('id="langEn"', page)
+        self.assertIn("#game.gfs", page)
+        self.assertIn("background:#fff", page)
+        self.assertIn("#gate {", page)
+        self.assertIn("button.c-r { color:#111; background:#fff", page)
+        self.assertIn("button.c-b { color:#fff; background:#111", page)
+        self.assertIn("maximum-scale=1", page)
+        self.assertIn("createElement('table')", page)
+        self.assertNotIn("max-width: 900px", page)
+        self.assertIn("function cmdGame", page)
+        self.assertIn("/game ", page)
+        self.assertIn("gomoku", page)
+        self.assertIn("牛头王", page)
+        self.assertIn("parseNiutou", page)
+        self.assertIn("function cellLabel", page)
+        self.assertIn("move pick", page)
+        self.assertIn("loadSession", page)
+        self.assertIn("scheduleReconnect", page)
+        self.assertIn("100dvh", page)
+        self.assertIn("addBubble", page)
+        self.assertIn("className = 'bubble '", page)
+        row = re.search(r'<form id="row">(.*?)</form>', page, re.S)
+        self.assertIsNotNone(row)
+        # Countdown lives in the top bar so the input row stays one wide line on phones.
+        self.assertNotIn('id="left"', row.group(1))
+        bar = re.search(r'<div id="bar">(.*?)</div>\s*<div id="gate">', page, re.S)
+        self.assertIsNotNone(bar)
+        self.assertIn('id="left"', bar.group(1))
+        self.assertIn("blobToPlayableVoice", page)
+        self.assertIn("audioBufferToWav", page)
+        self.assertIn("voiceNeedsWav", page)
+        scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+        self.assertGreaterEqual(len(scripts), 2)
+        self.assertIn("getElementById('go')", scripts[0])
+        self.assertNotIn("parseNiutou", scripts[0])
+        self.assertIn("parseNiutou", scripts[1])
+
+    def test_landing_en_board_labels(self) -> None:
+        guest_sharing.guest_store = guest_sharing.GuestStore()
+        link = guest_sharing.guest_store.create("Ada", "lobby")
+        assert link is not None
+        page = guest_http.render_guest_page(link, "en")
+        self.assertIn("Enter chat", page)
+        self.assertIn("Gomoku", page)
+        self.assertIn("Refresh", page)
+        self.assertIn('"gclose": "Close"', page)
+        self.assertIn("var PACKS =", page)
+        self.assertIn("6 Nimmt!", page)
+        self.assertIn("'狮':'L'", page)
+        self.assertIn("'将':'G'", page)
+        self.assertIn("'帅':'K'", page)
+        # Visible gate copy is English; Chinese still appears inside embedded PACKS.
+        self.assertIn('id="gateHint">One open only.', page)
+        self.assertIn('lang="en"', page)
+
+
+if __name__ == "__main__":
+    unittest.main()

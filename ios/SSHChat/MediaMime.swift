@@ -10,6 +10,8 @@ enum MediaMime {
         case n.hasSuffix(".webp"): return "image/webp"
         case n.hasSuffix(".bmp"): return "image/bmp"
         case n.hasSuffix(".mp4"): return "video/mp4"
+        case n.hasSuffix(".weba"): return "audio/webm"
+        case n.hasSuffix(".webm") && isVoiceName(n): return "audio/webm"
         case n.hasSuffix(".webm"): return "video/webm"
         case n.hasSuffix(".3gp"), n.hasSuffix(".3gpp"): return "video/3gpp"
         case n.hasSuffix(".mkv"): return "video/x-matroska"
@@ -23,17 +25,30 @@ enum MediaMime {
         }
     }
 
+    static func isVoiceName(_ name: String) -> Bool {
+        let n = (name as NSString).lastPathComponent.lowercased()
+        return n.hasPrefix("voice") || n.contains("voice-")
+    }
+
     static func isImage(_ mime: String) -> Bool { mime.lowercased().hasPrefix("image/") }
     static func isVideo(_ mime: String) -> Bool { mime.lowercased().hasPrefix("video/") }
-    static func isAudio(_ mime: String) -> Bool { mime.lowercased().hasPrefix("audio/") }
+    static func isAudio(_ mime: String, name: String = "") -> Bool {
+        if mime.lowercased().hasPrefix("audio/") { return true }
+        let n = (name as NSString).lastPathComponent.lowercased()
+        if n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".mp3")
+            || n.hasSuffix(".amr") || n.hasSuffix(".wav") || n.hasSuffix(".oga")
+            || n.hasSuffix(".weba") {
+            return true
+        }
+        if (n.hasSuffix(".webm") || n.hasSuffix(".ogg")) && isVoiceName(n) { return true }
+        if mime.lowercased() == "video/webm" && isVoiceName(n) { return true }
+        return false
+    }
 
     static func kindLabel(mime: String, name: String = "") -> String {
         if isImage(mime) { return "图片" }
+        if isAudio(mime, name: name) { return "语音" }
         if isVideo(mime) { return "视频" }
-        let n = name.lowercased()
-        if isAudio(mime) || n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".mp3") || n.hasSuffix(".amr") {
-            return "语音"
-        }
         return "文件"
     }
 }
@@ -46,6 +61,6 @@ struct DownloadedMedia: Identifiable, Equatable {
     var sender: String?
 
     var isImage: Bool { MediaMime.isImage(mime) }
-    var isVideo: Bool { MediaMime.isVideo(mime) }
-    var isAudio: Bool { MediaMime.isAudio(mime) }
+    var isAudio: Bool { MediaMime.isAudio(mime, name: name) }
+    var isVideo: Bool { MediaMime.isVideo(mime) && !isAudio }
 }

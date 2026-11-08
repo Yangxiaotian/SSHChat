@@ -14,10 +14,10 @@ data class DownloadedMedia(
 ) {
     val isImage: Boolean
         get() = MediaMime.isImage(mime)
-    val isVideo: Boolean
-        get() = MediaMime.isVideo(mime)
     val isAudio: Boolean
-        get() = MediaMime.isAudio(mime)
+        get() = MediaMime.isAudio(mime, name)
+    val isVideo: Boolean
+        get() = MediaMime.isVideo(mime) && !isAudio
 }
 
 object SecureDownload {
@@ -32,8 +32,12 @@ object SecureDownload {
             contentType = "application/json",
         )
         val filename = ticketJson.optString("filename").ifBlank { "file" }
-        val mime = ticketJson.optString("mime").ifBlank {
-            MediaMime.guess(filename)
+        val rawMime = ticketJson.optString("mime")
+        val mime = when {
+            rawMime.isNotBlank() && MediaMime.isAudio(rawMime, filename) &&
+                rawMime.startsWith("video/", ignoreCase = true) -> MediaMime.guess(filename)
+            rawMime.isNotBlank() -> rawMime
+            else -> MediaMime.guess(filename)
         }
         val rel = ticketJson.optString("download")
         if (rel.isBlank()) error("no download ticket")

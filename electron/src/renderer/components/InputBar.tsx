@@ -29,6 +29,8 @@ const COMMAND_KEYS = [
   { name: '/board', key: 'input.commands.canvas' },
   { name: '/piano', key: 'input.commands.piano' },
   { name: '/clock', key: 'input.commands.clock' },
+  { name: '/guest', key: 'input.commands.guest' },
+  { name: '/tmplink', key: 'input.commands.guest' },
   { name: '/leave', key: 'input.commands.leave' },
   { name: '/announce', key: 'input.commands.announce' },
   { name: '/pad', key: 'input.commands.pad' },
@@ -99,6 +101,8 @@ const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
   '/poll': ['new', 'close', 'help', 'show'],
   '/later': ['list', 'ls', 'show', 'cancel', 'help'],
   '/clock': ['help', 'close', 'new'],
+  '/guest': ['help', 'close', '5', '10', '15', '30', '60'],
+  '/tmplink': ['help', 'close', '5', '10', '15', '30', '60'],
 };
 
 function subcommandSuggestions(value: string): SuggestionItem[] {

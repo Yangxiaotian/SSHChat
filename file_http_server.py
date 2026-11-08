@@ -12,6 +12,7 @@ Provides:
 - Room piano:      GET/POST /piano/<token>/...   - Collaborative piano (URL + separate key)
 - Piano WS:        GET  /piano/<token>/ws        - WebSocket note push/broadcast (ticket auth)
 - Chess clock:     GET  /clock/<token>/...       - Fullscreen Kindle chess clock (ticks in the browser)
+- Guest chat:      GET/POST /guest/<token>/...   - One-shot 5-minute web chat (no SSH key)
 - Music player:    GET  /music/<token>/...       - Playlist page + Range audio from the music drop folder
 - Piano static:    GET  /piano-static/<file>     - Piano page assets (MP3 encoder)
 - Piano replay:    GET  /piano-replay/<id>       - Replay a shared piano recording
@@ -41,6 +42,7 @@ from typing import Optional
 import canvas_http
 import clock_http
 import file_sharing
+import guest_http
 import music_http
 import piano_http
 
@@ -63,8 +65,9 @@ PREVIEWABLE_TYPES = {
     'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
     # Videos
     'video/mp4', 'video/webm', 'video/ogg',
-    # Audio
+    # Audio (include mp4/m4a/aac so mobile + guest voice notes preview)
     'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/ogg', 'audio/webm',
+    'audio/mp4', 'audio/aac', 'audio/x-m4a', 'audio/x-wav',
     # Documents
     'application/pdf',
     # Text
@@ -75,6 +78,16 @@ PREVIEWABLE_TYPES = {
 
 def get_mime_type(filename: str) -> str:
     """Get MIME type for a file."""
+    name = (filename or "").lower()
+    # stdlib mimetypes often maps .m4a → audio/x-m4a and .webm → video/webm.
+    if name.endswith(".m4a"):
+        return "audio/mp4"
+    if name.endswith(".aac"):
+        return "audio/aac"
+    if name.endswith((".webm", ".weba")) and (
+        name.startswith("voice") or "/voice" in name or name.endswith(".weba")
+    ):
+        return "audio/webm"
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or 'application/octet-stream'
 
@@ -234,6 +247,38 @@ def needs_federation_file_proxy(base_url: Optional[str] = None) -> bool:
     if force in ("1", "true", "yes"):
         return True
     return not is_externally_reachable_url(base_url or "")
+
+
+def wait_for_public_base_url(
+    get_base_url,
+    *,
+    timeout: Optional[float] = None,
+    poll: float = 0.5,
+) -> tuple[str, bool]:
+    """Poll until get_base_url() looks public (Cloudflare latch back), or timeout.
+
+    Returns (base_url, is_public). Used by /guest so a brief tunnel remint can
+    finish instead of handing out a LAN/virtual IP.
+    """
+    try:
+        default_timeout = float(os.environ.get("SSHCHAT_GUEST_WAIT_PUBLIC_SEC", "12") or "12")
+    except ValueError:
+        default_timeout = 12.0
+    limit = default_timeout if timeout is None else float(timeout)
+    if limit < 0:
+        limit = 0.0
+    deadline = time.monotonic() + limit
+    last = ""
+    while True:
+        try:
+            last = str(get_base_url() or "").strip().rstrip("/")
+        except Exception:
+            last = ""
+        if is_externally_reachable_url(last):
+            return last, True
+        if time.monotonic() >= deadline:
+            return last, False
+        time.sleep(max(0.1, float(poll)))
 
 
 def content_disposition(filename: str, inline: bool) -> str:
@@ -1393,6 +1438,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             return
         if canvas_http.handle_canvas_post(self):
             return
+        if guest_http.handle_guest_post(self):
+            return
 
         parsed = urlparse(self.path)
         path_parts = parsed.path.strip('/').split('/')
@@ -1743,6 +1790,10 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         if piano_http.handle_piano_websocket(self):
             return
         if canvas_http.handle_canvas_websocket(self):
+            return
+        if guest_http.handle_guest_websocket(self):
+            return
+        if guest_http.handle_guest_get(self):
             return
         if clock_http.handle_clock_get(self):
             return

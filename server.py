@@ -26,6 +26,8 @@ from typing import Optional, Tuple
 
 import canvas_sharing
 import clock_sharing
+import guest_http
+import guest_sharing
 import dict_lookup
 import federation
 import games
@@ -4757,7 +4759,11 @@ def _federation_sync_file_public() -> None:
 
 
 def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
-    """Peer Cloudflare/public file URL changed — rewrite canvas mirror links."""
+    """Peer Cloudflare/public file URL changed — rewrite canvas mirror links.
+
+    Do not re-spam gui-open invites into chat; users who need the board again
+    can /canvas|/piano once more and get the live hostname.
+    """
     try:
         n = canvas_sharing.canvas_store.refresh_host_base_url(node_id, base_url)
     except Exception as e:
@@ -4768,27 +4774,15 @@ def _fed_on_file_public_change(node_id: str, base_url: str) -> None:
     print(
         f"[Canvas] updated {n} federated mirror(s) for {node_id} -> {base_url}"
     )
-    # Clients still hold the old trycloudflare invite; push fresh URLs.
-    host = (node_id or "").strip()
     try:
-        with canvas_sharing.canvas_store.lock:
-            sessions = [
-                s
-                for s in canvas_sharing.canvas_store.sessions.values()
-                if not s.closed
-                and not s.parked
-                and (s.host_node or "").strip() == host
-            ]
-        for session in sessions:
-            try:
-                _deliver_canvas_invites(session, refreshed=True)
-            except Exception as e:
-                print(
-                    f"[Canvas] re-invite after peer CF change failed "
-                    f"({session.session_id[:12]}…): {e!r}"
-                )
+        n_piano = piano_sharing.piano_store.refresh_host_base_url(node_id, base_url)
     except Exception as e:
-        print(f"[Canvas] peer CF re-invite sweep failed: {e!r}")
+        print(f"[Piano] refresh_host_base_url error: {e!r}")
+        n_piano = 0
+    if n_piano:
+        print(
+            f"[Piano] updated {n_piano} federated mirror(s) for {node_id} -> {base_url}"
+        )
 
 
 def _fed_on_library_page_result(_from_peer: str, req_id: str, payload: dict) -> None:
@@ -6164,24 +6158,34 @@ def _rediscover_clock_invites_for_public_change(reason: str = "") -> int:
 def _maybe_refresh_canvas_invites_on_public_change(
     cur: str, *, reason: str
 ) -> None:
-    """If live public base changed since last invite wave, re-deliver + csync."""
+    """If live public base changed, remember it and quietly csync peers.
+
+    Deliberately does **not** re-broadcast gui-open piano/canvas/clock invites.
+    Reminting Quick Tunnel used to flood every open session into chat; users
+    who still need the board can run /canvas|/piano|/clock again.
+    """
     global _LAST_CANVAS_PUBLIC_BASE
     cur = (cur or "").strip().rstrip("/")
     prev = (_LAST_CANVAS_PUBLIC_BASE or _load_last_canvas_public_base()).rstrip("/")
     if not cur:
-        # Probe blip / origin down: keep prev so a later recovery of the *same*
-        # hostname does not re-spam gui-open piano/canvas at everyone.
+        # Probe blip / origin down: keep prev so recovery of the same host is a no-op.
         return
     if cur == prev:
         _LAST_CANVAS_PUBLIC_BASE = cur
         return
-    _rediscover_canvas_invites_for_public_change(reason)
-    _rediscover_piano_invites_for_public_change(reason)
-    _rediscover_clock_invites_for_public_change(reason)
+    suffix = f" ({reason})" if reason else ""
+    print(
+        f"[FileTransfer] public base {prev or '(none)'} -> {cur}{suffix}; "
+        f"not re-spamming old piano/canvas/clock invites"
+    )
     try:
         _federation_push_all_canvas_announces()
     except Exception as e:
         print(f"[Canvas] csync after public change failed: {e!r}")
+    try:
+        _federation_push_all_piano_announces()
+    except Exception as e:
+        print(f"[Piano] psync after public change failed: {e!r}")
     _LAST_CANVAS_PUBLIC_BASE = cur
     _save_last_canvas_public_base(cur)
 
@@ -7810,6 +7814,229 @@ def _deliver_clock_url(
             send_line(c, _clock_invite_text(session, rejoined=rejoined, lang=lang))
         except Exception as e:
             print(f"[Clock] notify failed: {e}")
+
+
+def _guest_label(info: dict | None) -> str:
+    """Chat display: guests may add a remark in parentheses."""
+    if not info:
+        return "?"
+    name = str(info.get("name") or "")
+    if info.get("guest"):
+        return guest_sharing.display_nick(name, str(info.get("remark") or ""))
+    return name
+
+
+def attach_guest(
+    conn,
+    name: str,
+    room: str,
+    locale: str = "en",
+    minutes: int | None = None,
+    remark: str = "",
+) -> str:
+    """Put a web guest into a room. Nick must already be a random `~g…` name."""
+    nick = name if guest_sharing.is_guest_nick(name) else guest_sharing.random_guest_nick()
+    mins = guest_sharing.DEFAULT_MINUTES if minutes is None else minutes
+    note = guest_sharing.sanitize_remark(remark)
+    with lock:
+        existing = {
+            str(info.get("name") or "").lower() for info in clients.values()
+        }
+        while nick.lower() in existing:
+            nick = guest_sharing.random_guest_nick()
+        clients[conn] = {
+            "name": nick,
+            "rooms": {room},
+            "current_room": room,
+            "locale": locale,
+            "guest": True,
+            "remark": note,
+        }
+        rooms[room].add(conn)
+    label = guest_sharing.display_nick(nick, note)
+    send_line(conn, _ts(conn, "guest_welcome", room=room, nick=label, minutes=mins))
+    broadcast_room(
+        room,
+        f"[+] {label} joined #{room}\n".encode("utf-8"),
+        exclude_conn=conn,
+        skip_federation=True,
+    )
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        hub.notify_join(nick, room)
+    print(f"{label} joined #{room} (guest)")
+    return nick
+
+
+def _guest_file_recipients(nick: str, room_name: str) -> list[str]:
+    """Room members (and federated peers) who should receive a guest upload."""
+    with lock:
+        if room_name not in rooms:
+            return []
+        sender_lower = (nick or "").strip().lower()
+        seen = {sender_lower} if sender_lower else set()
+        recipients: list[str] = []
+        for c in rooms.get(room_name) or ():
+            info = clients.get(c)
+            if not info:
+                continue
+            other = str(info.get("name") or "").strip()
+            key = other.lower()
+            if not other or key in seen:
+                continue
+            recipients.append(other)
+            seen.add(key)
+    if not recipients:
+        recipients = [nick]
+    hub = federation.get_hub()
+    if hub is not None and hub.enabled:
+        seen = {n.lower() for n in recipients}
+        seen.add((nick or "").lower())
+        for remote_name in hub.names_in_room(room_name):
+            rk = remote_name.lower()
+            if rk not in seen:
+                recipients.append(remote_name)
+                seen.add(rk)
+    return recipients
+
+
+def _publish_guest_bytes(
+    nick: str,
+    room: str,
+    filename: str,
+    data: bytes,
+    *,
+    safe_name: str,
+) -> tuple[bool, str]:
+    """Write guest upload bytes into the normal one-time file-transfer path."""
+    if file_http is None:
+        return False, "file_off"
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    room_name = normalize_room(room) or DEFAULT_ROOM
+    recipients = _guest_file_recipients(nick, room_name)
+    if not recipients:
+        return False, "no_room"
+    store = file_sharing.file_transfer_store
+    transfer = store.create_upload_session(
+        sender=nick,
+        recipients=recipients,
+        filename=safe_name,
+        room=room_name,
+        upload_ttl_minutes=10,
+        download_ttl_minutes=60,
+    )
+    path = store.get_file_path(transfer.transfer_id, safe_name)
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+    except OSError:
+        return False, "save_fail"
+    if not store.mark_upload_complete(transfer.upload_token, path, len(raw), safe_name):
+        return False, "save_fail"
+    return True, ""
+
+
+def publish_guest_image(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
+    """Guest page uploaded an image — fan out via the normal one-time file path."""
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
+        return False, "too_big"
+    if not guest_sharing.looks_like_image(raw, filename):
+        return False, "not_image"
+    ext = guest_sharing.image_ext_for(raw, filename)
+    safe = file_sharing.sanitize_filename(filename or f"guest{ext}")
+    if not any(safe.lower().endswith(e) for e in guest_sharing.IMAGE_EXTS):
+        safe = f"{safe}{ext}" if safe else f"guest{ext}"
+    return _publish_guest_bytes(nick, room, filename, raw, safe_name=safe)
+
+
+def publish_guest_voice(nick: str, room: str, filename: str, data: bytes) -> tuple[bool, str]:
+    """Guest page uploaded a voice note — fan out via the normal one-time file path."""
+    raw = data or b""
+    if not raw:
+        return False, "empty"
+    if len(raw) > guest_sharing.MAX_VOICE_BYTES:
+        return False, "too_big"
+    if not guest_sharing.looks_like_audio(raw, filename):
+        return False, "not_audio"
+    ext = guest_sharing.audio_ext_for(raw, filename)
+    # Prefix voice- so mime mapping treats .webm as audio/webm, not video/webm.
+    base = file_sharing.sanitize_filename(filename or f"voice{ext}")
+    if not base.lower().startswith("voice"):
+        base = f"voice-{base}"
+    if not any(base.lower().endswith(e) for e in guest_sharing.AUDIO_EXTS):
+        base = f"{base}{ext}" if base else f"voice{ext}"
+    return _publish_guest_bytes(nick, room, filename, raw, safe_name=base)
+
+
+def _handle_guest(conn, sender: str, payload: str) -> None:
+    """Handle /guest — private one-shot web chat link (default 5 minutes)."""
+    raw = payload.split(None, 1)
+    arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    if arg in ("help", "?", "帮助"):
+        send_line(conn, _ts(conn, "guest_usage"))
+        return
+    if file_http is None:
+        send_line(conn, _ts(conn, "guest_http_off"))
+        return
+    with lock:
+        info = clients.get(conn)
+        room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+    if arg in ("close", "关闭"):
+        closed = guest_sharing.guest_store.close_for_creator(sender, room_name)
+        for link in closed:
+            old = link.conn
+            if old is None:
+                continue
+            try:
+                old.send_json({"t": "end", "why": "closed"})
+            except Exception:
+                pass
+            try:
+                remove_client(old)
+            except Exception:
+                pass
+        if not closed:
+            send_line(conn, _ts(conn, "guest_none", room=room_name))
+        else:
+            send_line(
+                conn, _ts(conn, "guest_closed", n=len(closed), room=room_name)
+            )
+        return
+    minutes = guest_sharing.DEFAULT_MINUTES
+    if arg:
+        minutes, err = guest_sharing.parse_minutes(arg)
+        if err == "range":
+            send_line(conn, _ts(conn, "guest_bad_minutes"))
+            return
+        if err or minutes is None:
+            send_line(conn, _ts(conn, "guest_usage"))
+            return
+    link = guest_sharing.guest_store.create(sender, room_name, minutes)
+    if link is None:
+        send_line(conn, _ts(conn, "guest_too_many"))
+        return
+    # Prefer a live Cloudflare / public base. Tunnel helper remints on a timer;
+    # wait briefly so phones do not get a LAN/virtual IP during the gap.
+    wait = getattr(file_http_server, "wait_for_public_base_url", None)
+    if callable(wait):
+        base, is_public = wait(file_http.get_base_url)
+    else:
+        base = (file_http.get_base_url() or "").rstrip("/")
+        check = getattr(file_http_server, "is_externally_reachable_url", None)
+        is_public = bool(check(base)) if callable(check) else False
+    if not base:
+        base = (file_http.get_base_url() or "").rstrip("/")
+    url = f"{base.rstrip('/')}/guest/{link.token}?lang={conn_locale(conn)}"
+    send_line(
+        conn, _ts(conn, "guest_created", url=url, room=room_name, minutes=minutes)
+    )
+    if not is_public:
+        send_line(conn, _ts(conn, "guest_lan_url_warn"))
 
 
 def _handle_clock(conn, sender: str, payload: str) -> None:
@@ -9997,10 +10224,12 @@ def remove_client(conn) -> None:
                 pass
             return
         name = info["name"]
+        leave_label = _guest_label(info)
         joined_rooms = list(info["rooms"])
         current_room = info.get("current_room", DEFAULT_ROOM)
         library_reading.pop(conn, None)
-        _remember_session_locked(name, joined_rooms, current_room)
+        if not info.get("guest"):
+            _remember_session_locked(name, joined_rooms, current_room)
         game_notices: list[tuple[str, list[str]]] = []
         for room in joined_rooms:
             same_name_peer = _same_name_peer_in_room_locked(room, name, exclude_conn=conn)
@@ -10089,7 +10318,7 @@ def remove_client(conn) -> None:
             and hub.enabled
             and hub.same_name_in_room(room, name, False)
         )
-        leave_msg = f"[!] {name} left #{room}\n".encode("utf-8")
+        leave_msg = f"[!] {leave_label} left #{room}\n".encode("utf-8")
         # Local delivery only: federation uses notify_leave (presence), not msg,
         # otherwise peers see the leave line twice. Skip the local notice when the
         # same nick is still visible via federation (multi-device), but always
@@ -10511,6 +10740,15 @@ def handle_command(conn, payload: str) -> None:
 
     if cmd == "/clock":
         _handle_clock(conn, name, payload)
+        return
+
+    if cmd in ("/guest", "/tmplink"):
+        try:
+            _handle_guest(conn, name, payload)
+        except Exception as e:
+            print(f"/guest error: user={name} payload={payload!r} err={e!r}")
+            traceback.print_exc()
+            send_line(conn, _ts(conn, "guest_cmd_fail"))
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -11140,6 +11378,15 @@ def process_client_line(conn, raw_line: bytes) -> None:
             return
         room = info["current_room"]
         name = info["name"]
+        is_guest = bool(info.get("guest"))
+        label = _guest_label(info)
+
+    if is_guest:
+        if payload.startswith("/") and not guest_sharing.guest_allowed_slash(payload):
+            send_line(conn, _ts(conn, "guest_no_commands"))
+            return
+        if len(payload) > guest_sharing.MAX_MSG_CHARS:
+            payload = payload[: guest_sharing.MAX_MSG_CHARS]
 
     if payload.startswith("/file "):
         send_line(conn, "[*] File transfer is not supported.\n")
@@ -11149,7 +11396,7 @@ def process_client_line(conn, raw_line: bytes) -> None:
         handle_command(conn, payload)
         return
 
-    line_out = f"[#{room}] [{name}] {payload}\n".encode("utf-8")
+    line_out = f"[#{room}] [{label}] {payload}\n".encode("utf-8")
     broadcast_room(room, line_out)
 
 
@@ -11257,7 +11504,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /guest /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -11332,6 +11579,15 @@ def handle_client(conn, addr) -> None:
         remove_client(conn)
 
 
+guest_http.bind_chat(
+    attach_guest=attach_guest,
+    process_client_line=process_client_line,
+    remove_client=remove_client,
+    publish_guest_image=publish_guest_image,
+    publish_guest_voice=publish_guest_voice,
+)
+
+
 def run_server() -> int:
     global _listen_socket, _shutdown_requested, _shutting_down, file_http
     global _capsule_thread
@@ -11346,6 +11602,16 @@ def run_server() -> int:
         )
         _capsule_thread.start()
     
+    # Guest WS must call *this* module's clients/rooms. `python server.py`
+    # runs as __main__; `import server` would be a second empty copy.
+    guest_http.bind_chat(
+        attach_guest=attach_guest,
+        process_client_line=process_client_line,
+        remove_client=remove_client,
+        publish_guest_image=publish_guest_image,
+        publish_guest_voice=publish_guest_voice,
+    )
+
     # Start file HTTP server
     file_enabled = os.environ.get("SSHCHAT_FILE_TRANSFER_ENABLED", "1") != "0"
     if file_enabled:
@@ -11375,9 +11641,8 @@ def run_server() -> int:
                         if cur != last:
                             last = cur
                             _federation_sync_file_public()
-                            # Room canvas invites embed the CF hostname; re-send
-                            # private invites + csync so clients/peers leave the
-                            # dead trycloudflare URL behind.
+                            # Remember new CF hostname + quiet federation sync.
+                            # Do not re-spam old gui-open invites into chat.
                             try:
                                 _maybe_refresh_canvas_invites_on_public_change(
                                     cur, reason="cf-watch"
@@ -11428,6 +11693,7 @@ def run_server() -> int:
                             canvas_sharing.canvas_store.cleanup_expired()
                             piano_sharing.piano_store.cleanup_expired()
                             clock_sharing.clock_store.cleanup_expired()
+                            guest_sharing.guest_store.cleanup_expired()
                         except Exception as e:
                             print(f"[FileTransfer] Cleanup error: {e}")
             

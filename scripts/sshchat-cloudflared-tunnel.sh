@@ -155,21 +155,19 @@ network_ready() {
   return 1
 }
 
-echo "[sshchat-cloudflared] waiting for origin :${FILE_HTTP_PORT} and WAN..."
-for _ in $(seq 1 120); do
-  port_ready && network_ready && break
-  sleep 1
-done
-if ! port_ready; then
-  echo "[sshchat-cloudflared] WARN: origin :${FILE_HTTP_PORT} not up yet; starting tunnel anyway" >&2
-fi
-if ! network_ready; then
-  echo "[sshchat-cloudflared] WARN: WAN not ready yet; starting tunnel anyway" >&2
-fi
-
-echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL edge-ip=$EDGE_IP_VERSION)"
-# Drop stale hostname so a half-booted server cannot keep advertising a dead tunnel.
-rm -f "$URL_FILE"
+wait_for_origin_and_wan() {
+  echo "[sshchat-cloudflared] waiting for origin :${FILE_HTTP_PORT} and WAN..."
+  for _ in $(seq 1 120); do
+    port_ready && network_ready && break
+    sleep 1
+  done
+  if ! port_ready; then
+    echo "[sshchat-cloudflared] WARN: origin :${FILE_HTTP_PORT} not up yet; starting tunnel anyway" >&2
+  fi
+  if ! network_ready; then
+    echo "[sshchat-cloudflared] WARN: WAN not ready yet; starting tunnel anyway" >&2
+  fi
+}
 
 run_tunnel() {
   local -a args=(tunnel --no-autoupdate --url "$LOCAL_URL" --metrics "$METRICS_ADDR")
@@ -189,6 +187,13 @@ run_tunnel() {
     cloudflared "${args[@]}"
   fi
 }
+
+# After rate-limit / hard failure, grow sleep so we do not stampede Quick Tunnel.
+# Reset after a healthy stretch so normal blips stay fast.
+BACKOFF_SEC="${SSHCHAT_CF_RESTART_BACKOFF_SEC:-5}"
+BACKOFF_MAX_SEC="${SSHCHAT_CF_RESTART_BACKOFF_MAX_SEC:-300}"
+RATE_LIMIT_BACKOFF_SEC="${SSHCHAT_CF_RATE_LIMIT_BACKOFF_SEC:-600}"
+_current_backoff="$BACKOFF_SEC"
 
 metrics_ha_connections() {
   curl -s --noproxy '*' --max-time 2 "http://${METRICS_ADDR}/metrics" 2>/dev/null \
@@ -221,15 +226,31 @@ proxy_usable() {
   [[ "$code" =~ ^(200|301|302) ]]
 }
 
+is_clash_fake_ip() {
+  # Clash TUN fake-ip range. dig @1.1.1.1 is often hijacked too under TUN.
+  [[ "${1:-}" =~ ^198\.18\. ]]
+}
+
 is_clash_fake_ip_host() {
   local host="$1" ip
   [[ -n "$host" ]] || return 1
-  ip=$(dig +short A "$host" 2>/dev/null | awk '/^198\.18\./{print; exit}')
-  [[ -n "$ip" ]]
+  ip=$(dig +short A "$host" 2>/dev/null | awk '/^[0-9]+\./{print; exit}')
+  is_clash_fake_ip "$ip" && return 0
+  # Explicit resolver may still be redirected by TUN transparent DNS.
+  ip=$(dig +short A "$host" @1.1.1.1 +time=1 +tries=1 2>/dev/null | awk '/^[0-9]+\./{print; exit}')
+  is_clash_fake_ip "$ip"
+}
+
+clash_dns_polluted() {
+  # Cheap global signal: even 1.1.1.1 lookups become 198.18.x under Clash TUN.
+  local ip
+  ip=$(dig +short A cloudflare.com @1.1.1.1 +time=1 +tries=1 2>/dev/null | awk '/^[0-9]+\./{print; exit}')
+  is_clash_fake_ip "$ip"
 }
 
 # Authoritative when Clash mixed-port works. Direct curl is poisoned by TUN
 # fake-ip (TLS SYSCALL to 198.18.x) even though phones on real DNS are fine.
+# Return codes: 0=ok, 1=dead, 2=unverifiable here (Clash) — use ha_connections.
 probe_public_url() {
   local url="$1" base host code
   [[ -n "$url" ]] || return 1
@@ -241,10 +262,14 @@ probe_public_url() {
     probe_ok_code "$code" && return 0
     code=$(http_code -x "$PROBE_PROXY" "${base}/")
     probe_ok_code "$code" && return 0
+    # Proxy reachable but trycloudflare returns 530/000 under Clash routing.
+    # Do NOT treat as definitive death — phones use real DNS.
+    if is_clash_fake_ip_host "$host" || clash_dns_polluted; then
+      return 2
+    fi
     return 1
   fi
-  if is_clash_fake_ip_host "$host"; then
-    # Cannot verify from this host; caller should fall back to ha_connections.
+  if is_clash_fake_ip_host "$host" || clash_dns_polluted; then
     return 2
   fi
   code=$(http_code --noproxy '*' "${base}/healthz")
@@ -283,17 +308,24 @@ advertise_if_healthy() {
       update_public_host "$url"
       return 0
     fi
+    # Metrics not ready yet right after mint — still advertise under Clash so
+    # /guest does not fall back to a LAN/virtual IP while ha comes up.
+    if clash_dns_polluted || is_clash_fake_ip_host "${url#https://}"; then
+      echo "[sshchat-cloudflared] WARN: Clash DNS polluted, ha=$n; advertising $url anyway" >&2
+      update_public_host "$url"
+      return 0
+    fi
   fi
   echo "[sshchat-cloudflared] not advertising yet (probe failed rc=$rc): $url" >&2
   rm -f "$URL_FILE"
   return 1
 }
 
-# Drop the latch as soon as the public hostname stops answering so /piano
-# cannot keep handing out a dead trycloudflare URL. Kill cloudflared only
-# after consecutive failures so a brief edge blip can reconnect in place.
+# Drop the latch when the tunnel is truly gone. Under Clash TUN, local HTTP
+# probes often fail (530/000) even while ha_connections>=1 and phones are fine
+# — never remint solely on a poisoned probe.
 watch_tunnel_health() {
-  local fails=0 n url rc
+  local fails=0 n url rc clash=0
   sleep "$HEALTH_GRACE_SEC"
   while true; do
     sleep "$HEALTH_INTERVAL_SEC"
@@ -313,7 +345,12 @@ watch_tunnel_health() {
     case "$n" in
       ''|*[!0-9]*) n=0 ;;
     esac
-    if [[ "$n" -ge 1 && ( "$rc" -eq 0 || "$rc" -eq 2 ) ]]; then
+    clash=0
+    if clash_dns_polluted || { [[ -n "$url" ]] && is_clash_fake_ip_host "${url#https://}"; }; then
+      clash=1
+    fi
+    # Connector up + (probe ok OR Clash-unverifiable): keep advertising.
+    if [[ "$n" -ge 1 && ( "$rc" -eq 0 || "$rc" -eq 2 || "$clash" -eq 1 ) ]]; then
       fails=0
       if [[ -n "$url" && ! -f "$URL_FILE" ]]; then
         echo "[sshchat-cloudflared] public probe recovered; re-advertise $url" >&2
@@ -321,13 +358,26 @@ watch_tunnel_health() {
       fi
       continue
     fi
+    # Clash + ha still up: local probe noise only — do not kill.
+    if [[ "$clash" -eq 1 && "$n" -ge 1 ]]; then
+      fails=0
+      continue
+    fi
     fails=$((fails + 1))
-    echo "[sshchat-cloudflared] tunnel unhealthy ha=$n probe_rc=$rc fails=$fails/$HEALTH_FAILS_NEED url=${url:-none}" >&2
-    if [[ "$fails" -ge 1 ]]; then
+    echo "[sshchat-cloudflared] tunnel unhealthy ha=$n probe_rc=$rc clash=$clash fails=$fails/$HEALTH_FAILS_NEED url=${url:-none}" >&2
+    if [[ "$fails" -ge 1 && "$n" -lt 1 ]]; then
       rm -f "$URL_FILE"
     fi
-    if [[ "$fails" -ge "$HEALTH_FAILS_NEED" ]]; then
+    if [[ "$fails" -ge "$HEALTH_FAILS_NEED" && "$n" -lt 1 ]]; then
       echo "[sshchat-cloudflared] restarting dead Quick Tunnel (stop advertising stale URL)" >&2
+      rm -f "$URL_FILE"
+      pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
+      return 0
+    fi
+    # ha still >=1 but probe hard-failed without Clash signal: wait longer,
+    # don't remint on a single bad HTTP code (530 during edge settle).
+    if [[ "$n" -ge 1 && "$fails" -ge $((HEALTH_FAILS_NEED * 3)) ]]; then
+      echo "[sshchat-cloudflared] connector up but probe stuck; reminting" >&2
       rm -f "$URL_FILE"
       pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
       return 0
@@ -344,33 +394,91 @@ is_quick_tunnel_url() {
   return 0
 }
 
-watch_tunnel_health &
-WATCH_PID=$!
-trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
+recently_rate_limited() {
+  # cloudflared / CF edge spam 429 or Error 1015 when Quick Tunnel is throttled.
+  tail -n 80 "$LOG_FILE" 2>/dev/null | grep -qE '429|Error 1015|Try again in|rate.?limit' \
+    && return 0
+  return 1
+}
 
-run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
-  echo "$line"
-  if [[ "$line" =~ https://[a-zA-Z0-9-]+\.trycloudflare\.com ]]; then
-    new_url="${BASH_REMATCH[0]}"
-    if ! is_quick_tunnel_url "$new_url"; then
-      continue
-    fi
-    old_url=""
-    [[ -f "$URL_FILE" ]] && old_url=$(tr -d '[:space:]' <"$URL_FILE" || true)
-    # First sight, hostname change, or latch was dropped after a failed probe.
-    if [[ "$old_url" != "$new_url" ]]; then
-      advertised=0
-      for _try in 1 2 3 4 5 6; do
-        if advertise_if_healthy "$new_url"; then
-          advertised=1
-          break
+run_one_tunnel_session() {
+  local watch_pid="" line new_url old_url advertised _try
+  # Drop stale hostname so a half-booted server cannot keep advertising a dead tunnel.
+  rm -f "$URL_FILE"
+  echo "[sshchat-cloudflared] starting tunnel -> $LOCAL_URL (protocol=$PROTOCOL edge-ip=$EDGE_IP_VERSION)"
+  watch_tunnel_health &
+  watch_pid=$!
+  # shellcheck disable=SC2064
+  trap "kill '$watch_pid' 2>/dev/null || true" RETURN
+  run_tunnel 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
+    echo "$line"
+    if [[ "$line" =~ https://[a-zA-Z0-9-]+\.trycloudflare\.com ]]; then
+      new_url="${BASH_REMATCH[0]}"
+      if ! is_quick_tunnel_url "$new_url"; then
+        continue
+      fi
+      old_url=""
+      [[ -f "$URL_FILE" ]] && old_url=$(tr -d '[:space:]' <"$URL_FILE" || true)
+      # First sight, hostname change, or latch was dropped after a failed probe.
+      if [[ "$old_url" != "$new_url" ]]; then
+        advertised=0
+        for _try in 1 2 3 4 5 6; do
+          if advertise_if_healthy "$new_url"; then
+            advertised=1
+            break
+          fi
+          sleep 2
+        done
+        if [[ "$advertised" -eq 0 ]]; then
+          echo "[sshchat-cloudflared] URL minted but not yet publicly reachable; health watcher will retry" >&2
         fi
-        sleep 2
-      done
-      if [[ "$advertised" -eq 0 ]]; then
-        echo "[sshchat-cloudflared] URL minted but not yet publicly reachable; health watcher will retry" >&2
+      fi
+    fi
+  done
+  local rc="${PIPESTATUS[0]:-1}"
+  kill "$watch_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+  trap - RETURN
+  rm -f "$URL_FILE"
+  return "$rc"
+}
+
+# Forever loop: health watcher kills a dead cloudflared, then we mint a new
+# Quick Tunnel here without waiting on systemd RestartSec. SIGTERM/INT exit.
+_stopping=0
+on_stop() {
+  _stopping=1
+  echo "[sshchat-cloudflared] stop signal; exiting" >&2
+  pkill -f 'cloudflared tunnel --no-autoupdate --url' 2>/dev/null || true
+  exit 0
+}
+trap on_stop INT TERM
+
+wait_for_origin_and_wan
+session_started_at=0
+while [[ "$_stopping" -eq 0 ]]; do
+  session_started_at=$(date +%s)
+  run_one_tunnel_session
+  rc=$?
+  [[ "$_stopping" -eq 0 ]] || break
+  rm -f "$URL_FILE"
+  lived=$(( $(date +%s) - session_started_at ))
+  if recently_rate_limited; then
+    _current_backoff="$RATE_LIMIT_BACKOFF_SEC"
+    echo "[sshchat-cloudflared] rate-limited; cooling down ${_current_backoff}s before remint" >&2
+  elif [[ "$lived" -ge 120 ]]; then
+    # Healthy stretch then die → quick remint.
+    _current_backoff="$BACKOFF_SEC"
+  else
+    if [[ "$_current_backoff" -lt "$BACKOFF_MAX_SEC" ]]; then
+      _current_backoff=$(( _current_backoff * 2 ))
+      if [[ "$_current_backoff" -gt "$BACKOFF_MAX_SEC" ]]; then
+        _current_backoff="$BACKOFF_MAX_SEC"
       fi
     fi
   fi
+  echo "[sshchat-cloudflared] tunnel session ended rc=$rc lived=${lived}s; auto-remint in ${_current_backoff}s" >&2
+  sleep "$_current_backoff" || true
+  wait_for_origin_and_wan
 done
-exit "${PIPESTATUS[0]}"
+exit 0

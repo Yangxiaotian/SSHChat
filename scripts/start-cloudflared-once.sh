@@ -28,8 +28,8 @@ for i in $(seq 1 60); do
     # Re-enable restart for process crashes only (not for quick create storms)
     cat >/etc/systemd/system/sshchat-cloudflared.service.d/override.conf <<'EOF'
 [Service]
-Restart=on-failure
-RestartSec=600
+Restart=always
+RestartSec=30
 EOF
     systemctl daemon-reload
     systemctl enable sshchat-cloudflared.service

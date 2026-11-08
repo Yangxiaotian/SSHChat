@@ -296,6 +296,7 @@ private struct KeyInjectingWebView: UIViewRepresentable {
               if (!el) return 'wait';
               el.value = '\(safe)';
               el.dispatchEvent(new Event('input', {bubbles:true}));
+              if (!/^[A-Z0-9]{6}$/.test('\(safe)')) return 'wait';
               var btn = document.getElementById('unlockBtn');
               if (btn && !btn.disabled) btn.click();
               return 'pending';

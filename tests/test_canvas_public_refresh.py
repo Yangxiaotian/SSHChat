@@ -43,8 +43,8 @@ class CanvasPublicRefreshTests(unittest.TestCase):
         except OSError:
             pass
 
-    def test_maybe_refresh_redelivers_when_base_changes(self) -> None:
-        session = canvas_sharing.canvas_store.create_session(
+    def test_maybe_refresh_updates_state_without_redeliver(self) -> None:
+        canvas_sharing.canvas_store.create_session(
             creator="alice", participants=["bob"], room="lobby"
         )
         invited: list[str] = []
@@ -62,15 +62,16 @@ class CanvasPublicRefreshTests(unittest.TestCase):
                 ),
             ):
                 with mock.patch.object(server, "_federation_push_all_canvas_announces"):
-                    server._maybe_refresh_canvas_invites_on_public_change(
-                        "https://new-host.trycloudflare.com", reason="boot"
-                    )
-                    # Same base again: no second wave.
-                    server._maybe_refresh_canvas_invites_on_public_change(
-                        "https://new-host.trycloudflare.com", reason="boot"
-                    )
+                    with mock.patch.object(server, "_federation_push_all_piano_announces"):
+                        server._maybe_refresh_canvas_invites_on_public_change(
+                            "https://new-host.trycloudflare.com", reason="boot"
+                        )
+                        # Same base again: still no chat spam.
+                        server._maybe_refresh_canvas_invites_on_public_change(
+                            "https://new-host.trycloudflare.com", reason="boot"
+                        )
 
-        self.assertEqual(invited, [f"{session.session_id}:True"])
+        self.assertEqual(invited, [])
         self.assertEqual(
             server._load_last_canvas_public_base(),
             "https://new-host.trycloudflare.com",
@@ -121,7 +122,7 @@ class CanvasPublicRefreshTests(unittest.TestCase):
         self.assertNotIn("old-dead.trycloudflare.com", sent[-1])
 
     def test_empty_latch_then_same_host_does_not_redeliver(self) -> None:
-        session = canvas_sharing.canvas_store.create_session(
+        canvas_sharing.canvas_store.create_session(
             creator="alice", participants=["bob"], room="lobby"
         )
         invited: list[str] = []
@@ -136,24 +137,19 @@ class CanvasPublicRefreshTests(unittest.TestCase):
                 ),
             ):
                 with mock.patch.object(server, "_federation_push_all_canvas_announces"):
-                    with mock.patch.object(
-                        server, "_rediscover_piano_invites_for_public_change"
-                    ):
-                        with mock.patch.object(
-                            server, "_rediscover_clock_invites_for_public_change"
-                        ):
-                            server._maybe_refresh_canvas_invites_on_public_change(
-                                host, reason="boot"
-                            )
-                            server._maybe_refresh_canvas_invites_on_public_change(
-                                "", reason="cf-down"
-                            )
-                            self.assertEqual(server._LAST_CANVAS_PUBLIC_BASE, host)
-                            server._maybe_refresh_canvas_invites_on_public_change(
-                                host, reason="cf-up"
-                            )
+                    with mock.patch.object(server, "_federation_push_all_piano_announces"):
+                        server._maybe_refresh_canvas_invites_on_public_change(
+                            host, reason="boot"
+                        )
+                        server._maybe_refresh_canvas_invites_on_public_change(
+                            "", reason="cf-down"
+                        )
+                        self.assertEqual(server._LAST_CANVAS_PUBLIC_BASE, host)
+                        server._maybe_refresh_canvas_invites_on_public_change(
+                            host, reason="cf-up"
+                        )
 
-        self.assertEqual(invited, [f"{session.session_id}:True"])
+        self.assertEqual(invited, [])
 
     def test_wait_live_file_public_returns_when_ready(self) -> None:
         calls = {"n": 0}

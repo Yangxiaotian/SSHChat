@@ -53,7 +53,19 @@ final class ChatViewModel: ObservableObject {
     @Published var showSendTargetPicker = false
     @Published var showPadEditor = false
     @Published var padEditorText = ""
+    @Published var showGuestMenu = false
+    @Published var showGuestCustom = false
+    @Published var guestMinutesDraft = "5"
+    @Published var showPollMenu = false
+    @Published var showPollEditor = false
+    @Published var pollQuestion = ""
+    @Published var pollOptions: [PollOptionDraft] = [PollOptionDraft(), PollOptionDraft()]
     @Published var gamePanelVisible = false
+
+    struct PollOptionDraft: Identifiable, Equatable {
+        let id = UUID()
+        var text = ""
+    }
     @Published var libraryVisible = false
     @Published var newsVisible = false
     let gameBoard = GameBoardModel()
@@ -467,6 +479,110 @@ final class ChatViewModel: ObservableObject {
         Task { try? await session.send("/clock") }
     }
 
+    func startGuest() {
+        guard connected else { toast = "请先连接"; return }
+        showGuestMenu = true
+    }
+
+    func sendGuest(minutes: Int) {
+        guard connected else { toast = "请先连接"; return }
+        let mins = min(60, max(1, minutes))
+        let cmd = "/guest \(mins)"
+        appendText("[*] 正在生成访客临时链接…（\(cmd)）")
+        CommandUsage.record("/guest")
+        Task { try? await session.send(cmd) }
+    }
+
+    func openGuestCustom() {
+        guestMinutesDraft = "5"
+        showGuestCustom = true
+    }
+
+    func sendGuestCustom() {
+        let raw = guestMinutesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let n = Int(raw), (1...60).contains(n) else {
+            toast = "请填写 1～60 的整数分钟"
+            return
+        }
+        sendGuest(minutes: n)
+    }
+
+    func openPollMenu() {
+        guard connected else { toast = "请先连接"; return }
+        showPollMenu = true
+    }
+
+    func startPollCreate() {
+        guard connected else { toast = "请先连接"; return }
+        pollQuestion = ""
+        pollOptions = [PollOptionDraft(), PollOptionDraft()]
+        showPollEditor = true
+    }
+
+    func viewCurrentPoll() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 查看当前投票…（/poll）")
+        CommandUsage.record("/poll")
+        Task { try? await session.send("/poll") }
+    }
+
+    func closeCurrentPoll() {
+        guard connected else { toast = "请先连接"; return }
+        appendText("[*] 结束投票…（/poll close）")
+        CommandUsage.record("/poll close")
+        Task { try? await session.send("/poll close") }
+    }
+
+    func addPollOption() {
+        guard pollOptions.count < 8 else {
+            toast = "最多 8 个选项"
+            return
+        }
+        pollOptions.append(PollOptionDraft())
+    }
+
+    func removePollOption(id: UUID) {
+        guard pollOptions.count > 2 else { return }
+        pollOptions.removeAll { $0.id == id }
+    }
+
+    func submitPoll() {
+        guard connected else { toast = "请先连接"; return }
+        let q = pollQuestion
+            .replacingOccurrences(of: "|", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty {
+            toast = "请填写问题"
+            return
+        }
+        if q.count > 120 {
+            toast = "问题过长（最多 120 字）"
+            return
+        }
+        var opts: [String] = []
+        for row in pollOptions {
+            let t = row.text
+                .replacingOccurrences(of: "|", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { continue }
+            if t.count > 60 {
+                toast = "选项过长（最多 60 字）"
+                return
+            }
+            opts.append(t)
+        }
+        guard opts.count >= 2 else {
+            toast = "至少需要 2 个选项"
+            return
+        }
+        let body = ([q] + opts).joined(separator: " | ")
+        let cmd = "/poll new \(body)"
+        appendText("[*] 正在发起投票…")
+        CommandUsage.record("/poll new")
+        showPollEditor = false
+        Task { try? await session.send(cmd) }
+    }
+
     func startPiano() {
         guard connected else { toast = "请先连接"; return }
         appendText("[*] 正在开启房间钢琴…（/piano）")
@@ -476,6 +592,16 @@ final class ChatViewModel: ObservableObject {
 
     func startMusic() {
         guard connected else { toast = "请先连接"; return }
+        if MusicPlayback.shared.hasSession, let url = MusicPlayback.shared.pageURLString {
+            MusicPlayback.shared.setPanelOpen(true)
+            webInvite = WebInvitePayload(
+                title: "点歌",
+                url: url,
+                key: MusicPlayback.shared.key,
+                isMusic: SecureInvite.supportsNativeMusicPlayer(url)
+            )
+            return
+        }
         appendText("[*] 正在打开点歌…（/music play）")
         CommandUsage.record("/music play")
         Task { try? await session.send("/music play") }
@@ -923,6 +1049,8 @@ final class ChatViewModel: ObservableObject {
                 }
             case .clock:
                 MessageAlert.play()
+                UIPasteboard.general.string = open.url
+                toast = "棋钟链接已复制"
                 appendText("[*] 打开棋钟…")
                 webInvite = WebInvitePayload(
                     title: "棋钟",
@@ -950,6 +1078,8 @@ final class ChatViewModel: ObservableObject {
 
         if let clockUrl = SecureInvite.parseClockUrl(stripped) {
             MessageAlert.play()
+            UIPasteboard.general.string = clockUrl
+            toast = "棋钟链接已复制"
             appendText("[*] 打开棋钟…")
             webInvite = WebInvitePayload(
                 title: "棋钟",
@@ -958,6 +1088,13 @@ final class ChatViewModel: ObservableObject {
                 isCanvas: true,
                 isClock: true
             )
+            return
+        }
+
+        if let guestUrl = SecureInvite.parseGuestUrl(stripped) {
+            UIPasteboard.general.string = guestUrl
+            toast = "临时链接已复制，可粘贴发给对方"
+            appendText(stripped)
             return
         }
 
@@ -1265,6 +1402,76 @@ struct ContentView: View {
             Button("从相册选择") { model.launchPhotoLibrary() }
             Button("录像发送") { model.launchCameraVideo() }
             Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("临时聊天时长", isPresented: $model.showGuestMenu, titleVisibility: .visible) {
+            Button("5 分钟") { model.sendGuest(minutes: 5) }
+            Button("10 分钟") { model.sendGuest(minutes: 10) }
+            Button("15 分钟") { model.sendGuest(minutes: 15) }
+            Button("30 分钟") { model.sendGuest(minutes: 30) }
+            Button("60 分钟") { model.sendGuest(minutes: 60) }
+            Button("自定义…") {
+                Task {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    model.openGuestCustom()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("对方进入后开始倒计时，最长 60 分钟")
+        }
+        .alert("自定义分钟", isPresented: $model.showGuestCustom) {
+            TextField("1～60", text: $model.guestMinutesDraft)
+                .keyboardType(.numberPad)
+            Button("生成") { model.sendGuestCustom() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("进入后的聊天时长（分钟）")
+        }
+        .confirmationDialog("房间投票", isPresented: $model.showPollMenu, titleVisibility: .visible) {
+            Button("发起投票") { model.startPollCreate() }
+            Button("查看当前投票") { model.viewCurrentPoll() }
+            Button("结束投票", role: .destructive) { model.closeCurrentPoll() }
+            Button("取消", role: .cancel) {}
+        }
+        .sheet(isPresented: $model.showPollEditor) {
+            NavigationStack {
+                Form {
+                    Section("问题") {
+                        TextField("今晚吃啥", text: $model.pollQuestion)
+                    }
+                    Section("选项（至少 2 个）") {
+                        ForEach($model.pollOptions) { $opt in
+                            HStack {
+                                TextField("选项", text: $opt.text)
+                                if model.pollOptions.count > 2 {
+                                    Button {
+                                        model.removePollOption(id: opt.id)
+                                    } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                            .foregroundStyle(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                        if model.pollOptions.count < 8 {
+                            Button("添加选项") { model.addPollOption() }
+                        }
+                    }
+                }
+                .navigationTitle("发起投票")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { model.showPollEditor = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("发起") { model.submitPoll() }
+                            .fontWeight(.semibold)
+                    }
+                }
+            }
+            .preferredColorScheme(.light)
         }
         .sheet(isPresented: $model.showPadEditor) {
             NavigationStack {
@@ -1803,6 +2010,14 @@ struct ContentView: View {
             plusCell(title: "便签", system: "note.text") {
                 showPlusPanel = false
                 model.startPadEdit()
+            }
+            plusCell(title: "访客", system: "link") {
+                showPlusPanel = false
+                model.startGuest()
+            }
+            plusCell(title: "投票", system: "checklist") {
+                showPlusPanel = false
+                model.openPollMenu()
             }
             plusCell(title: "图书馆", system: "books.vertical.fill") {
                 showPlusPanel = false
