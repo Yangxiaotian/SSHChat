@@ -1015,7 +1015,9 @@ function renderGame() {
     cmdGame('resign');
     setTimeout(function () { cmdGame('show'); }, 350);
   }));
-  if (snap && snap.kind === 'go') acts.appendChild(btn(L.gpass, function () { cmdGame('move pass'); }));
+  /* Match mobile: go + reversi expose pass (停一手). */
+  if (snap && !isEnded(snap) && (snap.kind === 'go' || snap.kind === 'reversi'))
+    acts.appendChild(btn(L.gpass, function () { cmdGame('move pass'); }));
   if (snap && (String(snap.state).indexOf('等待') >= 0 || /wait/i.test(snap.state)))
     acts.appendChild(btn(L.gstart, function () { cmdGame('move start'); }));
   (boot.games || []).forEach(function (g) {

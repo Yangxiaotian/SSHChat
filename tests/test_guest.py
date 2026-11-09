@@ -487,6 +487,11 @@ class GuestPageTests(unittest.TestCase):
         self.assertNotIn("max-width: 900px", page)
         self.assertIn("function cmdGame", page)
         self.assertIn("/game ", page)
+        self.assertIn("move pass", page)
+        self.assertRegex(
+            page,
+            r"snap\.kind === 'go' \|\| snap\.kind === 'reversi'",
+        )
         self.assertIn("gomoku", page)
         self.assertIn("牛头王", page)
         self.assertIn("parseNiutou", page)
