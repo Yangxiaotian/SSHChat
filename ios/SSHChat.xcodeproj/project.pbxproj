@@ -26,7 +26,6 @@
 		67FAC2431E1B0C67ED073E61 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D83E0298EA4557B016E588C /* SSHSession.swift */; };
 		6808303312CD7ABC57D22459 /* LibraryReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6D43C249CFCDF9F07BEA274 /* LibraryReaderView.swift */; };
 		75099855702B2A4E70101994 /* WebInviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62D55F063B5A6E13A717437 /* WebInviteView.swift */; };
-		C1A55E0F1B2C3D4E5F607081 /* MusicPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A55E0F1B2C3D4E5F607080 /* MusicPlayerView.swift */; };
 		78C33A2EBCD7F593D8D8402D /* DeviceKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */; };
 		7F8E26B8F07B6BE64D4C9A82 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 3556A8FC852FF2B36C09A77F /* Citadel */; };
 		8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */; };
@@ -48,6 +47,7 @@
 		CB4028DA1D7F208B9739ADFD /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = A6426611A081C6DD05ADEA57 /* NIOSSH */; };
 		D58941CF57AE6DC541F6FC17 /* SendTargetPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */; };
 		DFD92627140E958D19F53AAC /* SSHChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64243685BD8B9E650897F969 /* SSHChatApp.swift */; };
+		E695F8A39C4F790A2BAE34EA /* MusicPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DF2D47BE78E2E23AC511791 /* MusicPlayerView.swift */; };
 		F1657897BC6C5B81115E37B6 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B83D7B2716C6BA3941551A /* AppConfig.swift */; };
 		F68852D3BA5C89F2E8A0A7B3 /* NewsParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF24E89EDCFC4A82F927A02 /* NewsParser.swift */; };
 		FEE29724CA2C26941522EF17 /* WatchRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84F2A253B334D625853D2A30 /* WatchRootView.swift */; };
@@ -56,6 +56,7 @@
 /* Begin PBXFileReference section */
 		02B5EFB0087EA0CB32B5818E /* CommandCompletions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCompletions.swift; sourceTree = "<group>"; };
 		0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyNoise.swift; sourceTree = "<group>"; };
+		1DF2D47BE78E2E23AC511791 /* MusicPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlayerView.swift; sourceTree = "<group>"; };
 		235DFDA8EFC4738E2A076DF5 /* LibraryParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryParser.swift; sourceTree = "<group>"; };
 		256B3C6D9D4B3F5974CDEFE9 /* Utf8LineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utf8LineBuffer.swift; sourceTree = "<group>"; };
 		2698A8B2C9916CFDAEC3F45C /* DeviceKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyStore.swift; sourceTree = "<group>"; };
@@ -73,7 +74,6 @@
 		8BB068D046331F871B011C50 /* NewsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewsPanelView.swift; sourceTree = "<group>"; };
 		A444AB9A07153781D9B379A7 /* SendTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTarget.swift; sourceTree = "<group>"; };
 		A62D55F063B5A6E13A717437 /* WebInviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInviteView.swift; sourceTree = "<group>"; };
-		C1A55E0F1B2C3D4E5F607080 /* MusicPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlayerView.swift; sourceTree = "<group>"; };
 		A6E5B6078F5A131C28D76C70 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B219A2AB8367C1B155CC5485 /* SendTargetPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTargetPickerView.swift; sourceTree = "<group>"; };
 		B5382B5859F78E00B2C7A222 /* MediaMime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaMime.swift; sourceTree = "<group>"; };
@@ -190,7 +190,7 @@
 				B5382B5859F78E00B2C7A222 /* MediaMime.swift */,
 				D43BF322CC02862F7D60AB27 /* MediaPreviewView.swift */,
 				F19D61F982D7132AB0491F6A /* MessageAlert.swift */,
-				C1A55E0F1B2C3D4E5F607080 /* MusicPlayerView.swift */,
+				1DF2D47BE78E2E23AC511791 /* MusicPlayerView.swift */,
 				0BD65161DFC1533BCB5DF8E4 /* PtyNoise.swift */,
 				C90E177203159780DB095D76 /* SecureDownload.swift */,
 				CDFD13AB88D2B26A91E0A6AE /* SecureInvite.swift */,
@@ -369,7 +369,7 @@
 				B97FDE08E5B3B707E879B833 /* MediaMime.swift in Sources */,
 				8264AD8522963ECC9713C203 /* MediaPreviewView.swift in Sources */,
 				B6364014F90A9DF044A352B5 /* MessageAlert.swift in Sources */,
-				C1A55E0F1B2C3D4E5F607081 /* MusicPlayerView.swift in Sources */,
+				E695F8A39C4F790A2BAE34EA /* MusicPlayerView.swift in Sources */,
 				B2E5ABFA32DE787A077BD2BD /* NewsPanelView.swift in Sources */,
 				F68852D3BA5C89F2E8A0A7B3 /* NewsParser.swift in Sources */,
 				33BA8F4AFD31DC1591775D9A /* PtyNoise.swift in Sources */,
@@ -395,7 +395,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -408,7 +408,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.36;
+				MARKETING_VERSION = 0.3.35;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;
@@ -464,7 +464,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 49;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = 6Q9L8CDXSY;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SSHChat/Info.plist;
@@ -477,7 +477,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.36;
+				MARKETING_VERSION = 0.3.35;
 				PRODUCT_BUNDLE_IDENTIFIER = com.q267267275.SSHChat;
 				PRODUCT_NAME = SSHChat;
 				SDKROOT = iphoneos;

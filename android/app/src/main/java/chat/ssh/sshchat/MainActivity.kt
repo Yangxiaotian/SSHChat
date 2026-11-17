@@ -245,6 +245,10 @@ class MainActivity : AppCompatActivity() {
             hidePlusPanel()
             startGuest()
         }
+        binding.btnAgent.setOnClickListener {
+            hidePlusPanel()
+            startAgent()
+        }
         binding.btnPoll.setOnClickListener {
             hidePlusPanel()
             openPollMenu()
@@ -739,6 +743,96 @@ class MainActivity : AppCompatActivity() {
         appendLine("[*] 正在生成访客临时链接…（$cmd）")
         CommandUsage.record("/guest")
         client?.send(cmd)
+    }
+
+    private fun startAgent() {
+        if (client == null) {
+            Toast.makeText(this, "请先连接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isFinishing || isDestroyed) return
+        val presets = intArrayOf(5, 10, 15, 30, 60)
+        val labels = arrayOf("5 分钟", "10 分钟", "15 分钟", "30 分钟", "60 分钟", "自定义…")
+        AlertDialog.Builder(this)
+            .setTitle("Agent 聊天时长")
+            .setItems(labels) { _, which ->
+                if (which in presets.indices) sendAgent(presets[which])
+                else showAgentCustomMinutes()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showAgentCustomMinutes() {
+        if (isFinishing || isDestroyed) return
+        val pad = dp(20)
+        val et = android.widget.EditText(this).apply {
+            hint = "1～60"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText("5")
+            setSelection(text.length)
+        }
+        val wrap = FrameLayout(this).apply {
+            setPadding(pad, dp(8), pad, 0)
+            addView(et)
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("自定义分钟")
+            .setMessage("对方进入后与本机 Cursor Agent 对话，最长 60 分钟")
+            .setView(wrap)
+            .setPositiveButton("生成", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val n = et.text?.toString()?.trim()?.toIntOrNull()
+                if (n == null || n !in 1..60) {
+                    Toast.makeText(this, "请填写 1～60 的整数分钟", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                sendAgent(n)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun sendAgent(minutes: Int) {
+        if (isFinishing || isDestroyed) return
+        val mins = minutes.coerceIn(1, 60)
+        val pad = dp(20)
+        val et = android.widget.EditText(this).apply {
+            hint = "agent/config.json 中的密码"
+            inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val wrap = FrameLayout(this).apply {
+            setPadding(pad, dp(8), pad, 0)
+            addView(et)
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Agent 密码")
+            .setMessage("创建需服务器配置的密码（错误次数过多会锁死）")
+            .setView(wrap)
+            .setPositiveButton("生成", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val pw = et.text?.toString()?.trim().orEmpty()
+                if (pw.isEmpty()) {
+                    Toast.makeText(this, "请填写 Agent 密码", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val cmd = "/agent $pw $mins"
+                appendLine("[*] 正在生成 Agent 临时链接…（/agent *** $mins）")
+                CommandUsage.record("/agent")
+                client?.send(cmd)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
     }
 
     private fun openPollMenu() {
@@ -2100,6 +2194,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.isEnabled = on
         binding.btnPad.isEnabled = on
         binding.btnGuest.isEnabled = on
+        binding.btnAgent.isEnabled = on
         binding.btnPoll.isEnabled = on
         binding.btnLibrary.isEnabled = on
         binding.btnNews.isEnabled = on
@@ -2120,6 +2215,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBoard.alpha = iconAlpha
         binding.btnPad.alpha = iconAlpha
         binding.btnGuest.alpha = iconAlpha
+        binding.btnAgent.alpha = iconAlpha
         binding.btnPoll.alpha = iconAlpha
         binding.btnLibrary.alpha = iconAlpha
         binding.btnNews.alpha = iconAlpha

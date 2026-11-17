@@ -502,10 +502,11 @@ class GuestPageTests(unittest.TestCase):
         self.assertIn("100dvh", page)
         self.assertIn("addBubble", page)
         self.assertIn("className = 'bubble '", page)
-        row = re.search(r'<form id="row">(.*?)</form>', page, re.S)
+        row = re.search(r'<form id="composer">(.*?)</form>', page, re.S)
         self.assertIsNotNone(row)
-        # Countdown lives in the top bar so the input row stays one wide line on phones.
+        # Countdown lives in the top bar so the composer stays usable on phones.
         self.assertNotIn('id="left"', row.group(1))
+        self.assertIn("<textarea", row.group(1))
         bar = re.search(r'<div id="bar">(.*?)</div>\s*<div id="gate">', page, re.S)
         self.assertIsNotNone(bar)
         self.assertIn('id="left"', bar.group(1))

@@ -343,6 +343,7 @@ _TOP_COMMANDS = (
     "/piano",
     "/clock",
     "/guest",
+    "/agent",
     "/tmplink",
     "/leave",
     "/unmsg",
@@ -431,6 +432,20 @@ _SUBCOMMANDS_BY_CMD: dict[str, tuple[str, ...]] = {
     "/clock": ("help", "close", "new"),
     "/guest": ("help", "close", "5", "10", "15", "30", "60"),
     "/tmplink": ("help", "close", "5", "10", "15", "30", "60"),
+    "/agent": (
+        "help",
+        "close",
+        "mode",
+        "ask",
+        "full",
+        "allow",
+        "share",
+        "5",
+        "10",
+        "15",
+        "30",
+        "60",
+    ),
     "/fed": ("help",),
     "/peers": ("help",),
     "/federation": ("help",),
@@ -447,6 +462,7 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "list"): ("off", "offline"),
     ("/game", "on"): ("all",),
     ("/game", "off"): ("all",),
+    ("/agent", "mode"): ("ask", "full"),
 }
 
 _NESTED3_SUBCOMMANDS: dict[tuple[str, str, str], tuple[str, ...]] = {

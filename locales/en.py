@@ -11,7 +11,7 @@ MESSAGES: dict = {
         "[*] /part <room>    Leave a room; you must keep at least one (cannot leave the last).\n",
         "[*] /rooms         List rooms you joined; * marks the active room.\n",
         "[*] /names or /users  List nicknames in the active room (same command).\n",
-        "[*] /fed or /peers    Show federation peers and online users (alias /federation).\n",
+        "[*] /fed <password> or /peers <password>  Federation peers + online users (alias /federation).\n",
         "[*]\n",
         "[*] /msg #<room> <text>   Send one line to a room without switching (# means room).\n",
         "[*] /msg <nick> <text>   PM: delivered live if online; otherwise left as a leave-message for next login.\n",
@@ -68,6 +68,11 @@ MESSAGES: dict = {
         "[*] /guest [min]   Private one-shot web chat link (no SSH key; default 5 minutes, 1–60).\n",
         "[*]              They may open it once; text, images, voice notes, and the page game panel are OK; optional remark shows as ~g… (remark). Countdown shows minutes and seconds. Minimizing does not end it early; a reload in the same tab can resume. Nick is random. Alias /tmplink.\n",
         "[*] /guest close   Revoke your guest link(s) in this room.\n",
+        "[*] /agent <password> [min]  Start Agent (password in agent/config.json; default ask).\n",
+        "[*] /agent mode ask|full | /agent ask|full   Switch mode (no password after create); full needs /agent allow.\n",
+        "[*] /agent allow   Confirm full mode (restricted shell/write).\n",
+        "[*] /agent share   Publish the last private reply to the room.\n",
+        "[*] /agent close   Revoke your agent link(s) in this room.\n",
         "[*] /help          Show this help.\n",
     ],
     "game_help_lines": [
@@ -248,8 +253,20 @@ MESSAGES: dict = {
         "fed_users_header": "[*] Federation online users ({n}):\n",
         "fed_users_node": "[*]   {node} ({n}): {users}\n",
         "fed_users_empty": "[*] Federation online users: none.\n",
+        "fed_password_unset": (
+            "[*] /fed password not configured. Set `password` in federation/config.json "
+            "(see federation/config.example.json) or SSHCHAT_FED_PASSWORD.\n"
+        ),
+        "fed_password_bad": (
+            "[*] Wrong /fed password ({fails}/6 before lockout).\n"
+        ),
+        "fed_password_locked": (
+            "[*] Too many wrong /fed passwords. Try again in {seconds}s.\n"
+        ),
         "fed_usage": (
-            "[*] Usage: /fed or /peers  show federation peers and online users (alias /federation).\n"
+            "[*] Usage: /fed <password> or /peers <password>  show federation peers and online users "
+            "(alias /federation). Password in federation/config.json or SSHCHAT_FED_PASSWORD; "
+            "wrong passwords lock out like a phone PIN.\n"
         ),
         "multi_terminal": (
             "[*] Another terminal for this account is online; rooms synced and resume-play is available.\n"
@@ -330,6 +347,70 @@ MESSAGES: dict = {
         ),
         "guest_no_commands": "[*] Guests may send chat, images, and voice notes, and play via the game panel; other slash commands are blocked.\n",
         "guest_welcome": "[*] You are {nick} in #{room} for {minutes} minutes. Text, images, voice notes, and the game panel are OK. Do not refresh.\n",
+        "agent_http_off": (
+            "[*] Agent chat links need the file web service, which is currently off.\n"
+        ),
+        "agent_cmd_fail": (
+            "[*] Could not create the agent link; try again later (see server log).\n"
+        ),
+        "agent_cli_missing": (
+            "[*] Local `agent` CLI not found. Install Cursor CLI, set SSHCHAT_AGENT_BIN and CURSOR_API_KEY in /opt/sshchat/sshchat.env (the daemon does not read ~/.zshrc).\n"
+        ),
+        "agent_usage": (
+            "[*] Usage: /agent <password> [min]  start Agent (password only for create)\n"
+            "[*]         /agent mode ask|full | /agent ask|full  switch mode (no password)\n"
+            "[*]         /agent allow   confirm full (restricted shell / write workspace only)\n"
+            "[*]         /agent share   publish last private reply to the room\n"
+            "[*]         /agent close   revoke your agent link(s) in this room\n"
+            "[*] Wrong create-passwords lock out like a phone PIN. "
+            "Replies private to creator by default. Workspace /tmp/sshchat-agent/<room>/<link>/.\n"
+        ),
+        "agent_already_open": (
+            "[*] Agent already running here. Use /agent ask|full, /agent allow, /agent share, "
+            "or /agent close — password is only needed to start a new link.\n"
+        ),
+        "agent_mode_usage": "[*] Usage: /agent mode ask|full  (or /agent ask|full)\n",
+        "agent_bad_minutes": "[*] Minutes must be an integer from 1 to 60 (default 5).\n",
+        "agent_password_unset": (
+            "[*] /agent password not configured. Set `password` in agent/config.json "
+            "(see agent/config.example.json) or SSHCHAT_AGENT_PASSWORD.\n"
+        ),
+        "agent_password_bad": (
+            "[*] Wrong /agent password ({fails}/6 before lockout).\n"
+        ),
+        "agent_password_locked": (
+            "[*] Too many wrong /agent passwords. Try again in {seconds}s.\n"
+        ),
+        "agent_created": (
+            "[*] Agent online (ask/read-only). Private web link:\n"
+            "[*] {url}\n"
+            "[*] Room #{room} · workspace ready. {minutes} min after page open; unused 30 min. "
+            "Anyone in the room may @bot. Upgrade: /agent mode full → /agent allow\n"
+        ),
+        "agent_online": (
+            "[*] ~agent is online in #{room} (ask/read-only). Anyone here may @bot. /agent close to stop.\n"
+        ),
+        "agent_bot_forbidden": (
+            "[*] Only the /agent creator or that web guest may use @bot.\n"
+        ),
+        "agent_mode_ask": "[*] Agent set to ask (read-only).\n",
+        "agent_mode_full_pending": (
+            "[*] Full mode requested. Send /agent allow to enable restricted shell/write.\n"
+        ),
+        "agent_allow_need_full": "[*] Run /agent mode full first, then /agent allow.\n",
+        "agent_allow_ok": "[*] Full mode enabled (still limited by allow/deny lists).\n",
+        "agent_share_none": "[*] No private Agent reply to share yet. @bot first, then /agent share.\n",
+        "agent_share_ok": "[*] Published the last Agent reply to the room.\n",
+        "agent_replied_private": (
+            "[*] ~agent replied privately to the creator (body not shown here). Creator: /agent share\n"
+        ),
+        "agent_closed": "[*] Revoked {n} agent chat link(s) in #{room}.\n",
+        "agent_none": "[*] You have no agent chat links in #{room}.\n",
+        "agent_too_many": "[*] Too many unused or live temp links in this room (max 5); /agent close or /guest close.\n",
+        "agent_lan_url_warn": (
+            "[*] Note: no Cloudflare public hostname yet (link may be a LAN/virtual IP). "
+            "The tunnel helper remints on a timer; try /agent again shortly, or check sshchat-cloudflared.\n"
+        ),
         "lang_usage": "[*] Usage: /lang [en|zh]\n",
         "lang_set": "[*] UI language set to {lang}.\n",
         "lang_current": "[*] Current UI language: {lang}\n",

@@ -45,7 +45,7 @@ enum CommandCompletions {
         "/help", "/lang", "/language", "/names", "/users", "/rooms",
         "/fed", "/peers", "/federation",
         "/join", "/switch", "/part", "/msg", "/sendfile", "/file",
-        "/canvas", "/board", "/piano", "/clock", "/guest", "/tmplink", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
+        "/canvas", "/board", "/piano", "/clock", "/guest", "/tmplink", "/agent", "/leave", "/unmsg", "/announce", "/pad", "/poll", "/later",
         "/game", "/news", "/library", "/lib", "/music", "/song", "/dict", "/clear", "/cls", "/dnd",
     ]
 
@@ -78,6 +78,7 @@ enum CommandCompletions {
         "/clock": ["help", "close", "new"],
         "/guest": ["help", "close", "5", "10", "15", "30", "60"],
         "/tmplink": ["help", "close", "5", "10", "15", "30", "60"],
+        "/agent": ["help", "close", "mode", "ask", "full", "allow", "share", "5", "10", "15", "30", "60"],
     ]
 
     private static let nested: [String: [String]] = [
@@ -90,6 +91,7 @@ enum CommandCompletions {
         "/game list": ["off", "offline"],
         "/game on": ["all"],
         "/game off": ["all"],
+        "/agent mode": ["ask", "full"],
     ]
 
     private static let roomArgCmds: Set<String> = ["/join", "/switch", "/part"]

@@ -24,7 +24,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/lang en` / `/lang zh` | UI language (saved per nick) |
 | `/names` | Users in the active room |
 | `/rooms` | Rooms you joined (`*` = active) |
-| `/fed` / `/peers` | Federation peers and online users (alias `/federation`) |
+| `/fed <password>` / `/peers <password>` | Federation peers and online users (password in `federation/config.json`; alias `/federation`) |
 | `/join <room>` | Join and switch |
 | `/msg <nick> <text>` | PM (or leave-message if offline) |
 | `/sendfile` | File to current room |
@@ -35,6 +35,9 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/clock 10+5` | 10 minutes each, plus 5 seconds a move |
 | `/guest` | Private one-shot web chat link (no SSH key; default 5 min, `/guest 10` for 10; random nick; optional remark shows as `~g… (remark)`; guests may send text, images, voice notes, and play games on the page). Alias `/tmplink` |
 | `/guest close` | Revoke your guest link in this room |
+| `/agent <password> [min]` | Start Agent (password in `agent/config.json` or `SSHCHAT_AGENT_PASSWORD`; default ask; needs `CURSOR_API_KEY`) |
+| `/agent mode ask\|full` | Switch mode; full requires `/agent allow` |
+| `/agent allow` / `/agent share` / `/agent close` | Confirm full / publish last private reply / revoke |
 | `/pad` | Show room clipboard (shared sticky note; federated same-name rooms sync) |
 | `/pad <text>` | Set one line (use terminal `/pad edit` for newlines) |
 | `/pad edit` | Open vim/$EDITOR for multi-line, then upload (alias `/pad vim`) |

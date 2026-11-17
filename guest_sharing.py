@@ -21,6 +21,8 @@ CHAT_TTL_SEC = DEFAULT_MINUTES * 60
 UNUSED_TTL_SEC = 30 * 60
 MAX_ACTIVE_PER_CREATOR = 5
 MAX_MSG_CHARS = 500
+# Agent web prompts need more room than guest chat one-liners.
+AGENT_MAX_MSG_CHARS = 8000
 # Guest page image uploads (jpeg/png/gif/webp); keep small for short-lived links.
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
@@ -202,6 +204,19 @@ class GuestLink:
     closed: bool = False
     conn: object = None
     kick_started: bool = False
+    # "guest" = human invite; "agent" = web chat bridged to local Cursor agent
+    kind: str = "guest"
+    agent_session: str = ""
+    agent_busy: bool = False
+    # Latest guest text while a turn is running (overwrite; chat wants newest intent)
+    agent_pending: str = ""
+    # /tmp/sshchat-agent/<room>/ — set when /agent mints the link
+    agent_workspace: str = ""
+    # ask (default, read-only) | full (restricted shell/write after /agent allow)
+    agent_mode: str = "ask"
+    agent_full_allowed: bool = False
+    # Last private reply text for /agent share
+    agent_last_reply: str = ""
 
 
 @dataclass(eq=False)
@@ -292,9 +307,15 @@ class GuestStore:
         self.links: dict[str, GuestLink] = {}
 
     def create(
-        self, creator: str, room: str, minutes: int = DEFAULT_MINUTES
+        self,
+        creator: str,
+        room: str,
+        minutes: int = DEFAULT_MINUTES,
+        *,
+        kind: str = "guest",
     ) -> Optional[GuestLink]:
         now = time.time()
+        kind = "agent" if kind == "agent" else "guest"
         with self._lock:
             self._purge_locked(now)
             active = [
@@ -315,6 +336,7 @@ class GuestStore:
                 created_at=now,
                 unused_expires_at=now + UNUSED_TTL_SEC,
                 minutes=mins,
+                kind=kind,
             )
             self.links[token] = link
             return link
@@ -376,7 +398,9 @@ class GuestStore:
             return max(0.0, link.unused_expires_at - now)
         return max(0.0, link.chat_expires_at - now)
 
-    def close_for_creator(self, creator: str, room: str) -> list[GuestLink]:
+    def close_for_creator(
+        self, creator: str, room: str, *, kind: Optional[str] = None
+    ) -> list[GuestLink]:
         closed: list[GuestLink] = []
         with self._lock:
             for link in self.links.values():
@@ -384,6 +408,7 @@ class GuestStore:
                     link.creator == creator
                     and link.room == room
                     and not link.closed
+                    and (kind is None or link.kind == kind)
                 ):
                     link.closed = True
                     closed.append(link)
@@ -396,6 +421,32 @@ class GuestStore:
                 return None
             link.closed = True
             return link
+
+    def find_live_agent(self, room: str) -> Optional[GuestLink]:
+        """Newest non-expired agent link in this room (for @bot routing).
+
+        Bot is live as soon as /agent mints the link — no need to open the URL.
+        Unopened links expire at unused_expires_at; opened ones at chat_expires_at.
+        """
+        now = time.time()
+        best: Optional[GuestLink] = None
+
+        def _rank(link: GuestLink) -> float:
+            return link.opened_at or link.created_at
+
+        with self._lock:
+            self._purge_locked(now)
+            for link in self.links.values():
+                if link.kind != "agent" or link.closed or link.room != room:
+                    continue
+                if link.opened_at:
+                    if link.chat_expires_at and now >= link.chat_expires_at:
+                        continue
+                elif now >= link.unused_expires_at:
+                    continue
+                if best is None or _rank(link) >= _rank(best):
+                    best = link
+        return best
 
     def cleanup_expired(self) -> None:
         with self._lock:

@@ -473,7 +473,7 @@ npm run build:portable
 | `/help` | 完整命令说明（多行） |
 | `/names` 或 `/users` | 当前房间昵称列表 |
 | `/rooms` | 查看你已加入的房间（`*` 表示当前活动房间） |
-| `/fed` 或 `/peers` | 查看联邦直连节点与联邦在线用户（别名 `/federation`） |
+| `/fed <密码>` 或 `/peers <密码>` | 查看联邦直连节点与联邦在线用户（密码见 `federation/config.json`；别名 `/federation`） |
 | `/join 房间名` | 加入房间并切换到该房间 |
 | `/switch 房间名` | 在已加入房间之间切换 |
 | `/msg #房间名 内容` | 不切换当前房间，向指定房间发一行话（`#` 开头表示房间） |
@@ -490,6 +490,9 @@ npm run build:portable
 | `/clock close` / `/clock new` | 发起人关闭当前房间棋钟；强制新开 |
 | `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（默认 5 分钟，`/guest 10` 可改时长；昵称随机；可填备注显示为 `~g…（备注）`；访客可发文字、图片和语音，并用页面游戏区下棋）。别名 `/tmplink` |
 | `/guest close` | 作废你在本房生成的临时链接 |
+| `/agent <密码> [分钟]` | 本房启动 Agent（密码见 `agent/config.json` 或 `SSHCHAT_AGENT_PASSWORD`；默认 ask；需 `CURSOR_API_KEY`） |
+| `/agent mode ask\|full` | 切换模式；full 后需 `/agent allow` |
+| `/agent allow` / `/agent share` / `/agent close` | 确认 full / 公开上一条私聊回复 / 作废链接 |
 | `/leave` | 查看你发出、对方尚未阅读的留言 |
 | `/leave 昵称` | 只看发给该昵称的未读留言（带编号） |
 | `/leave 昵称 编号` | 撤回发给该昵称的第 N 条未读留言（别名：`/留言`、`/unmsg`） |
@@ -730,7 +733,8 @@ Electron 客户端左侧栏「L」图标可打开**图书馆面板**，图形化
 | `canvas_sharing.py` / `canvas_http.py` | `/canvas` 共享画板会话与绘画网页 |
 | `piano_sharing.py` / `piano_http.py` / `piano_samples/` | `/piano` 房间钢琴会话、网页与 MP3 采样 |
 | `clock_sharing.py` / `clock_http.py` | `/clock` 棋钟（Kindle 可用的无脚本网页） |
-| `guest_sharing.py` / `guest_http.py` | `/guest` 一次性网页聊天（无私钥；默认 5 分钟） |
+| `guest_sharing.py` / `guest_http.py` | `/guest` 一次性网页聊天；`/agent` 同链路面，一对一本机 Cursor Agent（附件进 `/tmp/sshchat-agent/<房间>/`） |
+| `agent_bridge.py` | `/agent` 调用本机 `agent` CLI；按房间重置临时工作区；创建密码见 `agent/config.json` |
 | `library.py` / `dict_lookup.py` | 图书馆与词典查询 |
 | `music.py` / `music_http.py` | `/music` 点歌曲库与网页播放器 |
 | `sshchat_gui.py` | 图形客户端源码 |

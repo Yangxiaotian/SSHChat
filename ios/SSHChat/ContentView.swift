@@ -56,6 +56,12 @@ final class ChatViewModel: ObservableObject {
     @Published var showGuestMenu = false
     @Published var showGuestCustom = false
     @Published var guestMinutesDraft = "5"
+    @Published var showAgentMenu = false
+    @Published var showAgentCustom = false
+    @Published var showAgentPassword = false
+    @Published var agentMinutesDraft = "5"
+    @Published var agentPasswordDraft = ""
+    var pendingAgentMinutes = 5
     @Published var showPollMenu = false
     @Published var showPollEditor = false
     @Published var pollQuestion = ""
@@ -505,6 +511,47 @@ final class ChatViewModel: ObservableObject {
             return
         }
         sendGuest(minutes: n)
+    }
+
+    func startAgent() {
+        guard connected else { toast = "请先连接"; return }
+        showAgentMenu = true
+    }
+
+    func sendAgent(minutes: Int) {
+        guard connected else { toast = "请先连接"; return }
+        pendingAgentMinutes = min(60, max(1, minutes))
+        agentPasswordDraft = ""
+        showAgentPassword = true
+    }
+
+    func confirmAgentPassword() {
+        guard connected else { toast = "请先连接"; return }
+        let pw = agentPasswordDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pw.isEmpty else {
+            toast = "请填写 Agent 密码"
+            return
+        }
+        let mins = pendingAgentMinutes
+        let cmd = "/agent \(pw) \(mins)"
+        appendText("[*] 正在生成 Agent 临时链接…（/agent *** \(mins)）")
+        CommandUsage.record("/agent")
+        agentPasswordDraft = ""
+        Task { try? await session.send(cmd) }
+    }
+
+    func openAgentCustom() {
+        agentMinutesDraft = "5"
+        showAgentCustom = true
+    }
+
+    func sendAgentCustom() {
+        let raw = agentMinutesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let n = Int(raw), (1...60).contains(n) else {
+            toast = "请填写 1～60 的整数分钟"
+            return
+        }
+        sendAgent(minutes: n)
     }
 
     func openPollMenu() {
@@ -1234,6 +1281,72 @@ final class ChatViewModel: ObservableObject {
     }
 }
 
+/// Guest / Agent duration pickers — kept out of ContentView.body so Swift can type-check.
+private struct GuestAgentInviteDialogs: ViewModifier {
+    @ObservedObject var model: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("临时聊天时长", isPresented: $model.showGuestMenu, titleVisibility: .visible) {
+                Button("5 分钟") { model.sendGuest(minutes: 5) }
+                Button("10 分钟") { model.sendGuest(minutes: 10) }
+                Button("15 分钟") { model.sendGuest(minutes: 15) }
+                Button("30 分钟") { model.sendGuest(minutes: 30) }
+                Button("60 分钟") { model.sendGuest(minutes: 60) }
+                Button("自定义…") {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        model.openGuestCustom()
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("对方进入后开始倒计时，最长 60 分钟")
+            }
+            .alert("自定义分钟", isPresented: $model.showGuestCustom) {
+                TextField("1～60", text: $model.guestMinutesDraft)
+                    .keyboardType(.numberPad)
+                Button("生成") { model.sendGuestCustom() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("进入后的聊天时长（分钟）")
+            }
+            .confirmationDialog("Agent 聊天时长", isPresented: $model.showAgentMenu, titleVisibility: .visible) {
+                Button("5 分钟") { model.sendAgent(minutes: 5) }
+                Button("10 分钟") { model.sendAgent(minutes: 10) }
+                Button("15 分钟") { model.sendAgent(minutes: 15) }
+                Button("30 分钟") { model.sendAgent(minutes: 30) }
+                Button("60 分钟") { model.sendAgent(minutes: 60) }
+                Button("自定义…") {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        model.openAgentCustom()
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("对方进入后与本机 Cursor Agent 对话，最长 60 分钟")
+            }
+            .alert("自定义分钟", isPresented: $model.showAgentCustom) {
+                TextField("1～60", text: $model.agentMinutesDraft)
+                    .keyboardType(.numberPad)
+                Button("下一步") { model.sendAgentCustom() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("Agent 聊天时长（分钟）")
+            }
+            .alert("Agent 密码", isPresented: $model.showAgentPassword) {
+                SecureField("agent/config.json 中的密码", text: $model.agentPasswordDraft)
+                Button("生成") { model.confirmAgentPassword() }
+                Button("取消", role: .cancel) {
+                    model.agentPasswordDraft = ""
+                }
+            } message: {
+                Text("创建需服务器配置的密码；错误次数过多会锁死")
+            }
+    }
+}
+
 private struct WebInvitePresentations: ViewModifier {
     @ObservedObject var model: ChatViewModel
 
@@ -1403,30 +1516,7 @@ struct ContentView: View {
             Button("录像发送") { model.launchCameraVideo() }
             Button("取消", role: .cancel) {}
         }
-        .confirmationDialog("临时聊天时长", isPresented: $model.showGuestMenu, titleVisibility: .visible) {
-            Button("5 分钟") { model.sendGuest(minutes: 5) }
-            Button("10 分钟") { model.sendGuest(minutes: 10) }
-            Button("15 分钟") { model.sendGuest(minutes: 15) }
-            Button("30 分钟") { model.sendGuest(minutes: 30) }
-            Button("60 分钟") { model.sendGuest(minutes: 60) }
-            Button("自定义…") {
-                Task {
-                    try? await Task.sleep(nanoseconds: 350_000_000)
-                    model.openGuestCustom()
-                }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("对方进入后开始倒计时，最长 60 分钟")
-        }
-        .alert("自定义分钟", isPresented: $model.showGuestCustom) {
-            TextField("1～60", text: $model.guestMinutesDraft)
-                .keyboardType(.numberPad)
-            Button("生成") { model.sendGuestCustom() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("进入后的聊天时长（分钟）")
-        }
+        .modifier(GuestAgentInviteDialogs(model: model))
         .confirmationDialog("房间投票", isPresented: $model.showPollMenu, titleVisibility: .visible) {
             Button("发起投票") { model.startPollCreate() }
             Button("查看当前投票") { model.viewCurrentPoll() }
@@ -2014,6 +2104,10 @@ struct ContentView: View {
             plusCell(title: "访客", system: "link") {
                 showPlusPanel = false
                 model.startGuest()
+            }
+            plusCell(title: "Agent", system: "cpu") {
+                showPlusPanel = false
+                model.startAgent()
             }
             plusCell(title: "投票", system: "checklist") {
                 showPlusPanel = false

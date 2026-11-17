@@ -579,8 +579,8 @@ apply_data_plane_permissions() {
     fi
   fi
 
-  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$u:$g" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/agent_bridge.py" "$PREFIX/password_gate.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/agent_bridge.py" "$PREFIX/password_gate.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
   if [[ -d "$PREFIX/locales" ]]; then
     chown -R "$u:$g" "$PREFIX/locales"
     chmod -R 'u=rwX,g=,o=' "$PREFIX/locales"
@@ -689,6 +689,37 @@ apply_federation_permissions() {
     fi
     chmod 640 "$fed_dir/peers.json"
   fi
+  if [[ -f "$fed_dir/config.json" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_group" "$fed_dir/config.json"
+    fi
+    chmod 640 "$fed_dir/config.json"
+  fi
+  if [[ -f "$fed_dir/config.example.json" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_group" "$fed_dir/config.example.json"
+    fi
+    chmod 644 "$fed_dir/config.example.json"
+  fi
+  local agent_dir="$PREFIX/agent"
+  if [[ -d "$agent_dir" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_group" "$agent_dir"
+    fi
+    chmod 750 "$agent_dir"
+  fi
+  if [[ -f "$agent_dir/config.json" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_group" "$agent_dir/config.json"
+    fi
+    chmod 640 "$agent_dir/config.json"
+  fi
+  if [[ -f "$agent_dir/config.example.json" ]]; then
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+      chown "$svc_user:$svc_group" "$agent_dir/config.example.json"
+    fi
+    chmod 644 "$agent_dir/config.example.json"
+  fi
 
   if id "$fed_user" &>/dev/null; then
     fed_group=$(primary_group_of "$fed_user")
@@ -746,8 +777,22 @@ apply_root_group_permissions() {
     chmod 640 "$PREFIX/sshchat.env"
   fi
 
-  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
-  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  chown "$ROOT_OWN" "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/agent_bridge.py" "$PREFIX/password_gate.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py" "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
+  chmod 600 "$PREFIX/server.py" "$PREFIX/games.py" "$PREFIX/ratings.py" "$PREFIX/sgs_data.py" "$PREFIX/library.py" "$PREFIX/music.py" "$PREFIX/music_http.py" "$PREFIX/dict_lookup.py" "$PREFIX/session_store.py" "$PREFIX/federation.py" "$PREFIX/offline_messages.py" "$PREFIX/file_sharing.py" "$PREFIX/file_http_server.py" "$PREFIX/canvas_sharing.py" "$PREFIX/canvas_http.py" "$PREFIX/canvas_ws.py" "$PREFIX/piano_sharing.py" "$PREFIX/piano_http.py" "$PREFIX/piano_ws.py" "$PREFIX/clock_sharing.py" "$PREFIX/clock_http.py" "$PREFIX/guest_sharing.py" "$PREFIX/guest_http.py" "$PREFIX/agent_bridge.py" "$PREFIX/password_gate.py" "$PREFIX/i18n.py" "$PREFIX/locale_store.py"
+  if [[ -d "$PREFIX/agent" ]]; then
+    chown -R "$ROOT_OWN" "$PREFIX/agent"
+    chmod 750 "$PREFIX/agent"
+    [[ -f "$PREFIX/agent/config.json" ]] && chmod 640 "$PREFIX/agent/config.json"
+    [[ -f "$PREFIX/agent/config.example.json" ]] && chmod 644 "$PREFIX/agent/config.example.json"
+  fi
+  if [[ -f "$PREFIX/federation/config.json" ]]; then
+    chown "$ROOT_OWN" "$PREFIX/federation/config.json"
+    chmod 640 "$PREFIX/federation/config.json"
+  fi
+  if [[ -f "$PREFIX/federation/config.example.json" ]]; then
+    chown "$ROOT_OWN" "$PREFIX/federation/config.example.json"
+    chmod 644 "$PREFIX/federation/config.example.json"
+  fi
   chmod 700 "$PREFIX/server.sh" "$PREFIX/admin-add-user.sh" "$PREFIX/admin-add-peer.sh" "$PREFIX/admin-remove-peer.sh"
   if [[ -f "$PREFIX/scripts/ensure-federation-user.sh" ]]; then
     chown -R "$ROOT_OWN" "$PREFIX/scripts"
@@ -1082,9 +1127,17 @@ if [[ -z "$PIP_INDEX_URL_ARG" ]]; then
   fi
 fi
 
-for f in server.py client.py games.py ratings.py sgs_data.py library.py music.py music_http.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py canvas_ws.py piano_sharing.py piano_http.py piano_ws.py clock_sharing.py clock_http.py guest_sharing.py guest_http.py; do
+for f in server.py client.py games.py ratings.py sgs_data.py library.py music.py music_http.py dict_lookup.py session_store.py federation.py offline_messages.py chat.sh server.sh admin-add-user.sh admin-add-peer.sh admin-remove-peer.sh federation-bridge.sh file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py canvas_ws.py piano_sharing.py piano_http.py piano_ws.py clock_sharing.py clock_http.py guest_sharing.py guest_http.py agent_bridge.py password_gate.py; do
   [[ -f "$SCRIPT_DIR/$f" ]] || { echo "error: missing $SCRIPT_DIR/$f" >&2; exit 1; }
 done
+[[ -f "$SCRIPT_DIR/agent/config.example.json" ]] || {
+  echo "error: missing $SCRIPT_DIR/agent/config.example.json" >&2
+  exit 1
+}
+[[ -f "$SCRIPT_DIR/federation/config.example.json" ]] || {
+  echo "error: missing $SCRIPT_DIR/federation/config.example.json" >&2
+  exit 1
+}
 ensure_piano_samples "$SCRIPT_DIR/piano_samples" || exit 1
 
 chmod +x \
@@ -1189,9 +1242,25 @@ copy_app_file() {
 for _f in server.py client.py sshchat_client_util.py games.py ratings.py sgs_data.py \
   library.py music.py music_http.py dict_lookup.py session_store.py federation.py offline_messages.py \
   file_sharing.py file_http_server.py canvas_sharing.py canvas_http.py canvas_ws.py piano_sharing.py piano_http.py piano_ws.py \
-  clock_sharing.py clock_http.py guest_sharing.py guest_http.py i18n.py locale_store.py; do
+  clock_sharing.py clock_http.py guest_sharing.py guest_http.py agent_bridge.py password_gate.py i18n.py locale_store.py; do
   copy_app_file "$SCRIPT_DIR/$_f" "$PREFIX/$_f"
 done
+# /agent + /fed password examples; seed config.json only when missing (never overwrite secrets).
+install -m 0750 -d "$PREFIX/agent" "$PREFIX/federation"
+copy_app_file "$SCRIPT_DIR/agent/config.example.json" "$PREFIX/agent/config.example.json"
+copy_app_file "$SCRIPT_DIR/federation/config.example.json" "$PREFIX/federation/config.example.json"
+if [[ ! -f "$PREFIX/agent/config.json" ]]; then
+  cp -f "$PREFIX/agent/config.example.json" "$PREFIX/agent/config.json"
+  echo "info: seeded $PREFIX/agent/config.json from example — edit password before /agent" >&2
+else
+  echo "info: keeping existing $PREFIX/agent/config.json" >&2
+fi
+if [[ ! -f "$PREFIX/federation/config.json" ]]; then
+  cp -f "$PREFIX/federation/config.example.json" "$PREFIX/federation/config.json"
+  echo "info: seeded $PREFIX/federation/config.json from example — edit password before /fed" >&2
+else
+  echo "info: keeping existing $PREFIX/federation/config.json" >&2
+fi
 rm -rf "$PREFIX/locales"
 cp -a "$SCRIPT_DIR/locales" "$PREFIX/locales"
 copy_piano_samples_dir "$SCRIPT_DIR/piano_samples" "$PREFIX/piano_samples"
@@ -1343,8 +1412,8 @@ PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import clock_sharing, clock_h
   echo "error: clock modules failed to import (need clock_sharing.py, clock_http.py)" >&2
   exit 1
 }
-PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import guest_sharing, guest_http" || {
-  echo "error: guest modules failed to import (need guest_sharing.py, guest_http.py)" >&2
+PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -c "import guest_sharing, guest_http, agent_bridge, password_gate, federation" || {
+  echo "error: guest/agent/fed modules failed to import (need guest_*, agent_bridge, password_gate, federation)" >&2
   exit 1
 }
 
@@ -1368,6 +1437,14 @@ SSHCHAT_ALERT_SOUND=auto
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
 # 点歌目录（mp3 / m4a / ogg / flac / wav）：默认 $PREFIX/music
+# /agent：非交互 agent -p 不读「agent login」，也不读 ~/.zshrc。
+# 在本文件设置 CURSOR_API_KEY=…，可选 SSHCHAT_AGENT_BIN=/path/to/agent、
+# SSHCHAT_AGENT_HOME=你的用户家目录（/agent 默认 --add-dir 此目录；也可用进程原有 HOME）。
+# 切勿设置 HOME=（chat.sh 会 source 本文件，会污染所有 SSH 用户）。
+# 不要默认挂 HOME：SSHCHAT_AGENT_ADD_HOME=0；额外目录：SSHCHAT_AGENT_ADD_DIRS=/a:/b
+# /agent 创建密码：编辑 $PREFIX/agent/config.json（或 SSHCHAT_AGENT_PASSWORD=…）
+# /fed 查看密码：编辑 $PREFIX/federation/config.json（或 SSHCHAT_FED_PASSWORD=…）
+# 改完后重启服务（macOS: sudo launchctl kickstart -k system/com.sshchat.server）。
 
 # 文件传输：本机 HTTP + Cloudflare Quick Tunnel（公网 https://*.trycloudflare.com）
 SSHCHAT_FILE_TRANSFER_ENABLED=$FILE_TRANSFER_ENABLED
@@ -1402,6 +1479,13 @@ SSHCHAT_ALERT_SOUND=auto
 # SSHCHAT_FED_SEND_QUEUE_MAX=512
 # /news RSS：默认经本机 HTTP 代理 127.0.0.1:7897（见 server.py NEWS_PROXY_LOCAL_DEFAULT）。
 # 若聊天服务跑在远端且无本地代理，请设 SSHCHAT_NEWS_NO_PROXY=1，或设 SSHCHAT_NEWS_PROXY=你的代理地址。
+# /agent：非交互 agent -p 不读「agent login」，也不读 ~/.zshrc。
+# 在本文件设置 CURSOR_API_KEY=…，可选 SSHCHAT_AGENT_BIN=/path/to/agent、
+# SSHCHAT_AGENT_HOME=你的用户家目录（/agent 默认 --add-dir 此目录；也可用进程原有 HOME）。
+# 切勿设置 HOME=（chat.sh 会 source 本文件，会污染所有 SSH 用户）。
+# 不要默认挂 HOME：SSHCHAT_AGENT_ADD_HOME=0；额外目录：SSHCHAT_AGENT_ADD_DIRS=/a:/b
+# /agent 创建密码：编辑 $PREFIX/agent/config.json（或 SSHCHAT_AGENT_PASSWORD=…）
+# /fed 查看密码：编辑 $PREFIX/federation/config.json（或 SSHCHAT_FED_PASSWORD=…）
 # 图书馆目录（epub / txt / pdf）：默认 $PREFIX/library
 # 点歌目录（mp3 / m4a / ogg / flac / wav）：默认 $PREFIX/music
 

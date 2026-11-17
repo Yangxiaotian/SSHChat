@@ -572,9 +572,31 @@ def _send_fed_users(conn, hub) -> None:
 def _handle_fed(conn, payload: str) -> None:
     """Show federation peers and online users (/fed, /peers, /federation)."""
     raw = payload.split(None, 1)
-    arg = raw[1].strip().lower() if len(raw) > 1 else ""
-    if arg in ("help", "?", "帮助"):
+    arg = raw[1].strip() if len(raw) > 1 else ""
+    arg_l = arg.lower()
+    if arg_l in ("help", "?", "帮助"):
         send_line(conn, _ts(conn, "fed_usage"))
+        return
+    # /fed <password> — same gate style as /agent
+    if not arg:
+        send_line(conn, _ts(conn, "fed_usage"))
+        return
+    parts = arg.split()
+    if len(parts) != 1:
+        send_line(conn, _ts(conn, "fed_usage"))
+        return
+    with lock:
+        info = clients.get(conn) or {}
+        speaker = str(info.get("name") or "")
+    code, kw = federation.check_fed_password(speaker, parts[0])
+    if code == "unset":
+        send_line(conn, _ts(conn, "fed_password_unset"))
+        return
+    if code == "locked":
+        send_line(conn, _ts(conn, "fed_password_locked", **kw))
+        return
+    if code != "ok":
+        send_line(conn, _ts(conn, "fed_password_bad", **kw))
         return
     hub = federation.get_hub()
     if hub is None or not hub.enabled:
@@ -2486,6 +2508,8 @@ def _discard_client_line_remainder(conn, buffer: bytes) -> bytes:
     while b"\n" not in buffer:
         try:
             chunk = conn.recv(4096)
+        except (TimeoutError, socket.timeout):
+            continue
         except OSError as e:
             if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
                 return b""
@@ -2501,33 +2525,24 @@ def _discard_client_line_remainder(conn, buffer: bytes) -> bytes:
 
 
 def _socket_send(conn, data: bytes) -> None:
-    """sendall with a temporary timeout; restore the prior socket timeout after."""
+    """sendall with a deadline — must NOT call sock.settimeout().
+
+    Chat sockets are shared: handle_client blocks in recv() while agent/guest
+    worker threads may broadcast via send_line(). Mutating the socket timeout
+    from the writer wakes recv with TimeoutError and drops healthy clients
+    (seen as: ~agent 正在思考… then [ERROR] server disconnected). Same lesson
+    as federation._sendall_timeout.
+    """
     if not data:
         return
-    old = None
-    has_timeout_api = hasattr(conn, "gettimeout") and hasattr(conn, "settimeout")
-    if has_timeout_api:
-        try:
-            old = conn.gettimeout()
-        except Exception:
-            old = None
-        try:
-            timeout = _SEND_TIMEOUT_SECONDS
-            if timeout > 0:
-                conn.settimeout(timeout)
-        except Exception:
-            has_timeout_api = False
-    try:
-        if hasattr(conn, "sendall"):
-            conn.sendall(data)
-        else:
-            conn.send(data)
-    finally:
-        if has_timeout_api:
-            try:
-                conn.settimeout(old)
-            except Exception:
-                pass
+    timeout = _SEND_TIMEOUT_SECONDS
+    if timeout is not None and float(timeout) > 0:
+        federation._sendall_timeout(conn, data, timeout=float(timeout))
+        return
+    if hasattr(conn, "sendall"):
+        conn.sendall(data)
+    else:
+        conn.send(data)
 
 
 def send_line(conn, text: str) -> None:
@@ -7833,6 +7848,8 @@ def attach_guest(
     locale: str = "en",
     minutes: int | None = None,
     remark: str = "",
+    *,
+    agent_link: bool = False,
 ) -> str:
     """Put a web guest into a room. Nick must already be a random `~g…` name."""
     nick = name if guest_sharing.is_guest_nick(name) else guest_sharing.random_guest_nick()
@@ -7851,6 +7868,7 @@ def attach_guest(
             "locale": locale,
             "guest": True,
             "remark": note,
+            "agent_link": bool(agent_link),
         }
         rooms[room].add(conn)
     label = guest_sharing.display_nick(nick, note)
@@ -7973,21 +7991,145 @@ def publish_guest_voice(nick: str, room: str, filename: str, data: bytes) -> tup
     return _publish_guest_bytes(nick, room, filename, raw, safe_name=base)
 
 
-def _handle_guest(conn, sender: str, payload: str) -> None:
-    """Handle /guest — private one-shot web chat link (default 5 minutes)."""
+def _agent_link_for_creator(sender: str, room: str):
+    """Newest live agent link created by sender in room, or None."""
+    link = guest_sharing.guest_store.find_live_agent(room)
+    if link is None:
+        return None
+    if (link.creator or "").lower() != (sender or "").lower():
+        return None
+    return link
+
+
+def _deliver_agent_private(link, text: str) -> None:
+    """Send agent reply privately to creator (+ guest page already handled)."""
+    import agent_bridge
+
+    body = agent_bridge.redact_secrets((text or "").strip())
+    if not body:
+        return
+    link.agent_last_reply = body
+    nick = agent_bridge.AGENT_NICK
+    # Creator (SSH / GUI clients) — prefix every line (body may be multi-line).
+    payload = "".join(
+        f"[#{link.room}] [{nick}] {ln}\n" for ln in body.splitlines() or [body]
+    )
+    for c, _name in find_clients_by_nickname(link.creator):
+        try:
+            send_line(c, payload)
+        except Exception:
+            pass
+    # Room-wide notice only (no payload)
+    fanout = broadcast_room
+    try:
+        fanout(
+            link.room,
+            _ts_room(link, "agent_replied_private", room=link.room).encode("utf-8"),
+            exclude_conn=link.conn,
+        )
+    except Exception:
+        try:
+            fanout(
+                link.room,
+                f"[#{link.room}] [*] ~agent replied privately. Creator: /agent share\n".encode(
+                    "utf-8"
+                ),
+                exclude_conn=link.conn,
+            )
+        except Exception:
+            pass
+
+
+def _ts_room(link, key: str, **kwargs) -> str:
+    """Locale string using the link's locale (for room-wide agent notices)."""
+    loc = getattr(link, "locale", None) or "en"
+    return i18n.t(f"server.{key}", loc, **kwargs)
+
+
+def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> None:
+    """Handle /guest or /agent — private one-shot web chat link (default 5 minutes)."""
+    is_agent = kind == "agent"
+    usage_key = "agent_usage" if is_agent else "guest_usage"
+    off_key = "agent_http_off" if is_agent else "guest_http_off"
+    none_key = "agent_none" if is_agent else "guest_none"
+    closed_key = "agent_closed" if is_agent else "guest_closed"
+    too_many_key = "agent_too_many" if is_agent else "guest_too_many"
+    created_key = "agent_created" if is_agent else "guest_created"
+    lan_key = "agent_lan_url_warn" if is_agent else "guest_lan_url_warn"
+    bad_min_key = "agent_bad_minutes" if is_agent else "guest_bad_minutes"
+
     raw = payload.split(None, 1)
     arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    parts = arg.split()
+    head = parts[0] if parts else ""
     if arg in ("help", "?", "帮助"):
-        send_line(conn, _ts(conn, "guest_usage"))
+        send_line(conn, _ts(conn, usage_key))
         return
     if file_http is None:
-        send_line(conn, _ts(conn, "guest_http_off"))
+        send_line(conn, _ts(conn, off_key))
         return
+    if is_agent:
+        import agent_bridge
+
+        if not agent_bridge.agent_bin():
+            send_line(conn, _ts(conn, "agent_cli_missing"))
+            return
     with lock:
         info = clients.get(conn)
         room_name = (info or {}).get("current_room") or DEFAULT_ROOM
+
+    # Agent management — password only gates *create*, never these.
+    # /agent ask|full is short for /agent mode ask|full.
+    if is_agent and head in ("mode", "allow", "share", "ask", "full"):
+        link = _agent_link_for_creator(sender, room_name)
+        if link is None:
+            send_line(conn, _ts(conn, none_key, room=room_name))
+            return
+        import agent_bridge
+
+        if head in ("mode", "ask", "full"):
+            want = head if head in ("ask", "full") else (
+                parts[1] if len(parts) > 1 else ""
+            )
+            if want not in ("ask", "full"):
+                send_line(conn, _ts(conn, "agent_mode_usage"))
+                return
+            link.agent_mode = want
+            if want == "ask":
+                link.agent_full_allowed = False
+                if link.agent_workspace:
+                    agent_bridge.write_cli_json(link.agent_workspace, mode="ask")
+                send_line(conn, _ts(conn, "agent_mode_ask"))
+            else:
+                link.agent_full_allowed = False
+                send_line(conn, _ts(conn, "agent_mode_full_pending"))
+            return
+        if head == "allow":
+            if link.agent_mode != "full":
+                send_line(conn, _ts(conn, "agent_allow_need_full"))
+                return
+            link.agent_full_allowed = True
+            if link.agent_workspace:
+                agent_bridge.write_cli_json(link.agent_workspace, mode="full")
+            send_line(conn, _ts(conn, "agent_allow_ok"))
+            return
+        # share
+        text = (link.agent_last_reply or "").strip()
+        if not text:
+            send_line(conn, _ts(conn, "agent_share_none"))
+            return
+        payload_bytes = "".join(
+            f"[#{link.room}] [{agent_bridge.AGENT_NICK}] {ln}\n"
+            for ln in text.splitlines() or [text]
+        ).encode("utf-8")
+        broadcast_room(link.room, payload_bytes)
+        send_line(conn, _ts(conn, "agent_share_ok"))
+        return
+
     if arg in ("close", "关闭"):
-        closed = guest_sharing.guest_store.close_for_creator(sender, room_name)
+        closed = guest_sharing.guest_store.close_for_creator(
+            sender, room_name, kind=("agent" if is_agent else "guest")
+        )
         for link in closed:
             old = link.conn
             if old is None:
@@ -8001,25 +8143,91 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
             except Exception:
                 pass
         if not closed:
-            send_line(conn, _ts(conn, "guest_none", room=room_name))
+            send_line(conn, _ts(conn, none_key, room=room_name))
         else:
             send_line(
-                conn, _ts(conn, "guest_closed", n=len(closed), room=room_name)
+                conn, _ts(conn, closed_key, n=len(closed), room=room_name)
             )
         return
     minutes = guest_sharing.DEFAULT_MINUTES
-    if arg:
+    if is_agent:
+        import agent_bridge
+
+        # Create only: /agent <password> [minutes]. Never re-check password for
+        # management. If already open and this is not a clear create, hint only.
+        existing = _agent_link_for_creator(sender, room_name)
+        create_minutes = None
+        if len(parts) == 2:
+            create_minutes, err = guest_sharing.parse_minutes(parts[1])
+            if err == "range":
+                send_line(conn, _ts(conn, bad_min_key))
+                return
+            if err or create_minutes is None:
+                if existing is not None:
+                    send_line(conn, _ts(conn, "agent_already_open"))
+                    return
+                send_line(conn, _ts(conn, usage_key))
+                return
+        elif len(parts) == 1:
+            # Single token: password create only when no live agent yet.
+            # With a live agent, never treat random words as password attempts.
+            if existing is not None:
+                send_line(conn, _ts(conn, "agent_already_open"))
+                return
+        elif not parts or len(parts) > 2:
+            if existing is not None:
+                send_line(conn, _ts(conn, "agent_already_open"))
+                return
+            send_line(conn, _ts(conn, usage_key))
+            return
+        if create_minutes is not None:
+            minutes = create_minutes
+        agent_pw = parts[0]
+        code, kw = agent_bridge.check_agent_password(sender, agent_pw)
+        if code == "unset":
+            send_line(conn, _ts(conn, "agent_password_unset"))
+            return
+        if code == "locked":
+            send_line(conn, _ts(conn, "agent_password_locked", **kw))
+            return
+        if code != "ok":
+            send_line(conn, _ts(conn, "agent_password_bad", **kw))
+            return
+    elif arg:
         minutes, err = guest_sharing.parse_minutes(arg)
         if err == "range":
-            send_line(conn, _ts(conn, "guest_bad_minutes"))
+            send_line(conn, _ts(conn, bad_min_key))
             return
         if err or minutes is None:
-            send_line(conn, _ts(conn, "guest_usage"))
+            send_line(conn, _ts(conn, usage_key))
             return
-    link = guest_sharing.guest_store.create(sender, room_name, minutes)
+    link = guest_sharing.guest_store.create(
+        sender, room_name, minutes, kind=("agent" if is_agent else "guest")
+    )
     if link is None:
-        send_line(conn, _ts(conn, "guest_too_many"))
+        send_line(conn, _ts(conn, too_many_key))
         return
+    if is_agent:
+        import agent_bridge
+
+        # Per-link /tmp workspace — ask mode by default.
+        link.agent_mode = "ask"
+        link.agent_full_allowed = False
+        link.agent_workspace = agent_bridge.reset_workspace(
+            room_name, link.token, mode="ask"
+        )
+        link.locale = conn_locale(conn)
+        # Bot is addressable with @bot immediately (any room member / that guest).
+        broadcast_room(
+            room_name,
+            _ts(
+                conn,
+                "agent_online",
+                room=room_name,
+                minutes=minutes,
+            ).encode("utf-8"),
+            exclude_conn=None,
+        )
     # Prefer a live Cloudflare / public base. Tunnel helper remints on a timer;
     # wait briefly so phones do not get a LAN/virtual IP during the gap.
     wait = getattr(file_http_server, "wait_for_public_base_url", None)
@@ -8033,10 +8241,11 @@ def _handle_guest(conn, sender: str, payload: str) -> None:
         base = (file_http.get_base_url() or "").rstrip("/")
     url = f"{base.rstrip('/')}/guest/{link.token}?lang={conn_locale(conn)}"
     send_line(
-        conn, _ts(conn, "guest_created", url=url, room=room_name, minutes=minutes)
+        conn,
+        _ts(conn, created_key, url=url, room=room_name, minutes=minutes),
     )
     if not is_public:
-        send_line(conn, _ts(conn, "guest_lan_url_warn"))
+        send_line(conn, _ts(conn, lan_key))
 
 
 def _handle_clock(conn, sender: str, payload: str) -> None:
@@ -10744,11 +10953,20 @@ def handle_command(conn, payload: str) -> None:
 
     if cmd in ("/guest", "/tmplink"):
         try:
-            _handle_guest(conn, name, payload)
+            _handle_guest(conn, name, payload, kind="guest")
         except Exception as e:
             print(f"/guest error: user={name} payload={payload!r} err={e!r}")
             traceback.print_exc()
             send_line(conn, _ts(conn, "guest_cmd_fail"))
+        return
+
+    if cmd == "/agent":
+        try:
+            _handle_guest(conn, name, payload, kind="agent")
+        except Exception as e:
+            print(f"/agent error: user={name} payload={payload!r} err={e!r}")
+            traceback.print_exc()
+            send_line(conn, _ts(conn, "agent_cmd_fail"))
         return
 
     send_line(conn, "[*] Unknown command. Try /help\n")
@@ -11385,8 +11603,14 @@ def process_client_line(conn, raw_line: bytes) -> None:
         if payload.startswith("/") and not guest_sharing.guest_allowed_slash(payload):
             send_line(conn, _ts(conn, "guest_no_commands"))
             return
-        if len(payload) > guest_sharing.MAX_MSG_CHARS:
-            payload = payload[: guest_sharing.MAX_MSG_CHARS]
+        with lock:
+            guest_cap = (
+                guest_sharing.AGENT_MAX_MSG_CHARS
+                if (clients.get(conn) or {}).get("agent_link")
+                else guest_sharing.MAX_MSG_CHARS
+            )
+        if len(payload) > guest_cap:
+            payload = payload[:guest_cap]
 
     if payload.startswith("/file "):
         send_line(conn, "[*] File transfer is not supported.\n")
@@ -11398,6 +11622,24 @@ def process_client_line(conn, raw_line: bytes) -> None:
 
     line_out = f"[#{room}] [{label}] {payload}\n".encode("utf-8")
     broadcast_room(room, line_out)
+    _maybe_route_agent_bot(conn, room, label, payload)
+
+
+def _maybe_route_agent_bot(conn, room: str, speaker: str, payload: str) -> None:
+    """Room chat with @bot → newest live /agent link (create is password-gated)."""
+    try:
+        import agent_bridge
+        import guest_http
+    except Exception:
+        return
+    hit, cleaned = agent_bridge.parse_bot_address(payload)
+    if not hit:
+        return
+    link = guest_sharing.guest_store.find_live_agent(room)
+    if link is None:
+        return
+    text = cleaned or "(hi)"
+    guest_http._schedule_agent_reply(link, f"{speaker}: {text}")
 
 
 def handle_client(conn, addr) -> None:
@@ -11504,7 +11746,7 @@ def handle_client(conn, addr) -> None:
         send_line(
             conn,
             f"[*] Active room #{active_room}. "
-            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /guest /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
+            f"/names /rooms /fed /join /switch /msg /sendfile /canvas /piano /clock /guest /agent /music /leave /part /announce /pad /poll /later /game /news /dict /clear /lang /help\n",
         )
         send_line(conn, f"[*] Rooms: {', '.join(room_labels)}\n")
         if hub is not None and hub.enabled and hub.peer_count > 0:
@@ -11559,6 +11801,9 @@ def handle_client(conn, addr) -> None:
                     continue
                 try:
                     chunk = conn.recv(4096)
+                except (TimeoutError, socket.timeout):
+                    # Idle client, or a brief timeout race from an old send path.
+                    continue
                 except OSError as e:
                     if getattr(e, "errno", None) in _DISCONNECT_ERRNOS:
                         break
@@ -11585,6 +11830,8 @@ guest_http.bind_chat(
     remove_client=remove_client,
     publish_guest_image=publish_guest_image,
     publish_guest_voice=publish_guest_voice,
+    broadcast_room=broadcast_room,
+    deliver_agent_private=_deliver_agent_private,
 )
 
 
@@ -11610,6 +11857,8 @@ def run_server() -> int:
         remove_client=remove_client,
         publish_guest_image=publish_guest_image,
         publish_guest_voice=publish_guest_voice,
+        broadcast_room=broadcast_room,
+        deliver_agent_private=_deliver_agent_private,
     )
 
     # Start file HTTP server

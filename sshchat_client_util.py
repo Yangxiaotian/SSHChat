@@ -153,11 +153,14 @@ def default_client_config_path() -> Path:
 
 
 def load_client_config(path: Path) -> dict[str, Any] | None:
-    path = path.expanduser().resolve()
-    if not path.is_file():
+    try:
+        path = path.expanduser().resolve()
+        if not path.is_file():
+            return None
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
         return None
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
 
 
 def save_client_config(path: Path, data: dict[str, Any]) -> None:

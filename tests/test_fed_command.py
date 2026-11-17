@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""/fed — show federation peers and online users."""
+"""/fed — show federation peers and online users (password-gated)."""
 
 from __future__ import annotations
 
@@ -60,6 +60,8 @@ class FakeHub:
 
 
 class FedCommandTests(unittest.TestCase):
+    FED_PW = "fed-secret"
+
     def setUp(self) -> None:
         self.conn = DummyConn()
         server.clients[self.conn] = {
@@ -68,8 +70,15 @@ class FedCommandTests(unittest.TestCase):
             "current_room": "default",
             "locale": "zh",
         }
+        self._env = mock.patch.dict(
+            os.environ, {"SSHCHAT_FED_PASSWORD": self.FED_PW}
+        )
+        self._env.start()
+        federation.reset_fed_password_attempts()
 
     def tearDown(self) -> None:
+        self._env.stop()
+        federation.reset_fed_password_attempts()
         server.clients.pop(self.conn, None)
 
     def _run(self, payload: str) -> str:
@@ -79,13 +88,28 @@ class FedCommandTests(unittest.TestCase):
 
     def test_disabled(self) -> None:
         with mock.patch.object(server.federation, "get_hub", return_value=None):
-            out = self._run("/fed")
+            out = self._run(f"/fed {self.FED_PW}")
         self.assertIn("未启用联邦", out)
+
+    def test_requires_password(self) -> None:
+        with mock.patch.object(server.federation, "get_hub", return_value=FakeHub()):
+            out = self._run("/fed")
+        self.assertIn("用法", out)
+        out = self._run("/fed wrong")
+        self.assertIn("密码错误", out)
+
+    def test_password_lockout(self) -> None:
+        for _ in range(5):
+            code, _ = federation.check_fed_password("alice", "nope")
+            self.assertEqual(code, "bad")
+        code, kw = federation.check_fed_password("alice", "nope")
+        self.assertEqual(code, "locked")
+        self.assertGreaterEqual(int(kw.get("seconds") or 0), 60)
 
     def test_none_online_still_lists_local_users(self) -> None:
         hub = FakeHub(direct=[])
         with mock.patch.object(server.federation, "get_hub", return_value=hub):
-            out = self._run("/peers")
+            out = self._run(f"/peers {self.FED_PW}")
         self.assertIn("没有直连在线", out)
         self.assertIn("联邦在线用户", out)
         self.assertIn("alice(#default)", out)
@@ -101,7 +125,7 @@ class FedCommandTests(unittest.TestCase):
             },
         )
         with mock.patch.object(server.federation, "get_hub", return_value=hub):
-            out = self._run("/federation")
+            out = self._run(f"/federation {self.FED_PW}")
         self.assertIn("直连在线 1", out)
         self.assertIn("B.local", out)
         self.assertIn("经路由可达", out)
@@ -117,6 +141,7 @@ class FedCommandTests(unittest.TestCase):
         self.assertIn("/fed", out)
         self.assertIn("/peers", out)
         self.assertIn("用户", out)
+        self.assertIn("密码", out)
 
 
 if __name__ == "__main__":

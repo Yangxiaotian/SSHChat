@@ -167,6 +167,7 @@ _TOP_COMMANDS = (
     "/clock",
     "/guest",
     "/tmplink",
+    "/agent",
     "/leave",
     "/unmsg",
     "/announce",
@@ -233,6 +234,21 @@ _GUEST_SUBCOMMANDS = {
     "60": None,
 }
 
+_AGENT_SUBCOMMANDS = {
+    "help": None,
+    "close": None,
+    "mode": None,
+    "ask": None,
+    "full": None,
+    "allow": None,
+    "share": None,
+    "5": None,
+    "10": None,
+    "15": None,
+    "30": None,
+    "60": None,
+}
+
 _FED_SUBCOMMANDS = {
     "help": None,
 }
@@ -254,6 +270,7 @@ _SUBCOMMANDS_BY_CMD = {
     "/clock": sorted(_CLOCK_SUBCOMMANDS),
     "/guest": sorted(_GUEST_SUBCOMMANDS),
     "/tmplink": sorted(_GUEST_SUBCOMMANDS),
+    "/agent": sorted(_AGENT_SUBCOMMANDS),
     "/fed": sorted(_FED_SUBCOMMANDS),
     "/peers": sorted(_FED_SUBCOMMANDS),
     "/federation": sorted(_FED_SUBCOMMANDS),
@@ -271,6 +288,7 @@ _NESTED_SUBCOMMANDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("/game", "on"): ("all",) + _GAME_NAMES,
     ("/game", "off"): ("all",) + _GAME_NAMES,
     ("/game", "list"): ("off", "offline"),
+    ("/agent", "mode"): ("ask", "full"),
 }
 
 # Third token after `/game move <verb>` (niutou row/bot args).
@@ -1727,6 +1745,7 @@ def main():
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
         "/guest | /guest [min] | /guest close  "
+        "/agent <password> [min] | /agent mode ask|full | /agent allow | /agent share | /agent close  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"

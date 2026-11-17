@@ -31,6 +31,7 @@ const COMMAND_KEYS = [
   { name: '/clock', key: 'input.commands.clock' },
   { name: '/guest', key: 'input.commands.guest' },
   { name: '/tmplink', key: 'input.commands.guest' },
+  { name: '/agent', key: 'input.commands.agent' },
   { name: '/leave', key: 'input.commands.leave' },
   { name: '/announce', key: 'input.commands.announce' },
   { name: '/pad', key: 'input.commands.pad' },
@@ -103,6 +104,11 @@ const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
   '/clock': ['help', 'close', 'new'],
   '/guest': ['help', 'close', '5', '10', '15', '30', '60'],
   '/tmplink': ['help', 'close', '5', '10', '15', '30', '60'],
+  '/agent': ['help', 'close', 'mode', 'ask', 'full', 'allow', 'share', '5', '10', '15', '30', '60'],
+};
+
+const NESTED_SUBCOMMANDS: Record<string, string[]> = {
+  '/agent mode': ['ask', 'full'],
 };
 
 function subcommandSuggestions(value: string): SuggestionItem[] {
@@ -130,6 +136,27 @@ function subcommandSuggestions(value: string): SuggestionItem[] {
         desc: 'subcommand',
         source: 'command' as const,
       }));
+  }
+  const nestedKey = parts.length >= 2 ? `${cmd} ${parts[1].toLowerCase()}` : '';
+  const nested = nestedKey ? NESTED_SUBCOMMANDS[nestedKey] : undefined;
+  if (nested?.length) {
+    if (trailingSpace && parts.length === 2) {
+      return nested.map((sub) => ({
+        value: `${parts[0]} ${parts[1]} ${sub}`,
+        desc: 'subcommand',
+        source: 'command' as const,
+      }));
+    }
+    if (parts.length === 3 && !trailingSpace) {
+      const prefix = parts[2].toLowerCase();
+      return nested
+        .filter((sub) => sub.toLowerCase().startsWith(prefix))
+        .map((sub) => ({
+          value: `${parts[0]} ${parts[1]} ${sub}`,
+          desc: 'subcommand',
+          source: 'command' as const,
+        }));
+    }
   }
   return [];
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import cgi
 import html
 import json
+import os
 import struct
 import threading
 import time
@@ -24,6 +25,8 @@ _process_client_line = None
 _remove_client = None
 _publish_guest_image = None
 _publish_guest_voice = None
+_broadcast_room = None
+_deliver_agent_private = None
 
 
 def bind_chat(
@@ -33,27 +36,39 @@ def bind_chat(
     remove_client,
     publish_guest_image=None,
     publish_guest_voice=None,
+    broadcast_room=None,
+    deliver_agent_private=None,
 ) -> None:
     global _attach_guest, _process_client_line, _remove_client
-    global _publish_guest_image, _publish_guest_voice
+    global _publish_guest_image, _publish_guest_voice, _broadcast_room
+    global _deliver_agent_private
     _attach_guest = attach_guest
     _process_client_line = process_client_line
     _remove_client = remove_client
     _publish_guest_image = publish_guest_image
     _publish_guest_voice = publish_guest_voice
+    _broadcast_room = broadcast_room
+    _deliver_agent_private = deliver_agent_private
 
 
 _TEXTS = {
     "zh": {
         "title": "SSHChat 临时聊天",
+        "title_agent": "SSHChat Agent 聊天",
         "room": "房间",
         "you": "你是",
         "enter": "进入聊天",
         "send": "发送",
         "pic": "图片",
+        "pic_agent": "交图",
+        "file": "附件",
+        "file_agent": "交文件",
         "voice": "语音",
+        "voice_agent": "交音",
         "voice_rec": "松开",
+        "composer_tip_agent": "文字：对人直接说；找机器人写 @bot …　｜　交图/交音/交文件：只进本页 Agent 临时目录，不是房间传文件",
         "hint": "只能打开一次，进入后 {minutes} 分钟。页面倒计时显示分和秒。系统昵称随机；可填备注，聊天里显示为 ~g…（备注）。可发文字、图片和语音，并用游戏区下棋。最小化或切走浏览器不会提前结束；同一标签刷新可恢复。不要关掉这个标签。",
+        "hint_agent": "只能打开一次，进入后 {minutes} 分钟。对人直接说；找机器人请加 @bot（例：@bot 本机什么配置）。交图/交音/交文件只进本链接 Agent 临时目录（不是房间 /sendfile）。可填备注。不要关掉这个标签。",
         "remark": "备注（可选）",
         "remark_ph": "怎么称呼你",
         "game": "游戏",
@@ -95,33 +110,49 @@ _TEXTS = {
         "gone": "链接无效或已过期。请让对方重新发一条 /guest。",
         "left": "剩余",
         "placeholder": "说点什么…",
+        "placeholder_agent": "对人直接说；找机器人请加 @bot（可多行，Shift+回车换行）",
         "fail": "进不去。",
         "uploading": "正在发送图片…",
         "upload_ok": "图片已发送。",
+        "upload_ok_agent": "图片已交给 Agent（仅工作区，不走房间传文件）。",
         "upload_fail": "图片发送失败。",
+        "file_uploading": "正在发送附件…",
+        "file_ok": "附件已交给 Agent。",
+        "file_fail": "附件发送失败。",
         "voice_uploading": "正在发送语音…",
         "voice_ok": "语音已发送。",
+        "voice_ok_agent": "语音已交给 Agent（仅工作区）。",
         "voice_fail": "语音发送失败。",
         "voice_short": "录音太短。",
         "voice_denied": "需要麦克风权限才能发语音。",
         "voice_unsupported": "当前浏览器不支持录音。",
         "not_image": "只能发送图片（jpg/png/gif/webp）。",
         "not_audio": "只能发送语音（webm/ogg/m4a/wav/mp3）。",
-        "too_big": "文件太大（图片最多 8MB，语音最多 4MB）。",
+        "too_big": "文件太大（图片最多 8MB，语音最多 4MB，附件最多 12MB）。",
         "file_off": "文件服务未启用，无法发图或语音。",
         "joining": "正在进入…",
         "rejoin": "连接中断，正在重连…",
+        "rejoined": "已重新连上。",
+        "agent_thinking": "~agent 正在思考…",
+        "agent_queued": "~agent 还在忙，已记下你最新一条。",
     },
     "en": {
         "title": "SSHChat guest chat",
+        "title_agent": "SSHChat agent chat",
         "room": "Room",
         "you": "You are",
         "enter": "Enter chat",
         "send": "Send",
         "pic": "Image",
+        "pic_agent": "To bot",
+        "file": "File",
+        "file_agent": "File→bot",
         "voice": "Talk",
+        "voice_agent": "Voice→bot",
         "voice_rec": "Send",
+        "composer_tip_agent": "Text: people plain / bot with @bot …  |  Image/voice/file buttons: agent workspace only (not room /sendfile)",
         "hint": "One open only. After you enter you have {minutes} minutes. The countdown shows minutes and seconds. Your nick is random; an optional remark shows as ~g… (remark). Text, images, voice notes, and the game panel are allowed. Minimizing or switching away does not end it early; a reload in this same tab can resume. Do not close this tab.",
+        "hint_agent": "One open only. After you enter you have {minutes} minutes. Talk to people normally; address the bot with @bot (e.g. @bot what is this machine?). Image/voice/file buttons go only to this link's agent temp folder (not room /sendfile). Optional remark allowed. Do not close this tab.",
         "remark": "Remark (optional)",
         "remark_ph": "What should we call you",
         "game": "Games",
@@ -163,22 +194,31 @@ _TEXTS = {
         "gone": "This link is invalid or expired. Ask them to send /guest once more.",
         "left": "Left",
         "placeholder": "Message…",
+        "placeholder_agent": "People: plain text · bot: @bot … (multiline; Shift+Enter for newline)",
         "fail": "Could not join.",
         "uploading": "Sending image…",
         "upload_ok": "Image sent.",
+        "upload_ok_agent": "Image sent to the agent (workspace only, not room file transfer).",
         "upload_fail": "Could not send image.",
+        "file_uploading": "Sending file…",
+        "file_ok": "File sent to the agent.",
+        "file_fail": "Could not send file.",
         "voice_uploading": "Sending voice…",
         "voice_ok": "Voice sent.",
+        "voice_ok_agent": "Voice sent to the agent (workspace only).",
         "voice_fail": "Could not send voice.",
         "voice_short": "Recording too short.",
         "voice_denied": "Microphone permission is required for voice notes.",
         "voice_unsupported": "This browser cannot record audio.",
         "not_image": "Images only (jpg/png/gif/webp).",
         "not_audio": "Voice only (webm/ogg/m4a/wav/mp3).",
-        "too_big": "File too large (images max 8MB, voice max 4MB).",
+        "too_big": "File too large (images max 8MB, voice max 4MB, attachments max 12MB).",
         "file_off": "File service is off; cannot send images or voice.",
         "joining": "Entering…",
         "rejoin": "Disconnected, reconnecting…",
+        "rejoined": "Reconnected.",
+        "agent_thinking": "~agent is thinking…",
+        "agent_queued": "~agent is still busy; queued your latest message.",
     },
 }
 
@@ -217,17 +257,27 @@ def _send_json(handler: "BaseHTTPRequestHandler", code: int, data: dict) -> None
     handler.wfile.write(body)
 
 
-def _ui_pack(lang: str) -> dict:
+def _ui_pack(lang: str, *, agent: bool = False) -> dict:
     """Client strings for one locale (both packs are embedded for live switching)."""
     text = _TEXTS[lang]
     return {
-        "title": text["title"],
+        "title": text["title_agent"] if agent else text["title"],
         "room": text["room"],
         "enter": text["enter"],
         "send": text["send"],
-        "pic": text["pic"],
-        "placeholder": text["placeholder"],
-        "hint": text["hint"],
+        "pic": text.get("pic_agent", text["pic"]) if agent else text["pic"],
+        "file": (
+            text.get("file_agent", text.get("file", "File"))
+            if agent
+            else text.get("file", "File")
+        ),
+        "composer_tip": text.get("composer_tip_agent", "") if agent else "",
+        "placeholder": (
+            text.get("placeholder_agent", text["placeholder"])
+            if agent
+            else text["placeholder"]
+        ),
+        "hint": text["hint_agent"] if agent else text["hint"],
         "remark": text["remark"],
         "remark_ph": text["remark_ph"],
         "fail": text["fail"],
@@ -236,20 +286,28 @@ def _ui_pack(lang: str) -> dict:
         "left": text["left"],
         "you": text["you"],
         "uploading": text["uploading"],
-        "upload_ok": text["upload_ok"],
+        "upload_ok": (
+            text.get("upload_ok_agent", text["upload_ok"]) if agent else text["upload_ok"]
+        ),
         "upload_fail": text["upload_fail"],
+        "file_uploading": text.get("file_uploading", text["uploading"]),
+        "file_ok": text.get("file_ok", text["upload_ok"]),
+        "file_fail": text.get("file_fail", text["upload_fail"]),
         "voice_uploading": text["voice_uploading"],
-        "voice_ok": text["voice_ok"],
+        "voice_ok": (
+            text.get("voice_ok_agent", text["voice_ok"]) if agent else text["voice_ok"]
+        ),
         "voice_fail": text["voice_fail"],
         "voice_short": text["voice_short"],
         "voice_denied": text["voice_denied"],
         "voice_unsupported": text["voice_unsupported"],
-        "voice": text["voice"],
+        "voice": text.get("voice_agent", text["voice"]) if agent else text["voice"],
         "voice_rec": text["voice_rec"],
         "not_image": text["not_image"],
         "not_audio": text["not_audio"],
         "too_big": text["too_big"],
         "file_off": text["file_off"],
+        "is_agent": bool(agent),
         "game": text["game"],
         "gclose": text["gclose"],
         "gjoin": text["gjoin"],
@@ -276,6 +334,9 @@ def _ui_pack(lang: str) -> dict:
         "gended": text["gended"],
         "joining": text["joining"],
         "rejoin": text["rejoin"],
+        "rejoined": text.get("rejoined", text["rejoin"]),
+        "agent_thinking": text.get("agent_thinking", ""),
+        "agent_queued": text.get("agent_queued", ""),
         "games": text["games"],
     }
 
@@ -1115,6 +1176,8 @@ function renderGame() {
 def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
     text = _TEXTS[lang]
     minutes = link.minutes or guest_sharing.DEFAULT_MINUTES
+    is_agent = getattr(link, "kind", "guest") == "agent"
+    page_title = text["title_agent"] if is_agent else text["title"]
     boot = {
         "token": link.token,
         "room": link.room,
@@ -1122,12 +1185,17 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
         "minutes": minutes,
         "maxImage": guest_sharing.MAX_IMAGE_BYTES,
         "maxVoice": guest_sharing.MAX_VOICE_BYTES,
+        "maxFile": 12 * 1024 * 1024,
         "games": text["games"],
+        "kind": "agent" if is_agent else "guest",
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     packs_json = json.dumps(
-        {"zh": _ui_pack("zh"), "en": _ui_pack("en")},
+        {"zh": _ui_pack("zh", agent=is_agent), "en": _ui_pack("en", agent=is_agent)},
         ensure_ascii=False,
+    )
+    gate_hint = (text["hint_agent"] if is_agent else text["hint"]).format(
+        minutes=minutes
     )
     return f"""<!DOCTYPE html>
 <html lang="{'zh-CN' if lang == 'zh' else 'en'}">
@@ -1135,7 +1203,7 @@ def render_guest_page(link: guest_sharing.GuestLink, lang: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="robots" content="noindex">
-<title>{html.escape(text['title'])}</title>
+<title>{html.escape(page_title)}</title>
 <style>
 html,body {{ margin:0; height:100%; height:100vh; height:100dvh; overflow:hidden; background:#fff; color:#111; font-family:sans-serif; }}
 #app {{ display:flex; flex-direction:column; height:100%; overflow:hidden; }}
@@ -1153,20 +1221,35 @@ html,body {{ margin:0; height:100%; height:100vh; height:100dvh; overflow:hidden
 #log .bubble.me {{ align-self:flex-end; background:#d4edda; color:#041; }}
 #log .bubble .nm {{ font-size:11px; color:#555; margin-bottom:.15rem; }}
 #log .bubble.me .nm {{ color:#063; }}
+#log .bubble .txt.md {{ white-space:normal; }}
+#log .bubble .txt.md p {{ margin:.35em 0; }}
+#log .bubble .txt.md p:first-child {{ margin-top:0; }}
+#log .bubble .txt.md p:last-child {{ margin-bottom:0; }}
+#log .bubble .txt.md pre {{ margin:.4em 0; padding:.45rem .55rem; background:#111; color:#f5f5f5; border-radius:8px; overflow:auto; font-size:12px; line-height:1.35; }}
+#log .bubble .txt.md code {{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92em; }}
+#log .bubble .txt.md :not(pre) > code {{ background:rgba(0,0,0,.08); padding:.05em .3em; border-radius:4px; }}
+#log .bubble .txt.md ul, #log .bubble .txt.md ol {{ margin:.35em 0; padding-left:1.3em; }}
+#log .bubble .txt.md a {{ color:#0b57d0; }}
 #log .sys {{ align-self:center; max-width:92%; font-size:12px; color:#666; text-align:center; }}
+#log .sys.thinking {{ color:#1565c0; font-style:italic; }}
+#log .sys.thinking::after {{ content:''; animation: thinkDots 1.2s steps(4,end) infinite; }}
+@keyframes thinkDots {{ 0%,20% {{ content:''; }} 40% {{ content:'.'; }} 60% {{ content:'..'; }} 80%,100% {{ content:'...'; }} }}
 #log img.preview {{ display:block; max-width:min(100%,240px); max-height:200px; margin-top:.3rem; border-radius:8px; }}
 #log audio.preview {{ display:block; width:min(100%,240px); margin-top:.25rem; }}
-#row {{ display:flex; flex-wrap:nowrap; padding:.4rem .45rem; gap:.35rem; align-items:center; flex-shrink:0; background:#f5f5f5; border-top:1px solid #ccc; }}
-#row input[type=text] {{ flex:1 1 auto; padding:.55rem .6rem; font-size:16px; min-width:0; width:0; }}
+#composer {{ display:flex; flex-direction:column; gap:.3rem; padding:.4rem .45rem; flex-shrink:0; background:#f5f5f5; border-top:1px solid #ccc; }}
+#agentTip {{ display:none; font-size:12px; line-height:1.35; color:#555; padding:.15rem .2rem; }}
+#msg {{ width:100%; box-sizing:border-box; padding:.55rem .6rem; font-size:16px; line-height:1.35; resize:vertical; min-height:2.6rem; max-height:40vh; border:1px solid #999; background:#fff; color:#111; font-family:inherit; }}
+#msg.agent {{ min-height:5.2rem; }}
+#tools {{ display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; }}
 #gate {{ padding:1.5rem; max-width:28rem; background:#fff; color:#111; }}
 #gate p {{ line-height:1.5; color:#333; }}
 #gate input {{ width:100%; max-width:16rem; padding:.5rem; font-size:16px; box-sizing:border-box; background:#fff; color:#111; border:1px solid #999; }}
 button {{ padding:.55rem .7rem; font-size:15px; }}
-#row button {{ flex:0 0 auto; padding:.55rem .55rem; font-size:14px; white-space:nowrap; }}
+#tools button {{ flex:0 0 auto; padding:.55rem .55rem; font-size:14px; white-space:nowrap; }}
 #voice {{ touch-action:none; user-select:none; -webkit-user-select:none; white-space:nowrap; }}
 #voice.rec {{ background:#c62828; color:#fff; }}
 .warn {{ color:#a40; }}
-#pic {{ display:none; }}
+#pic, #file {{ display:none; }}
 #game {{ background:#fff; color:#111; border-bottom:1px solid #ccc; flex-shrink:0; }}
 #ghead {{ display:flex; align-items:center; gap:.6rem; padding:.4rem .7rem; flex-shrink:0; }}
 #gstat {{ flex:1; font-size:13px; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
@@ -1209,7 +1292,7 @@ button {{ padding:.55rem .7rem; font-size:15px; }}
 <body>
 <div id="app">
   <div id="bar">
-    <div id="who">{html.escape(text['title'])} · {html.escape(text['room'])} #{html.escape(link.room)}</div>
+    <div id="who">{html.escape(page_title)} · {html.escape(text['room'])} #{html.escape(link.room)}</div>
     <div id="langs">
       <button type="button" id="langZh" class="{'on' if lang == 'zh' else ''}">中文</button>
       <button type="button" id="langEn" class="{'on' if lang == 'en' else ''}">EN</button>
@@ -1217,7 +1300,7 @@ button {{ padding:.55rem .7rem; font-size:15px; }}
     <div id="left"></div>
   </div>
   <div id="gate">
-    <p class="warn" id="gateHint">{html.escape(text['hint'].format(minutes=minutes))}</p>
+    <p class="warn" id="gateHint">{html.escape(gate_hint)}</p>
     <p>
       <label for="remark" id="remarkLab">{html.escape(text['remark'])}</label><br>
       <input id="remark" type="text" maxlength="{guest_sharing.MAX_REMARK_CHARS}" placeholder="{html.escape(text['remark_ph'])}" autocomplete="nickname">
@@ -1240,12 +1323,17 @@ button {{ padding:.55rem .7rem; font-size:15px; }}
       </div>
     </div>
     <div id="log"></div>
-    <form id="row">
-      <input id="msg" type="text" maxlength="500" placeholder="{html.escape(text['placeholder'])}" autocomplete="off">
-      <button type="button" id="voice">{html.escape(text['voice'])}</button>
-      <button type="button" id="pick">{html.escape(text['pic'])}</button>
-      <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
-      <button type="submit" id="send">{html.escape(text['send'])}</button>
+    <form id="composer">
+      <div id="agentTip" style="{'display:block' if is_agent else 'display:none'}">{html.escape(text.get('composer_tip_agent', '') if is_agent else '')}</div>
+      <textarea id="msg" class="{'agent' if is_agent else ''}" rows="{4 if is_agent else 2}" maxlength="{guest_sharing.AGENT_MAX_MSG_CHARS if is_agent else guest_sharing.MAX_MSG_CHARS}" placeholder="{html.escape((text.get('placeholder_agent') if is_agent else None) or text['placeholder'])}" autocomplete="off"></textarea>
+      <div id="tools">
+        <button type="button" id="voice">{html.escape((text.get('voice_agent') if is_agent else None) or text['voice'])}</button>
+        <button type="button" id="pick">{html.escape((text.get('pic_agent') if is_agent else None) or text['pic'])}</button>
+        <button type="button" id="pickFile" style="{'display:inline-block' if is_agent else 'display:none'}">{html.escape((text.get('file_agent') if is_agent else None) or text.get('file', '附件'))}</button>
+        <input id="pic" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/*">
+        <input id="file" type="file">
+        <button type="submit" id="send">{html.escape(text['send'])}</button>
+      </div>
     </form>
   </div>
 </div>
@@ -1254,6 +1342,7 @@ var boot = {boot_json};
 var PACKS = {packs_json};
 var L = PACKS[boot.lang] || PACKS.en;
 var ws, exp = 0, ticket = '', busy = false, ended = false, reconnectTimer = null, toldRejoin = false;
+var wasReconnect = false, heartbeatTimer = null;
 var meLabel = '', meNick = '', pendingSys = [];
 function applyLang(lang) {{
   if (!PACKS[lang]) return;
@@ -1279,12 +1368,22 @@ function applyLang(lang) {{
   if (rem) rem.placeholder = L.remark_ph;
   var go = document.getElementById('go');
   if (go) go.textContent = L.enter;
+  var tip = document.getElementById('agentTip');
+  if (tip) {{
+    tip.style.display = (boot.kind === 'agent' && L.composer_tip) ? 'block' : 'none';
+    tip.textContent = L.composer_tip || '';
+  }}
   var msg = document.getElementById('msg');
   if (msg) msg.placeholder = L.placeholder;
   var voice = document.getElementById('voice');
   if (voice && voice.className.indexOf('rec') < 0) voice.textContent = L.voice;
   var pick = document.getElementById('pick');
   if (pick) pick.textContent = L.pic;
+  var pickFile = document.getElementById('pickFile');
+  if (pickFile) {{
+    pickFile.textContent = L.file || 'File';
+    pickFile.style.display = (boot.kind === 'agent') ? 'inline-block' : 'none';
+  }}
   var send = document.getElementById('send');
   if (send) send.textContent = L.send;
   var tog = document.getElementById('gtog');
@@ -1363,8 +1462,77 @@ function addSys(text) {{
   scrollLog();
   try {{ if (typeof maybeGameNote === 'function') maybeGameNote(text); }} catch (e) {{}}
 }}
-function addBubble(who, text) {{
+function escHtml(s) {{
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}}
+function renderMd(src) {{
+  // Tiny subset: fences, inline code, bold/italic, links, lists, paragraphs.
+  var s = String(src || '').replace(/\\r\\n/g, '\\n');
+  var blocks = [];
+  s = s.replace(/```([\\w+-]*)\\n([\\s\\S]*?)```/g, function (_, lang, code) {{
+    var i = blocks.length;
+    blocks.push('<pre><code>' + escHtml(code.replace(/\\s+$/,'')) + '</code></pre>');
+    return '\\n%%B' + i + '%%\\n';
+  }});
+  var lines = s.split('\\n');
+  var out = [], listType = '';
+  function closeList() {{
+    if (listType) {{ out.push(listType === 'ol' ? '</ol>' : '</ul>'); listType = ''; }}
+  }}
+  function inlineFmt(t) {{
+    t = escHtml(t);
+    t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+    t = t.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    t = t.replace(/(^|[\\s(])\\*([^*]+)\\*(?=[\\s).,!?:;]|$)/g, '$1<em>$2</em>');
+    t = t.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return t;
+  }}
+  for (var i = 0; i < lines.length; i++) {{
+    var ln = lines[i];
+    var bm = /^%%B(\\d+)%%$/.exec(ln.trim());
+    if (bm) {{ closeList(); out.push(blocks[+bm[1]] || ''); continue; }}
+    var ul = /^\\s*[-*]\\s+(.+)$/.exec(ln);
+    var ol = /^\\s*\\d+\\.\\s+(.+)$/.exec(ln);
+    if (ul) {{
+      if (listType !== 'ul') {{ closeList(); out.push('<ul>'); listType = 'ul'; }}
+      out.push('<li>' + inlineFmt(ul[1]) + '</li>');
+      continue;
+    }}
+    if (ol) {{
+      if (listType !== 'ol') {{ closeList(); out.push('<ol>'); listType = 'ol'; }}
+      out.push('<li>' + inlineFmt(ol[1]) + '</li>');
+      continue;
+    }}
+    closeList();
+    if (/^###\\s+/.test(ln)) {{ out.push('<p><strong>' + inlineFmt(ln.replace(/^###\\s+/, '')) + '</strong></p>'); continue; }}
+    if (/^##\\s+/.test(ln)) {{ out.push('<p><strong>' + inlineFmt(ln.replace(/^##\\s+/, '')) + '</strong></p>'); continue; }}
+    if (/^#\\s+/.test(ln)) {{ out.push('<p><strong>' + inlineFmt(ln.replace(/^#\\s+/, '')) + '</strong></p>'); continue; }}
+    if (!ln.trim()) {{ out.push(''); continue; }}
+    out.push('<p>' + inlineFmt(ln) + '</p>');
+  }}
+  closeList();
+  return out.join('');
+}}
+var thinkingEl = null;
+function showThinking(msg) {{
+  hideThinking();
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'sys thinking';
+  thinkingEl.textContent = msg || L.agent_thinking || '…';
+  document.getElementById('log').appendChild(thinkingEl);
+  scrollLog();
+}}
+function hideThinking() {{
+  if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
+  thinkingEl = null;
+}}
+function addBubble(who, text, asMd) {{
   flushSys();
+  hideThinking();
   var wrap = document.createElement('div');
   wrap.className = 'bubble ' + (isMe(who) ? 'me' : 'them');
   if (!isMe(who) && who) {{
@@ -1374,8 +1542,13 @@ function addBubble(who, text) {{
     wrap.appendChild(n);
   }}
   var b = document.createElement('div');
-  b.className = 'txt';
-  b.textContent = text;
+  if (asMd) {{
+    b.className = 'txt md';
+    b.innerHTML = renderMd(text);
+  }} else {{
+    b.className = 'txt';
+    b.textContent = text;
+  }}
   wrap.appendChild(b);
   document.getElementById('log').appendChild(wrap);
   scrollLog();
@@ -1457,8 +1630,19 @@ function maybePreview(chunk) {{
   }}).catch(function () {{}});
 }}
 function proto() {{ return location.protocol === 'https:' ? 'wss:' : 'ws:'; }}
+function stopHeartbeat() {{
+  if (heartbeatTimer) {{ clearInterval(heartbeatTimer); heartbeatTimer = null; }}
+}}
+function startHeartbeat() {{
+  stopHeartbeat();
+  heartbeatTimer = setInterval(function () {{
+    if (!ws || ws.readyState !== 1) return;
+    try {{ ws.send(JSON.stringify({{t: 'ping'}})); }} catch (e) {{}}
+  }}, 20000);
+}}
 function scheduleReconnect() {{
   if (ended || reconnectTimer || !ticket) return;
+  wasReconnect = true;
   if (!toldRejoin) {{ toldRejoin = true; append('\\n' + (L.rejoin || '') + '\\n'); }}
   reconnectTimer = setTimeout(function () {{
     reconnectTimer = null;
@@ -1468,24 +1652,67 @@ function scheduleReconnect() {{
 function connect(tkt) {{
   ticket = tkt;
   saveSession();
+  stopHeartbeat();
   try {{ if (ws) {{ ws.onclose = null; if (ws.readyState < 2) ws.close(); }} }} catch (e) {{}}
   ws = new WebSocket(proto() + '//' + location.host + '/guest/' + boot.token + '/ws?k=' + encodeURIComponent(ticket));
   ws.onopen = function () {{
-    toldRejoin = false;
+    if (wasReconnect) {{
+      wasReconnect = false;
+      toldRejoin = false;
+      append('\\n' + (L.rejoined || '') + '\\n');
+    }} else {{
+      toldRejoin = false;
+    }}
+    startHeartbeat();
     if (typeof cmdGame === 'function') cmdGame('show');
   }};
   ws.onmessage = function (ev) {{
     var m;
     try {{ m = JSON.parse(ev.data); }} catch (e) {{ return; }}
+    if (m.t === 'pong') return;
+    if (m.t === 'agent') {{
+      if (m.phase === 'thinking') showThinking(m.s || L.agent_thinking);
+      else if (m.phase === 'queued') showThinking(m.s || L.agent_queued);
+      else if (m.phase === 'done') hideThinking();
+      return;
+    }}
+    if (m.t === 'md') {{
+      addBubble(m.who || '~agent', m.s || '', true);
+      return;
+    }}
     if (m.t === 'line') {{ append(m.s); if (typeof ingestGame === 'function') ingestGame(m.s); }}
     if (m.t === 'hello' && m.exp) {{ exp = m.exp; saveSession(); }}
     if (m.t === 'end') over(m.why === 'timeout' ? L.expired : L.used);
   }};
   ws.onclose = function () {{
+    stopHeartbeat();
     if (ended) return;
     if (!exp || Date.now()/1000 >= exp) {{ over(L.expired); return; }}
     scheduleReconnect();
   }};
+}}
+function sendFile(file) {{
+  if (!file || !ticket || busy || boot.kind !== 'agent') return;
+  if (file.size > (boot.maxFile || 12582912)) {{ append('\\n' + L.too_big + '\\n'); return; }}
+  busy = true;
+  append('\\n' + (L.file_uploading || L.uploading) + '\\n');
+  var fd = new FormData();
+  fd.append('file', file, file.name || 'upload.bin');
+  fetch('/guest/' + boot.token + '/file?k=' + encodeURIComponent(ticket) + '&lang=' + encodeURIComponent(boot.lang), {{
+    method: 'POST',
+    body: fd
+  }}).then(function (r) {{ return r.json().then(function (j) {{ return {{ok: r.ok, j: j}}; }}); }})
+    .then(function (x) {{
+      busy = false;
+      if (!x.ok || !x.j.ok) {{
+        var err = (x.j && x.j.error) || L.file_fail || L.upload_fail;
+        if (x.j && x.j.code === 'too_big') err = L.too_big;
+        append(err + '\\n');
+        return;
+      }}
+      append((L.file_ok || L.upload_ok) + '\\n');
+    }})
+    .catch(function () {{ busy = false; append((L.file_fail || L.upload_fail) + '\\n'); }});
 }}
 function sendImage(file) {{
   if (!file || !ticket || busy) return;
@@ -1773,6 +2000,18 @@ document.getElementById('pic').onchange = function () {{
   if (f) sendImage(f);
 }};
 (function () {{
+  var bf = document.getElementById('pickFile');
+  var inp = document.getElementById('file');
+  if (!bf || !inp) return;
+  if (boot.kind === 'agent') bf.style.display = '';
+  bf.onclick = function () {{ inp.click(); }};
+  inp.onchange = function () {{
+    var f = this.files && this.files[0];
+    this.value = '';
+    if (f) sendFile(f);
+  }};
+}})();
+(function () {{
   var btn = document.getElementById('voice');
   if (!btn) return;
   var armed = false;
@@ -1809,14 +2048,31 @@ document.addEventListener('paste', function (e) {{
     }}
   }}
 }});
-document.getElementById('row').onsubmit = function (e) {{
-  e.preventDefault();
+(function () {{
+  var form = document.getElementById('composer');
   var box = document.getElementById('msg');
-  var s = box.value;
-  if (!s || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({{t: 'msg', s: s}}));
-  box.value = '';
-}};
+  if (!form || !box) return;
+  form.onsubmit = function (e) {{
+    e.preventDefault();
+    var s = box.value;
+    if (!s || !ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({{t: 'msg', s: s}}));
+    box.value = '';
+  }};
+  box.addEventListener('keydown', function (e) {{
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    // Mobile: Enter inserts newline. Desktop agent: Enter sends, Shift+Enter newline.
+    if (boot.kind !== 'agent') {{
+      e.preventDefault();
+      form.requestSubmit ? form.requestSubmit() : form.onsubmit(e);
+      return;
+    }}
+    var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    if (coarse) return;
+    e.preventDefault();
+    form.requestSubmit ? form.requestSubmit() : form.onsubmit(e);
+  }});
+}})();
 setInterval(tick, 250);
 (function () {{
   var s = loadSession();
@@ -1887,6 +2143,8 @@ def handle_guest_post(handler: "BaseHTTPRequestHandler") -> bool:
         return _handle_guest_image(handler, parts[1])
     if parts[2] == "voice":
         return _handle_guest_voice(handler, parts[1])
+    if parts[2] == "file":
+        return _handle_guest_file(handler, parts[1])
     return False
 
 
@@ -1932,60 +2190,94 @@ def _handle_guest_image(handler: "BaseHTTPRequestHandler", token: str) -> bool:
             {"ok": False, "code": err or "gone", "error": text.get(err, text["used"])},
         )
         return True
-    if _publish_guest_image is None:
+    is_agent = getattr(link, "kind", "guest") == "agent"
+    if not is_agent and _publish_guest_image is None:
         _send_json(
             handler,
             503,
             {"ok": False, "code": "file_off", "error": text["file_off"]},
         )
         return True
-    content_type = handler.headers.get("Content-Type", "")
-    if not content_type.startswith("multipart/form-data"):
-        _send_json(handler, 400, {"ok": False, "code": "bad", "error": text["upload_fail"]})
+    raw, filename, code = _read_guest_upload(
+        handler, max_bytes=guest_sharing.MAX_IMAGE_BYTES, text=text
+    )
+    if code:
+        msg = text.get(code) or text["upload_fail"]
+        status = 413 if code == "too_big" else 400
+        _send_json(handler, status, {"ok": False, "code": code, "error": msg})
         return True
-    try:
-        form = cgi.FieldStorage(
-            fp=handler.rfile,
-            headers=handler.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-            },
-        )
-    except Exception:
-        _send_json(handler, 400, {"ok": False, "code": "bad", "error": text["upload_fail"]})
-        return True
-    if "file" not in form:
-        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
-        return True
-    file_item = form["file"]
-    if not getattr(file_item, "file", None):
-        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
-        return True
-    raw = file_item.file.read(guest_sharing.MAX_IMAGE_BYTES + 1)
-    if not raw:
-        _send_json(handler, 400, {"ok": False, "code": "empty", "error": text["upload_fail"]})
-        return True
-    if len(raw) > guest_sharing.MAX_IMAGE_BYTES:
-        _send_json(handler, 413, {"ok": False, "code": "too_big", "error": text["too_big"]})
-        return True
-    filename = getattr(file_item, "filename", None) or "image.jpg"
-    if not guest_sharing.looks_like_image(raw, filename):
+    if not guest_sharing.looks_like_image(raw or b"", filename):
         _send_json(
             handler,
             400,
             {"ok": False, "code": "not_image", "error": text["not_image"]},
         )
         return True
+    if is_agent:
+        # Agent path: workspace only — do not use room one-time file transfer.
+        try:
+            _agent_ingest_upload(link, filename, raw or b"", kind="image")
+        except Exception:
+            _send_json(
+                handler, 500, {"ok": False, "code": "fail", "error": text["upload_fail"]}
+            )
+            return True
+        _send_json(handler, 200, {"ok": True})
+        return True
     nick = link.nick or guest_sharing.random_guest_nick()
-    ok, code = _publish_guest_image(nick, link.room, filename, raw)
+    ok, pub_code = _publish_guest_image(nick, link.room, filename, raw or b"")
     if not ok:
-        msg = text.get(code) or text["upload_fail"]
-        status = 413 if code == "too_big" else 400 if code == "not_image" else 503
-        _send_json(handler, status, {"ok": False, "code": code or "fail", "error": msg})
+        msg = text.get(pub_code) or text["upload_fail"]
+        status = (
+            413
+            if pub_code == "too_big"
+            else 400
+            if pub_code == "not_image"
+            else 503
+        )
+        _send_json(
+            handler, status, {"ok": False, "code": pub_code or "fail", "error": msg}
+        )
         return True
     _send_json(handler, 200, {"ok": True})
     return True
+
+
+def _agent_ingest_upload(
+    link: guest_sharing.GuestLink, filename: str, raw: bytes, *, kind: str
+) -> str:
+    """Save into this link's /tmp workspace, notice the room, ask ~agent to look.
+
+    Does not use the room one-time file-transfer channel.
+    """
+    import agent_bridge
+
+    ws = (link.agent_workspace or "").strip() or agent_bridge.workspace_for_link(
+        link.room, link.token
+    )
+    link.agent_workspace = ws
+    os.makedirs(os.path.join(ws, "uploads"), mode=0o700, exist_ok=True)
+    path = agent_bridge.save_upload(ws, filename, raw)
+    base = os.path.basename(path)
+    nick = link.nick or guest_sharing.random_guest_nick()
+    fanout = _broadcast_room
+    if fanout is not None:
+        try:
+            fanout(
+                link.room,
+                (
+                    f"[#{link.room}] [{nick}] "
+                    f"[*sent {kind} to ~agent: {base}*]\n"
+                ).encode("utf-8"),
+            )
+        except Exception:
+            pass
+    note = (
+        f"Guest uploaded an {kind}: {path}\n"
+        f"Open/read this file in your workspace and respond to the guest."
+    )
+    _schedule_agent_reply(link, note)
+    return path
 
 
 def _read_guest_upload(
@@ -2035,7 +2327,8 @@ def _handle_guest_voice(handler: "BaseHTTPRequestHandler", token: str) -> bool:
             {"ok": False, "code": err or "gone", "error": text.get(err, text["used"])},
         )
         return True
-    if _publish_guest_voice is None:
+    is_agent = getattr(link, "kind", "guest") == "agent"
+    if not is_agent and _publish_guest_voice is None:
         _send_json(
             handler,
             503,
@@ -2057,6 +2350,16 @@ def _handle_guest_voice(handler: "BaseHTTPRequestHandler", token: str) -> bool:
             {"ok": False, "code": "not_audio", "error": text["not_audio"]},
         )
         return True
+    if is_agent:
+        try:
+            _agent_ingest_upload(link, filename, raw or b"", kind="voice note")
+        except Exception:
+            _send_json(
+                handler, 500, {"ok": False, "code": "fail", "error": text["voice_fail"]}
+            )
+            return True
+        _send_json(handler, 200, {"ok": True})
+        return True
     nick = link.nick or guest_sharing.random_guest_nick()
     ok, pub_code = _publish_guest_voice(nick, link.room, filename, raw or b"")
     if not ok:
@@ -2071,6 +2374,41 @@ def _handle_guest_voice(handler: "BaseHTTPRequestHandler", token: str) -> bool:
         _send_json(
             handler, status, {"ok": False, "code": pub_code or "fail", "error": msg}
         )
+        return True
+    _send_json(handler, 200, {"ok": True})
+    return True
+
+
+def _handle_guest_file(handler: "BaseHTTPRequestHandler", token: str) -> bool:
+    """Agent-only: attachment → link workspace only (no room file transfer)."""
+    lang = _lang(handler)
+    text = _TEXTS[lang]
+    ticket = ((parse_qs(urlparse(handler.path).query or "").get("k") or [""])[0] or "").strip()
+    link, err = guest_sharing.guest_store.ws_ok(token, ticket)
+    if link is None:
+        _send_json(
+            handler,
+            403,
+            {"ok": False, "code": err or "gone", "error": text.get(err, text["used"])},
+        )
+        return True
+    if getattr(link, "kind", "guest") != "agent":
+        _send_json(handler, 403, {"ok": False, "code": "gone", "error": text["gone"]})
+        return True
+    import agent_bridge
+
+    raw, filename, code = _read_guest_upload(
+        handler, max_bytes=agent_bridge.MAX_UPLOAD_BYTES, text=text
+    )
+    if code:
+        msg = text.get(code) or text["upload_fail"]
+        status = 413 if code == "too_big" else 400
+        _send_json(handler, status, {"ok": False, "code": code, "error": msg})
+        return True
+    try:
+        _agent_ingest_upload(link, filename, raw or b"", kind="attachment")
+    except Exception:
+        _send_json(handler, 500, {"ok": False, "code": "fail", "error": text["upload_fail"]})
         return True
     _send_json(handler, 200, {"ok": True})
     return True
@@ -2151,6 +2489,143 @@ def _schedule_kick(link: guest_sharing.GuestLink) -> None:
     threading.Thread(target=wait, daemon=True, name="guest-kick").start()
 
 
+def _agent_ws(link: guest_sharing.GuestLink, obj: dict) -> None:
+    conn = link.conn
+    if conn is None:
+        return
+    try:
+        conn.send_json(obj)
+    except Exception:
+        pass
+
+
+def _agent_room_text(room: str, nick: str, text: str) -> bytes:
+    """Prefix every line so IRC-style room clients keep the speaker."""
+    lines = (text or "").splitlines() or [""]
+    return "".join(f"[#{room}] [{nick}] {ln}\n" for ln in lines).encode("utf-8")
+
+
+def _effective_agent_mode(link: guest_sharing.GuestLink) -> str:
+    if getattr(link, "agent_mode", "ask") == "full" and getattr(
+        link, "agent_full_allowed", False
+    ):
+        return "full"
+    return "ask"
+
+
+def _schedule_agent_reply(link: guest_sharing.GuestLink, user_text: str) -> None:
+    """Fire-and-forget one Cursor agent turn; reply is private to creator + guest page."""
+    text_in = (user_text or "").strip()
+    if not text_in:
+        return
+    if link.agent_busy:
+        # Keep newest intent; run it when the current turn finishes.
+        link.agent_pending = text_in
+        _agent_ws(
+            link,
+            {
+                "t": "agent",
+                "phase": "queued",
+                "s": _TEXTS.get(link.locale or "en", _TEXTS["en"]).get(
+                    "agent_queued", ""
+                ),
+            },
+        )
+        return
+
+    def work() -> None:
+        import agent_bridge
+
+        link.agent_busy = True
+        pending_next = ""
+        think_msg = _TEXTS.get(link.locale or "en", _TEXTS["en"]).get(
+            "agent_thinking", "~agent…"
+        )
+        _agent_ws(link, {"t": "agent", "phase": "thinking", "s": think_msg})
+        fanout = _broadcast_room
+        if fanout is not None:
+            try:
+                fanout(
+                    link.room,
+                    f"[#{link.room}] [*] {think_msg}\n".encode("utf-8"),
+                    exclude_conn=link.conn,
+                )
+            except TypeError:
+                try:
+                    fanout(
+                        link.room,
+                        f"[#{link.room}] [*] {think_msg}\n".encode("utf-8"),
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        stop_ka = threading.Event()
+
+        def keepalive() -> None:
+            # Cloudflare / idle proxies drop quiet sockets during long agent turns.
+            while not stop_ka.wait(20):
+                _agent_ws(link, {"t": "agent", "phase": "thinking", "s": think_msg})
+
+        ka = threading.Thread(
+            target=keepalive, daemon=True, name=f"agent-ka-{link.token[:8]}"
+        )
+        ka.start()
+        mode = _effective_agent_mode(link)
+        try:
+            reply, sid = agent_bridge.turn(
+                text_in,
+                session_id=link.agent_session or "",
+                workspace_dir=link.agent_workspace or "",
+                mode=mode,
+            )
+            if sid:
+                link.agent_session = sid
+        except Exception as e:
+            reply = f"[*] agent error: {e!r}"
+        finally:
+            stop_ka.set()
+            pending_next = (link.agent_pending or "").strip()
+            link.agent_pending = ""
+            link.agent_busy = False
+            try:
+                _agent_ws(link, {"t": "agent", "phase": "done"})
+            except Exception:
+                pass
+
+        try:
+            text = agent_bridge.redact_secrets((reply or "").strip())
+            if text:
+                if len(text) > 8000:
+                    text = text[:8000] + "…"
+                nick = agent_bridge.AGENT_NICK
+                # Guest page: one markdown bubble (keeps fences / newlines intact).
+                _agent_ws(link, {"t": "md", "who": nick, "s": text})
+                # Creator + room notice (private by default).
+                deliver = _deliver_agent_private
+                if deliver is not None:
+                    try:
+                        deliver(link, text)
+                    except Exception:
+                        pass
+                else:
+                    link.agent_last_reply = text
+            if pending_next:
+                _schedule_agent_reply(link, pending_next)
+        except Exception as e:
+            try:
+                _agent_ws(
+                    link, {"t": "sys", "s": f"[*] agent deliver error: {e!r}"}
+                )
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=work, daemon=True, name=f"agent-{link.token[:8]}"
+    ).start()
+
+
 def _run_guest_ws(link: guest_sharing.GuestLink, sock) -> None:
     attach = _attach_guest
     process_line = _process_client_line
@@ -2190,6 +2665,7 @@ def _run_guest_ws(link: guest_sharing.GuestLink, sock) -> None:
                 link.locale,
                 minutes=link.minutes,
                 remark=link.remark,
+                agent_link=getattr(link, "kind", "") == "agent",
             )
             or nick
         )
@@ -2223,11 +2699,24 @@ def _run_guest_ws(link: guest_sharing.GuestLink, sock) -> None:
                 continue
             if not isinstance(msg, dict):
                 continue
-            if str(msg.get("t") or "") != "msg":
+            kind = str(msg.get("t") or "")
+            if kind == "ping":
+                try:
+                    gconn.send_json({"t": "pong"})
+                except Exception:
+                    break
                 continue
-            text = str(msg.get("s") or "")[: guest_sharing.MAX_MSG_CHARS]
+            if kind != "msg":
+                continue
+            cap = (
+                guest_sharing.AGENT_MAX_MSG_CHARS
+                if getattr(link, "kind", "guest") == "agent"
+                else guest_sharing.MAX_MSG_CHARS
+            )
+            text = str(msg.get("s") or "")[:cap]
             if not text.strip():
                 continue
+            # Chat always hits the room; @bot is routed to ~agent in process_client_line.
             process_line(gconn, text.encode("utf-8"))
     finally:
         if link.conn is gconn:

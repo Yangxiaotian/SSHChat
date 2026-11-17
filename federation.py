@@ -22,6 +22,8 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import password_gate
+
 PROTOCOL_VERSION = "1"
 # 9=EBADF: writer close_transport() while reader is in recv().
 _DISCONNECT_ERRNOS = {9, 32, 54, 57, 104}
@@ -87,6 +89,36 @@ def _peers_path() -> Path:
         return Path(raw)
     base = Path(__file__).resolve().parent
     return base / "federation" / "peers.json"
+
+
+def fed_config_path() -> Path:
+    raw = (os.environ.get("SSHCHAT_FED_CONFIG") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parent / "federation" / "config.json"
+
+
+def configured_fed_password() -> str:
+    """Password from SSHCHAT_FED_PASSWORD or federation/config.json `password`."""
+    return password_gate.load_password_from_config(
+        env_key="SSHCHAT_FED_PASSWORD",
+        path=fed_config_path(),
+    )
+
+
+def check_fed_password(user: str, password: str) -> tuple[str, dict]:
+    """Verify /fed|/peers|/federation password (ok | unset | locked | bad)."""
+    return password_gate.check_password(
+        scope="fed",
+        user=user,
+        password=password,
+        expected=configured_fed_password(),
+    )
+
+
+def reset_fed_password_attempts(user: str = "") -> None:
+    """Test helper."""
+    password_gate.reset_attempts(scope="fed", user=user)
 
 
 def _ssh_key_path() -> Path:

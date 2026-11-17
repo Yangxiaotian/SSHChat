@@ -11,7 +11,7 @@ MESSAGES: dict = {
         "[*] /part <房间>    退出某房间；至少保留一间，不能退出最后一个。\n",
         "[*] /rooms         列出你已加入的房间；前面带 * 的是当前活跃房间。\n",
         "[*] /names 或 /users  列出当前活跃房间内的昵称（二者相同）。\n",
-        "[*] /fed 或 /peers    查看联邦直连节点与联邦在线用户（别名 /federation）。\n",
+        "[*] /fed <密码> 或 /peers <密码>  查看联邦直连节点与联邦在线用户（别名 /federation）。\n",
         "[*]\n",
         "[*] /msg #<房间> <文字>   不切换当前房，把一句话发到指定房间（# 开头表示房间）。\n",
         "[*] /msg <昵称> <文字>   私聊：对方在线则即时送达；不在线则留言，对方下次上线时收到。\n",
@@ -68,6 +68,11 @@ MESSAGES: dict = {
         "[*] /guest [分钟]  生成仅自己可见的一次性网页聊天链接（默认 5 分钟，可写 1～60）。\n",
         "[*]              对方只能打开一次；可发文字、图片和语音；可用页面游戏区下棋；可填备注，聊天显示为 ~g…（备注）。进入后页面显示分+秒倒计时；最小化不提前结束；同一标签刷新可恢复。昵称随机。别名 /tmplink。\n",
         "[*] /guest close   作废你在本房生成的临时链接。\n",
+        "[*] /agent <密码> [分钟]  本房启动 Agent（密码见 agent/config.json；默认 ask 只读）。\n",
+        "[*] /agent mode ask|full | /agent ask|full   切换模式（创建后无需再输密码）；full 需 /agent allow。\n",
+        "[*] /agent allow   确认启用 full（受限 shell/写工作区）。\n",
+        "[*] /agent share   把上一条私聊回复公开到本房。\n",
+        "[*] /agent close   作废你在本房生成的 Agent 链接。\n",
         "[*] /help          显示本说明。\n",
     ],
     "game_help_lines": [
@@ -243,8 +248,19 @@ MESSAGES: dict = {
         "fed_users_header": "[*] 联邦在线用户共 {n} 人：\n",
         "fed_users_node": "[*]   {node}（{n}）：{users}\n",
         "fed_users_empty": "[*] 联邦在线用户：无。\n",
+        "fed_password_unset": (
+            "[*] 尚未配置 /fed 密码。请在 federation/config.json 写入 password"
+            "（可参考 federation/config.example.json），或设置 SSHCHAT_FED_PASSWORD。\n"
+        ),
+        "fed_password_bad": (
+            "[*] /fed 密码错误（已错 {fails} 次，满 6 次将锁死）。\n"
+        ),
+        "fed_password_locked": (
+            "[*] /fed 密码错误次数过多，请 {seconds} 秒后再试。\n"
+        ),
         "fed_usage": (
-            "[*] 用法：/fed 或 /peers  查看联邦直连节点与联邦在线用户（别名 /federation）。\n"
+            "[*] 用法：/fed <密码> 或 /peers <密码>  查看联邦直连节点与联邦在线用户（别名 /federation）。"
+            "密码见 federation/config.json 或 SSHCHAT_FED_PASSWORD；错密会像手机锁屏一样递增锁死。\n"
         ),
         "multi_terminal": (
             "[*] 检测到同账号其他终端在线，已同步房间并支持直接续玩。\n"
@@ -325,6 +341,70 @@ MESSAGES: dict = {
         ),
         "guest_no_commands": "[*] 临时访客只能发聊天、图片、语音，并用页面游戏区下棋；不能使用其他斜杠命令。\n",
         "guest_welcome": "[*] 你是 {nick}，在 #{room} 临时聊天，还剩 {minutes} 分钟。可发文字、图片和语音，并用页面游戏区下棋。请勿刷新。\n",
+        "agent_http_off": (
+            "[*] Agent 聊天链接依赖文件网页服务，当前未启用。\n"
+        ),
+        "agent_cmd_fail": (
+            "[*] Agent 链接生成失败，请稍后重试（详情见服务端日志）。\n"
+        ),
+        "agent_cli_missing": (
+            "[*] 本机找不到 `agent` 命令（Cursor CLI）。安装后把路径写入 /opt/sshchat/sshchat.env 的 SSHCHAT_AGENT_BIN，并配置 CURSOR_API_KEY（服务端读不到 ~/.zshrc）。\n"
+        ),
+        "agent_usage": (
+            "[*] 用法：/agent <密码> [分钟]  开 Agent（仅创建时要密码）\n"
+            "[*]         /agent mode ask|full | /agent ask|full  切换模式（无需密码）\n"
+            "[*]         /agent allow   确认启用 full（受限 shell / 仅写工作区）\n"
+            "[*]         /agent share   公开上一条私聊回复到本房\n"
+            "[*]         /agent close   作废本房你的 Agent 链接\n"
+            "[*] 创建密码错误会像手机锁屏一样递增锁死。"
+            "回复默认只给创建者；工作区 /tmp/sshchat-agent/<房间>/<链接>/。\n"
+        ),
+        "agent_already_open": (
+            "[*] 本房 Agent 已在运行。请用 /agent ask|full、/agent allow、/agent share 或 /agent close；"
+            "只有再开一条新链接才需要密码。\n"
+        ),
+        "agent_mode_usage": "[*] 用法：/agent mode ask|full（或 /agent ask|full）\n",
+        "agent_bad_minutes": "[*] 时长请写 1～60 的整数分钟（默认 5）。\n",
+        "agent_password_unset": (
+            "[*] 尚未配置 /agent 密码。请在 agent/config.json 写入 password"
+            "（可参考 agent/config.example.json），或设置 SSHCHAT_AGENT_PASSWORD。\n"
+        ),
+        "agent_password_bad": (
+            "[*] /agent 密码错误（已错 {fails} 次，满 6 次将锁死）。\n"
+        ),
+        "agent_password_locked": (
+            "[*] /agent 密码错误次数过多，请 {seconds} 秒后再试。\n"
+        ),
+        "agent_created": (
+            "[*] Agent 已上线（ask 只读）。网页链接仅你可见：\n"
+            "[*] {url}\n"
+            "[*] 房间 #{room} · 工作区已就绪。网页进入后 {minutes} 分钟；未打开 30 分钟作废。"
+            "房内任何人可 @bot。升级：/agent mode full → /agent allow\n"
+        ),
+        "agent_online": (
+            "[*] ~agent 已在 #{room} 上线（ask 只读）。本房任何人可 @bot。/agent close 下线。\n"
+        ),
+        "agent_bot_forbidden": (
+            "[*] 只有该 /agent 的创建者或对应网页访客可以用 @bot。\n"
+        ),
+        "agent_mode_ask": "[*] Agent 已设为 ask（只读）。\n",
+        "agent_mode_full_pending": (
+            "[*] 已请求 full 模式。请再发 /agent allow 确认后才会启用受限 shell/写工作区。\n"
+        ),
+        "agent_allow_need_full": "[*] 请先 /agent mode full，再 /agent allow。\n",
+        "agent_allow_ok": "[*] full 模式已启用（仍受命令白名单与密钥 deny 限制）。\n",
+        "agent_share_none": "[*] 还没有可公开的 Agent 回复。先 @bot，再 /agent share。\n",
+        "agent_share_ok": "[*] 已将上一条 Agent 回复公开到本房。\n",
+        "agent_replied_private": (
+            "[*] ~agent 已私聊回复创建者（本房不显示正文）。创建者可 /agent share 公开。\n"
+        ),
+        "agent_closed": "[*] 已作废本房 {n} 条 Agent 链接（#{room}）。\n",
+        "agent_none": "[*] 房间 #{room} 没有你生成的 Agent 链接。\n",
+        "agent_too_many": "[*] 本房未打开或进行中的临时链接太多（最多 5 条），先 /agent close 或 /guest close。\n",
+        "agent_lan_url_warn": (
+            "[*] 注意：当前还没有 Cloudflare 公网域名（链接可能是内网/虚拟 IP）。"
+            "隧道脚本会定时自愈；稍后再发一次 /agent，或检查 sshchat-cloudflared 服务。\n"
+        ),
         "lang_usage": "[*] 用法：/lang [en|zh]\n",
         "lang_set": "[*] 界面语言已设为 {lang}。\n",
         "lang_current": "[*] 当前界面语言：{lang}\n",
