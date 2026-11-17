@@ -31,7 +31,7 @@ _SECRET_RE = re.compile(
     r"sk-[A-Za-z0-9_-]{16,}"
     r"|crsr_[a-fA-F0-9]{20,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
-    r"|(?i)(?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*\S{8,}"
+    r"|(?i:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*\S{8,}"
     r"|(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{48,}={0,2}(?![A-Za-z0-9+/])"
     r")"
 )

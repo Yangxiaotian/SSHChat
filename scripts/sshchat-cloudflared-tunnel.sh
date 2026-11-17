@@ -107,7 +107,11 @@ update_public_host() {
     return 0
   fi
   local tmp
-  tmp=$(mktemp)
+  # Same directory as ENV_FILE so mv is atomic (avoids stale TMPDIR from deploy).
+  tmp=$(mktemp "${ENV_FILE}.XXXXXX") || {
+    echo "[sshchat-cloudflared] mktemp failed; refusing to rewrite $ENV_FILE" >&2
+    return 1
+  }
   grep -vE '^SSHCHAT_FILE_(PUBLIC_HOST|PUBLIC_PORT|USE_HTTPS|HTTP_HOST|HTTP_PORT|TRANSFER_ENABLED|STORAGE_DIR)=' "$ENV_FILE" \
     | grep -v '^# File transfer via Cloudflare Tunnel' >"$tmp" || true
   cat >>"$tmp" <<ENV
@@ -121,8 +125,11 @@ SSHCHAT_FILE_PUBLIC_HOST=$host
 SSHCHAT_FILE_PUBLIC_PORT=443
 SSHCHAT_FILE_STORAGE_DIR=$STORAGE_DIR
 ENV
-  cat "$tmp" >"$ENV_FILE"
-  rm -f "$tmp"
+  if ! mv -f "$tmp" "$ENV_FILE"; then
+    echo "[sshchat-cloudflared] failed to write $ENV_FILE" >&2
+    rm -f "$tmp"
+    return 1
+  fi
   chown "$owner" "$ENV_FILE" 2>/dev/null || true
   chmod "$mode" "$ENV_FILE" 2>/dev/null || true
   echo "[sshchat-cloudflared] updated env -> $host"

@@ -1382,6 +1382,9 @@ if [[ "$REUSE_VENV" -eq 0 ]]; then
     fi
   fi
   rm -rf "$DEPLOY_TMP"
+  # mktemp (and later cloudflared setup) honor TMPDIR; do not leave it pointing
+  # at a removed directory or ensure_env will truncate sshchat.env on failure.
+  unset TMPDIR || true
 else
   echo "info: skipped venv recreate / pip install"
 fi
