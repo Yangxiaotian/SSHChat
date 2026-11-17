@@ -8203,6 +8203,40 @@ def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> No
                 conn, _ts(conn, closed_key, n=len(closed), room=room_name)
             )
         return
+    if head in guest_sharing.TTL_SUBCOMMANDS:
+        # /guest ttl · /agent ttl — leftover unused-link or live-chat time.
+        kind_name = "agent" if is_agent else "guest"
+        links = guest_sharing.guest_store.list_for_creator(
+            sender, room_name, kind=kind_name
+        )
+        if not links:
+            send_line(conn, _ts(conn, none_key, room=room_name))
+            return
+        header_key = "agent_ttl_header" if is_agent else "guest_ttl_header"
+        unused_key = "agent_ttl_unused" if is_agent else "guest_ttl_unused"
+        live_key = "agent_ttl_live" if is_agent else "guest_ttl_live"
+        now = time.time()
+        lines = [_ts(conn, header_key, room=room_name, n=len(links))]
+        for link in links:
+            left = guest_sharing.format_remaining(
+                guest_sharing.guest_store.remaining(link, now=now)
+            )
+            if link.opened_at:
+                nick = (link.nick or "").strip() or "~g…"
+                lines.append(
+                    _ts(conn, live_key, nick=nick, left=left, minutes=link.minutes)
+                )
+            else:
+                lines.append(
+                    _ts(
+                        conn,
+                        unused_key,
+                        left=left,
+                        minutes=link.minutes,
+                    )
+                )
+        send_line(conn, "".join(lines))
+        return
     minutes = guest_sharing.DEFAULT_MINUTES
     if is_agent:
         import agent_bridge

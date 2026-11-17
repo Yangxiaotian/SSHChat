@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+import time
 import unittest
 from unittest import mock
 
@@ -245,6 +246,32 @@ class GuestCommandTests(unittest.TestCase):
         with mock.patch.object(server, "file_http", fake_http):
             server.handle_command(self.alice, "/guest 99")
         self.assertIn("1 to 60", self._out(self.alice))
+
+    def test_guest_ttl_unused_and_live(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest 10")
+        self.alice.sent.clear()
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest ttl")
+        unused_out = self._out(self.alice)
+        self.assertIn("unused", unused_out.lower())
+        self.assertIn("link left", unused_out.lower())
+        self.assertRegex(unused_out, r"\d+:\d{2}")
+        link = next(iter(guest_sharing.guest_store.links.values()))
+        guest_sharing.guest_store.open_once(link.token)
+        link.chat_expires_at = time.time() + 125
+        self.alice.sent.clear()
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.alice, "/guest left")
+        live_out = self._out(self.alice)
+        self.assertIn("live", live_out.lower())
+        self.assertRegex(live_out, r"chat left 2:0[4-5]")
+        self.alice.sent.clear()
+        with mock.patch.object(server, "file_http", fake_http):
+            server.handle_command(self.bob, "/guest ttl")
+        self.assertIn("no guest", self._out(self.bob).lower())
 
     def test_link_is_private_and_not_gui_open(self) -> None:
         fake_http = mock.Mock()

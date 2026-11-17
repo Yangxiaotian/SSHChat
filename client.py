@@ -227,6 +227,8 @@ _CLOCK_SUBCOMMANDS = {
 _GUEST_SUBCOMMANDS = {
     "help": None,
     "close": None,
+    "ttl": None,
+    "left": None,
     "5": None,
     "10": None,
     "15": None,
@@ -244,6 +246,8 @@ _AGENT_SUBCOMMANDS = {
     "cd": None,
     "ws": None,
     "workspace": None,
+    "ttl": None,
+    "left": None,
     "allow": None,
     "share": None,
     "5": None,
@@ -1748,8 +1752,8 @@ def main():
         "/canvas | /canvas <nick> | /canvas #<room>  "
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
-        "/guest | /guest [min] | /guest close  "
-        "/agent <password> [min] | /agent cwd | /agent mode ask|full | /agent allow | /agent share | /agent close  "
+        "/guest | /guest [min] | /guest ttl | /guest close  "
+        "/agent <password> [min] | /agent cwd | /agent ttl | /agent mode ask|full | /agent allow | /agent share | /agent close  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"

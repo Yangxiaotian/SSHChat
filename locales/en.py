@@ -68,9 +68,11 @@ MESSAGES: dict = {
         "[*] /guest [min]   Private one-shot web chat link (no SSH key; default 5 minutes, 1–60).\n",
         "[*]              They may open it once; text, images, voice notes, and the page game panel are OK; optional remark shows as ~g… (remark). Countdown shows minutes and seconds. Minimizing does not end it early; a reload in the same tab can resume. Nick is random. Alias /tmplink.\n",
         "[*] /guest close   Revoke your guest link(s) in this room.\n",
+        "[*] /guest ttl     Show remaining time for your guest link(s) (alias left).\n",
         "[*] /agent <password> [min]  Start Agent (password in agent/config.json; default ask).\n",
         "[*] /agent mode ask|full | /agent ask|full   Switch mode (no password after create); full needs /agent allow.\n",
         "[*] /agent cwd [path]  Show/set Agent working directory (aliases cd/ws; reset with /agent cwd -).\n",
+        "[*] /agent ttl     Show remaining time for your agent link(s) (alias left).\n",
         "[*] /agent allow   Confirm full mode (restricted shell/write).\n",
         "[*] /agent share   Publish the last private reply to the room.\n",
         "[*] /agent close   Revoke your agent link(s) in this room.\n",
@@ -330,9 +332,13 @@ MESSAGES: dict = {
         ),
         "guest_usage": (
             "[*] Usage: /guest [min]   private one-shot web link; default 5 minutes, 1–60\n"
+            "[*]         /guest ttl    remaining time (aliases left / 剩余)\n"
             "[*]         /guest close  revoke your unused or live links in this room\n"
             "[*] Send the URL out of band (chat app, SMS). They may open it once; text, images, voice notes, and the page game panel are allowed; optional remark shows as ~g… (remark). Countdown shows minutes and seconds. Minimizing does not end it early; a reload in the same tab can resume. Nick is random (~g…) and cannot impersonate a pubkey user.\n"
         ),
+        "guest_ttl_header": "[*] Your guest links in #{room} ({n}):\n",
+        "guest_ttl_unused": "[*]   · unused · link left {left} ({minutes} min chat after open)\n",
+        "guest_ttl_live": "[*]   · live {nick} · chat left {left}\n",
         "guest_bad_minutes": "[*] Minutes must be an integer from 1 to 60 (default 5).\n",
         "guest_created": (
             "[*] Temporary chat link (only you can see this — send it yourself, do not open it):\n"
@@ -361,6 +367,7 @@ MESSAGES: dict = {
             "[*] Usage: /agent <password> [min]  start Agent (password only for create)\n"
             "[*]         /agent mode ask|full | /agent ask|full  switch mode (no password)\n"
             "[*]         /agent cwd [path]  show/set working dir (cd/ws; /agent cwd - resets)\n"
+            "[*]         /agent ttl    remaining time (aliases left / 剩余)\n"
             "[*]         /agent allow   confirm full (restricted shell / write workspace only)\n"
             "[*]         /agent share   publish last private reply to the room\n"
             "[*]         /agent close   revoke your agent link(s) in this room\n"
@@ -368,9 +375,12 @@ MESSAGES: dict = {
             "Replies private to creator by default. Temp uploads /tmp/sshchat-agent/<room>/<link>/.\n"
         ),
         "agent_already_open": (
-            "[*] Agent already running here. Use /agent ask|full, /agent cwd, /agent allow, "
-            "/agent share, or /agent close — password is only needed to start a new link.\n"
+            "[*] Agent already running here. Use /agent ask|full, /agent cwd, /agent ttl, "
+            "/agent allow, /agent share, or /agent close — password is only needed to start a new link.\n"
         ),
+        "agent_ttl_header": "[*] Your agent links in #{room} ({n}):\n",
+        "agent_ttl_unused": "[*]   · unused · link left {left} ({minutes} min chat after open)\n",
+        "agent_ttl_live": "[*]   · live {nick} · chat left {left}\n",
         "agent_cwd_usage": (
             "[*] Usage: /agent cwd [path]   show or set working directory "
             "(aliases: cd, ws, workspace). /agent cwd - resets to the temp link folder.\n"

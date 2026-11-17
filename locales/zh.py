@@ -68,9 +68,11 @@ MESSAGES: dict = {
         "[*] /guest [分钟]  生成仅自己可见的一次性网页聊天链接（默认 5 分钟，可写 1～60）。\n",
         "[*]              对方只能打开一次；可发文字、图片和语音；可用页面游戏区下棋；可填备注，聊天显示为 ~g…（备注）。进入后页面显示分+秒倒计时；最小化不提前结束；同一标签刷新可恢复。昵称随机。别名 /tmplink。\n",
         "[*] /guest close   作废你在本房生成的临时链接。\n",
+        "[*] /guest ttl     查看本房你的临时链接剩余时间（别名 left）。\n",
         "[*] /agent <密码> [分钟]  本房启动 Agent（密码见 agent/config.json；默认 ask 只读）。\n",
         "[*] /agent mode ask|full | /agent ask|full   切换模式（创建后无需再输密码）；full 需 /agent allow。\n",
         "[*] /agent cwd [路径]  查看/设置 Agent 工作目录（别名 cd/ws；/agent cwd - 复位）。\n",
+        "[*] /agent ttl     查看本房 Agent 链接剩余时间（别名 left）。\n",
         "[*] /agent allow   确认启用 full（受限 shell/写工作区）。\n",
         "[*] /agent share   把上一条私聊回复公开到本房。\n",
         "[*] /agent close   作废你在本房生成的 Agent 链接。\n",
@@ -324,9 +326,13 @@ MESSAGES: dict = {
         ),
         "guest_usage": (
             "[*] 用法：/guest [分钟]  一次性网页链接，默认 5 分钟，可写 1～60\n"
+            "[*]         /guest ttl    查看剩余时间（别名 left / 剩余）\n"
             "[*]         /guest close  作废你在本房尚未使用或仍在进行的链接\n"
             "[*] 把网址用微信等发给没有公钥的人。对方只能打开一次；进入后可发文字、图片和语音，并用页面游戏区下棋；可填备注，聊天显示为 ~g…（备注）。页面显示分+秒倒计时；最小化不提前结束；同一标签刷新可恢复。昵称随机（~g…），无法冒充公钥用户。\n"
         ),
+        "guest_ttl_header": "[*] 本房你的临时聊天链接（#{room}，共 {n} 条）：\n",
+        "guest_ttl_unused": "[*]   · 未打开 · 链接剩余 {left}（打开后可用 {minutes} 分钟）\n",
+        "guest_ttl_live": "[*]   · 进行中 {nick} · 聊天剩余 {left}\n",
         "guest_bad_minutes": "[*] 时长请写 1～60 的整数分钟（默认 5）。\n",
         "guest_created": (
             "[*] 临时聊天链接（仅你可见，请自行发给对方，不要自己点开）：\n"
@@ -355,6 +361,7 @@ MESSAGES: dict = {
             "[*] 用法：/agent <密码> [分钟]  开 Agent（仅创建时要密码）\n"
             "[*]         /agent mode ask|full | /agent ask|full  切换模式（无需密码）\n"
             "[*]         /agent cwd [路径]  查看/设置工作目录（cd/ws；/agent cwd - 复位）\n"
+            "[*]         /agent ttl    查看剩余时间（别名 left / 剩余）\n"
             "[*]         /agent allow   确认启用 full（受限 shell / 仅写工作区）\n"
             "[*]         /agent share   公开上一条私聊回复到本房\n"
             "[*]         /agent close   作废本房你的 Agent 链接\n"
@@ -362,9 +369,12 @@ MESSAGES: dict = {
             "回复默认只给创建者；临时上传区 /tmp/sshchat-agent/<房间>/<链接>/。\n"
         ),
         "agent_already_open": (
-            "[*] 本房 Agent 已在运行。请用 /agent ask|full、/agent cwd、/agent allow、"
-            "/agent share 或 /agent close；只有再开一条新链接才需要密码。\n"
+            "[*] 本房 Agent 已在运行。请用 /agent ask|full、/agent cwd、/agent ttl、"
+            "/agent allow、/agent share 或 /agent close；只有再开一条新链接才需要密码。\n"
         ),
+        "agent_ttl_header": "[*] 本房你的 Agent 链接（#{room}，共 {n} 条）：\n",
+        "agent_ttl_unused": "[*]   · 未打开 · 链接剩余 {left}（打开后可用 {minutes} 分钟）\n",
+        "agent_ttl_live": "[*]   · 进行中 {nick} · 聊天剩余 {left}\n",
         "agent_cwd_usage": (
             "[*] 用法：/agent cwd [路径]   查看或设置工作目录"
             "（别名 cd / ws / workspace）。/agent cwd - 复位到临时链接目录。\n"

@@ -34,6 +34,8 @@ class TestGuestCompletions(unittest.TestCase):
             [
                 "/guest help",
                 "/guest close",
+                "/guest ttl",
+                "/guest left",
                 "/guest 5",
                 "/guest 10",
                 "/guest 15",

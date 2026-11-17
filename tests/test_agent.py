@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -448,6 +449,38 @@ class AgentCommandTests(unittest.TestCase):
             if not link.closed
         ]
         self.assertEqual(open_kinds, ["guest"])
+
+    def test_agent_ttl(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        lines: list[str] = []
+
+        def capture(conn, text: str) -> None:
+            lines.append(text)
+
+        with mock.patch.object(server, "file_http", fake_http), mock.patch.object(
+            server, "send_line", side_effect=capture
+        ), mock.patch.object(server, "broadcast_room"), mock.patch(
+            "agent_bridge.agent_bin", return_value="/usr/bin/agent"
+        ):
+            server.handle_command(self.alice, f"/agent {self.AGENT_PW} 10")
+            lines.clear()
+            server.handle_command(self.alice, "/agent ttl")
+        joined = "\n".join(lines)
+        self.assertIn("unused", joined.lower())
+        self.assertRegex(joined, r"\d+:\d{2}")
+        link = guest_sharing.guest_store.find_live_agent("lobby")
+        assert link is not None
+        guest_sharing.guest_store.open_once(link.token)
+        link.chat_expires_at = time.time() + 90
+        lines.clear()
+        with mock.patch.object(server, "file_http", fake_http), mock.patch.object(
+            server, "send_line", side_effect=capture
+        ), mock.patch("agent_bridge.agent_bin", return_value="/usr/bin/agent"):
+            server.handle_command(self.alice, "/agent left")
+        live = "\n".join(lines)
+        self.assertIn("live", live.lower())
+        self.assertRegex(live, r"chat left 1:2[89]|chat left 1:30")
 
     def test_schedule_agent_reply_private(self) -> None:
         link = guest_sharing.guest_store.create("alice", "lobby", 5, kind="agent")

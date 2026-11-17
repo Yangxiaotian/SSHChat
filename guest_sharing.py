@@ -187,6 +187,22 @@ def parse_minutes(arg: str) -> tuple[Optional[int], str]:
     return n, ""
 
 
+def format_remaining(sec: float) -> str:
+    """Format leftover seconds as m:ss (or h:mm:ss when >= 1h)."""
+    s = max(0, int(sec))
+    h, rem = divmod(s, 3600)
+    m, r = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{r:02d}"
+    return f"{m}:{r:02d}"
+
+
+# /guest ttl · /agent ttl (and short aliases)
+TTL_SUBCOMMANDS = frozenset(
+    {"ttl", "left", "remain", "remaining", "剩余", "时间"}
+)
+
+
 @dataclass
 class GuestLink:
     token: str
@@ -399,6 +415,25 @@ class GuestStore:
         if not link.opened_at:
             return max(0.0, link.unused_expires_at - now)
         return max(0.0, link.chat_expires_at - now)
+
+    def list_for_creator(
+        self, creator: str, room: str, *, kind: Optional[str] = None
+    ) -> list[GuestLink]:
+        """Live (non-closed, non-purged) links for creator in room, oldest first."""
+        now = time.time()
+        out: list[GuestLink] = []
+        with self._lock:
+            self._purge_locked(now)
+            for link in self.links.values():
+                if (
+                    link.creator == creator
+                    and link.room == room
+                    and not link.closed
+                    and (kind is None or link.kind == kind)
+                ):
+                    out.append(link)
+        out.sort(key=lambda L: L.created_at)
+        return out
 
     def close_for_creator(
         self, creator: str, room: str, *, kind: Optional[str] = None
