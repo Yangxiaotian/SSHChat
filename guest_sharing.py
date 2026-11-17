@@ -212,6 +212,8 @@ class GuestLink:
     agent_pending: str = ""
     # /tmp/sshchat-agent/<room>/ — set when /agent mints the link
     agent_workspace: str = ""
+    # Runtime primary --workspace for agent CLI (/agent cwd); empty = use agent_workspace
+    agent_cwd: str = ""
     # ask (default, read-only) | full (restricted shell/write after /agent allow)
     agent_mode: str = "ask"
     agent_full_allowed: bool = False

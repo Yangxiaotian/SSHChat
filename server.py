@@ -8059,7 +8059,9 @@ def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> No
     bad_min_key = "agent_bad_minutes" if is_agent else "guest_bad_minutes"
 
     raw = payload.split(None, 1)
-    arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    # Keep original casing for paths (/agent cwd …); lower only for command words.
+    orig_arg = raw[1].strip() if len(raw) > 1 else ""
+    arg = orig_arg.lower()
     parts = arg.split()
     head = parts[0] if parts else ""
     if arg in ("help", "?", "帮助"):
@@ -8080,12 +8082,56 @@ def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> No
 
     # Agent management — password only gates *create*, never these.
     # /agent ask|full is short for /agent mode ask|full.
-    if is_agent and head in ("mode", "allow", "share", "ask", "full"):
+    # /agent cwd|cd|ws|workspace [path] changes primary --workspace at runtime.
+    if is_agent and head in (
+        "mode",
+        "allow",
+        "share",
+        "ask",
+        "full",
+        "cwd",
+        "cd",
+        "ws",
+        "workspace",
+    ):
         link = _agent_link_for_creator(sender, room_name)
         if link is None:
             send_line(conn, _ts(conn, none_key, room=room_name))
             return
         import agent_bridge
+
+        if head in ("cwd", "cd", "ws", "workspace"):
+            # Path keeps original case; empty / reset → link temp dir.
+            orig_parts = orig_arg.split(None, 1)
+            path_raw = orig_parts[1].strip() if len(orig_parts) > 1 else ""
+            if not path_raw:
+                cur = agent_bridge.effective_workspace(link)
+                send_line(conn, _ts(conn, "agent_cwd_current", path=cur))
+                return
+            resolved, err = agent_bridge.resolve_cwd(
+                path_raw, link_ws=link.agent_workspace or ""
+            )
+            if err == "missing":
+                send_line(conn, _ts(conn, "agent_cwd_missing", path=path_raw))
+                return
+            if err == "denied":
+                send_line(conn, _ts(conn, "agent_cwd_denied", path=path_raw))
+                return
+            if err != "ok" or not resolved:
+                send_line(conn, _ts(conn, "agent_cwd_usage"))
+                return
+            link.agent_cwd = resolved
+            # New tree → fresh agent session.
+            link.agent_session = ""
+            mode = "full" if (
+                link.agent_mode == "full" and link.agent_full_allowed
+            ) else "ask"
+            try:
+                agent_bridge.write_cli_json(resolved, mode=mode)
+            except OSError:
+                pass
+            send_line(conn, _ts(conn, "agent_cwd_set", path=resolved))
+            return
 
         if head in ("mode", "ask", "full"):
             want = head if head in ("ask", "full") else (
@@ -8097,8 +8143,12 @@ def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> No
             link.agent_mode = want
             if want == "ask":
                 link.agent_full_allowed = False
-                if link.agent_workspace:
-                    agent_bridge.write_cli_json(link.agent_workspace, mode="ask")
+                try:
+                    agent_bridge.write_cli_json(
+                        agent_bridge.effective_workspace(link), mode="ask"
+                    )
+                except OSError:
+                    pass
                 send_line(conn, _ts(conn, "agent_mode_ask"))
             else:
                 link.agent_full_allowed = False
@@ -8109,8 +8159,12 @@ def _handle_guest(conn, sender: str, payload: str, *, kind: str = "guest") -> No
                 send_line(conn, _ts(conn, "agent_allow_need_full"))
                 return
             link.agent_full_allowed = True
-            if link.agent_workspace:
-                agent_bridge.write_cli_json(link.agent_workspace, mode="full")
+            try:
+                agent_bridge.write_cli_json(
+                    agent_bridge.effective_workspace(link), mode="full"
+                )
+            except OSError:
+                pass
             send_line(conn, _ts(conn, "agent_allow_ok"))
             return
         # share

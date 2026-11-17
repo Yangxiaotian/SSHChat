@@ -314,13 +314,50 @@ def reset_workspace(room: str, token: str = "", *, mode: str = "ask") -> str:
     return path
 
 
-def extra_add_dirs() -> list[str]:
+def extra_add_dirs(*, exclude: str = "") -> list[str]:
     """Host dirs passed as --add-dir.
 
     By default includes SSHCHAT_AGENT_HOME or HOME. Disable with
     SSHCHAT_AGENT_ADD_HOME=0. Extra paths: SSHCHAT_AGENT_ADD_DIRS (colon-separated).
     """
     out: list[str] = []
+    seen: set[str] = set()
+    ex = ""
+    if exclude:
+        try:
+            ex = os.path.realpath(exclude)
+        except OSError:
+            ex = exclude
+
+    def _add(path: str) -> None:
+        p = (path or "").strip()
+        if not p or not os.path.isdir(p):
+            return
+        try:
+            real = os.path.realpath(p)
+        except OSError:
+            real = p
+        if ex and real == ex:
+            return
+        if real in seen:
+            return
+        seen.add(real)
+        out.append(real)
+
+    if _add_home_enabled():
+        _add(_agent_home())
+    raw = (os.environ.get("SSHCHAT_AGENT_ADD_DIRS") or "").strip()
+    for part in raw.split(":"):
+        _add(part)
+    override = (os.environ.get("SSHCHAT_AGENT_WORKSPACE") or "").strip()
+    if override:
+        _add(override)
+    return out
+
+
+def allowed_cwd_roots(link_ws: str = "") -> list[str]:
+    """Directories under which /agent cwd may point."""
+    roots: list[str] = []
     seen: set[str] = set()
 
     def _add(path: str) -> None:
@@ -334,14 +371,61 @@ def extra_add_dirs() -> list[str]:
         if real in seen:
             return
         seen.add(real)
-        out.append(real)
+        roots.append(real)
 
+    _add(link_ws)
+    _add((os.environ.get("SSHCHAT_AGENT_WORKSPACE") or "").strip())
     if _add_home_enabled():
         _add(_agent_home())
-    raw = (os.environ.get("SSHCHAT_AGENT_ADD_DIRS") or "").strip()
-    for part in raw.split(":"):
-        _add(part)
-    return out
+    for part in (os.environ.get("SSHCHAT_AGENT_ADD_DIRS") or "").split(":"):
+        _add(part.strip())
+    return roots
+
+
+def resolve_cwd(path: str, *, link_ws: str = "") -> tuple[Optional[str], str]:
+    """Resolve /agent cwd path. Returns (realpath, err) err in ok|empty|missing|denied."""
+    raw = (path or "").strip()
+    if not raw or raw in (".", "reset", "clear", "-"):
+        # reset to link temp workspace
+        if link_ws and os.path.isdir(link_ws):
+            return os.path.realpath(link_ws), "ok"
+        return None, "empty"
+    if raw.startswith("~"):
+        home = _agent_home() or os.path.expanduser("~")
+        raw = os.path.join(home, raw[2:].lstrip("/")) if raw != "~" else home
+    if not os.path.isabs(raw):
+        base = _agent_home() or os.getcwd()
+        raw = os.path.join(base, raw)
+    if not os.path.isdir(raw):
+        return None, "missing"
+    try:
+        real = os.path.realpath(raw)
+    except OSError:
+        return None, "missing"
+    roots = allowed_cwd_roots(link_ws)
+    if not roots:
+        return None, "denied"
+    for root in roots:
+        try:
+            if real == root or real.startswith(root + os.sep):
+                return real, "ok"
+        except Exception:
+            continue
+    return None, "denied"
+
+
+def effective_workspace(link) -> str:
+    """Primary --workspace for a GuestLink (runtime cwd or temp link dir)."""
+    cwd = (getattr(link, "agent_cwd", None) or "").strip()
+    if cwd and os.path.isdir(cwd):
+        return cwd
+    ws = (getattr(link, "agent_workspace", None) or "").strip()
+    if ws:
+        return ws
+    override = (os.environ.get("SSHCHAT_AGENT_WORKSPACE") or "").strip()
+    if override and os.path.isdir(override):
+        return os.path.realpath(override)
+    return workspace()
 
 
 def save_upload(room_or_ws: str, filename: str, data: bytes) -> str:
@@ -373,10 +457,15 @@ def turn(
     *,
     session_id: str = "",
     workspace_dir: str = "",
+    upload_dir: str = "",
     mode: str = "ask",
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
 ) -> tuple[str, str]:
-    """Run one agent turn. Returns (reply_text, session_id)."""
+    """Run one agent turn. Returns (reply_text, session_id).
+
+    workspace_dir: primary --workspace / cwd (runtime /agent cwd).
+    upload_dir: link temp dir kept as --add-dir so uploads/ stay visible.
+    """
     exe = agent_bin()
     if not exe:
         return ("[*] agent CLI not found on PATH (install Cursor CLI / `agent`).", "")
@@ -386,6 +475,7 @@ def turn(
     ws = (workspace_dir or "").strip() or workspace()
     os.makedirs(ws, mode=0o700, exist_ok=True)
     mode = "full" if mode == "full" else "ask"
+    # Permissions live under the primary workspace .cursor/cli.json
     write_cli_json(ws, mode=mode)
     if session_id:
         hint = _RESUME_HINT_FULL if mode == "full" else _RESUME_HINT_ASK
@@ -408,7 +498,16 @@ def turn(
     else:
         # force = skip interactive prompts; still gated by cli.json allow/deny
         cmd.extend(["--force", "--sandbox", "disabled"])
-    for extra in extra_add_dirs():
+    extras = extra_add_dirs(exclude=ws)
+    up = (upload_dir or "").strip()
+    if up and os.path.isdir(up):
+        try:
+            up_real = os.path.realpath(up)
+        except OSError:
+            up_real = up
+        if up_real != os.path.realpath(ws) and up_real not in extras:
+            extras.insert(0, up_real)
+    for extra in extras:
         cmd.extend(["--add-dir", extra])
     if session_id:
         cmd.extend(["--resume", session_id])

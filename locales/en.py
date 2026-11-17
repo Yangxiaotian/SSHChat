@@ -70,6 +70,7 @@ MESSAGES: dict = {
         "[*] /guest close   Revoke your guest link(s) in this room.\n",
         "[*] /agent <password> [min]  Start Agent (password in agent/config.json; default ask).\n",
         "[*] /agent mode ask|full | /agent ask|full   Switch mode (no password after create); full needs /agent allow.\n",
+        "[*] /agent cwd [path]  Show/set Agent working directory (aliases cd/ws; reset with /agent cwd -).\n",
         "[*] /agent allow   Confirm full mode (restricted shell/write).\n",
         "[*] /agent share   Publish the last private reply to the room.\n",
         "[*] /agent close   Revoke your agent link(s) in this room.\n",
@@ -359,15 +360,28 @@ MESSAGES: dict = {
         "agent_usage": (
             "[*] Usage: /agent <password> [min]  start Agent (password only for create)\n"
             "[*]         /agent mode ask|full | /agent ask|full  switch mode (no password)\n"
+            "[*]         /agent cwd [path]  show/set working dir (cd/ws; /agent cwd - resets)\n"
             "[*]         /agent allow   confirm full (restricted shell / write workspace only)\n"
             "[*]         /agent share   publish last private reply to the room\n"
             "[*]         /agent close   revoke your agent link(s) in this room\n"
             "[*] Wrong create-passwords lock out like a phone PIN. "
-            "Replies private to creator by default. Workspace /tmp/sshchat-agent/<room>/<link>/.\n"
+            "Replies private to creator by default. Temp uploads /tmp/sshchat-agent/<room>/<link>/.\n"
         ),
         "agent_already_open": (
-            "[*] Agent already running here. Use /agent ask|full, /agent allow, /agent share, "
-            "or /agent close — password is only needed to start a new link.\n"
+            "[*] Agent already running here. Use /agent ask|full, /agent cwd, /agent allow, "
+            "/agent share, or /agent close — password is only needed to start a new link.\n"
+        ),
+        "agent_cwd_usage": (
+            "[*] Usage: /agent cwd [path]   show or set working directory "
+            "(aliases: cd, ws, workspace). /agent cwd - resets to the temp link folder.\n"
+        ),
+        "agent_cwd_current": "[*] Agent cwd: {path}\n",
+        "agent_cwd_set": "[*] Agent cwd set to {path} (new session).\n",
+        "agent_cwd_missing": "[*] Not a directory: {path}\n",
+        "agent_cwd_denied": (
+            "[*] Path not allowed: {path}\n"
+            "[*] cwd must be under HOME (if enabled), SSHCHAT_AGENT_ADD_DIRS, "
+            "SSHCHAT_AGENT_WORKSPACE, or this link's temp folder.\n"
         ),
         "agent_mode_usage": "[*] Usage: /agent mode ask|full  (or /agent ask|full)\n",
         "agent_bad_minutes": "[*] Minutes must be an integer from 1 to 60 (default 5).\n",

@@ -240,6 +240,10 @@ _AGENT_SUBCOMMANDS = {
     "mode": None,
     "ask": None,
     "full": None,
+    "cwd": None,
+    "cd": None,
+    "ws": None,
+    "workspace": None,
     "allow": None,
     "share": None,
     "5": None,
@@ -1745,7 +1749,7 @@ def main():
         "/piano | /piano <nick> | /piano #<room>  "
         "/clock | /clock 10+5 | /clock #<room>  "
         "/guest | /guest [min] | /guest close  "
-        "/agent <password> [min] | /agent mode ask|full | /agent allow | /agent share | /agent close  "
+        "/agent <password> [min] | /agent cwd | /agent mode ask|full | /agent allow | /agent share | /agent close  "
         "/leave [nick]|<nick> <n>  /part <room>  "
         "/announce  /pad  /poll  /later  /game  /news  /news fetch <cat> <n>  /dict  /library (/lib)  /music (/song)  "
         "/lang en|zh  /dnd on|off  /clear  /help"

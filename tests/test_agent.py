@@ -305,6 +305,53 @@ class AgentCommandTests(unittest.TestCase):
             self.assertTrue(link.agent_full_allowed)
             self.assertEqual(guest_http._effective_agent_mode(link), "full")
 
+    def test_agent_cwd_runtime(self) -> None:
+        fake_http = mock.Mock()
+        fake_http.get_base_url.return_value = "https://example.trycloudflare.com"
+        lines: list[str] = []
+        project = tempfile.mkdtemp(prefix="sshchat-cwd-proj-")
+
+        def capture(conn, text: str) -> None:
+            lines.append(text)
+
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SSHCHAT_AGENT_HOME": project,
+                    "SSHCHAT_AGENT_ADD_HOME": "1",
+                },
+                clear=False,
+            ), mock.patch.object(server, "file_http", fake_http), mock.patch.object(
+                server, "send_line", side_effect=capture
+            ), mock.patch.object(server, "broadcast_room"), mock.patch(
+                "agent_bridge.agent_bin", return_value="/usr/bin/agent"
+            ):
+                server.handle_command(self.alice, f"/agent {self.AGENT_PW}")
+                link = guest_sharing.guest_store.find_live_agent("lobby")
+                assert link is not None
+                sub = os.path.join(project, "SSHChat-dev")
+                os.makedirs(sub, exist_ok=True)
+                lines.clear()
+                server.handle_command(self.alice, f"/agent cwd {sub}")
+                self.assertEqual(link.agent_cwd, os.path.realpath(sub))
+                self.assertEqual(link.agent_session, "")
+                self.assertTrue(any(sub in x or "cwd" in x.lower() or "工作目录" in x for x in lines))
+                self.assertEqual(
+                    agent_bridge.effective_workspace(link), os.path.realpath(sub)
+                )
+                lines.clear()
+                server.handle_command(self.alice, "/agent cwd -")
+                self.assertEqual(
+                    os.path.realpath(link.agent_cwd),
+                    os.path.realpath(link.agent_workspace),
+                )
+                lines.clear()
+                server.handle_command(self.alice, "/agent cwd /no/such/place")
+                self.assertTrue(any("Not a directory" in x or "不是目录" in x for x in lines))
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+
     def test_agent_full_alias_not_password(self) -> None:
         fake_http = mock.Mock()
         fake_http.get_base_url.return_value = "https://example.trycloudflare.com"

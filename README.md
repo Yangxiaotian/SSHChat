@@ -36,6 +36,7 @@ On first connect you will see an active-room tip line. Useful commands:
 | `/guest` | Private one-shot web chat link (no SSH key; default 5 min, `/guest 10` for 10; random nick; optional remark shows as `~g… (remark)`; guests may send text, images, voice notes, and play games on the page). Alias `/tmplink` |
 | `/guest close` | Revoke your guest link in this room |
 | `/agent <password> [min]` | Start Agent (password in `agent/config.json` or `SSHCHAT_AGENT_PASSWORD`; default ask; needs `CURSOR_API_KEY`) |
+| `/agent cwd [path]` | Show/set Agent working directory (`cd`/`ws`; `/agent cwd -` resets) |
 | `/agent mode ask\|full` | Switch mode; full requires `/agent allow` |
 | `/agent allow` / `/agent share` / `/agent close` | Confirm full / publish last private reply / revoke |
 | `/pad` | Show room clipboard (shared sticky note; federated same-name rooms sync) |

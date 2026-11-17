@@ -70,6 +70,7 @@ MESSAGES: dict = {
         "[*] /guest close   作废你在本房生成的临时链接。\n",
         "[*] /agent <密码> [分钟]  本房启动 Agent（密码见 agent/config.json；默认 ask 只读）。\n",
         "[*] /agent mode ask|full | /agent ask|full   切换模式（创建后无需再输密码）；full 需 /agent allow。\n",
+        "[*] /agent cwd [路径]  查看/设置 Agent 工作目录（别名 cd/ws；/agent cwd - 复位）。\n",
         "[*] /agent allow   确认启用 full（受限 shell/写工作区）。\n",
         "[*] /agent share   把上一条私聊回复公开到本房。\n",
         "[*] /agent close   作废你在本房生成的 Agent 链接。\n",
@@ -353,15 +354,28 @@ MESSAGES: dict = {
         "agent_usage": (
             "[*] 用法：/agent <密码> [分钟]  开 Agent（仅创建时要密码）\n"
             "[*]         /agent mode ask|full | /agent ask|full  切换模式（无需密码）\n"
+            "[*]         /agent cwd [路径]  查看/设置工作目录（cd/ws；/agent cwd - 复位）\n"
             "[*]         /agent allow   确认启用 full（受限 shell / 仅写工作区）\n"
             "[*]         /agent share   公开上一条私聊回复到本房\n"
             "[*]         /agent close   作废本房你的 Agent 链接\n"
             "[*] 创建密码错误会像手机锁屏一样递增锁死。"
-            "回复默认只给创建者；工作区 /tmp/sshchat-agent/<房间>/<链接>/。\n"
+            "回复默认只给创建者；临时上传区 /tmp/sshchat-agent/<房间>/<链接>/。\n"
         ),
         "agent_already_open": (
-            "[*] 本房 Agent 已在运行。请用 /agent ask|full、/agent allow、/agent share 或 /agent close；"
-            "只有再开一条新链接才需要密码。\n"
+            "[*] 本房 Agent 已在运行。请用 /agent ask|full、/agent cwd、/agent allow、"
+            "/agent share 或 /agent close；只有再开一条新链接才需要密码。\n"
+        ),
+        "agent_cwd_usage": (
+            "[*] 用法：/agent cwd [路径]   查看或设置工作目录"
+            "（别名 cd / ws / workspace）。/agent cwd - 复位到临时链接目录。\n"
+        ),
+        "agent_cwd_current": "[*] Agent 工作目录：{path}\n",
+        "agent_cwd_set": "[*] 已切换 Agent 工作目录：{path}（新会话）。\n",
+        "agent_cwd_missing": "[*] 不是目录：{path}\n",
+        "agent_cwd_denied": (
+            "[*] 路径不允许：{path}\n"
+            "[*] cwd 必须在 HOME（若启用）、SSHCHAT_AGENT_ADD_DIRS、"
+            "SSHCHAT_AGENT_WORKSPACE 或本链接临时目录之下。\n"
         ),
         "agent_mode_usage": "[*] 用法：/agent mode ask|full（或 /agent ask|full）\n",
         "agent_bad_minutes": "[*] 时长请写 1～60 的整数分钟（默认 5）。\n",

@@ -491,6 +491,7 @@ npm run build:portable
 | `/guest` | 生成**仅自己可见**的一次性网页聊天链接，发给没有公钥的人（默认 5 分钟，`/guest 10` 可改时长；昵称随机；可填备注显示为 `~g…（备注）`；访客可发文字、图片和语音，并用页面游戏区下棋）。别名 `/tmplink` |
 | `/guest close` | 作废你在本房生成的临时链接 |
 | `/agent <密码> [分钟]` | 本房启动 Agent（密码见 `agent/config.json` 或 `SSHCHAT_AGENT_PASSWORD`；默认 ask；需 `CURSOR_API_KEY`） |
+| `/agent cwd [路径]` | 查看/设置 Agent 工作目录（`cd`/`ws`；`/agent cwd -` 复位） |
 | `/agent mode ask\|full` | 切换模式；full 后需 `/agent allow` |
 | `/agent allow` / `/agent share` / `/agent close` | 确认 full / 公开上一条私聊回复 / 作废链接 |
 | `/leave` | 查看你发出、对方尚未阅读的留言 |

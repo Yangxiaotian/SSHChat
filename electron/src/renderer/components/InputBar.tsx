@@ -104,7 +104,7 @@ const SUBCOMMANDS_BY_CMD: Record<string, readonly string[]> = {
   '/clock': ['help', 'close', 'new'],
   '/guest': ['help', 'close', '5', '10', '15', '30', '60'],
   '/tmplink': ['help', 'close', '5', '10', '15', '30', '60'],
-  '/agent': ['help', 'close', 'mode', 'ask', 'full', 'allow', 'share', '5', '10', '15', '30', '60'],
+  '/agent': ['help', 'close', 'mode', 'ask', 'full', 'cwd', 'cd', 'ws', 'workspace', 'allow', 'share', '5', '10', '15', '30', '60'],
 };
 
 const NESTED_SUBCOMMANDS: Record<string, string[]> = {

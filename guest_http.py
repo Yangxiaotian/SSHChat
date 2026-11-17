@@ -2577,7 +2577,8 @@ def _schedule_agent_reply(link: guest_sharing.GuestLink, user_text: str) -> None
             reply, sid = agent_bridge.turn(
                 text_in,
                 session_id=link.agent_session or "",
-                workspace_dir=link.agent_workspace or "",
+                workspace_dir=agent_bridge.effective_workspace(link),
+                upload_dir=link.agent_workspace or "",
                 mode=mode,
             )
             if sid:
